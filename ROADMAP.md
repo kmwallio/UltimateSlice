@@ -82,6 +82,13 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 - [x] FCPXML 1.10 import (`quick-xml`) — parses assets, spine, asset-clip elements
 - [x] FCPXML 1.10 export — writes resources/format/asset + library/event/project/sequence/spine
 
+### MCP Server (`--mcp` flag)
+- [x] `--mcp` flag enables the MCP (Model Context Protocol) server at startup
+- [x] JSON-RPC 2.0 over stdio (MCP 2024-11-05 protocol)
+- [x] `--mcp` flag is stripped from argv before GLib sees it
+- [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
+- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`
+
 ---
 
 ## 🔜 Planned

@@ -1,0 +1,236 @@
+/// MCP stdio transport — reads newline-delimited JSON-RPC from stdin,
+/// dispatches tool calls to the GTK main thread via `sender`, and
+/// writes JSON-RPC responses to stdout.
+use std::io::{BufRead, Write};
+use serde_json::{json, Value};
+use crate::mcp::McpCommand;
+
+const PROTOCOL_VERSION: &str = "2024-11-05";
+
+pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
+    let stdin  = std::io::stdin();
+    let mut out = std::io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = match line { Ok(l) => l, Err(_) => break };
+        let line = line.trim().to_owned();
+        if line.is_empty() { continue; }
+
+        let msg: Value = match serde_json::from_str(&line) {
+            Ok(v)  => v,
+            Err(e) => {
+                let r = err(Value::Null, -32700, &format!("Parse error: {e}"));
+                let _ = writeln!(out, "{r}");
+                let _ = out.flush();
+                continue;
+            }
+        };
+
+        // MCP notifications carry no "id" — do not respond.
+        let id = match msg.get("id") {
+            Some(id) => id.clone(),
+            None     => continue,
+        };
+
+        let method = msg["method"].as_str().unwrap_or("");
+        let params = msg.get("params").cloned().unwrap_or(json!({}));
+
+        let response = match method {
+            "initialize"     => ok(&id, initialize_result()),
+            "ping"           => ok(&id, json!({})),
+            "tools/list"     => ok(&id, tools_list()),
+            "resources/list" => ok(&id, json!({"resources": []})),
+            "tools/call"     => call_tool(&id, &params, &sender),
+            _                => err(id, -32601, "Method not found"),
+        };
+
+        let _ = writeln!(out, "{response}");
+        let _ = out.flush();
+    }
+}
+
+// ── JSON-RPC helpers ─────────────────────────────────────────────────────────
+
+fn ok(id: &Value, result: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn err(id: Value, code: i32, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+fn text_content(v: Value) -> Value {
+    json!({"content": [{"type": "text", "text": v.to_string()}]})
+}
+
+// ── MCP initialize ────────────────────────────────────────────────────────────
+
+fn initialize_result() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": { "tools": {} },
+        "serverInfo": {
+            "name":    "ultimateslice",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    })
+}
+
+// ── Tool list ─────────────────────────────────────────────────────────────────
+
+fn tools_list() -> Value {
+    json!({ "tools": [
+        {
+            "name": "get_project",
+            "description": "Return the full project state (title, frame rate, all tracks and clips) as JSON.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "list_tracks",
+            "description": "List all tracks in the project with their index, id, kind (Video/Audio), and clip count.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "list_clips",
+            "description": "List every clip on the timeline across all tracks.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_clip",
+            "description": "Add a new clip to a track. Durations are in nanoseconds (1 s = 1_000_000_000 ns).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_path":       { "type": "string",  "description": "Absolute path to the media file." },
+                    "track_index":       { "type": "integer", "description": "0-based track index (default: 0)." },
+                    "timeline_start_ns": { "type": "integer", "description": "Timeline position in nanoseconds." },
+                    "source_in_ns":      { "type": "integer", "description": "Source in-point in nanoseconds." },
+                    "source_out_ns":     { "type": "integer", "description": "Source out-point in nanoseconds." }
+                },
+                "required": ["source_path", "timeline_start_ns", "source_in_ns", "source_out_ns"]
+            }
+        },
+        {
+            "name": "remove_clip",
+            "description": "Remove a clip from the timeline by its unique id (obtained from list_clips).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id to remove." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "move_clip",
+            "description": "Move a clip to a new timeline start position in nanoseconds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":      { "type": "string",  "description": "Clip id to move." },
+                    "new_start_ns": { "type": "integer", "description": "New timeline start in nanoseconds." }
+                },
+                "required": ["clip_id", "new_start_ns"]
+            }
+        },
+        {
+            "name": "trim_clip",
+            "description": "Adjust the source in- and out-point of a clip without changing its timeline position.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":       { "type": "string",  "description": "Clip id to trim." },
+                    "source_in_ns":  { "type": "integer", "description": "New source in-point in nanoseconds." },
+                    "source_out_ns": { "type": "integer", "description": "New source out-point in nanoseconds." }
+                },
+                "required": ["clip_id", "source_in_ns", "source_out_ns"]
+            }
+        },
+        {
+            "name": "set_project_title",
+            "description": "Rename the project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "New project title." }
+                },
+                "required": ["title"]
+            }
+        },
+        {
+            "name": "save_fcpxml",
+            "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for the output .fcpxml file." }
+                },
+                "required": ["path"]
+            }
+        }
+    ]})
+}
+
+// ── Tool dispatch ─────────────────────────────────────────────────────────────
+
+fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCommand>) -> Value {
+    let name = params["name"].as_str().unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    // Every tool call gets a dedicated one-shot reply channel.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
+
+    let cmd = match name {
+        "get_project" => McpCommand::GetProject { reply: tx },
+        "list_tracks" => McpCommand::ListTracks  { reply: tx },
+        "list_clips"  => McpCommand::ListClips   { reply: tx },
+
+        "add_clip" => McpCommand::AddClip {
+            source_path:       args["source_path"].as_str().unwrap_or("").to_string(),
+            track_index:       args["track_index"].as_u64().unwrap_or(0) as usize,
+            timeline_start_ns: args["timeline_start_ns"].as_u64().unwrap_or(0),
+            source_in_ns:      args["source_in_ns"].as_u64().unwrap_or(0),
+            source_out_ns:     args["source_out_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "remove_clip" => McpCommand::RemoveClip {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "move_clip" => McpCommand::MoveClip {
+            clip_id:      args["clip_id"].as_str().unwrap_or("").to_string(),
+            new_start_ns: args["new_start_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "trim_clip" => McpCommand::TrimClip {
+            clip_id:       args["clip_id"].as_str().unwrap_or("").to_string(),
+            source_in_ns:  args["source_in_ns"].as_u64().unwrap_or(0),
+            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "set_project_title" => McpCommand::SetTitle {
+            title: args["title"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "save_fcpxml" => McpCommand::SaveFcpxml {
+            path:  args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        _ => return err(id.clone(), -32602, &format!("Unknown tool: '{name}'")),
+    };
+
+    if sender.send(cmd).is_err() {
+        return err(id.clone(), -32603, "App main thread unavailable");
+    }
+
+    match rx.recv() {
+        Ok(result) => ok(id, text_content(result)),
+        Err(_)     => err(id.clone(), -32603, "No reply from app"),
+    }
+}

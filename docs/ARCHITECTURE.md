@@ -40,6 +40,10 @@ src/
     timeline/
       mod.rs                Re-exports TimelineState and build_timeline()
       widget.rs             Full timeline: Cairo drawing + all gesture/key controllers
+
+  mcp/
+    mod.rs                  McpCommand enum; start_mcp_server() → mpsc::Receiver<McpCommand>
+    server.rs               Stdio JSON-RPC 2.0 loop; dispatches 9 MCP tools to main thread
 ```
 
 ---
@@ -188,6 +192,7 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 | `quick-xml` | `0.37` | FCPXML parsing |
 | `serde` | `1` | serialization |
 | `uuid` | `1` | clip IDs |
+| `serde_json` | `1` | JSON for MCP |
 | `anyhow` | `1` | error handling |
 | `thiserror` | `1` | error types |
 | `log` + `env_logger` | latest | logging |
@@ -203,7 +208,75 @@ cargo build
 cargo run
 # With GStreamer debug output:
 GST_DEBUG=2 cargo run
+# With MCP server enabled (stdio JSON-RPC):
+cargo run -- --mcp
 ```
+
+---
+
+## MCP Server
+
+When started with `--mcp`, UltimateSlice exposes a Model Context Protocol server
+over **stdio** (newline-delimited JSON-RPC 2.0, protocol version `2024-11-05`).
+Agents connect by spawning the process and piping stdio.
+
+### Architecture
+
+```
+Agent (stdin/stdout)
+    ↓ JSON-RPC lines
+MCP server thread  (src/mcp/server.rs)
+    ↓ McpCommand + SyncSender<Value>  (std::sync::mpsc)
+GTK main thread  (src/ui/window.rs — polled every 10 ms)
+    ↓ mutates Project, calls on_project_changed()
+    ↑ sends Value reply back via SyncSender
+MCP server thread
+    ↑ JSON-RPC response to stdout
+```
+
+Key design points:
+- The MCP thread **blocks** waiting for each reply — requests are serialized.
+- The main thread **never blocks** — it drains the channel via `try_recv()` in a timer.
+- `McpCommand` variants carry a `std::sync::mpsc::SyncSender<serde_json::Value>`
+  as a one-shot reply channel. All types are `Send`.
+- `glib::Sender` / `MainContext::channel` are **not used** (API changed in glib 0.22).
+
+### Available Tools
+
+| Tool | Description |
+|---|---|
+| `get_project` | Full project JSON (title, tracks, clips) |
+| `list_tracks` | Track index, id, kind, clip count |
+| `list_clips` | All clips with id, path, track\_index, ns positions |
+| `add_clip` | Add clip at track\_index + timeline position |
+| `remove_clip` | Remove clip by id |
+| `move_clip` | Change a clip's `timeline_start_ns` |
+| `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
+| `set_project_title` | Rename the project |
+| `save_fcpxml` | Write FCPXML 1.10 to a file path |
+
+### Example session
+
+```jsonc
+// → initialize
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"claude","version":"1"}}}
+
+// ← response
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"ultimateslice","version":"0.1.0"}}}
+
+// → list tools
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+
+// → add a clip at 5 seconds
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add_clip","arguments":{"source_path":"/home/user/footage.mp4","track_index":0,"timeline_start_ns":5000000000,"source_in_ns":0,"source_out_ns":10000000000}}}
+```
+
+### Adding a new MCP tool
+
+1. Add a variant to `McpCommand` in `src/mcp/mod.rs`
+2. Add a matching entry to the `tools_list()` function in `src/mcp/server.rs`
+3. Add a dispatch arm in `call_tool()` in `src/mcp/server.rs`
+4. Add a handler arm in `handle_mcp_command()` in `src/ui/window.rs`
 
 Required system packages (Debian/Ubuntu):
 ```

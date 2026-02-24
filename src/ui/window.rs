@@ -11,7 +11,7 @@ use crate::ui::{media_browser, preview, toolbar, inspector};
 use crate::ui::timeline::{TimelineState, build_timeline};
 
 /// Build and show the main application window.
-pub fn build_window(app: &gtk::Application) {
+pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("UltimateSlice")
@@ -190,5 +190,168 @@ pub fn build_window(app: &gtk::Application) {
         });
     }
 
+    // ── MCP server (optional, enabled via --mcp flag) ─────────────────────
+    if mcp_enabled {
+        let mcp_receiver = crate::mcp::start_mcp_server();
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        // Poll the mpsc channel every 10 ms on the GTK main thread.
+        glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+            while let Ok(cmd) = mcp_receiver.try_recv() {
+                handle_mcp_command(cmd, &project, &on_project_changed);
+            }
+            glib::ControlFlow::Continue
+        });
+        eprintln!("[MCP] Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
+    }
+
     window.present();
+}
+
+// ── MCP command handler (runs on GTK main thread) ────────────────────────────
+
+fn handle_mcp_command(
+    cmd: crate::mcp::McpCommand,
+    project: &Rc<RefCell<Project>>,
+    on_project_changed: &Rc<dyn Fn()>,
+) {
+    use crate::mcp::McpCommand;
+    use crate::model::clip::ClipKind;
+    use serde_json::json;
+
+    match cmd {
+        McpCommand::GetProject { reply } => {
+            let proj = project.borrow();
+            let v = serde_json::to_value(&*proj).unwrap_or(json!(null));
+            reply.send(v).ok();
+        }
+
+        McpCommand::ListTracks { reply } => {
+            let proj = project.borrow();
+            let tracks: Vec<_> = proj.tracks.iter().enumerate().map(|(i, t)| json!({
+                "index":      i,
+                "id":         t.id,
+                "label":      t.label,
+                "kind":       format!("{:?}", t.kind),
+                "clip_count": t.clips.len(),
+                "muted":      t.muted,
+                "locked":     t.locked,
+            })).collect();
+            reply.send(json!(tracks)).ok();
+        }
+
+        McpCommand::ListClips { reply } => {
+            let proj = project.borrow();
+            let clips: Vec<_> = proj.tracks.iter().enumerate()
+                .flat_map(|(ti, track)| track.clips.iter().map(move |c| json!({
+                    "id":               c.id,
+                    "label":            c.label,
+                    "source_path":      c.source_path,
+                    "track_index":      ti,
+                    "track_id":         track.id,
+                    "timeline_start_ns": c.timeline_start,
+                    "source_in_ns":     c.source_in,
+                    "source_out_ns":    c.source_out,
+                    "duration_ns":      c.duration(),
+                })))
+                .collect();
+            reply.send(json!(clips)).ok();
+        }
+
+        McpCommand::AddClip { source_path, track_index, timeline_start_ns, source_in_ns, source_out_ns, reply } => {
+            let clip_id = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.tracks.get_mut(track_index) {
+                    let mut clip = Clip::new(source_path, source_out_ns, timeline_start_ns, ClipKind::Video);
+                    clip.source_in  = source_in_ns;
+                    clip.source_out = source_out_ns;
+                    let id = clip.id.clone();
+                    track.add_clip(clip);
+                    proj.dirty = true;
+                    Ok(id)
+                } else {
+                    Err(format!("Track index {track_index} does not exist"))
+                }
+            };
+            match clip_id {
+                Ok(id) => {
+                    reply.send(json!({"success": true, "clip_id": id})).ok();
+                    on_project_changed();
+                }
+                Err(e) => { reply.send(json!({"success": false, "error": e})).ok(); }
+            }
+        }
+
+        McpCommand::RemoveClip { clip_id, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            for track in proj.tracks.iter_mut() {
+                if let Some(pos) = track.clips.iter().position(|c| c.id == clip_id) {
+                    track.clips.remove(pos);
+                    proj.dirty = true;
+                    found = true;
+                    break;
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::MoveClip { clip_id, new_start_ns, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.timeline_start = new_start_ns;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::TrimClip { clip_id, source_in_ns, source_out_ns, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.source_in  = source_in_ns;
+                        clip.source_out = source_out_ns;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SetTitle { title, reply } => {
+            project.borrow_mut().title = title.clone();
+            project.borrow_mut().dirty = true;
+            reply.send(json!({"success": true})).ok();
+            on_project_changed();
+        }
+
+        McpCommand::SaveFcpxml { path, reply } => {
+            let result = {
+                let proj = project.borrow();
+                crate::fcpxml::writer::write_fcpxml(&proj)
+                    .and_then(|xml| std::fs::write(&path, xml).map_err(|e| anyhow::anyhow!(e)))
+            };
+            match result {
+                Ok(_)  => reply.send(json!({"success": true, "path": path})).ok(),
+                Err(e) => reply.send(json!({"success": false, "error": e.to_string()})).ok(),
+            };
+        }
+    }
 }

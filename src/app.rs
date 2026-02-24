@@ -4,7 +4,7 @@ use crate::ui::window::build_window;
 
 const APP_ID: &str = "io.github.ultimateslice";
 
-pub fn run() {
+pub fn run(mcp_enabled: bool) {
     let app = Application::builder()
         .application_id(APP_ID)
         .build();
@@ -13,11 +13,13 @@ pub fn run() {
         load_css();
     });
 
-    app.connect_activate(|app| {
-        build_window(app);
+    app.connect_activate(move |app| {
+        build_window(app, mcp_enabled);
     });
 
-    app.run();
+    // Strip --mcp from argv before GLib sees it (unknown flags cause errors).
+    let args: Vec<String> = std::env::args().filter(|a| a != "--mcp").collect();
+    app.run_with_args(&args);
 }
 
 fn load_css() {
