@@ -64,6 +64,8 @@ pub struct TimelineState {
     pub on_project_changed: Option<Rc<dyn Fn()>>,
     /// Callback fired when the user presses Space to toggle play/pause
     pub on_play_pause: Option<Rc<dyn Fn()>>,
+    /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
+    pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
 }
 
 impl TimelineState {
@@ -80,7 +82,9 @@ impl TimelineState {
             drag_op: DragOp::None,
             on_seek: None,
             on_project_changed: None,
-            on_play_pause: None,        }
+            on_play_pause: None,
+            on_drop_clip: None,
+        }
     }
 
     pub fn ns_to_x(&self, ns: u64) -> f64 {
@@ -635,6 +639,41 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         });
     }
     area.add_controller(scroll);
+
+    // ── Drop target: accept clips dragged from media browser ────────────────
+    {
+        use gtk4::DropTarget;
+        let drop = DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        drop.connect_drop(move |_target, value, x, y| {
+            let payload = match value.get::<String>() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            // Payload format: "{source_path}|{duration_ns}"
+            let mut parts = payload.splitn(2, '|');
+            let source_path = match parts.next() { Some(p) => p.to_string(), None => return false };
+            let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+            let (track_idx, timeline_start_ns) = {
+                let st = state.borrow();
+                let track_row_idx = if y > RULER_HEIGHT {
+                    ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
+                } else { 0 };
+                let tns = st.x_to_ns(x);
+                (track_row_idx, tns)
+            };
+
+            let cb = state.borrow().on_drop_clip.clone();
+            if let Some(cb) = cb {
+                cb(source_path, duration_ns, track_idx, timeline_start_ns);
+            }
+            if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+            true
+        });
+        area.add_controller(drop);
+    }
 
     area
 }

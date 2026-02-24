@@ -1,6 +1,8 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, Button, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
+use gdk4;
 use gio;
+use glib;
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::model::media_library::MediaItem;
@@ -51,7 +53,7 @@ pub fn build_media_browser(
     {
         let lib = library.borrow();
         for item in lib.iter() {
-            list.append(&make_list_row(&item.label, &item.source_path));
+            list.append(&make_list_row(&item.label, &item.source_path, item.duration_ns));
         }
     }
 
@@ -125,7 +127,7 @@ pub fn build_media_browser(
 
                         // Add to library
                         library.borrow_mut().push(item);
-                        let row = make_list_row(&label, &path_str);
+                        let row = make_list_row(&label, &path_str, duration_ns);
                         list.append(&row);
 
                         // Auto-select the newly imported item
@@ -144,7 +146,7 @@ pub fn build_media_browser(
     vbox
 }
 
-fn make_list_row(label: &str, path: &str) -> ListBoxRow {
+fn make_list_row(label: &str, path: &str, duration_ns: u64) -> ListBoxRow {
     let row = ListBoxRow::new();
     let vbox = GBox::new(Orientation::Vertical, 2);
     vbox.set_margin_start(8);
@@ -169,6 +171,17 @@ fn make_list_row(label: &str, path: &str) -> ListBoxRow {
     vbox.append(&name_label);
     vbox.append(&path_label);
     row.set_child(Some(&vbox));
+
+    // Drag source: payload = "{source_path}|{duration_ns}"
+    let drag_src = gtk::DragSource::new();
+    drag_src.set_actions(gdk4::DragAction::COPY);
+    let payload = format!("{path}|{duration_ns}");
+    drag_src.connect_prepare(move |_src, _x, _y| {
+        let val = glib::Value::from(&payload);
+        Some(gdk4::ContentProvider::for_value(&val))
+    });
+    row.add_controller(drag_src);
+
     row
 }
 

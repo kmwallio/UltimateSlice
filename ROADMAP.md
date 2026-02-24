@@ -103,7 +103,7 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 - [x] Snap-to-clip-edge when moving clips (10 px threshold, snaps both start and end edges)
 - [x] Multiple video tracks and audio tracks (Add/Remove Track buttons below timeline)
 - [x] Audio waveform rendering in audio track rows (background GStreamer decode, normalized peaks)
-- [ ] Drag-and-drop from media browser onto a specific timeline track/position
+- [x] Drag-and-drop from media browser onto a specific timeline track/position
 - [ ] Snap-to-clip-edge when moving/trimming
 - [ ] Timeline markers / chapter points
 - [ ] Magnetic timeline mode (gap-free)

@@ -99,6 +99,28 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             prog_player.borrow_mut().toggle_play_pause();
         }));
     }
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        timeline_state.borrow_mut().on_drop_clip = Some(Rc::new(move |source_path, duration_ns, track_idx, timeline_start_ns| {
+            let mut proj = project.borrow_mut();
+            if let Some(track) = proj.tracks.get_mut(track_idx) {
+                use crate::model::clip::ClipKind;
+                use crate::model::track::TrackKind;
+                let kind = match track.kind {
+                    TrackKind::Video => ClipKind::Video,
+                    TrackKind::Audio => ClipKind::Audio,
+                };
+                let mut clip = Clip::new(source_path, duration_ns, timeline_start_ns, kind);
+                clip.source_in = 0;
+                clip.source_out = duration_ns;
+                track.add_clip(clip);
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        }));
+    }
 
     let header = toolbar::build_toolbar(project.clone(), timeline_state.clone(), {
         let cb = on_project_changed.clone();
