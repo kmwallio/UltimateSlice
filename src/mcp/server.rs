@@ -167,6 +167,22 @@ fn tools_list() -> Value {
                 },
                 "required": ["path"]
             }
+        },
+        {
+            "name": "list_library",
+            "description": "List all items currently in the media library (imported but not necessarily on the timeline).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "import_media",
+            "description": "Import a media file into the library by absolute path. Probes duration via GStreamer Discoverer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the media file to import." }
+                },
+                "required": ["path"]
+            }
         }
     ]})
 }
@@ -218,6 +234,13 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
+            path:  args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "list_library" => McpCommand::ListLibrary { reply: tx },
+
+        "import_media" => McpCommand::ImportMedia {
             path:  args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },

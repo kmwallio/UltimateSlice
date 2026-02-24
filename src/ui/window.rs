@@ -8,7 +8,7 @@ use crate::model::track::TrackKind;
 use crate::model::media_library::MediaItem;
 use crate::media::player::Player;
 use crate::ui::{media_browser, preview, toolbar, inspector};
-use crate::ui::timeline::{TimelineState, build_timeline};
+use crate::ui::timeline::{TimelineState, build_timeline_panel};
 
 /// Build and show the main application window.
 pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
@@ -171,8 +171,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     timeline_scroll.set_vexpand(true);
     timeline_scroll.set_hexpand(true);
 
-    let timeline_widget = build_timeline(timeline_state.clone());
-    timeline_scroll.set_child(Some(&timeline_widget));
+    let timeline_panel = build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
+    timeline_scroll.set_child(Some(&timeline_panel));
     root_vpaned.set_end_child(Some(&timeline_scroll));
 
     root_hpaned.set_start_child(Some(&root_vpaned));
@@ -185,15 +185,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     window.set_child(Some(&root_hpaned));
 
-    // Update timeline playhead from player position every 100ms
+    // Update timeline playhead from player position every 100ms.
+    // queue_draw on the panel triggers the DrawingArea inside it.
     {
         let player = player.clone();
         let timeline_state = timeline_state.clone();
-        let tl_widget = timeline_widget.clone();
+        let panel_weak = timeline_panel.downgrade();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let pos = player.borrow().position();
             timeline_state.borrow_mut().playhead_ns = pos;
-            tl_widget.queue_draw();
+            if let Some(p) = panel_weak.upgrade() { p.queue_draw(); }
             glib::ControlFlow::Continue
         });
     }
@@ -202,11 +203,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     if mcp_enabled {
         let mcp_receiver = crate::mcp::start_mcp_server();
         let project = project.clone();
+        let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
         glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
             while let Ok(cmd) = mcp_receiver.try_recv() {
-                handle_mcp_command(cmd, &project, &on_project_changed);
+                handle_mcp_command(cmd, &project, &library, &on_project_changed);
             }
             glib::ControlFlow::Continue
         });
@@ -221,6 +223,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 fn handle_mcp_command(
     cmd: crate::mcp::McpCommand,
     project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<Vec<MediaItem>>>,
     on_project_changed: &Rc<dyn Fn()>,
 ) {
     use crate::mcp::McpCommand;
@@ -360,6 +363,28 @@ fn handle_mcp_command(
                 Ok(_)  => reply.send(json!({"success": true, "path": path})).ok(),
                 Err(e) => reply.send(json!({"success": false, "error": e.to_string()})).ok(),
             };
+        }
+
+        McpCommand::ListLibrary { reply } => {
+            let lib = library.borrow();
+            let items: Vec<_> = lib.iter().map(|item| json!({
+                "label":       item.label,
+                "source_path": item.source_path,
+                "duration_ns": item.duration_ns,
+                "duration_s":  item.duration_ns as f64 / 1_000_000_000.0,
+            })).collect();
+            reply.send(json!(items)).ok();
+        }
+
+        McpCommand::ImportMedia { path, reply } => {
+            let uri = format!("file://{path}");
+            let duration_ns = crate::ui::media_browser::probe_duration(&uri)
+                .unwrap_or(10 * 1_000_000_000);
+            let item = MediaItem::new(path.clone(), duration_ns);
+            let label = item.label.clone();
+            library.borrow_mut().push(item);
+            reply.send(json!({"success": true, "label": label, "duration_ns": duration_ns})).ok();
+            on_project_changed();
         }
     }
 }

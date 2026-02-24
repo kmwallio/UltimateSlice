@@ -87,7 +87,7 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 - [x] JSON-RPC 2.0 over stdio (MCP 2024-11-05 protocol)
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
-- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`
+- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `list_library`, `import_media`
 
 ---
 
@@ -101,8 +101,8 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 ### Timeline Improvements
 - [x] Clip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
 - [x] Snap-to-clip-edge when moving clips (10 px threshold, snaps both start and end edges)
+- [x] Multiple video tracks and audio tracks (Add/Remove Track buttons below timeline)
 - [ ] Audio waveform rendering in audio track rows
-- [ ] Multiple video tracks and audio tracks (add/remove tracks)
 - [ ] Drag-and-drop from media browser onto a specific timeline track/position
 - [ ] Snap-to-clip-edge when moving/trimming
 - [ ] Timeline markers / chapter points
