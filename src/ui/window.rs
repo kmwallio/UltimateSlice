@@ -43,33 +43,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
 
+    // Two-phase setup: create a stable Rc handle now, fill in the real
+    // implementation after the timeline panel is built (so we can capture
+    // a weak reference to it for explicit queue_draw).
+    let on_project_changed_impl: Rc<RefCell<Option<Box<dyn Fn()>>>> =
+        Rc::new(RefCell::new(None));
     let on_project_changed: Rc<dyn Fn()> = {
-        let inspector_view = inspector_view.clone();
-        let project = project.clone();
-        let timeline_state = timeline_state.clone();
-        let window_weak = window_weak.clone();
-        let prog_player = prog_player.clone();
-
+        let cb = on_project_changed_impl.clone();
         Rc::new(move || {
-            if let Some(win) = window_weak.upgrade() {
-                let proj = project.borrow();
-                let dirty_marker = if proj.dirty { " •" } else { "" };
-                win.set_title(Some(&format!("UltimateSlice — {}{dirty_marker}", proj.title)));
+            if let Some(f) = cb.borrow().as_ref() {
+                f();
             }
-            let proj = project.borrow();
-            let selected = timeline_state.borrow().selected_clip_id.clone();
-            inspector_view.update(&proj, selected.as_deref());
-
-            // Reload program player clip list
-            let clips: Vec<ProgramClip> = proj.tracks.iter().flat_map(|t| {
-                t.clips.iter().map(|c| ProgramClip {
-                    source_path:      c.source_path.clone(),
-                    source_in_ns:     c.source_in,
-                    source_out_ns:    c.source_out,
-                    timeline_start_ns: c.timeline_start,
-                })
-            }).collect();
-            prog_player.borrow_mut().load_clips(clips);
         })
     };
 
@@ -233,6 +217,50 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let timeline_panel = build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
     timeline_scroll.set_child(Some(&timeline_panel));
     root_vpaned.set_end_child(Some(&timeline_scroll));
+
+    // Now that timeline_panel exists, fill in the real on_project_changed implementation.
+    // This runs after every edit: updates title, inspector, program player clip list,
+    // and queues a redraw on the timeline.
+    {
+        let inspector_view = inspector_view.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let window_weak = window_weak.clone();
+        let prog_player = prog_player.clone();
+        let panel_weak = timeline_panel.downgrade();
+
+        *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
+            // Update window title
+            if let Some(win) = window_weak.upgrade() {
+                let proj = project.borrow();
+                let dirty_marker = if proj.dirty { " •" } else { "" };
+                win.set_title(Some(&format!("UltimateSlice — {}{dirty_marker}", proj.title)));
+            }
+
+            // Update inspector and collect program clips — drop proj borrow before GStreamer call
+            let clips: Vec<ProgramClip> = {
+                let proj = project.borrow();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                inspector_view.update(&proj, selected.as_deref());
+                proj.tracks.iter().flat_map(|t| {
+                    t.clips.iter().map(|c| ProgramClip {
+                        source_path:       c.source_path.clone(),
+                        source_in_ns:      c.source_in,
+                        source_out_ns:     c.source_out,
+                        timeline_start_ns: c.timeline_start,
+                    })
+                }).collect()
+            }; // proj borrow dropped here — safe to call GStreamer below
+
+            // Reload program player (GStreamer state change; must not hold proj borrow)
+            prog_player.borrow_mut().load_clips(clips);
+
+            // Force immediate timeline redraw (don't wait for 100ms timer)
+            if let Some(p) = panel_weak.upgrade() {
+                p.queue_draw();
+            }
+        }));
+    }
 
     root_hpaned.set_start_child(Some(&root_vpaned));
 

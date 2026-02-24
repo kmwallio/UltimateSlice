@@ -173,13 +173,14 @@ fn make_list_row(label: &str, path: &str, duration_ns: u64) -> ListBoxRow {
     row.set_child(Some(&vbox));
 
     // Drag source: payload = "{source_path}|{duration_ns}"
+    // Use set_content (static) instead of connect_prepare to avoid claiming
+    // the button-press event sequence, which would break ListBox row selection.
     let drag_src = gtk::DragSource::new();
     drag_src.set_actions(gdk4::DragAction::COPY);
+    drag_src.set_exclusive(false);
     let payload = format!("{path}|{duration_ns}");
-    drag_src.connect_prepare(move |_src, _x, _y| {
-        let val = glib::Value::from(&payload);
-        Some(gdk4::ContentProvider::for_value(&val))
-    });
+    let val = glib::Value::from(&payload);
+    drag_src.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
     row.add_controller(drag_src);
 
     row
