@@ -94,12 +94,13 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 ## 🔜 Planned
 
 ### Source Monitor Improvements
+- [x] Clip name shown in source monitor header
 - [ ] Frame-accurate jog/shuttle control
 - [ ] Mark-in / Mark-out visible as timecodes in a dedicated bar
-- [ ] Clip name shown in source monitor header
 
 ### Timeline Improvements
-- [ ] Clip thumbnails in video track rows (frame extraction via AppSink)
+- [x] Clip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
+- [x] Snap-to-clip-edge when moving clips (10 px threshold, snaps both start and end edges)
 - [ ] Audio waveform rendering in audio track rows
 - [ ] Multiple video tracks and audio tracks (add/remove tracks)
 - [ ] Drag-and-drop from media browser onto a specific timeline track/position

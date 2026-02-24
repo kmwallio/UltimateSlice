@@ -220,11 +220,31 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     area.set_content_height((RULER_HEIGHT + TRACK_HEIGHT * 4.0) as i32);
     area.set_focusable(true);
 
+    let thumb_cache = Rc::new(RefCell::new(
+        crate::media::thumb_cache::ThumbnailCache::new()
+    ));
+
     // Drawing
     {
         let state = state.clone();
+        let thumb_cache = thumb_cache.clone();
         area.set_draw_func(move |_area, cr, width, height| {
-            draw_timeline(cr, width, height, &state.borrow());
+            let mut cache = thumb_cache.borrow_mut();
+            cache.poll();
+            draw_timeline(cr, width, height, &state.borrow(), &mut cache);
+        });
+    }
+
+    // Expose thumb_cache poll + queue_draw via a 200ms timer so new thumbnails
+    // trigger a repaint even when the user isn't moving the mouse.
+    {
+        let area_weak = area.downgrade();
+        let thumb_cache = thumb_cache.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            if thumb_cache.borrow_mut().poll() {
+                if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+            }
+            glib::ControlFlow::Continue
         });
     }
 
@@ -358,11 +378,54 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let drag_op = st.drag_op.clone();
                 match drag_op {
                     DragOp::MoveClip { ref clip_id, ref track_id, clip_offset_ns, .. } => {
-                        let new_start = current_ns.saturating_sub(clip_offset_ns);
+                        let raw_start = current_ns.saturating_sub(clip_offset_ns);
+                        // ── Snap to clip edges ──────────────────────────────
+                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                        let (clip_dur, snap_start) = {
+                            let proj = st.project.borrow();
+                            // Collect all edge times from OTHER clips
+                            let edges: Vec<u64> = proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter(|c| &c.id != clip_id)
+                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
+                                .collect();
+                            let this_dur = proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| &c.id == clip_id)
+                                .map(|c| c.duration())
+                                .unwrap_or(0);
+                            // Snap clip start edge
+                            let by_start = edges.iter().copied()
+                                .filter(|&e| (e as i64 - raw_start as i64).unsigned_abs() < snap_ns)
+                                .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
+                            // Snap clip end edge
+                            let by_end = edges.iter().copied()
+                                .filter(|&e| {
+                                    let end = raw_start + this_dur;
+                                    (e as i64 - end as i64).unsigned_abs() < snap_ns
+                                })
+                                .min_by_key(|&e| {
+                                    let end = raw_start + this_dur;
+                                    (e as i64 - end as i64).unsigned_abs()
+                                })
+                                .map(|e| e.saturating_sub(this_dur));
+                            let snapped = match (by_start, by_end) {
+                                (Some(a), Some(b)) => {
+                                    let da = (a as i64 - raw_start as i64).unsigned_abs();
+                                    let db = (b as i64 - raw_start as i64).unsigned_abs();
+                                    if da <= db { a } else { b }
+                                }
+                                (Some(a), None) => a,
+                                (None, Some(b)) => b,
+                                (None, None) => raw_start,
+                            };
+                            (this_dur, snapped)
+                        };
+                        let _ = clip_dur; // used above
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
                             if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.timeline_start = new_start;
+                                clip.timeline_start = snap_start;
                             }
                         }
                     }
@@ -567,7 +630,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 }
 
 /// Cairo drawing of the entire timeline
-fn draw_timeline(cr: &gtk::cairo::Context, width: i32, height: i32, st: &TimelineState) {
+fn draw_timeline(
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    st: &TimelineState,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+) {
     let w = width as f64;
     let h = height as f64;
 
@@ -582,7 +651,7 @@ fn draw_timeline(cr: &gtk::cairo::Context, width: i32, height: i32, st: &Timelin
     let proj = st.project.borrow();
     for (i, track) in proj.tracks.iter().enumerate() {
         let y = RULER_HEIGHT + i as f64 * TRACK_HEIGHT;
-        draw_track_row(cr, w, y, track, st);
+        draw_track_row(cr, w, y, track, st, cache);
     }
 
     // Playhead
@@ -648,6 +717,7 @@ fn draw_track_row(
     y: f64,
     track: &crate::model::track::Track,
     st: &TimelineState,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
 ) {
     let (r, g, b) = match track.kind {
         TrackKind::Video => (0.16, 0.16, 0.18),
@@ -673,7 +743,7 @@ fn draw_track_row(
     cr.stroke().ok();
 
     for clip in &track.clips {
-        draw_clip(cr, y, clip, track, st);
+        draw_clip(cr, y, clip, track, st, cache);
     }
 }
 
@@ -683,6 +753,7 @@ fn draw_clip(
     clip: &crate::model::clip::Clip,
     track: &crate::model::track::Track,
     st: &TimelineState,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
 ) {
     let cx = st.ns_to_x(clip.timeline_start);
     let cw = (clip.duration() as f64 / NS_PER_SECOND) * st.pixels_per_second;
@@ -700,6 +771,42 @@ fn draw_clip(
     cr.set_source_rgb(r, g, b);
     rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
     cr.fill().ok();
+
+    // ── Thumbnail strip for video clips ──────────────────────────────────
+    if track.kind == TrackKind::Video && cw > 20.0 {
+        // Request thumb at the clip's source in-point
+        cache.request(&clip.source_path, clip.source_in);
+        if let Some(surf) = cache.get(&clip.source_path, clip.source_in) {
+            cr.save().ok();
+            // Clip to the clip rectangle (with 1px inset)
+            rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
+            cr.clip();
+
+            let thumb_aspect = 160.0_f64 / 90.0_f64;
+            let tile_h = ch - 2.0;
+            let tile_w = tile_h * thumb_aspect;
+            let scale = tile_h / 90.0;
+
+            // Tile thumbnails across the clip width
+            let mut tile_x = cx + 1.0;
+            while tile_x < cx + cw - 1.0 {
+                cr.save().ok();
+                cr.translate(tile_x, cy + 1.0);
+                cr.scale(scale, scale);
+                cr.set_source_surface(surf, 0.0, 0.0).ok();
+                cr.paint_with_alpha(0.75).ok();
+                cr.restore().ok();
+                tile_x += tile_w;
+            }
+            cr.restore().ok();
+
+            // Re-draw the clip colour as a semi-transparent overlay so the
+            // label remains readable on top of the thumbnail.
+            cr.set_source_rgba(r, g, b, 0.35);
+            rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
+            cr.fill().ok();
+        }
+    }
 
     if is_selected {
         cr.set_source_rgb(1.0, 0.85, 0.0);

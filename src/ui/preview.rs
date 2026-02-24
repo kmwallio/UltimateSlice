@@ -12,16 +12,26 @@ const NS_PER_SECOND: f64 = 1_000_000_000.0;
 ///
 /// Returns `(widget, source_marks)` — callers read `source_marks` to get the
 /// current in/out selection when appending to the timeline.
+/// Returns `(widget, source_marks, clip_name_label)`.
 pub fn build_preview(
     player: Rc<RefCell<Player>>,
     paintable: gdk4::Paintable,
-) -> (GBox, Rc<RefCell<SourceMarks>>) {
+) -> (GBox, Rc<RefCell<SourceMarks>>, Label) {
     let source_marks = Rc::new(RefCell::new(SourceMarks::default()));
 
     let vbox = GBox::new(Orientation::Vertical, 0);
     vbox.set_hexpand(true);
     vbox.set_vexpand(true);
     vbox.set_focusable(true);
+
+    // Clip name header
+    let clip_name_label = Label::new(Some("No source loaded"));
+    clip_name_label.set_halign(gtk::Align::Start);
+    clip_name_label.set_margin_start(8);
+    clip_name_label.set_margin_top(4);
+    clip_name_label.set_margin_bottom(2);
+    clip_name_label.add_css_class("clip-name");
+    vbox.append(&clip_name_label);
 
     // Video display
     let picture = Picture::new();
@@ -280,7 +290,7 @@ pub fn build_preview(
         });
     }
 
-    (vbox, source_marks)
+    (vbox, source_marks, clip_name_label)
 }
 
 fn draw_scrubber(

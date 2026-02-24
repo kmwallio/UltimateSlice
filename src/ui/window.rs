@@ -101,7 +101,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     top_paned.set_position(220);
 
     // ── Build preview first so we have source_marks ───────────────────────
-    let (preview_widget, source_marks) = preview::build_preview(player.clone(), paintable);
+    let (preview_widget, source_marks, clip_name_label) = preview::build_preview(player.clone(), paintable);
     top_paned.set_end_child(Some(&preview_widget));
 
     // ── on_append: reads source_marks, creates clip, adds to timeline ─────
@@ -137,6 +137,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let player = player.clone();
         let source_marks = source_marks.clone();
         Rc::new(move |path: String, duration_ns: u64| {
+            // Update the clip name label
+            let name = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&path)
+                .to_string();
+            clip_name_label.set_text(&name);
             let uri = format!("file://{path}");
             let _ = player.borrow().load(&uri);
             let mut m = source_marks.borrow_mut();
