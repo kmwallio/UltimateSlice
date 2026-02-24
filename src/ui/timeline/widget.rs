@@ -58,10 +58,12 @@ pub struct TimelineState {
     pub selected_clip_id: Option<String>,
     pub selected_track_id: Option<String>,
     drag_op: DragOp,
-    /// Callback fired when user seeks
-    pub on_seek: Option<Box<dyn Fn(u64)>>,
-    /// Callback fired when project changes (redraw inspector, etc.)
-    pub on_project_changed: Option<Box<dyn Fn()>>,
+    /// Callback fired when user seeks — use Rc so it can be cloned out before releasing the RefMut
+    pub on_seek: Option<Rc<dyn Fn(u64)>>,
+    /// Callback fired when project changes — use Rc so it can be cloned out before releasing the RefMut
+    pub on_project_changed: Option<Rc<dyn Fn()>>,
+    /// Callback fired when the user presses Space to toggle play/pause
+    pub on_play_pause: Option<Rc<dyn Fn()>>,
 }
 
 impl TimelineState {
@@ -78,7 +80,7 @@ impl TimelineState {
             drag_op: DragOp::None,
             on_seek: None,
             on_project_changed: None,
-        }
+            on_play_pause: None,        }
     }
 
     pub fn ns_to_x(&self, ns: u64) -> f64 {
@@ -120,7 +122,6 @@ impl TimelineState {
         }
         self.selected_clip_id = None;
         self.selected_track_id = None;
-        if let Some(ref cb) = self.on_project_changed { cb(); }
     }
 
     /// Razor cut the selected clip (or any clip at playhead) at the playhead position
@@ -159,7 +160,6 @@ impl TimelineState {
             };
             let mut proj = self.project.borrow_mut();
             self.history.execute(Box::new(cmd), &mut proj);
-            if let Some(ref cb) = self.on_project_changed { cb(); }
         }
     }
 
@@ -242,15 +242,21 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 // Click in ruler → seek
                 let ns = st.x_to_ns(x);
                 st.playhead_ns = ns;
-                if let Some(ref cb) = st.on_seek { cb(ns); }
+                let seek_cb = st.on_seek.clone();
+                drop(st);
+                if let Some(cb) = seek_cb { cb(ns); }
             } else if button == 1 {
                 match st.active_tool.clone() {
                     ActiveTool::Razor => {
                         // Razor cut at click position
                         let ns = st.x_to_ns(x);
                         st.playhead_ns = ns;
-                        if let Some(ref cb) = st.on_seek { cb(ns); }
+                        let seek_cb = st.on_seek.clone();
                         st.razor_cut_at_playhead();
+                        let proj_cb = st.on_project_changed.clone();
+                        drop(st);
+                        if let Some(cb) = seek_cb { cb(ns); }
+                        if let Some(cb) = proj_cb { cb(); }
                     }
                     ActiveTool::Select => {
                         // Select clip
@@ -265,6 +271,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 st.selected_track_id = None;
                             }
                         }
+                        drop(st);
                     }
                 }
             } else if button == 3 {
@@ -274,7 +281,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     st.selected_clip_id = Some(h.clip_id);
                     st.selected_track_id = Some(h.track_id);
                 }
+                drop(st);
                 // delete_selected called via keyboard (Delete key)
+            } else {
+                drop(st);
             }
 
             if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
@@ -468,7 +478,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     DragOp::None => {}
                 }
 
-                if let Some(ref cb) = st.on_project_changed { cb(); }
+                let proj_cb = st.on_project_changed.clone();
+                drop(st);
+                if let Some(cb) = proj_cb { cb(); }
             }
         });
     }
@@ -485,11 +497,21 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             let mut st = state.borrow_mut();
 
+            // Track whether we need to fire on_project_changed after releasing the borrow
+            let mut notify_project = false;
+
             let handled = match key {
-                Key::z if ctrl && !shift => { st.undo(); true }
-                Key::z if ctrl && shift  => { st.redo(); true }
-                Key::y if ctrl           => { st.redo(); true }
-                Key::Delete | Key::BackSpace => { st.delete_selected(); true }
+                Key::z if ctrl && !shift => { st.undo(); notify_project = true; true }
+                Key::z if ctrl && shift  => { st.redo(); notify_project = true; true }
+                Key::y if ctrl           => { st.redo(); notify_project = true; true }
+                Key::Delete | Key::BackSpace => { st.delete_selected(); notify_project = true; true }
+                Key::space => {
+                    let pp_cb = st.on_play_pause.clone();
+                    drop(st);
+                    if let Some(cb) = pp_cb { cb(); }
+                    if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+                    return glib::Propagation::Stop;
+                }
                 Key::b | Key::B => {
                     // B = Blade/Razor
                     st.active_tool = if st.active_tool == ActiveTool::Razor {
@@ -506,8 +528,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 _ => false,
             };
 
+            let proj_cb = if notify_project { st.on_project_changed.clone() } else { None };
             if handled {
                 if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+            }
+            drop(st);
+            if let Some(cb) = proj_cb { cb(); }
+
+            if handled {
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed

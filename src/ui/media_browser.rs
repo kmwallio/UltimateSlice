@@ -3,20 +3,22 @@ use gtk4::{self as gtk, Box as GBox, Button, Label, ListBox, ListBoxRow, Orienta
 use gio;
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::model::project::Project;
-use crate::model::clip::{Clip, ClipKind};
-use crate::model::track::TrackKind;
+use crate::model::media_library::MediaItem;
 
 /// Builds the media browser panel.
-/// `on_clip_added` is called when the user imports a file.
+///
+/// * `library`            – shared list of imported media items
+/// * `on_source_selected` – called when the user selects a library item (path, duration_ns)
+/// * `on_append`          – called when the user clicks "Append to Timeline"
 pub fn build_media_browser(
-    project: Rc<RefCell<Project>>,
-    on_clip_added: impl Fn() + 'static,
+    library: Rc<RefCell<Vec<MediaItem>>>,
+    on_source_selected: Rc<dyn Fn(String, u64)>,
+    on_append: Rc<dyn Fn()>,
 ) -> GBox {
     let vbox = GBox::new(Orientation::Vertical, 4);
-    vbox.set_width_request(180);
+    vbox.set_width_request(190);
 
-    let header = Label::new(Some("Media Browser"));
+    let header = Label::new(Some("Media Library"));
     header.add_css_class("browser-header");
     header.set_margin_top(8);
     header.set_margin_bottom(4);
@@ -37,27 +39,63 @@ pub fn build_media_browser(
     scroll.set_child(Some(&list));
     vbox.append(&scroll);
 
-    // Collect all current clips for initial population
+    // "Append to Timeline" button at the bottom of the browser
+    let append_btn = Button::with_label("⬇ Append to Timeline");
+    append_btn.set_margin_start(8);
+    append_btn.set_margin_end(8);
+    append_btn.set_margin_bottom(8);
+    append_btn.set_sensitive(false); // enabled once a clip is selected
+    vbox.append(&append_btn);
+
+    // Populate list from existing library items (e.g. after project load)
     {
-        let proj = project.borrow();
-        for track in &proj.tracks {
-            for clip in &track.clips {
-                list.append(&make_list_row(&clip.label, &clip.source_path));
-            }
+        let lib = library.borrow();
+        for item in lib.iter() {
+            list.append(&make_list_row(&item.label, &item.source_path));
         }
     }
 
-    // Import button — open file chooser
+    // Selection → fire on_source_selected
     {
-        let project = project.clone();
+        let library = library.clone();
+        let on_source_selected = on_source_selected.clone();
+        let append_btn = append_btn.clone();
+        list.connect_row_selected(move |_, row| {
+            if let Some(row) = row {
+                let idx = row.index() as usize;
+                let lib = library.borrow();
+                if let Some(item) = lib.get(idx) {
+                    let path = item.source_path.clone();
+                    let dur = item.duration_ns;
+                    drop(lib);
+                    append_btn.set_sensitive(true);
+                    on_source_selected(path, dur);
+                }
+            } else {
+                append_btn.set_sensitive(false);
+            }
+        });
+    }
+
+    // Append button → fire on_append
+    {
+        let on_append = on_append.clone();
+        append_btn.connect_clicked(move |_| {
+            on_append();
+        });
+    }
+
+    // Import button → file chooser, adds to library only
+    {
+        let library = library.clone();
         let list = list.clone();
-        let on_clip_added = Rc::new(on_clip_added);
+        let on_source_selected = on_source_selected.clone();
+        let append_btn_weak = append_btn.downgrade();
 
         import_btn.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Import Media");
 
-            // Build a filter for common video/audio types
             let filter = gtk::FileFilter::new();
             filter.add_mime_type("video/*");
             filter.add_mime_type("audio/*");
@@ -68,11 +106,11 @@ pub fn build_media_browser(
             filters.append(&filter);
             dialog.set_filters(Some(&filters));
 
-            let project = project.clone();
+            let library = library.clone();
             let list = list.clone();
-            let on_clip_added = on_clip_added.clone();
+            let on_source_selected = on_source_selected.clone();
+            let append_btn_weak = append_btn_weak.clone();
 
-            // Get the root window from the button
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
             dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
@@ -80,35 +118,23 @@ pub fn build_media_browser(
                     if let Some(path) = file.path() {
                         let path_str = path.to_string_lossy().to_string();
                         let uri = format!("file://{path_str}");
-
-                        // Probe duration via GStreamer
                         let duration_ns = probe_duration(&uri).unwrap_or(10 * 1_000_000_000);
 
-                        let clip = Clip::new(
-                            path_str.clone(),
-                            duration_ns,
-                            0,
-                            ClipKind::Video,
-                        );
+                        let item = MediaItem::new(path_str.clone(), duration_ns);
+                        let label = item.label.clone();
 
-                        let label = clip.label.clone();
-                        list.append(&make_list_row(&label, &path_str));
+                        // Add to library
+                        library.borrow_mut().push(item);
+                        let row = make_list_row(&label, &path_str);
+                        list.append(&row);
 
-                        // Add clip to first video track at the end.
-                        // The borrow_mut block must be closed before calling
-                        // on_clip_added(), which internally borrows the project again.
-                        {
-                            let mut proj = project.borrow_mut();
-                            if let Some(track) = proj.tracks.iter_mut().find(|t| t.kind == TrackKind::Video) {
-                                let timeline_start = track.duration();
-                                let mut c = clip;
-                                c.timeline_start = timeline_start;
-                                track.add_clip(c);
-                            }
-                            proj.dirty = true;
-                        } // proj dropped here — safe to re-borrow below
-
-                        on_clip_added();
+                        // Auto-select the newly imported item
+                        list.select_row(Some(&row));
+                        if let Some(btn) = append_btn_weak.upgrade() {
+                            btn.set_sensitive(true);
+                        }
+                        // Load into source viewer immediately
+                        on_source_selected(path_str, duration_ns);
                     }
                 }
             });
@@ -147,7 +173,7 @@ fn make_list_row(label: &str, path: &str) -> ListBoxRow {
 }
 
 /// Quickly probe the duration of a media file using GStreamer discoverer.
-fn probe_duration(uri: &str) -> Option<u64> {
+pub fn probe_duration(uri: &str) -> Option<u64> {
     use gstreamer_pbutils::Discoverer;
     gstreamer::init().ok()?;
     let discoverer = Discoverer::new(gstreamer::ClockTime::from_seconds(5)).ok()?;
