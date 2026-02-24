@@ -94,15 +94,20 @@ pub fn build_media_browser(
                         let label = clip.label.clone();
                         list.append(&make_list_row(&label, &path_str));
 
-                        // Add clip to first video track at the end
-                        let mut proj = project.borrow_mut();
-                        if let Some(track) = proj.tracks.iter_mut().find(|t| t.kind == TrackKind::Video) {
-                            let timeline_start = track.duration();
-                            let mut c = clip;
-                            c.timeline_start = timeline_start;
-                            track.add_clip(c);
-                        }
-                        proj.dirty = true;
+                        // Add clip to first video track at the end.
+                        // The borrow_mut block must be closed before calling
+                        // on_clip_added(), which internally borrows the project again.
+                        {
+                            let mut proj = project.borrow_mut();
+                            if let Some(track) = proj.tracks.iter_mut().find(|t| t.kind == TrackKind::Video) {
+                                let timeline_start = track.duration();
+                                let mut c = clip;
+                                c.timeline_start = timeline_start;
+                                track.add_clip(c);
+                            }
+                            proj.dirty = true;
+                        } // proj dropped here — safe to re-borrow below
+
                         on_clip_added();
                     }
                 }
