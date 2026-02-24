@@ -1,0 +1,21 @@
+[package]
+name = "ultimate-slice"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gtk4 = { version = "0.11", features = ["v4_14"] }
+gstreamer = "0.25"
+gstreamer-video = "0.25"
+gstreamer-pbutils = "0.25"
+gstreamer-app = "0.25"
+glib = "0.22"
+gio = "0.22"
+gdk4 = "0.11"
+quick-xml = { version = "0.36", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+anyhow = "1"

@@ -1,0 +1,59 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use super::clip::Clip;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TrackKind {
+    Video,
+    Audio,
+}
+
+/// A single horizontal lane in the timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Track {
+    pub id: String,
+    pub kind: TrackKind,
+    pub label: String,
+    pub clips: Vec<Clip>,
+    pub muted: bool,
+    pub locked: bool,
+}
+
+impl Track {
+    pub fn new_video(label: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            kind: TrackKind::Video,
+            label: label.into(),
+            clips: Vec::new(),
+            muted: false,
+            locked: false,
+        }
+    }
+
+    pub fn new_audio(label: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            kind: TrackKind::Audio,
+            label: label.into(),
+            clips: Vec::new(),
+            muted: false,
+            locked: false,
+        }
+    }
+
+    /// Add a clip and keep clips sorted by timeline position
+    pub fn add_clip(&mut self, clip: Clip) {
+        self.clips.push(clip);
+        self.clips.sort_by_key(|c| c.timeline_start);
+    }
+
+    pub fn remove_clip(&mut self, clip_id: &str) {
+        self.clips.retain(|c| c.id != clip_id);
+    }
+
+    /// Total timeline duration covered by this track's clips
+    pub fn duration(&self) -> u64 {
+        self.clips.iter().map(|c| c.timeline_end()).max().unwrap_or(0)
+    }
+}
