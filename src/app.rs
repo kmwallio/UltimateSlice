@@ -23,6 +23,11 @@ pub fn run(mcp_enabled: bool) {
 }
 
 fn load_css() {
+    // Prefer the dark variant of the system theme (Adwaita-dark on GNOME)
+    if let Some(settings) = gtk4::Settings::default() {
+        settings.set_property("gtk-application-prefer-dark-theme", true);
+    }
+
     let css = gtk4::CssProvider::new();
     let css_data = include_str!("style.css");
     css.load_from_data(css_data);
