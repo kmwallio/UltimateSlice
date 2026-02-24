@@ -224,24 +224,34 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         crate::media::thumb_cache::ThumbnailCache::new()
     ));
 
+    let wave_cache = Rc::new(RefCell::new(
+        crate::media::waveform_cache::WaveformCache::new()
+    ));
+
     // Drawing
     {
         let state = state.clone();
         let thumb_cache = thumb_cache.clone();
+        let wave_cache = wave_cache.clone();
         area.set_draw_func(move |_area, cr, width, height| {
-            let mut cache = thumb_cache.borrow_mut();
-            cache.poll();
-            draw_timeline(cr, width, height, &state.borrow(), &mut cache);
+            let mut tcache = thumb_cache.borrow_mut();
+            tcache.poll();
+            let mut wcache = wave_cache.borrow_mut();
+            wcache.poll();
+            draw_timeline(cr, width, height, &state.borrow(), &mut tcache, &mut wcache);
         });
     }
 
-    // Expose thumb_cache poll + queue_draw via a 200ms timer so new thumbnails
+    // Expose thumb_cache poll + queue_draw via a 200ms timer so new thumbnails/waveforms
     // trigger a repaint even when the user isn't moving the mouse.
     {
         let area_weak = area.downgrade();
         let thumb_cache = thumb_cache.clone();
+        let wave_cache = wave_cache.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-            if thumb_cache.borrow_mut().poll() {
+            let thumbs_done = thumb_cache.borrow_mut().poll();
+            wave_cache.borrow_mut().poll();
+            if thumbs_done {
                 if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
             }
             glib::ControlFlow::Continue
@@ -636,6 +646,7 @@ fn draw_timeline(
     height: i32,
     st: &TimelineState,
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
     let w = width as f64;
     let h = height as f64;
@@ -651,7 +662,7 @@ fn draw_timeline(
     let proj = st.project.borrow();
     for (i, track) in proj.tracks.iter().enumerate() {
         let y = RULER_HEIGHT + i as f64 * TRACK_HEIGHT;
-        draw_track_row(cr, w, y, track, st, cache);
+        draw_track_row(cr, w, y, track, st, cache, wcache);
     }
 
     // Playhead
@@ -718,6 +729,7 @@ fn draw_track_row(
     track: &crate::model::track::Track,
     st: &TimelineState,
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
     let (r, g, b) = match track.kind {
         TrackKind::Video => (0.16, 0.16, 0.18),
@@ -743,7 +755,7 @@ fn draw_track_row(
     cr.stroke().ok();
 
     for clip in &track.clips {
-        draw_clip(cr, y, clip, track, st, cache);
+        draw_clip(cr, y, clip, track, st, cache, wcache);
     }
 }
 
@@ -754,6 +766,7 @@ fn draw_clip(
     track: &crate::model::track::Track,
     st: &TimelineState,
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
     let cx = st.ns_to_x(clip.timeline_start);
     let cw = (clip.duration() as f64 / NS_PER_SECOND) * st.pixels_per_second;
@@ -805,6 +818,30 @@ fn draw_clip(
             cr.set_source_rgba(r, g, b, 0.35);
             rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
             cr.fill().ok();
+        }
+    }
+
+    // ── Waveform for audio clips ───────────────────────────────────────────
+    if track.kind == TrackKind::Audio && cw > 8.0 {
+        wcache.request(&clip.source_path);
+        let px_count = cw as usize;
+        if let Some(peaks) = wcache.get_peaks(&clip.source_path, clip.source_in, clip.source_out, px_count) {
+            cr.save().ok();
+            rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
+            cr.clip();
+
+            let mid = cy + ch / 2.0;
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.6);
+            cr.set_line_width(1.0);
+
+            for (i, &peak) in peaks.iter().enumerate() {
+                let px = cx + i as f64;
+                let half_h = (peak as f64 * (ch / 2.0 - 2.0)).max(1.0);
+                cr.move_to(px + 0.5, mid - half_h);
+                cr.line_to(px + 0.5, mid + half_h);
+            }
+            cr.stroke().ok();
+            cr.restore().ok();
         }
     }
 
