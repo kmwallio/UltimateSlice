@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureClick, Label, Orientation, Picture};
+use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureClick, GestureDrag, Label, Orientation, Picture};
 use glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use crate::media::player::{Player, PlayerState};
 use crate::model::media_library::SourceMarks;
@@ -34,35 +34,66 @@ pub fn build_preview(
 
     // ── Source scrubber ───────────────────────────────────────────────────
     let scrubber = DrawingArea::new();
-    scrubber.set_content_height(20);
+    scrubber.set_content_height(24);
     scrubber.set_hexpand(true);
     scrubber.set_margin_start(8);
     scrubber.set_margin_end(8);
     scrubber.set_margin_top(4);
+
+    // Share the actual drawn width so click/drag handlers use the same value.
+    let drawn_width: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
+
     {
         let player = player.clone();
         let source_marks = source_marks.clone();
+        let drawn_width = drawn_width.clone();
         scrubber.set_draw_func(move |_area, cr, width, _height| {
-            draw_scrubber(cr, width as f64, &player.borrow(), &source_marks.borrow());
+            let w = width as f64;
+            drawn_width.set(w.max(1.0));
+            draw_scrubber(cr, w, &player.borrow(), &source_marks.borrow());
         });
     }
-    // Click on scrubber → seek
-    {
-        let scrubber_click = GestureClick::new();
-        let player = player.clone();
+
+    // Helper: convert a raw widget-local x to a seek position in nanoseconds.
+    let seek_from_x = {
         let source_marks = source_marks.clone();
+        let drawn_width = drawn_width.clone();
+        let player = player.clone();
         let scrubber_weak = scrubber.downgrade();
-        scrubber_click.connect_pressed(move |_, _, x, _| {
+        Rc::new(move |x: f64| {
             let dur = source_marks.borrow().duration_ns;
             if dur == 0 { return; }
-            let w = scrubber_weak.upgrade().map(|a| a.width()).unwrap_or(1) as f64;
+            let w = drawn_width.get();
             let frac = (x / w).clamp(0.0, 1.0);
             let pos = (frac * dur as f64) as u64;
             let _ = player.borrow().seek(pos);
             if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
-        });
+        })
+    };
+
+    // Click → seek
+    {
+        let scrubber_click = GestureClick::new();
+        let seek_from_x = seek_from_x.clone();
+        scrubber_click.connect_pressed(move |_, _, x, _| seek_from_x(x));
         scrubber.add_controller(scrubber_click);
     }
+
+    // Drag → live seek while scrubbing
+    {
+        let scrubber_drag = GestureDrag::new();
+        let seek_from_x = seek_from_x.clone();
+        scrubber_drag.connect_drag_begin({
+            let seek_from_x = seek_from_x.clone();
+            move |_, x, _| seek_from_x(x)
+        });
+        scrubber_drag.connect_drag_update(move |gesture, offset_x, _| {
+            let (start_x, _) = gesture.start_point().unwrap_or((0.0, 0.0));
+            seek_from_x(start_x + offset_x);
+        });
+        scrubber.add_controller(scrubber_drag);
+    }
+
     vbox.append(&scrubber);
 
     // ── In/out timecode row ───────────────────────────────────────────────
