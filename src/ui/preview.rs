@@ -44,13 +44,12 @@ pub fn build_preview(
     let drawn_width: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
 
     {
-        let player = player.clone();
         let source_marks = source_marks.clone();
         let drawn_width = drawn_width.clone();
         scrubber.set_draw_func(move |_area, cr, width, _height| {
             let w = width as f64;
             drawn_width.set(w.max(1.0));
-            draw_scrubber(cr, w, &player.borrow(), &source_marks.borrow());
+            draw_scrubber(cr, w, &source_marks.borrow());
         });
     }
 
@@ -66,6 +65,9 @@ pub fn build_preview(
             let w = drawn_width.get();
             let frac = (x / w).clamp(0.0, 1.0);
             let pos = (frac * dur as f64) as u64;
+            // Record the desired position immediately so the scrubber draws
+            // the correct playhead even while GStreamer is still pre-rolling.
+            source_marks.borrow_mut().display_pos_ns = pos;
             let _ = player.borrow().seek(pos);
             if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
         })
@@ -238,6 +240,7 @@ pub fn build_preview(
         let player = player.clone();
         let label = timecode_label.clone();
         let scrubber_weak = scrubber.downgrade();
+        let source_marks = source_marks.clone();
         let btn = btn_play_pause.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
@@ -247,6 +250,12 @@ pub fn build_preview(
             match p.state() {
                 PlayerState::Playing => btn.set_label("⏸"),
                 _ => btn.set_label("▶"),
+            }
+            // While playing, follow the real player position.
+            // While paused/seeking, keep display_pos_ns (set immediately on seek)
+            // so the scrubber doesn't snap to 0 during GStreamer pre-roll.
+            if p.state() == PlayerState::Playing && pos > 0 {
+                source_marks.borrow_mut().display_pos_ns = pos;
             }
             label.set_text(&format!("{} / {}", ns_to_timecode(pos), ns_to_timecode(dur)));
             drop(p);
@@ -261,7 +270,6 @@ pub fn build_preview(
 fn draw_scrubber(
     cr: &gtk::cairo::Context,
     width: f64,
-    player: &Player,
     marks: &SourceMarks,
 ) {
     let height = 20.0;
@@ -295,8 +303,9 @@ fn draw_scrubber(
     cr.line_to(out_x, height);
     cr.stroke().ok();
 
-    // Playhead (red)
-    let pos = player.position();
+    // Playhead — use display_pos_ns (set immediately on seek) rather than
+    // player.position(), which returns 0 while GStreamer is pre-rolling.
+    let pos = marks.display_pos_ns;
     let ph_x = (pos as f64 / dur as f64) * width;
     cr.set_source_rgb(1.0, 0.3, 0.3);
     cr.set_line_width(2.0);

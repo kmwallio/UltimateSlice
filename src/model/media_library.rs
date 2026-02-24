@@ -37,4 +37,7 @@ pub struct SourceMarks {
     pub in_ns: u64,
     /// Out-point (end of selection), in nanoseconds
     pub out_ns: u64,
+    /// Last position explicitly seeked to — used as display position while
+    /// GStreamer is still pre-rolling (query_position returns 0 during that time).
+    pub display_pos_ns: u64,
 }

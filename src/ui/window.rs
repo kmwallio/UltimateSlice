@@ -144,6 +144,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             m.duration_ns = duration_ns;
             m.in_ns = 0;
             m.out_ns = duration_ns;
+            m.display_pos_ns = 0;
         })
     };
 
