@@ -602,6 +602,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     st.active_tool = ActiveTool::Select;
                     true
                 }
+                Key::question | Key::slash => {
+                    // Show keyboard shortcut reference
+                    drop(st);
+                    if let Some(a) = area_weak.upgrade() {
+                        if let Some(win) = a.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
+                            show_shortcuts_dialog(&win);
+                        }
+                    }
+                    return glib::Propagation::Stop;
+                }
                 _ => false,
             };
 
@@ -930,4 +940,62 @@ fn format_timecode(secs: f64) -> String {
     let m = (secs % 3600) / 60;
     let s = secs % 60;
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+
+pub fn show_shortcuts_dialog(parent: &gtk::Window) {
+    use gtk4::{Dialog, Label, Orientation, ResponseType, ScrolledWindow};
+    let dialog = Dialog::builder()
+        .title("Keyboard Shortcuts")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(480)
+        .default_height(500)
+        .build();
+    dialog.add_button("Close", ResponseType::Close);
+
+    let shortcuts: &[(&str, &str)] = &[
+        ("Space",          "Play / Pause"),
+        ("I",              "Set In-point"),
+        ("O",              "Set Out-point"),
+        ("B",              "Toggle Razor (Blade) tool"),
+        ("Escape",         "Switch to Select tool"),
+        ("Delete / Bksp",  "Delete selected clip"),
+        ("Ctrl+Z",         "Undo"),
+        ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
+        ("Scroll",         "Zoom timeline (vertical scroll)"),
+        ("Scroll (H)",     "Pan timeline (horizontal scroll)"),
+        ("? / /",          "Show this help"),
+    ];
+
+    let vbox = gtk4::Box::new(Orientation::Vertical, 12);
+    vbox.set_margin_start(20);
+    vbox.set_margin_end(20);
+    vbox.set_margin_top(16);
+    vbox.set_margin_bottom(16);
+
+    for (key, desc) in shortcuts {
+        let row = gtk4::Box::new(Orientation::Horizontal, 0);
+        row.set_spacing(12);
+
+        let key_lbl = Label::new(Some(key));
+        key_lbl.set_width_chars(28);
+        key_lbl.set_xalign(1.0);
+        key_lbl.add_css_class("shortcut-key");
+
+        let desc_lbl = Label::new(Some(desc));
+        desc_lbl.set_xalign(0.0);
+
+        row.append(&key_lbl);
+        row.append(&desc_lbl);
+        vbox.append(&row);
+    }
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_child(Some(&vbox));
+    scroll.set_vexpand(true);
+    dialog.content_area().append(&scroll);
+
+    dialog.connect_response(|d, _| d.destroy());
+    dialog.present();
 }

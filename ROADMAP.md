@@ -118,7 +118,7 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
   - Clips reload automatically on every project change
 
 ### Audio
-- [ ] Audio track clip display with waveform
+- [x] Audio track clip display with waveform (see Timeline Improvements above)
 - [ ] Volume / pan controls per clip in the inspector
 - [ ] Basic audio mixing (level meters)
 
@@ -128,7 +128,7 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 - [ ] Titles / text overlay (`textoverlay`)
 
 ### Project Management
-- [ ] Project save / load as FCPXML (wired to New/Open/Save buttons)
+- [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [ ] Recent projects list
 - [ ] Auto-save
 - [ ] Proxy media generation and management
@@ -136,10 +136,10 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 ### Export
 - [ ] Export presets (resolution, bitrate, codec)
 - [ ] ProRes / WebM / GIF export options
-- [ ] Export progress dialog with cancel
+- [x] Export progress dialog with cancel (ProgressBar + status label)
 
 ### Polish
-- [ ] Keyboard shortcut reference overlay (? key)
+- [x] Keyboard shortcut reference overlay (? or / key opens a modal dialog)
 - [ ] Preferences dialog (theme, default frame rate, etc.)
 - [ ] Accessibility: keyboard navigation in all panels
 - [ ] Application icon and desktop integration (`.desktop` file)

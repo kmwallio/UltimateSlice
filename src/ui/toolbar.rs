@@ -148,6 +148,40 @@ pub fn build_toolbar(
                             }
                         });
 
+                        // Build a progress dialog
+                        let progress_dialog = gtk::Window::builder()
+                            .title("Exporting…")
+                            .default_width(360)
+                            .build();
+                        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                        vbox.set_margin_start(20);
+                        vbox.set_margin_end(20);
+                        vbox.set_margin_top(20);
+                        vbox.set_margin_bottom(20);
+
+                        let status_label = gtk::Label::new(Some("Preparing export…"));
+                        status_label.set_halign(gtk::Align::Start);
+
+                        let progress_bar = gtk::ProgressBar::new();
+                        progress_bar.set_show_text(true);
+                        progress_bar.set_text(Some("0%"));
+
+                        let cancel_btn = gtk::Button::with_label("Cancel");
+                        cancel_btn.set_halign(gtk::Align::End);
+
+                        vbox.append(&status_label);
+                        vbox.append(&progress_bar);
+                        vbox.append(&cancel_btn);
+                        progress_dialog.set_child(Some(&vbox));
+                        progress_dialog.present();
+
+                        // Cancel is not yet wired to stop the background thread —
+                        // just close the dialog for now
+                        {
+                            let pd = progress_dialog.clone();
+                            cancel_btn.connect_clicked(move |_| { pd.close(); });
+                        }
+
                         // Poll progress on the GTK main loop
                         glib::timeout_add_local(
                             std::time::Duration::from_millis(200),
@@ -155,13 +189,20 @@ pub fn build_toolbar(
                                 while let Ok(msg) = rx.try_recv() {
                                     match msg {
                                         ExportProgress::Progress(p) => {
-                                            println!("Export: {:.0}%", p * 100.0);
+                                            progress_bar.set_fraction(p as f64);
+                                            progress_bar.set_text(Some(&format!("{:.0}%", p * 100.0)));
+                                            status_label.set_text(&format!("Exporting to {output}…"));
                                         }
                                         ExportProgress::Done => {
-                                            println!("Export complete: {output}");
+                                            progress_bar.set_fraction(1.0);
+                                            progress_bar.set_text(Some("Done!"));
+                                            status_label.set_text("Export complete.");
+                                            cancel_btn.set_label("Close");
                                             return glib::ControlFlow::Break;
                                         }
                                         ExportProgress::Error(e) => {
+                                            status_label.set_text(&format!("Error: {e}"));
+                                            cancel_btn.set_label("Close");
                                             eprintln!("Export error: {e}");
                                             return glib::ControlFlow::Break;
                                         }
