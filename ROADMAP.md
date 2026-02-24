@@ -111,9 +111,11 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 - [ ] Ripple/roll/slip/slide edit modes
 
 ### Program Monitor
-- [ ] Separate "Program Monitor" that composites and plays back the assembled timeline
-  (requires a GStreamer `concat` + `compositor` pipeline driven by the timeline model)
-- [ ] Preview the output of the timeline in real-time
+- [x] Program Monitor panel showing assembled timeline playback
+  - Dedicated `ProgramPlayer` advances clip-by-clip from the project model
+  - Play/Stop transport controls; timecode display
+  - Timeline seek (click ruler) also seeks the program monitor
+  - Clips reload automatically on every project change
 
 ### Audio
 - [ ] Audio track clip display with waveform

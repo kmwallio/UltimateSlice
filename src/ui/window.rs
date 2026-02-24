@@ -7,7 +7,8 @@ use crate::model::clip::{Clip, ClipKind};
 use crate::model::track::TrackKind;
 use crate::model::media_library::MediaItem;
 use crate::media::player::Player;
-use crate::ui::{media_browser, preview, toolbar, inspector};
+use crate::media::program_player::{ProgramPlayer, ProgramClip};
+use crate::ui::{media_browser, preview, toolbar, inspector, program_monitor};
 use crate::ui::timeline::{TimelineState, build_timeline_panel};
 
 /// Build and show the main application window.
@@ -27,6 +28,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let (player, paintable) = Player::new().expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
+    let (prog_player_raw, prog_paintable) = ProgramPlayer::new()
+        .expect("Failed to create program player");
+    let prog_player = Rc::new(RefCell::new(prog_player_raw));
+
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
 
     // ── Build inspector ───────────────────────────────────────────────────
@@ -43,6 +48,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let window_weak = window_weak.clone();
+        let prog_player = prog_player.clone();
 
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
@@ -53,6 +59,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let proj = project.borrow();
             let selected = timeline_state.borrow().selected_clip_id.clone();
             inspector_view.update(&proj, selected.as_deref());
+
+            // Reload program player clip list
+            let clips: Vec<ProgramClip> = proj.tracks.iter().flat_map(|t| {
+                t.clips.iter().map(|c| ProgramClip {
+                    source_path:      c.source_path.clone(),
+                    source_in_ns:     c.source_in,
+                    source_out_ns:    c.source_out,
+                    timeline_start_ns: c.timeline_start,
+                })
+            }).collect();
+            prog_player.borrow_mut().load_clips(clips);
         })
     };
 
@@ -63,18 +80,23 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     }
     {
         let player = player.clone();
+        let prog_player = prog_player.clone();
         timeline_state.borrow_mut().on_seek = Some(Rc::new(move |ns| {
             let _ = player.borrow().seek(ns);
+            prog_player.borrow_mut().seek(ns);
         }));
     }
     {
         let player = player.clone();
+        let prog_player = prog_player.clone();
         timeline_state.borrow_mut().on_play_pause = Some(Rc::new(move || {
             let p = player.borrow();
             match p.state() {
                 crate::media::player::PlayerState::Playing => { let _ = p.pause(); }
                 _ => { let _ = p.play(); }
             }
+            drop(p);
+            prog_player.borrow_mut().toggle_play_pause();
         }));
     }
 
@@ -102,7 +124,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     // ── Build preview first so we have source_marks ───────────────────────
     let (preview_widget, source_marks, clip_name_label) = preview::build_preview(player.clone(), paintable);
-    top_paned.set_end_child(Some(&preview_widget));
+
+    // ── Build program monitor ──────────────────────────────────────────────
+    let prog_monitor_widget = program_monitor::build_program_monitor(
+        prog_player.clone(),
+        prog_paintable,
+    );
+
+    // Source + Program monitors side-by-side
+    let monitors_paned = Paned::new(Orientation::Horizontal);
+    monitors_paned.set_hexpand(true);
+    monitors_paned.set_vexpand(true);
+    monitors_paned.set_position(640);
+    monitors_paned.set_start_child(Some(&preview_widget));
+    monitors_paned.set_end_child(Some(&prog_monitor_widget));
+
+    top_paned.set_end_child(Some(&monitors_paned));
 
     // ── on_append: reads source_marks, creates clip, adds to timeline ─────
     let on_append: Rc<dyn Fn()> = {

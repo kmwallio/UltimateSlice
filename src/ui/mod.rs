@@ -4,3 +4,4 @@ pub mod media_browser;
 pub mod preview;
 pub mod timeline;
 pub mod inspector;
+pub mod program_monitor;
