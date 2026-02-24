@@ -1,8 +1,8 @@
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use crate::model::project::{Project, FrameRate};
-use crate::model::track::{Track, TrackKind};
+use crate::model::track::Track;
 use crate::model::clip::{Clip, ClipKind};
 use std::collections::HashMap;
 

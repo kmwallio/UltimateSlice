@@ -1,7 +1,6 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, Button, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
 use gio;
-use glib;
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::model::project::Project;

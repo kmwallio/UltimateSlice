@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_pbutils as gst_pbutils;
 use gstreamer_pbutils::prelude::*;
 use std::sync::mpsc;
 use crate::model::project::Project;

@@ -1,9 +1,8 @@
-use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
 use std::io::Cursor;
 use anyhow::Result;
 use crate::model::project::Project;
-use crate::model::track::TrackKind;
 
 /// Serialize a `Project` to FCPXML 1.10 format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
@@ -30,7 +29,7 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     writer.write_event(Event::Start(proj_elem))?;
 
     // <sequence>
-    let fps = format!("{}/{}", project.frame_rate.numerator, project.frame_rate.denominator);
+    let _fps = format!("{}/{}", project.frame_rate.numerator, project.frame_rate.denominator);
     let duration_str = ns_to_fcpxml_time(project.duration(), &project.frame_rate);
     let format_ref = "r1";
 
@@ -76,7 +75,7 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
     writer.write_event(Event::Start(BytesStart::new("resources")))?;
 
     // Format resource
-    let fps = format!("{}/{}", project.frame_rate.numerator, project.frame_rate.denominator);
+    let _fps = format!("{}/{}", project.frame_rate.numerator, project.frame_rate.denominator);
     let mut fmt = BytesStart::new("format");
     fmt.push_attribute(("id", "r1"));
     fmt.push_attribute(("name", "FFVideoFormat1080p24"));

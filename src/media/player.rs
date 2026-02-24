@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use glib::prelude::*;
 
 /// Playback state
 #[derive(Debug, Clone, PartialEq)]

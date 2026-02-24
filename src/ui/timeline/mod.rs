@@ -1,2 +1,2 @@
 pub mod widget;
-pub use widget::{TimelineState, build_timeline};
+pub use widget::{TimelineState, ActiveTool, build_timeline};

@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Button, HeaderBar, Label};
+use gtk4::{self as gtk, Button, HeaderBar, Label, ToggleButton};
 use gio;
 use glib;
 use std::cell::RefCell;
@@ -7,10 +7,12 @@ use std::rc::Rc;
 use crate::model::project::Project;
 use crate::fcpxml;
 use crate::media::export::{export_project, ExportProgress};
+use crate::ui::timeline::{TimelineState, ActiveTool};
 
 /// Build the main `HeaderBar` toolbar.
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<TimelineState>>,
     on_project_changed: impl Fn() + 'static + Clone,
 ) -> HeaderBar {
     let header = HeaderBar::new();
@@ -174,6 +176,60 @@ pub fn build_toolbar(
         });
     }
     header.pack_end(&btn_export);
+
+    // ── Undo / Redo ─────────────────────────────────────────────────────
+    let btn_undo = Button::with_label("↩ Undo");
+    btn_undo.set_tooltip_text(Some("Undo (Ctrl+Z)"));
+    {
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        btn_undo.connect_clicked(move |_| {
+            timeline_state.borrow_mut().undo();
+            on_project_changed();
+        });
+    }
+    header.pack_start(&btn_undo);
+
+    let btn_redo = Button::with_label("↪ Redo");
+    btn_redo.set_tooltip_text(Some("Redo (Ctrl+Shift+Z)"));
+    {
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        btn_redo.connect_clicked(move |_| {
+            timeline_state.borrow_mut().redo();
+            on_project_changed();
+        });
+    }
+    header.pack_start(&btn_redo);
+
+    // ── Tool selector: Select / Razor ───────────────────────────────────
+    let btn_select = ToggleButton::with_label("↖ Select");
+    btn_select.set_tooltip_text(Some("Selection tool (Escape)"));
+    btn_select.set_active(true);
+
+    let btn_razor = ToggleButton::with_label("✂ Razor");
+    btn_razor.set_tooltip_text(Some("Razor/blade tool (B)"));
+    btn_razor.set_group(Some(&btn_select));
+
+    {
+        let timeline_state = timeline_state.clone();
+        btn_select.connect_toggled(move |btn| {
+            if btn.is_active() {
+                timeline_state.borrow_mut().active_tool = ActiveTool::Select;
+            }
+        });
+    }
+    {
+        let timeline_state = timeline_state.clone();
+        btn_razor.connect_toggled(move |btn| {
+            if btn.is_active() {
+                timeline_state.borrow_mut().active_tool = ActiveTool::Razor;
+            }
+        });
+    }
+
+    header.pack_start(&btn_select);
+    header.pack_start(&btn_razor);
 
     header
 }

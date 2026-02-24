@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, Label, Orientation, Picture, Scale};
+use gtk4::{self as gtk, Box as GBox, Button, Label, Orientation, Picture};
 use glib;
 use std::cell::RefCell;
 use std::rc::Rc;
