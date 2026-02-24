@@ -1,0 +1,140 @@
+{
+  "mcpServers": {
+    "ultimate-slice": {
+      "command": "cargo",
+      "args": ["run", "--", "--mcp"],
+      "cwd": "UltimateSlice",
+      "tools": [
+        {
+          "name": "get_project",
+          "description": "Return the full project state (title, frame rate, all tracks and clips) as JSON.",
+          "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+          "name": "list_tracks",
+          "description": "List all tracks in the project with their index, id, kind (Video/Audio), and clip count.",
+          "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+          "name": "list_clips",
+          "description": "List every clip on the timeline across all tracks.",
+          "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+          "name": "add_clip",
+          "description": "Add a new clip to a track. Durations are in nanoseconds (1 s = 1_000_000_000 ns).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "source_path": {
+                "type": "string",
+                "description": "Absolute path to the media file."
+              },
+              "track_index": {
+                "type": "integer",
+                "description": "0-based track index (default: 0)."
+              },
+              "timeline_start_ns": {
+                "type": "integer",
+                "description": "Timeline position in nanoseconds."
+              },
+              "source_in_ns": {
+                "type": "integer",
+                "description": "Source in-point in nanoseconds."
+              },
+              "source_out_ns": {
+                "type": "integer",
+                "description": "Source out-point in nanoseconds."
+              }
+            },
+            "required": [
+              "source_path",
+              "timeline_start_ns",
+              "source_in_ns",
+              "source_out_ns"
+            ]
+          }
+        },
+        {
+          "name": "remove_clip",
+          "description": "Remove a clip from the timeline by its unique id (obtained from list_clips).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "clip_id": {
+                "type": "string",
+                "description": "Clip id to remove."
+              }
+            },
+            "required": ["clip_id"]
+          }
+        },
+        {
+          "name": "move_clip",
+          "description": "Move a clip to a new timeline start position in nanoseconds.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "clip_id": {
+                "type": "string",
+                "description": "Clip id to move."
+              },
+              "new_start_ns": {
+                "type": "integer",
+                "description": "New timeline start in nanoseconds."
+              }
+            },
+            "required": ["clip_id", "new_start_ns"]
+          }
+        },
+        {
+          "name": "trim_clip",
+          "description": "Adjust the source in- and out-point of a clip without changing its timeline position.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "clip_id": {
+                "type": "string",
+                "description": "Clip id to trim."
+              },
+              "source_in_ns": {
+                "type": "integer",
+                "description": "New source in-point in nanoseconds."
+              },
+              "source_out_ns": {
+                "type": "integer",
+                "description": "New source out-point in nanoseconds."
+              }
+            },
+            "required": ["clip_id", "source_in_ns", "source_out_ns"]
+          }
+        },
+        {
+          "name": "set_project_title",
+          "description": "Rename the project.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string", "description": "New project title." }
+            },
+            "required": ["title"]
+          }
+        },
+        {
+          "name": "save_fcpxml",
+          "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Absolute path for the output .fcpxml file."
+              }
+            },
+            "required": ["path"]
+          }
+        }
+      ]
+    }
+  }
+}

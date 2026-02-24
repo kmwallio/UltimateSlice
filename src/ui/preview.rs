@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureClick, GestureDrag, Label, Orientation, Picture};
+use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label, Orientation, Picture};
 use glib;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -62,7 +62,19 @@ pub fn build_preview(
         Rc::new(move |x: f64| {
             let dur = source_marks.borrow().duration_ns;
             if dur == 0 { return; }
-            let w = drawn_width.get();
+            // Use the drawn width recorded in draw_func; fall back to the
+            // widget's allocated width if draw_func hasn't fired yet.
+            let w = {
+                let dw = drawn_width.get();
+                if dw > 1.0 {
+                    dw
+                } else {
+                    scrubber_weak.upgrade()
+                        .map(|s| s.width() as f64)
+                        .unwrap_or(1.0)
+                        .max(1.0)
+                }
+            };
             let frac = (x / w).clamp(0.0, 1.0);
             let pos = (frac * dur as f64) as u64;
             // Record the desired position immediately so the scrubber draws
@@ -73,26 +85,29 @@ pub fn build_preview(
         })
     };
 
-    // Click → seek
-    {
-        let scrubber_click = GestureClick::new();
-        let seek_from_x = seek_from_x.clone();
-        scrubber_click.connect_pressed(move |_, _, x, _| seek_from_x(x));
-        scrubber.add_controller(scrubber_click);
-    }
-
-    // Drag → live seek while scrubbing
+    // ── Gesture: click OR drag → seek ────────────────────────────────────
+    // Use GestureDrag only. GestureDrag emits drag_begin immediately on
+    // button press (no movement threshold), so it handles both a simple click
+    // and a drag. Adding a GestureClick alongside GestureDrag would cause
+    // GestureClick to claim the event sequence first, denying GestureDrag.
     {
         let scrubber_drag = GestureDrag::new();
-        let seek_from_x = seek_from_x.clone();
+
+        // drag_begin fires on press (handles plain click too)
         scrubber_drag.connect_drag_begin({
             let seek_from_x = seek_from_x.clone();
             move |_, x, _| seek_from_x(x)
         });
-        scrubber_drag.connect_drag_update(move |gesture, offset_x, _| {
-            let (start_x, _) = gesture.start_point().unwrap_or((0.0, 0.0));
-            seek_from_x(start_x + offset_x);
+
+        // drag_update fires while pointer moves with button held
+        scrubber_drag.connect_drag_update({
+            let seek_from_x = seek_from_x.clone();
+            move |gesture, offset_x, _| {
+                let (start_x, _) = gesture.start_point().unwrap_or((0.0, 0.0));
+                seek_from_x(start_x + offset_x);
+            }
         });
+
         scrubber.add_controller(scrubber_drag);
     }
 
@@ -251,10 +266,11 @@ pub fn build_preview(
                 PlayerState::Playing => btn.set_label("⏸"),
                 _ => btn.set_label("▶"),
             }
-            // While playing, follow the real player position.
-            // While paused/seeking, keep display_pos_ns (set immediately on seek)
-            // so the scrubber doesn't snap to 0 during GStreamer pre-roll.
-            if p.state() == PlayerState::Playing && pos > 0 {
+            // Update display_pos_ns from the real player position once
+            // GStreamer finishes pre-rolling after a seek (pos goes non-zero).
+            // We skip pos==0 to avoid snapping the scrubber to the start
+            // during the flush/pre-roll window that follows a seek.
+            if pos > 0 {
                 source_marks.borrow_mut().display_pos_ns = pos;
             }
             label.set_text(&format!("{} / {}", ns_to_timecode(pos), ns_to_timecode(dur)));
