@@ -58,6 +58,8 @@ pub struct TimelineState {
     pub selected_clip_id: Option<String>,
     pub selected_track_id: Option<String>,
     drag_op: DragOp,
+    /// Scroll offset at the start of a ruler pan-drag
+    ruler_pan_start_offset: f64,
     /// Callback fired when user seeks — use Rc so it can be cloned out before releasing the RefMut
     pub on_seek: Option<Rc<dyn Fn(u64)>>,
     /// Callback fired when project changes — use Rc so it can be cloned out before releasing the RefMut
@@ -80,6 +82,7 @@ impl TimelineState {
             selected_clip_id: None,
             selected_track_id: None,
             drag_op: DragOp::None,
+            ruler_pan_start_offset: 0.0,
             on_seek: None,
             on_project_changed: None,
             on_play_pause: None,
@@ -337,9 +340,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             move |_gesture, x, y| {
                 let mut st = state.borrow_mut();
                 if y < RULER_HEIGHT {
-                    // Start ruler scrub immediately on drag-begin.
+                    // On drag-begin in ruler: record start offset for panning;
+                    // also seek playhead to clicked position.
                     let ns = st.x_to_ns(x);
                     st.playhead_ns = ns;
+                    st.ruler_pan_start_offset = st.scroll_offset;
                     let seek_cb = st.on_seek.clone();
                     drop(st);
                     if let Some(cb) = seek_cb { cb(ns); }
@@ -394,13 +399,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let (_, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
 
                 if start_y < RULER_HEIGHT {
-                    // Continuous ruler scrubbing while dragging.
+                    // Drag on ruler = pan the timeline.
                     let mut st = state.borrow_mut();
-                    let ns = st.x_to_ns(current_x);
-                    st.playhead_ns = ns;
-                    let seek_cb = st.on_seek.clone();
-                    drop(st);
-                    if let Some(cb) = seek_cb { cb(ns); }
+                    st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
                     if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
                     return;
                 }
