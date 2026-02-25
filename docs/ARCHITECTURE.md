@@ -224,6 +224,13 @@ GST_DEBUG=2 cargo run
 cargo run -- --mcp
 ```
 
+> **Single-instance enforcement for `--mcp`:** Only one MCP-enabled instance may
+> run at a time. On startup with `--mcp`, the binary reads
+> `/tmp/ultimateslice-mcp.pid`, sends SIGTERM (then SIGKILL after 3 s) to any
+> prior instance, and writes its own PID to the file. The PID file is removed on
+> normal exit. This lets agents or CI scripts safely restart the server by simply
+> re-launching with `--mcp`.
+
 ---
 
 ## MCP Server

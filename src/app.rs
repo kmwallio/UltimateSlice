@@ -1,12 +1,23 @@
 use gtk4::prelude::*;
 use gtk4::Application;
+use gio;
 use crate::ui::window::build_window;
 
 const APP_ID: &str = "io.github.ultimateslice";
 
 pub fn run(mcp_enabled: bool) {
+    // When running as an MCP server we've already terminated any prior instance
+    // via the PID file. Use NON_UNIQUE so GTK doesn't block on D-Bus registration
+    // while the old instance's session is still being cleaned up.
+    let flags = if mcp_enabled {
+        gio::ApplicationFlags::NON_UNIQUE
+    } else {
+        gio::ApplicationFlags::empty()
+    };
+
     let app = Application::builder()
         .application_id(APP_ID)
+        .flags(flags)
         .build();
 
     app.connect_startup(|_| {
