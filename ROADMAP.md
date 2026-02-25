@@ -161,8 +161,21 @@ Tracking docs:
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [ ] Proxy media generation and management
 
+### Canvas / Sequence Settings
+- [ ] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
+- [ ] Frame rate selector in project settings (23.976, 24, 25, 29.97, 30, 60 fps)
+- [ ] Aspect ratio presets (16:9, 4:3, 9:16 vertical, 1:1 square)
+- [ ] Persist canvas settings in FCPXML `<format>` element
+
 ### Export
-- [ ] Export presets (resolution, bitrate, codec)
+- [ ] Advanced export dialog (replace current single-button export)
+  - Codec selection: H.264, H.265/HEVC, VP9, ProRes, AV1
+  - Container selection: MP4, MOV, WebM, MKV
+  - Output resolution presets with downscale support (4K → 1080p → 720p → custom)
+  - Bitrate control: CRF / target bitrate mode
+  - Audio codec: AAC, Opus, FLAC, PCM
+  - Audio sample rate and channel layout (stereo / mono)
+- [ ] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
 - [ ] ProRes / WebM / GIF export options
 - [x] Export progress dialog with cancel (ProgressBar + status label)
 
