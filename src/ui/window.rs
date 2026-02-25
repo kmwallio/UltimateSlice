@@ -124,7 +124,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let top_paned = Paned::new(Orientation::Horizontal);
     top_paned.set_hexpand(true);
     top_paned.set_vexpand(true);
-    top_paned.set_position(220);
+    top_paned.set_position(280);
 
     // ── Build preview first so we have source_marks ───────────────────────
     let (preview_widget, source_marks, clip_name_label) = preview::build_preview(player.clone(), paintable);
@@ -171,15 +171,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         prog_paintable,
     );
 
-    // Source + Program monitors side-by-side
-    let monitors_paned = Paned::new(Orientation::Horizontal);
-    monitors_paned.set_hexpand(true);
-    monitors_paned.set_vexpand(true);
-    monitors_paned.set_position(640);
-    monitors_paned.set_start_child(Some(&preview_widget));
-    monitors_paned.set_end_child(Some(&prog_monitor_widget));
-
-    top_paned.set_end_child(Some(&monitors_paned));
+    top_paned.set_end_child(Some(&prog_monitor_widget));
 
     // ── on_append: reads source_marks, creates clip, adds to timeline ─────
     let on_append: Rc<dyn Fn()> = {
@@ -213,7 +205,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let on_source_selected: Rc<dyn Fn(String, u64)> = {
         let player = player.clone();
         let source_marks = source_marks.clone();
+        let preview_widget = preview_widget.clone();
         Rc::new(move |path: String, duration_ns: u64| {
+            // Show the source preview now that a clip is selected
+            preview_widget.set_visible(true);
             // Update the clip name label
             let name = std::path::Path::new(&path)
                 .file_stem()
@@ -238,7 +233,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         on_source_selected.clone(),
         on_append.clone(),
     );
-    top_paned.set_start_child(Some(&browser));
+    // Left panel: media browser (expanding) with source preview below (hidden until selection)
+    preview_widget.set_visible(false);
+    let left_panel = gtk::Box::new(Orientation::Vertical, 0);
+    left_panel.append(&browser);
+    left_panel.append(&preview_widget);
+    top_paned.set_start_child(Some(&left_panel));
 
     root_vpaned.set_start_child(Some(&top_paned));
 
