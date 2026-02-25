@@ -272,6 +272,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let state = state.clone();
         let area_weak = area.downgrade();
         click.connect_pressed(move |gesture, _n_press, x, y| {
+            // Grab keyboard focus so Delete/Backspace etc. work immediately
+            if let Some(a) = area_weak.upgrade() { a.grab_focus(); }
             let button = gesture.current_button();
             let mut st = state.borrow_mut();
 
