@@ -4,6 +4,10 @@ A Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 
 ---
 
+Tracking docs:
+- [`CHANGELOG.md`](CHANGELOG.md) — running history of implemented changes/progress
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — agent/contributor implementation guide
+
 ## ✅ Implemented
 
 ### Foundation

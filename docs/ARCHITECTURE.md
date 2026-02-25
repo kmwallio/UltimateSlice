@@ -5,6 +5,17 @@ on the UltimateSlice codebase. Read it before making changes.
 
 ---
 
+## Required Documentation Updates (Agent Rule)
+
+When making changes, update these files as part of the same work:
+
+1. `CHANGELOG.md` — append a concise entry under **Unreleased** describing what changed and why.
+2. `ROADMAP.md` — keep implemented/planned checklists accurate for any affected feature area.
+
+Do this continuously as work is completed (not only at the end of large efforts).
+
+---
+
 ## Project Layout
 
 ```
