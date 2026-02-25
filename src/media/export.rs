@@ -49,7 +49,7 @@ pub fn export_project(
     let mut filter = String::new();
     for (i, _) in video_clips.iter().enumerate() {
         filter.push_str(&format!(
-            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,fps={}/{},format=yuv420p[v{i}];",
+            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p[v{i}];",
             project.width, project.height, project.width, project.height,
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
