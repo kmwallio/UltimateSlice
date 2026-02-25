@@ -153,7 +153,7 @@ Tracking docs:
 - [x] Flip horizontal / flip vertical via GStreamer `videoflip`
 - [ ] Position offset (X / Y translation within the output frame)
 - [x] Persist transform settings in FCPXML (`us:crop-*`, `us:rotate`, `us:flip-h/v` attributes)
-- [ ] Interactive crop/rotate handles in program monitor — overlay renders but handles don't reliably update the preview (on hold)
+- [ ] Interactive crop/rotate handles in program monitor (removed; use Inspector sliders instead)
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
