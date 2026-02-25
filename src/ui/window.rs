@@ -127,7 +127,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     top_paned.set_position(280);
 
     // ── Build preview first so we have source_marks ───────────────────────
-    let (preview_widget, source_marks, clip_name_label) = preview::build_preview(player.clone(), paintable);
+    // on_append stub: real impl filled in below after source_marks is available.
+    let on_append_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_append: Rc<dyn Fn()> = {
+        let cb = on_append_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
+    let (preview_widget, source_marks, clip_name_label) = preview::build_preview(player.clone(), paintable, on_append.clone());
 
     // Wire on_drop_clip — placed here so it can read source_marks to honour
     // the in/out selection set in the source monitor.
@@ -174,7 +182,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     top_paned.set_end_child(Some(&prog_monitor_widget));
 
     // ── on_append: reads source_marks, creates clip, adds to timeline ─────
-    let on_append: Rc<dyn Fn()> = {
+    *on_append_impl.borrow_mut() = Some({
         let project = project.clone();
         let source_marks = source_marks.clone();
         let on_project_changed = on_project_changed.clone();
@@ -199,7 +207,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
             on_project_changed();
         })
-    };
+    });
 
     // ── on_source_selected: loads clip into player + resets source_marks ──
     let on_source_selected: Rc<dyn Fn(String, u64)> = {
@@ -231,7 +239,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let browser = media_browser::build_media_browser(
         library.clone(),
         on_source_selected.clone(),
-        on_append.clone(),
     );
     // Left panel: media browser (expanding) with source preview below (hidden until selection)
     preview_widget.set_visible(false);

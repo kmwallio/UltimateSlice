@@ -18,6 +18,7 @@ const DEFAULT_FRAME_NS: u64 = 41_666_667;
 pub fn build_preview(
     player: Rc<RefCell<Player>>,
     paintable: gdk4::Paintable,
+    on_append: Rc<dyn Fn()>,
 ) -> (GBox, Rc<RefCell<SourceMarks>>, Label) {
     let source_marks = Rc::new(RefCell::new(SourceMarks::default()));
 
@@ -117,26 +118,76 @@ pub fn build_preview(
         })
     };
 
-    // ── Gesture: click OR drag → seek ────────────────────────────────────
-    // Use GestureDrag only. GestureDrag emits drag_begin immediately on
-    // button press (no movement threshold), so it handles both a simple click
-    // and a drag. Adding a GestureClick alongside GestureDrag would cause
-    // GestureClick to claim the event sequence first, denying GestureDrag.
+    // ── Gesture: click OR drag → seek OR drag in/out marker ──────────────
+    // DragMode: 0 = seek playhead, 1 = drag In marker, 2 = drag Out marker.
+    // Determined in drag_begin by hit-testing the pointer position against the
+    // in/out marker positions (within ±8 px of each marker line).
+    let drag_mode: Rc<Cell<u8>> = Rc::new(Cell::new(0));
     {
         let scrubber_drag = GestureDrag::new();
 
-        // drag_begin fires on press (handles plain click too)
+        // drag_begin: decide what this gesture controls
         scrubber_drag.connect_drag_begin({
             let seek_from_x = seek_from_x.clone();
-            move |_, x, _| seek_from_x(x)
+            let source_marks = source_marks.clone();
+            let drawn_width = drawn_width.clone();
+            let drag_mode = drag_mode.clone();
+            let scrubber_weak = scrubber.downgrade();
+            move |_, x, _| {
+                let marks = source_marks.borrow();
+                let dur = marks.duration_ns;
+                if dur == 0 {
+                    drag_mode.set(0);
+                    drop(marks);
+                    seek_from_x(x);
+                    return;
+                }
+                let w = drawn_width.get().max(1.0);
+                let in_x  = (marks.in_ns  as f64 / dur as f64) * w;
+                let out_x = (marks.out_ns as f64 / dur as f64) * w;
+                drop(marks);
+                const HIT: f64 = 8.0;
+                if (x - in_x).abs() <= HIT {
+                    drag_mode.set(1);
+                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                } else if (x - out_x).abs() <= HIT {
+                    drag_mode.set(2);
+                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                } else {
+                    drag_mode.set(0);
+                    seek_from_x(x);
+                }
+            }
         });
 
-        // drag_update fires while pointer moves with button held
+        // drag_update: apply seek or marker update
         scrubber_drag.connect_drag_update({
             let seek_from_x = seek_from_x.clone();
+            let source_marks = source_marks.clone();
+            let drawn_width = drawn_width.clone();
+            let drag_mode = drag_mode.clone();
+            let scrubber_weak = scrubber.downgrade();
             move |gesture, offset_x, _| {
                 let (start_x, _) = gesture.start_point().unwrap_or((0.0, 0.0));
-                seek_from_x(start_x + offset_x);
+                let x = start_x + offset_x;
+                match drag_mode.get() {
+                    0 => seek_from_x(x),
+                    mode => {
+                        let w = drawn_width.get().max(1.0);
+                        let frac = (x / w).clamp(0.0, 1.0);
+                        let mut marks = source_marks.borrow_mut();
+                        let dur = marks.duration_ns;
+                        if dur == 0 { return; }
+                        let pos_ns = (frac * dur as f64) as u64;
+                        if mode == 1 {
+                            marks.in_ns = pos_ns.min(marks.out_ns.saturating_sub(1_000_000));
+                        } else {
+                            marks.out_ns = pos_ns.max(marks.in_ns + 1_000_000);
+                        }
+                        drop(marks);
+                        if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    }
+                }
             }
         });
 
@@ -191,8 +242,11 @@ pub fn build_preview(
     let btn_stop       = Button::with_label("⏹");
     let btn_play_pause = Button::with_label("▶");
     let btn_next_frame = Button::with_label("▮▶");
+    let btn_append     = Button::with_label("⬇ Append");
     btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     btn_next_frame.set_tooltip_text(Some("Step forward one frame (→)"));
+    btn_append.set_tooltip_text(Some("Append selection to timeline"));
+    btn_append.set_sensitive(false); // enabled once a source is loaded
 
     controls.append(&btn_set_in);
     controls.append(&btn_prev_frame);
@@ -200,6 +254,7 @@ pub fn build_preview(
     controls.append(&btn_play_pause);
     controls.append(&btn_next_frame);
     controls.append(&btn_set_out);
+    controls.append(&btn_append);
     vbox.append(&controls);
 
     // Shuttle speed state for J/K/L: negative = reverse, 0 = paused, positive = forward.
@@ -252,6 +307,13 @@ pub fn build_preview(
             update_marks_bar(&m);
             drop(m);
             if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+        });
+    }
+
+    // Append
+    {
+        btn_append.connect_clicked(move |_| {
+            on_append();
         });
     }
 
@@ -432,6 +494,7 @@ pub fn build_preview(
         let shuttle_speed = shuttle_speed.clone();
         let frame_ns = frame_ns.clone();
         let update_marks_bar = update_marks_bar.clone();
+        let btn_append = btn_append.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
             let pos = p.position();
@@ -482,6 +545,8 @@ pub fn build_preview(
             // Keep marks bar in sync (out label resets when source is loaded)
             {
                 let m = source_marks.borrow();
+                // Enable append once a source is loaded
+                btn_append.set_sensitive(!m.path.is_empty());
                 update_marks_bar(&m);
             }
             drop(p);
@@ -515,19 +580,31 @@ fn draw_scrubber(
     cr.rectangle(in_x, 0.0, out_x - in_x, height);
     cr.fill().ok();
 
-    // In marker (green line)
+    // In marker (green line + downward triangle handle at top)
     cr.set_source_rgb(0.2, 0.9, 0.3);
     cr.set_line_width(2.0);
     cr.move_to(in_x, 0.0);
     cr.line_to(in_x, height);
     cr.stroke().ok();
+    // Triangle handle (pointing down from top edge)
+    cr.move_to(in_x - 5.0, 0.0);
+    cr.line_to(in_x + 5.0, 0.0);
+    cr.line_to(in_x, 8.0);
+    cr.close_path();
+    cr.fill().ok();
 
-    // Out marker (orange line)
+    // Out marker (orange line + downward triangle handle at top)
     cr.set_source_rgb(1.0, 0.6, 0.1);
     cr.set_line_width(2.0);
     cr.move_to(out_x, 0.0);
     cr.line_to(out_x, height);
     cr.stroke().ok();
+    // Triangle handle (pointing down from top edge)
+    cr.move_to(out_x - 5.0, 0.0);
+    cr.line_to(out_x + 5.0, 0.0);
+    cr.line_to(out_x, 8.0);
+    cr.close_path();
+    cr.fill().ok();
 
     // Playhead — use display_pos_ns (set immediately on seek) rather than
     // player.position(), which returns 0 while GStreamer is pre-rolling.

@@ -27,7 +27,7 @@ impl MediaItem {
 }
 
 /// In/out marks and current source for the source preview monitor.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceMarks {
     /// Filesystem path of the currently loaded source clip
     pub path: String,

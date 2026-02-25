@@ -11,11 +11,9 @@ use crate::model::media_library::MediaItem;
 ///
 /// * `library`            – shared list of imported media items
 /// * `on_source_selected` – called when the user selects a library item (path, duration_ns)
-/// * `on_append`          – called when the user clicks "Append to Timeline"
 pub fn build_media_browser(
     library: Rc<RefCell<Vec<MediaItem>>>,
     on_source_selected: Rc<dyn Fn(String, u64)>,
-    on_append: Rc<dyn Fn()>,
 ) -> GBox {
     let vbox = GBox::new(Orientation::Vertical, 4);
     vbox.set_width_request(190);
@@ -41,14 +39,6 @@ pub fn build_media_browser(
     scroll.set_child(Some(&list));
     vbox.append(&scroll);
 
-    // "Append to Timeline" button at the bottom of the browser
-    let append_btn = Button::with_label("⬇ Append to Timeline");
-    append_btn.set_margin_start(8);
-    append_btn.set_margin_end(8);
-    append_btn.set_margin_bottom(8);
-    append_btn.set_sensitive(false); // enabled once a clip is selected
-    vbox.append(&append_btn);
-
     // Populate list from existing library items (e.g. after project load)
     {
         let lib = library.borrow();
@@ -61,15 +51,11 @@ pub fn build_media_browser(
     {
         let library = library.clone();
         let list = list.clone();
-        let append_btn = append_btn.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
             let lib = library.borrow();
             let count = listbox_row_count(&list);
             if count != lib.len() {
                 rebuild_listbox_from_library(&list, &lib);
-                if lib.is_empty() {
-                    append_btn.set_sensitive(false);
-                }
             }
             glib::ControlFlow::Continue
         });
@@ -79,7 +65,6 @@ pub fn build_media_browser(
     {
         let library = library.clone();
         let on_source_selected = on_source_selected.clone();
-        let append_btn = append_btn.clone();
         list.connect_row_selected(move |_, row| {
             if let Some(row) = row {
                 let idx = row.index() as usize;
@@ -88,20 +73,9 @@ pub fn build_media_browser(
                     let path = item.source_path.clone();
                     let dur = item.duration_ns;
                     drop(lib);
-                    append_btn.set_sensitive(true);
                     on_source_selected(path, dur);
                 }
-            } else {
-                append_btn.set_sensitive(false);
             }
-        });
-    }
-
-    // Append button → fire on_append
-    {
-        let on_append = on_append.clone();
-        append_btn.connect_clicked(move |_| {
-            on_append();
         });
     }
 
@@ -110,7 +84,6 @@ pub fn build_media_browser(
         let library = library.clone();
         let list = list.clone();
         let on_source_selected = on_source_selected.clone();
-        let append_btn_weak = append_btn.downgrade();
 
         import_btn.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
@@ -129,7 +102,6 @@ pub fn build_media_browser(
             let library = library.clone();
             let list = list.clone();
             let on_source_selected = on_source_selected.clone();
-            let append_btn_weak = append_btn_weak.clone();
 
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
@@ -150,9 +122,6 @@ pub fn build_media_browser(
 
                         // Auto-select the newly imported item
                         list.select_row(Some(&row));
-                        if let Some(btn) = append_btn_weak.upgrade() {
-                            btn.set_sensitive(true);
-                        }
                         // Load into source viewer immediately
                         on_source_selected(path_str, duration_ns);
                     }
