@@ -26,9 +26,18 @@ pub fn build_toolbar(
     btn_new.set_tooltip_text(Some("New project (Ctrl+N)"));
     {
         let project = project.clone();
+        let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         btn_new.connect_clicked(move |_| {
             *project.borrow_mut() = Project::new("Untitled");
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.playhead_ns = 0;
+                st.scroll_offset = 0.0;
+                st.pixels_per_second = 100.0;
+                st.selected_clip_id = None;
+                st.selected_track_id = None;
+            }
             on_project_changed();
         });
     }
@@ -39,6 +48,7 @@ pub fn build_toolbar(
     btn_open.set_tooltip_text(Some("Open FCPXML project (Ctrl+O)"));
     {
         let project = project.clone();
+        let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         btn_open.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
@@ -54,6 +64,7 @@ pub fn build_toolbar(
 
             let project = project.clone();
             let on_project_changed = on_project_changed.clone();
+            let timeline_state_cb = timeline_state.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
             dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
@@ -64,6 +75,14 @@ pub fn build_toolbar(
                                 Ok(mut new_proj) => {
                                     new_proj.file_path = path.to_str().map(|s| s.to_string());
                                     *project.borrow_mut() = new_proj;
+                                    {
+                                        let mut st = timeline_state_cb.borrow_mut();
+                                        st.playhead_ns = 0;
+                                        st.scroll_offset = 0.0;
+                                        st.pixels_per_second = 100.0;
+                                        st.selected_clip_id = None;
+                                        st.selected_track_id = None;
+                                    }
                                     on_project_changed();
                                 }
                                 Err(e) => eprintln!("FCPXML parse error: {e}"),

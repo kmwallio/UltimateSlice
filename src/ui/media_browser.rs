@@ -57,6 +57,24 @@ pub fn build_media_browser(
         }
     }
 
+    // Keep list in sync when library changes externally (e.g. opening FCPXML).
+    {
+        let library = library.clone();
+        let list = list.clone();
+        let append_btn = append_btn.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            let lib = library.borrow();
+            let count = listbox_row_count(&list);
+            if count != lib.len() {
+                rebuild_listbox_from_library(&list, &lib);
+                if lib.is_empty() {
+                    append_btn.set_sensitive(false);
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     // Selection → fire on_source_selected
     {
         let library = library.clone();
@@ -193,4 +211,23 @@ pub fn probe_duration(uri: &str) -> Option<u64> {
     let discoverer = Discoverer::new(gstreamer::ClockTime::from_seconds(5)).ok()?;
     let info = discoverer.discover_uri(uri).ok()?;
     info.duration().map(|d| d.nseconds())
+}
+
+fn listbox_row_count(list: &ListBox) -> usize {
+    let mut count = 0usize;
+    let mut child = list.first_child();
+    while let Some(w) = child {
+        count += 1;
+        child = w.next_sibling();
+    }
+    count
+}
+
+fn rebuild_listbox_from_library(list: &ListBox, lib: &[MediaItem]) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    for item in lib.iter() {
+        list.append(&make_list_row(&item.label, &item.source_path, item.duration_ns));
+    }
 }
