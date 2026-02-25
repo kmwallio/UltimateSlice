@@ -44,6 +44,26 @@ pub fn build_preview(
     picture.add_css_class("preview-picture");
     vbox.append(&picture);
 
+    // DragSource on the video display so users can drag the current
+    // clip selection (in/out range) directly to the timeline.
+    {
+        let source_marks = source_marks.clone();
+        let drag_src = gtk::DragSource::new();
+        drag_src.set_actions(gdk4::DragAction::COPY);
+        drag_src.connect_prepare({
+            let source_marks = source_marks.clone();
+            move |_src, _x, _y| {
+                let marks = source_marks.borrow();
+                if marks.path.is_empty() || marks.duration_ns == 0 {
+                    return None;
+                }
+                let payload = format!("{}|{}", marks.path, marks.duration_ns);
+                Some(gdk4::ContentProvider::for_value(&glib::Value::from(&payload)))
+            }
+        });
+        picture.add_controller(drag_src);
+    }
+
     // ── Source scrubber ───────────────────────────────────────────────────
     let scrubber = DrawingArea::new();
     scrubber.set_content_height(24);

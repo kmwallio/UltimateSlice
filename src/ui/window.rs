@@ -84,29 +84,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             prog_player.borrow_mut().toggle_play_pause();
         }));
     }
-    {
-        let project = project.clone();
-        let on_project_changed = on_project_changed.clone();
-        timeline_state.borrow_mut().on_drop_clip = Some(Rc::new(move |source_path, duration_ns, track_idx, timeline_start_ns| {
-            let mut proj = project.borrow_mut();
-            if let Some(track) = proj.tracks.get_mut(track_idx) {
-                use crate::model::clip::ClipKind;
-                use crate::model::track::TrackKind;
-                let kind = match track.kind {
-                    TrackKind::Video => ClipKind::Video,
-                    TrackKind::Audio => ClipKind::Audio,
-                };
-                let mut clip = Clip::new(source_path, duration_ns, timeline_start_ns, kind);
-                clip.source_in = 0;
-                clip.source_out = duration_ns;
-                track.add_clip(clip);
-                proj.dirty = true;
-                drop(proj);
-                on_project_changed();
-            }
-        }));
-    }
-
     let header = toolbar::build_toolbar(project.clone(), timeline_state.clone(), {
         let cb = on_project_changed.clone();
         move || cb()
@@ -131,6 +108,42 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     // ── Build preview first so we have source_marks ───────────────────────
     let (preview_widget, source_marks, clip_name_label) = preview::build_preview(player.clone(), paintable);
+
+    // Wire on_drop_clip — placed here so it can read source_marks to honour
+    // the in/out selection set in the source monitor.
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let source_marks = source_marks.clone();
+        timeline_state.borrow_mut().on_drop_clip = Some(Rc::new(move |source_path, duration_ns, track_idx, timeline_start_ns| {
+            let mut proj = project.borrow_mut();
+            if let Some(track) = proj.tracks.get_mut(track_idx) {
+                use crate::model::clip::ClipKind;
+                use crate::model::track::TrackKind;
+                let kind = match track.kind {
+                    TrackKind::Video => ClipKind::Video,
+                    TrackKind::Audio => ClipKind::Audio,
+                };
+                // If the source monitor has in/out marks for this clip, use them;
+                // otherwise fall back to the full source range.
+                let (src_in, src_out) = {
+                    let marks = source_marks.borrow();
+                    if marks.path == source_path && marks.in_ns < marks.out_ns {
+                        (marks.in_ns, marks.out_ns)
+                    } else {
+                        (0, duration_ns)
+                    }
+                };
+                let mut clip = Clip::new(source_path, src_out, timeline_start_ns, kind);
+                clip.source_in = src_in;
+                clip.source_out = src_out;
+                track.add_clip(clip);
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        }));
+    }
 
     // ── Build program monitor ──────────────────────────────────────────────
     let prog_monitor_widget = program_monitor::build_program_monitor(
