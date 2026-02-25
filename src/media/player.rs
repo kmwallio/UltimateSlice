@@ -92,13 +92,40 @@ impl Player {
         }
     }
 
-    /// Seek to an absolute position in nanoseconds
+    /// Seek to an absolute position in nanoseconds (snaps to nearest keyframe)
     pub fn seek(&self, position_ns: u64) -> Result<()> {
         self.pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             gst::ClockTime::from_nseconds(position_ns),
         )?;
         Ok(())
+    }
+
+    /// Frame-accurate seek to an absolute position in nanoseconds.
+    /// Slower than `seek()` but lands on the exact requested frame.
+    pub fn seek_accurate(&self, position_ns: u64) -> Result<()> {
+        self.pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            gst::ClockTime::from_nseconds(position_ns),
+        )?;
+        Ok(())
+    }
+
+    /// Step forward by one frame (frame_duration_ns = 1e9 / fps).
+    pub fn step_forward(&self, frame_duration_ns: u64) -> Result<u64> {
+        let pos = self.position();
+        let dur = self.duration();
+        let new_pos = (pos + frame_duration_ns).min(dur);
+        self.seek_accurate(new_pos)?;
+        Ok(new_pos)
+    }
+
+    /// Step backward by one frame (frame_duration_ns = 1e9 / fps).
+    pub fn step_backward(&self, frame_duration_ns: u64) -> Result<u64> {
+        let pos = self.position();
+        let new_pos = pos.saturating_sub(frame_duration_ns);
+        self.seek_accurate(new_pos)?;
+        Ok(new_pos)
     }
 
     /// Current playback position in nanoseconds, or 0 if unknown

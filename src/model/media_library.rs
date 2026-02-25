@@ -27,7 +27,7 @@ impl MediaItem {
 }
 
 /// In/out marks and current source for the source preview monitor.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SourceMarks {
     /// Filesystem path of the currently loaded source clip
     pub path: String,
@@ -40,4 +40,20 @@ pub struct SourceMarks {
     /// Last position explicitly seeked to — used as display position while
     /// GStreamer is still pre-rolling (query_position returns 0 during that time).
     pub display_pos_ns: u64,
+    /// Frame duration in nanoseconds (default 24 fps ≈ 41_666_667 ns).
+    /// Used for frame-accurate jog/shuttle stepping.
+    pub frame_ns: u64,
+}
+
+impl Default for SourceMarks {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            duration_ns: 0,
+            in_ns: 0,
+            out_ns: 0,
+            display_pos_ns: 0,
+            frame_ns: 41_666_667, // 24 fps default
+        }
+    }
 }

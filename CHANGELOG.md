@@ -5,6 +5,17 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- Source Monitor — frame-accurate jog/shuttle control:
+  - Frame step forward/backward buttons (◀▮ / ▮▶) in source monitor transport bar.
+  - Left/Right arrow keyboard shortcuts for single-frame stepping.
+  - J/K/L keyboard shortcuts for shuttle reverse/pause/forward at increasing speeds (1×, 2×, 4×).
+  - Frame-accurate seeking via new `Player::seek_accurate()` (uses GStreamer `ACCURATE` flag).
+  - `Player::step_forward()` / `step_backward()` methods for frame-level navigation.
+  - Frame-accurate timecode display (`H:MM:SS:FF`) in position/duration label.
+- Source Monitor — dedicated mark-in / mark-out timecode bar:
+  - New styled `.marks-bar` showing In, Out, and Duration timecodes with frame accuracy.
+  - In-point (green), Out-point (orange), and Duration labels with monospace font.
+  - `SourceMarks.frame_ns` field for configurable frame duration (defaults to 24 fps).
 - MCP `export_mp4` tool:
   - Added `McpCommand::ExportMp4` and MCP tool schema/dispatch (`export_mp4`).
   - Added main-thread handler in `window.rs` to run export in a background worker and return JSON results.

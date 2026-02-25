@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label, Orientation, Picture};
+use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label, Orientation, Picture, Separator};
 use glib;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -7,6 +7,8 @@ use crate::media::player::{Player, PlayerState};
 use crate::model::media_library::SourceMarks;
 
 const NS_PER_SECOND: f64 = 1_000_000_000.0;
+/// Default frame duration at 24 fps (nanoseconds)
+const DEFAULT_FRAME_NS: u64 = 41_666_667;
 
 /// Builds the source-preview panel: video display + in/out scrubber + transport.
 ///
@@ -123,53 +125,95 @@ pub fn build_preview(
 
     vbox.append(&scrubber);
 
-    // ── In/out timecode row ───────────────────────────────────────────────
-    let inout_row = GBox::new(Orientation::Horizontal, 8);
-    inout_row.set_halign(gtk::Align::Center);
-    inout_row.set_margin_top(2);
+    // ── Dedicated Mark In/Out bar ────────────────────────────────────────
+    let marks_bar = GBox::new(Orientation::Horizontal, 12);
+    marks_bar.add_css_class("marks-bar");
+    marks_bar.set_halign(gtk::Align::Fill);
+    marks_bar.set_margin_start(8);
+    marks_bar.set_margin_end(8);
+    marks_bar.set_margin_top(4);
 
-    let in_label  = Label::new(Some("In:  0:00"));
-    let out_label = Label::new(Some("Out: 0:00"));
-    in_label.add_css_class("clip-path");
-    out_label.add_css_class("clip-path");
-    inout_row.append(&in_label);
-    inout_row.append(&Label::new(Some("│")));
-    inout_row.append(&out_label);
-    vbox.append(&inout_row);
+    let in_label  = Label::new(Some("In  00:00:00:00"));
+    let out_label = Label::new(Some("Out 00:00:00:00"));
+    let dur_label = Label::new(Some("Dur 00:00:00:00"));
+    in_label.add_css_class("marks-timecode");
+    in_label.add_css_class("marks-in");
+    out_label.add_css_class("marks-timecode");
+    out_label.add_css_class("marks-out");
+    dur_label.add_css_class("marks-timecode");
+    dur_label.add_css_class("marks-dur");
+
+    let sep1 = Separator::new(Orientation::Vertical);
+    let sep2 = Separator::new(Orientation::Vertical);
+
+    marks_bar.append(&in_label);
+    marks_bar.append(&sep1);
+    marks_bar.append(&out_label);
+    marks_bar.append(&sep2);
+    marks_bar.append(&dur_label);
+    vbox.append(&marks_bar);
 
     // ── Position / duration timecode ──────────────────────────────────────
-    let timecode_label = Label::new(Some("0:00:00 / 0:00:00"));
+    let timecode_label = Label::new(Some("0:00:00:00 / 0:00:00:00"));
+    timecode_label.add_css_class("timecode");
     timecode_label.set_margin_top(2);
     vbox.append(&timecode_label);
 
     // ── Transport bar ─────────────────────────────────────────────────────
-    let controls = GBox::new(Orientation::Horizontal, 6);
+    let controls = GBox::new(Orientation::Horizontal, 4);
     controls.set_halign(gtk::Align::Center);
     controls.set_margin_top(4);
     controls.set_margin_bottom(4);
 
-    let btn_set_in  = Button::with_label("Set In (I)");
-    let btn_set_out = Button::with_label("Set Out (O)");
+    let btn_set_in     = Button::with_label("Set In (I)");
+    let btn_set_out    = Button::with_label("Set Out (O)");
+    let btn_prev_frame = Button::with_label("◀▮");
     let btn_stop       = Button::with_label("⏹");
     let btn_play_pause = Button::with_label("▶");
+    let btn_next_frame = Button::with_label("▮▶");
+    btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
+    btn_next_frame.set_tooltip_text(Some("Step forward one frame (→)"));
 
     controls.append(&btn_set_in);
+    controls.append(&btn_prev_frame);
     controls.append(&btn_stop);
     controls.append(&btn_play_pause);
+    controls.append(&btn_next_frame);
     controls.append(&btn_set_out);
     vbox.append(&controls);
+
+    // Shuttle speed state for J/K/L: negative = reverse, 0 = paused, positive = forward.
+    // Values: -3, -2, -1, 0, 1, 2, 3 (corresponding to 1x, 2x, 4x speeds).
+    let shuttle_speed: Rc<Cell<i32>> = Rc::new(Cell::new(0));
+    // Local cache of frame duration; synced from source_marks.frame_ns in the 100ms timer.
+    let frame_ns: Rc<Cell<u64>> = Rc::new(Cell::new(DEFAULT_FRAME_NS));
+
+    // Helper: update the marks bar labels from current source_marks state.
+    let update_marks_bar = {
+        let in_label = in_label.clone();
+        let out_label = out_label.clone();
+        let dur_label = dur_label.clone();
+        let frame_ns = frame_ns.clone();
+        Rc::new(move |marks: &SourceMarks| {
+            let fns = frame_ns.get();
+            in_label.set_text(&format!("In  {}", ns_to_timecode_frames(marks.in_ns, fns)));
+            out_label.set_text(&format!("Out {}", ns_to_timecode_frames(marks.out_ns, fns)));
+            let dur = marks.out_ns.saturating_sub(marks.in_ns);
+            dur_label.set_text(&format!("Dur {}", ns_to_timecode_frames(dur, fns)));
+        })
+    };
 
     // Set In
     {
         let player = player.clone();
         let source_marks = source_marks.clone();
-        let in_label = in_label.clone();
+        let update_marks_bar = update_marks_bar.clone();
         let scrubber_weak = scrubber.downgrade();
         btn_set_in.connect_clicked(move |_| {
             let pos = player.borrow().position();
             let mut m = source_marks.borrow_mut();
             m.in_ns = pos.min(m.out_ns.saturating_sub(1_000_000));
-            in_label.set_text(&format!("In:  {}", ns_to_timecode(m.in_ns)));
+            update_marks_bar(&m);
             drop(m);
             if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
         });
@@ -179,13 +223,13 @@ pub fn build_preview(
     {
         let player = player.clone();
         let source_marks = source_marks.clone();
-        let out_label = out_label.clone();
+        let update_marks_bar = update_marks_bar.clone();
         let scrubber_weak = scrubber.downgrade();
         btn_set_out.connect_clicked(move |_| {
             let pos = player.borrow().position();
             let mut m = source_marks.borrow_mut();
             m.out_ns = pos.max(m.in_ns + 1_000_000);
-            out_label.set_text(&format!("Out: {}", ns_to_timecode(m.out_ns)));
+            update_marks_bar(&m);
             drop(m);
             if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
         });
@@ -195,7 +239,9 @@ pub fn build_preview(
     {
         let player = player.clone();
         let btn = btn_play_pause.clone();
+        let shuttle_speed = shuttle_speed.clone();
         btn_play_pause.connect_clicked(move |_| {
+            shuttle_speed.set(0);
             let p = player.borrow();
             match p.state() {
                 PlayerState::Playing => { let _ = p.pause(); btn.set_label("▶"); }
@@ -208,22 +254,59 @@ pub fn build_preview(
     {
         let player = player.clone();
         let btn = btn_play_pause.clone();
+        let shuttle_speed = shuttle_speed.clone();
         btn_stop.connect_clicked(move |_| {
+            shuttle_speed.set(0);
             let p = player.borrow();
             let _ = p.stop();
             btn.set_label("▶");
         });
     }
 
-    // ── Keyboard shortcuts (I/O for in/out marks) ─────────────────────────
+    // Step backward one frame
+    {
+        let player = player.clone();
+        let source_marks = source_marks.clone();
+        let frame_ns = frame_ns.clone();
+        let scrubber_weak = scrubber.downgrade();
+        btn_prev_frame.connect_clicked(move |_| {
+            let p = player.borrow();
+            let _ = p.pause();
+            if let Ok(new_pos) = p.step_backward(frame_ns.get()) {
+                source_marks.borrow_mut().display_pos_ns = new_pos;
+            }
+            drop(p);
+            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+        });
+    }
+
+    // Step forward one frame
+    {
+        let player = player.clone();
+        let source_marks = source_marks.clone();
+        let frame_ns = frame_ns.clone();
+        let scrubber_weak = scrubber.downgrade();
+        btn_next_frame.connect_clicked(move |_| {
+            let p = player.borrow();
+            let _ = p.pause();
+            if let Ok(new_pos) = p.step_forward(frame_ns.get()) {
+                source_marks.borrow_mut().display_pos_ns = new_pos;
+            }
+            drop(p);
+            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+        });
+    }
+
+    // ── Keyboard shortcuts (I/O, Space, J/K/L, ←/→) ─────────────────────
     {
         let key_ctrl = EventControllerKey::new();
         let player = player.clone();
         let source_marks = source_marks.clone();
-        let in_label = in_label.clone();
-        let out_label = out_label.clone();
+        let update_marks_bar = update_marks_bar.clone();
         let scrubber_weak = scrubber.downgrade();
         let btn_play_pause = btn_play_pause.clone();
+        let shuttle_speed = shuttle_speed.clone();
+        let frame_ns = frame_ns.clone();
 
         key_ctrl.connect_key_pressed(move |_, key, _, _| {
             use gtk::gdk::Key;
@@ -232,7 +315,7 @@ pub fn build_preview(
                     let pos = player.borrow().position();
                     let mut m = source_marks.borrow_mut();
                     m.in_ns = pos.min(m.out_ns.saturating_sub(1_000_000));
-                    in_label.set_text(&format!("In:  {}", ns_to_timecode(m.in_ns)));
+                    update_marks_bar(&m);
                     drop(m);
                     if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
                     glib::Propagation::Stop
@@ -241,17 +324,76 @@ pub fn build_preview(
                     let pos = player.borrow().position();
                     let mut m = source_marks.borrow_mut();
                     m.out_ns = pos.max(m.in_ns + 1_000_000);
-                    out_label.set_text(&format!("Out: {}", ns_to_timecode(m.out_ns)));
+                    update_marks_bar(&m);
                     drop(m);
                     if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
                     glib::Propagation::Stop
                 }
                 Key::space => {
+                    shuttle_speed.set(0);
                     let p = player.borrow();
                     match p.state() {
                         PlayerState::Playing => { let _ = p.pause(); btn_play_pause.set_label("▶"); }
                         _ => { let _ = p.play(); btn_play_pause.set_label("⏸"); }
                     }
+                    glib::Propagation::Stop
+                }
+                // J — shuttle reverse (increasing speed: -1x, -2x, -4x)
+                Key::j | Key::J => {
+                    let cur = shuttle_speed.get();
+                    let new_speed = if cur > 0 { -1 } else { (cur - 1).max(-3) };
+                    shuttle_speed.set(new_speed);
+                    // Shuttle is implemented as frame stepping in the 100ms timer
+                    let _ = player.borrow().pause();
+                    btn_play_pause.set_label("◀◀");
+                    glib::Propagation::Stop
+                }
+                // K — stop shuttle / pause
+                Key::k | Key::K => {
+                    shuttle_speed.set(0);
+                    let _ = player.borrow().pause();
+                    btn_play_pause.set_label("▶");
+                    glib::Propagation::Stop
+                }
+                // L — shuttle forward (increasing speed: 1x, 2x, 4x)
+                Key::l | Key::L => {
+                    let cur = shuttle_speed.get();
+                    let new_speed = if cur < 0 { 1 } else { (cur + 1).min(3) };
+                    shuttle_speed.set(new_speed);
+                    if new_speed == 1 {
+                        let _ = player.borrow().play();
+                        btn_play_pause.set_label("⏸");
+                    } else {
+                        // Faster speeds are implemented via frame stepping in the timer
+                        let _ = player.borrow().pause();
+                        btn_play_pause.set_label("▶▶");
+                    }
+                    glib::Propagation::Stop
+                }
+                // ← — step backward one frame
+                Key::Left => {
+                    shuttle_speed.set(0);
+                    let p = player.borrow();
+                    let _ = p.pause();
+                    if let Ok(new_pos) = p.step_backward(frame_ns.get()) {
+                        source_marks.borrow_mut().display_pos_ns = new_pos;
+                    }
+                    drop(p);
+                    btn_play_pause.set_label("▶");
+                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    glib::Propagation::Stop
+                }
+                // → — step forward one frame
+                Key::Right => {
+                    shuttle_speed.set(0);
+                    let p = player.borrow();
+                    let _ = p.pause();
+                    if let Ok(new_pos) = p.step_forward(frame_ns.get()) {
+                        source_marks.borrow_mut().display_pos_ns = new_pos;
+                    }
+                    drop(p);
+                    btn_play_pause.set_label("▶");
+                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
@@ -260,21 +402,47 @@ pub fn build_preview(
         vbox.add_controller(key_ctrl);
     }
 
-    // ── Update scrubber + timecode every 100ms ────────────────────────────
+    // ── Update scrubber + timecode every 100ms; handle shuttle stepping ──
     {
         let player = player.clone();
         let label = timecode_label.clone();
         let scrubber_weak = scrubber.downgrade();
         let source_marks = source_marks.clone();
         let btn = btn_play_pause.clone();
+        let shuttle_speed = shuttle_speed.clone();
+        let frame_ns = frame_ns.clone();
+        let update_marks_bar = update_marks_bar.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
             let pos = p.position();
             let dur = p.duration();
+
+            // Sync local frame_ns cache from source_marks
+            frame_ns.set(source_marks.borrow().frame_ns);
+
+            // Handle shuttle speeds != 0 and != 1 via frame stepping
+            let spd = shuttle_speed.get();
+            if spd != 0 && spd != 1 {
+                // Number of frames to step per 100ms tick: |speed| mapped 2→2, 3→4
+                let step_frames: u64 = match spd.unsigned_abs() {
+                    2 => 2,
+                    3 => 4,
+                    _ => 1,
+                };
+                let step_ns = step_frames * frame_ns.get();
+                if spd > 0 {
+                    let _ = p.step_forward(step_ns);
+                } else {
+                    let _ = p.step_backward(step_ns);
+                }
+            }
+
             // Sync play button label with actual state
-            match p.state() {
-                PlayerState::Playing => btn.set_label("⏸"),
-                _ => btn.set_label("▶"),
+            if spd == 0 {
+                match p.state() {
+                    PlayerState::Playing => btn.set_label("⏸"),
+                    _ => btn.set_label("▶"),
+                }
             }
             // Update display_pos_ns from the real player position once
             // GStreamer finishes pre-rolling after a seek (pos goes non-zero).
@@ -283,7 +451,17 @@ pub fn build_preview(
             if pos > 0 {
                 source_marks.borrow_mut().display_pos_ns = pos;
             }
-            label.set_text(&format!("{} / {}", ns_to_timecode(pos), ns_to_timecode(dur)));
+            let fns = frame_ns.get();
+            label.set_text(&format!(
+                "{} / {}",
+                ns_to_timecode_frames(pos, fns),
+                ns_to_timecode_frames(dur, fns),
+            ));
+            // Keep marks bar in sync (out label resets when source is loaded)
+            {
+                let m = source_marks.borrow();
+                update_marks_bar(&m);
+            }
             drop(p);
             if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
             glib::ControlFlow::Continue
@@ -340,14 +518,16 @@ fn draw_scrubber(
     cr.stroke().ok();
 }
 
-fn ns_to_timecode(ns: u64) -> String {
-    let total_secs = (ns as f64 / NS_PER_SECOND) as u64;
+/// Frame-accurate timecode: `H:MM:SS:FF` (always shows hours for consistency).
+fn ns_to_timecode_frames(ns: u64, frame_ns: u64) -> String {
+    let frame_ns = frame_ns.max(1); // guard against division by zero
+    let total_frames = ns / frame_ns;
+    let fps = (NS_PER_SECOND / frame_ns as f64).round() as u64;
+    let fps = fps.max(1);
+    let ff = total_frames % fps;
+    let total_secs = total_frames / fps;
     let h = total_secs / 3600;
     let m = (total_secs % 3600) / 60;
     let s = total_secs % 60;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
+    format!("{h}:{m:02}:{s:02}:{ff:02}")
 }
