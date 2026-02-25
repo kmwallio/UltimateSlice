@@ -52,6 +52,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         })
     };
 
+    // Deferred: filled in after transform_overlay is created below.
+    // Used so on_transform_changed (wired before the overlay exists) can update the overlay.
+    let update_overlay_fn: Rc<RefCell<Option<Box<dyn Fn(crate::ui::program_monitor::ClipTransform)>>>> =
+        Rc::new(RefCell::new(None));
+
     // ── Build inspector (after on_project_changed is defined so we can pass it) ──
     let (inspector_box, inspector_view) = inspector::build_inspector(
         project.clone(),
@@ -96,9 +101,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
+            let update_overlay_fn = update_overlay_fn.clone();
             move |cl, cr, ct, cb, rot, fh, fv| {
                 player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                 prog_player.borrow_mut().update_current_transform(cl, cr, ct, cb, rot, fh, fv);
+                // Update overlay to reflect new slider values immediately
+                if let Some(f) = update_overlay_fn.borrow().as_ref() {
+                    f(crate::ui::program_monitor::ClipTransform {
+                        crop_left: cl, crop_right: cr, crop_top: ct, crop_bottom: cb,
+                        rotate: rot, flip_h: fh, flip_v: fv,
+                    });
+                }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -209,20 +222,29 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         prog_paintable,
     );
 
-    // Wire the transform overlay callback: update project + GStreamer on drag.
+    // Fill in the deferred overlay-update fn now that transform_overlay exists.
+    {
+        let overlay = transform_overlay.clone();
+        *update_overlay_fn.borrow_mut() = Some(Box::new(move |t| {
+            overlay.set_clip(Some(t));
+        }));
+    }
+
+    // Wire the transform overlay callback: update project + GStreamer + inspector on drag.
     {
         let project = project.clone();
         let prog_player = prog_player.clone();
         let window_weak = window_weak.clone();
         let timeline_state = timeline_state.clone();
+        let inspector_view = inspector_view.clone();
         transform_overlay.set_on_changed(move |cl, cr_val, ct, cb_val, rot, fh, fv| {
             let selected_id = timeline_state.borrow().selected_clip_id.clone();
-            if let Some(id) = selected_id {
+            if let Some(ref id) = selected_id {
                 {
                     let mut proj = project.borrow_mut();
                     'outer: for track in proj.tracks.iter_mut() {
                         for clip in track.clips.iter_mut() {
-                            if clip.id == id {
+                            if clip.id == *id {
                                 clip.crop_left   = cl;
                                 clip.crop_right  = cr_val;
                                 clip.crop_top    = ct;
@@ -237,6 +259,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                 }
                 prog_player.borrow_mut().update_current_transform(cl, cr_val, ct, cb_val, rot, fh, fv);
+                // Sync the inspector sliders so they reflect the dragged values
+                {
+                    let proj = project.borrow();
+                    inspector_view.update(&proj, Some(id.as_str()));
+                }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
