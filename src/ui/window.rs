@@ -269,19 +269,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         },
     );
 
-    // 100 ms poll timer: update timecode label AND sync timeline playhead during playback
+    // 100 ms poll timer: advance playback, update timecode + timeline playhead
     {
         let pp = prog_player.clone();
         let ts = timeline_state.clone();
         let cell = timeline_panel_cell.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            let changed = pp.borrow_mut().poll();
+            pp.borrow_mut().poll();
             let pos_ns = pp.borrow().timeline_pos_ns;
             pos_label.set_text(&program_monitor::format_timecode(pos_ns));
-            if changed {
-                ts.borrow_mut().playhead_ns = pos_ns;
-                if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
-            }
+            // Always sync playhead so seek/stop are also reflected
+            ts.borrow_mut().playhead_ns = pos_ns;
+            if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
             glib::ControlFlow::Continue
         });
     }
@@ -365,12 +364,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     timeline_scroll.set_vexpand(true);
     timeline_scroll.set_hexpand(true);
 
-    let timeline_panel = build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
+    let (timeline_panel, timeline_area) = build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
     timeline_scroll.set_child(Some(&timeline_panel));
     root_vpaned.set_end_child(Some(&timeline_scroll));
 
-    // Fill in the timeline panel cell so the poll timer + stop button can redraw it.
-    *timeline_panel_cell.borrow_mut() = Some(timeline_panel.clone().upcast::<gtk4::Widget>());
+    // Fill in the timeline area cell so the poll timer + stop button can redraw it.
+    *timeline_panel_cell.borrow_mut() = Some(timeline_area.clone().upcast::<gtk4::Widget>());
 
     // Now that timeline_panel exists, fill in the real on_project_changed implementation.
     // This runs after every edit: updates title, inspector, program player clip list,
@@ -382,7 +381,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let library = library.clone();
         let window_weak = window_weak.clone();
         let prog_player = prog_player.clone();
-        let panel_weak = timeline_panel.downgrade();
+        let panel_weak = timeline_area.downgrade();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Update window title
@@ -485,20 +484,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     root_hpaned.set_end_child(Some(&inspector_scroll));
 
     window.set_child(Some(&root_hpaned));
-
-    // Update timeline playhead from program timeline position every 100ms.
-    // (Using source player position can snap playhead back to 0 when source monitor is idle.)
-    {
-        let prog_player = prog_player.clone();
-        let timeline_state = timeline_state.clone();
-        let panel_weak = timeline_panel.downgrade();
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            let pos = prog_player.borrow().timeline_pos_ns;
-            timeline_state.borrow_mut().playhead_ns = pos;
-            if let Some(p) = panel_weak.upgrade() { p.queue_draw(); }
-            glib::ControlFlow::Continue
-        });
-    }
 
     // ── MCP server (optional, enabled via --mcp flag) ─────────────────────
     if mcp_enabled {

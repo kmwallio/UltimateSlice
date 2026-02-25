@@ -2,11 +2,11 @@ pub mod widget;
 pub use widget::{TimelineState, ActiveTool, build_timeline};
 
 /// Build the full timeline panel: timeline DrawingArea + track management bar.
-/// The returned widget is a VBox containing both.
+/// Returns `(panel_box, drawing_area)` — call `drawing_area.queue_draw()` to repaint.
 pub fn build_timeline_panel(
     state: std::rc::Rc<std::cell::RefCell<TimelineState>>,
     on_project_changed: std::rc::Rc<dyn Fn()>,
-) -> gtk4::Box {
+) -> (gtk4::Box, gtk4::DrawingArea) {
     use gtk4::prelude::*;
     use gtk4::{self as gtk, Box as GBox, Button, Orientation};
 
@@ -101,5 +101,5 @@ pub fn build_timeline_panel(
     bar.append(&btn_remove);
     vbox.append(&bar);
 
-    vbox
+    (vbox, area)
 }
