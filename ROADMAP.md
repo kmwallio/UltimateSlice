@@ -110,7 +110,7 @@ Tracking docs:
 - [x] Multiple video tracks and audio tracks (Add/Remove Track buttons below timeline)
 - [x] Audio waveform rendering in audio track rows (background GStreamer decode, normalized peaks)
 - [x] Drag-and-drop from media browser onto a specific timeline track/position
-- [ ] Snap-to-clip-edge when moving/trimming
+- [x] Snap-to-clip-edge when trimming (TrimIn and TrimOut snap to nearby edges)
 - [ ] Timeline markers / chapter points
 - [ ] Magnetic timeline mode (gap-free)
 - [ ] Cross-dissolve transitions between clips
@@ -126,7 +126,7 @@ Tracking docs:
 
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
-- [ ] Volume / pan controls per clip in the inspector
+- [x] Volume / pan controls per clip in the inspector (sliders, GStreamer volume + audiopanorama, persisted in FCPXML)
 - [ ] Basic audio mixing (level meters)
 
 ### Color & Effects
@@ -141,7 +141,7 @@ Tracking docs:
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [ ] Recent projects list
-- [ ] Auto-save
+- [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [ ] Proxy media generation and management
 
 ### Export

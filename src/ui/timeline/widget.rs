@@ -467,25 +467,53 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     DragOp::TrimIn { ref clip_id, ref track_id, original_source_in, original_timeline_start } => {
                         let drag_ns = current_ns.saturating_sub(original_timeline_start);
+                        // Snap the new timeline_start to nearby clip edges
+                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                        let new_start_raw = original_timeline_start + drag_ns;
+                        let snapped_start = {
+                            let proj = st.project.borrow();
+                            let edges: Vec<u64> = proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter(|c| &c.id != clip_id)
+                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
+                                .collect();
+                            edges.iter().copied()
+                                .filter(|&e| (e as i64 - new_start_raw as i64).unsigned_abs() < snap_ns)
+                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).unsigned_abs())
+                                .unwrap_or(new_start_raw)
+                        };
+                        let snapped_drag = snapped_start.saturating_sub(original_timeline_start);
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
                             if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                let new_source_in = original_source_in + drag_ns;
-                                // Don't let in-point exceed out-point
+                                let new_source_in = original_source_in + snapped_drag;
                                 if new_source_in < clip.source_out.saturating_sub(1_000_000) {
                                     clip.source_in = new_source_in;
-                                    clip.timeline_start = original_timeline_start + drag_ns;
+                                    clip.timeline_start = original_timeline_start + snapped_drag;
                                 }
                             }
                         }
                     }
                     DragOp::TrimOut { ref clip_id, ref track_id, .. } => {
+                        // Snap the out-point to nearby clip edges
+                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                        let snapped_ns = {
+                            let proj = st.project.borrow();
+                            let edges: Vec<u64> = proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter(|c| &c.id != clip_id)
+                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
+                                .collect();
+                            edges.iter().copied()
+                                .filter(|&e| (e as i64 - current_ns as i64).unsigned_abs() < snap_ns)
+                                .min_by_key(|&e| (e as i64 - current_ns as i64).unsigned_abs())
+                                .unwrap_or(current_ns)
+                        };
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
                             if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                // Don't let out-point go below in-point
-                                if current_ns > clip.source_in + 1_000_000 {
-                                    let offset = current_ns.saturating_sub(clip.timeline_start);
+                                if snapped_ns > clip.source_in + 1_000_000 {
+                                    let offset = snapped_ns.saturating_sub(clip.timeline_start);
                                     clip.source_out = clip.source_in + offset;
                                 }
                             }

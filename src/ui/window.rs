@@ -76,6 +76,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_audio_changed: volume/pan slider → direct update, no pipeline reload
+        {
+            let prog_player = prog_player.clone();
+            let window_weak = window_weak.clone();
+            let project = project.clone();
+            move |vol, pan| {
+                prog_player.borrow_mut().update_current_audio(vol as f64, pan as f64);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -298,6 +312,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         saturation:        c.saturation as f64,
                         denoise:           c.denoise as f64,
                         sharpness:         c.sharpness as f64,
+                        volume:            c.volume as f64,
+                        pan:               c.pan as f64,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
@@ -389,6 +405,40 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             glib::ControlFlow::Continue
         });
         eprintln!("[MCP] Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
+    }
+
+    // Auto-save: every 60 seconds, write to a temp file if the project is dirty.
+    {
+        let project = project.clone();
+        let window_weak = window.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_secs(60), move || {
+            let is_dirty = project.borrow().dirty;
+            if is_dirty {
+                let xml_result = {
+                    let proj = project.borrow();
+                    crate::fcpxml::writer::write_fcpxml(&proj)
+                };
+                if let Ok(xml) = xml_result {
+                    let path = "/tmp/ultimateslice-autosave.fcpxml";
+                    if std::fs::write(path, xml).is_ok() {
+                        if let Some(win) = window_weak.upgrade() {
+                            let proj = project.borrow();
+                            let title = format!("UltimateSlice — {} (Auto-saved)", proj.title);
+                            win.set_title(Some(&title));
+                            // Restore normal title after 3 seconds
+                            let win_w2 = win.downgrade();
+                            let proj_title = proj.title.clone();
+                            glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
+                                if let Some(w) = win_w2.upgrade() {
+                                    w.set_title(Some(&format!("UltimateSlice — {} •", proj_title)));
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     window.present();

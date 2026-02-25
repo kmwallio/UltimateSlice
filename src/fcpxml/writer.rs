@@ -63,6 +63,8 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
             asset_clip.push_attribute(("us:denoise",    clip.denoise.to_string().as_str()));
             asset_clip.push_attribute(("us:sharpness",  clip.sharpness.to_string().as_str()));
+            asset_clip.push_attribute(("us:volume",     clip.volume.to_string().as_str()));
+            asset_clip.push_attribute(("us:pan",        clip.pan.to_string().as_str()));
             writer.write_event(Event::Empty(asset_clip))?;
         }
     }

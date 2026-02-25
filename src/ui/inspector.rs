@@ -23,6 +23,9 @@ pub struct InspectorView {
     // Denoise / sharpness sliders
     pub denoise_slider: Scale,
     pub sharpness_slider: Scale,
+    // Audio sliders
+    pub volume_slider: Scale,
+    pub pan_slider: Scale,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
 }
@@ -57,6 +60,8 @@ impl InspectorView {
                 self.saturation_slider.set_value(c.saturation as f64);
                 self.denoise_slider.set_value(c.denoise as f64);
                 self.sharpness_slider.set_value(c.sharpness as f64);
+                self.volume_slider.set_value(c.volume as f64);
+                self.pan_slider.set_value(c.pan as f64);
             }
             None => {
                 self.name_entry.set_text("");
@@ -69,6 +74,8 @@ impl InspectorView {
                 self.saturation_slider.set_value(1.0);
                 self.denoise_slider.set_value(0.0);
                 self.sharpness_slider.set_value(0.0);
+                self.volume_slider.set_value(1.0);
+                self.pan_slider.set_value(0.0);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -82,10 +89,12 @@ impl InspectorView {
 /// - `on_color_changed`: fired on every color/effects slider movement with
 ///   `(brightness, contrast, saturation, denoise, sharpness)`;
 ///   should update the program player's video filter elements directly without a full pipeline reload.
+/// - `on_audio_changed`: fired on every audio slider movement with `(volume, pan)`.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
     on_color_changed: impl Fn(f32, f32, f32, f32, f32) + 'static,
+    on_audio_changed: impl Fn(f32, f32) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -187,6 +196,29 @@ pub fn build_inspector(
     sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     vbox.append(&sharpness_slider);
 
+    // Audio section
+    vbox.append(&Separator::new(Orientation::Horizontal));
+    let audio_title = Label::new(Some("Audio"));
+    audio_title.set_halign(gtk::Align::Start);
+    audio_title.add_css_class("browser-header");
+    vbox.append(&audio_title);
+
+    row_label(&vbox, "Volume");
+    let volume_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    volume_slider.set_value(1.0);
+    volume_slider.set_draw_value(true);
+    volume_slider.set_digits(2);
+    volume_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    vbox.append(&volume_slider);
+
+    row_label(&vbox, "Pan");
+    let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    pan_slider.set_value(0.0);
+    pan_slider.set_draw_value(true);
+    pan_slider.set_digits(2);
+    pan_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    vbox.append(&pan_slider);
+
     vbox.append(&Separator::new(Orientation::Horizontal));
 
     // Apply name button
@@ -199,6 +231,7 @@ pub fn build_inspector(
 
     let on_clip_changed = Rc::new(on_clip_changed);
     let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
+    let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -304,6 +337,60 @@ pub fn build_inspector(
         |clip, v| clip.sharpness = v,
     );
 
+    // Wire audio sliders
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_audio_changed = on_audio_changed.clone();
+        let volume_slider_cb = volume_slider.clone();
+        let pan_slider_cb = pan_slider.clone();
+        volume_slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let val = s.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.volume = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_audio_changed(volume_slider_cb.value() as f32, pan_slider_cb.value() as f32);
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_audio_changed = on_audio_changed.clone();
+        let volume_slider_cb = volume_slider.clone();
+        let pan_slider_cb = pan_slider.clone();
+        pan_slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let val = s.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.pan = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_audio_changed(volume_slider_cb.value() as f32, pan_slider_cb.value() as f32);
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -317,6 +404,8 @@ pub fn build_inspector(
         saturation_slider,
         denoise_slider,
         sharpness_slider,
+        volume_slider,
+        pan_slider,
         updating,
     });
 

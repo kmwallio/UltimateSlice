@@ -22,6 +22,10 @@ pub struct ProgramClip {
     pub denoise: f64,
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen)
     pub sharpness: f64,
+    /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
+    pub volume: f64,
+    /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
+    pub pan: f64,
 }
 
 impl ProgramClip {
@@ -46,6 +50,8 @@ pub struct ProgramPlayer {
     videobalance: Option<gst::Element>,
     /// gaussianblur element for per-clip denoise/sharpness
     gaussianblur: Option<gst::Element>,
+    /// audiopanorama element for per-clip audio pan
+    audiopanorama: Option<gst::Element>,
 }
 
 impl ProgramPlayer {
@@ -74,6 +80,7 @@ impl ProgramPlayer {
 
         let videobalance = gst::ElementFactory::make("videobalance").build().ok();
         let gaussianblur = gst::ElementFactory::make("gaussianblur").build().ok();
+        let audiopanorama = gst::ElementFactory::make("audiopanorama").build().ok();
 
         if videobalance.is_some() && gaussianblur.is_some() {
             let vb = videobalance.as_ref().unwrap();
@@ -93,6 +100,10 @@ impl ProgramPlayer {
             pipeline.set_property("video-filter", vb);
         }
 
+        if let Some(ref ap) = audiopanorama {
+            pipeline.set_property("audio-filter", ap);
+        }
+
         Ok((
             Self {
                 pipeline,
@@ -103,6 +114,7 @@ impl ProgramPlayer {
                 timeline_dur_ns: 0,
                 videobalance,
                 gaussianblur,
+                audiopanorama,
             },
             paintable,
         ))
@@ -226,6 +238,14 @@ impl ProgramPlayer {
         }
     }
 
+    /// Directly update volume and pan on the current clip.
+    pub fn update_current_audio(&mut self, volume: f64, pan: f64) {
+        self.pipeline.set_property("volume", volume.clamp(0.0, 2.0));
+        if let Some(ref ap) = self.audiopanorama {
+            ap.set_property("panorama", pan.clamp(-1.0, 1.0));
+        }
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────
 
     fn clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
@@ -248,6 +268,11 @@ impl ProgramPlayer {
         if let Some(ref gb) = self.gaussianblur {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             gb.set_property("sigma", sigma);
+        }
+        // Apply per-clip audio volume and pan
+        self.pipeline.set_property("volume", clip.volume.clamp(0.0, 2.0));
+        if let Some(ref ap) = self.audiopanorama {
+            ap.set_property("panorama", clip.pan.clamp(-1.0, 1.0));
         }
 
         if self.current_idx == Some(idx) {

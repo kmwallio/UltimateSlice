@@ -11,6 +11,7 @@ pub enum ClipKind {
 
 fn default_contrast() -> f32 { 1.0 }
 fn default_saturation() -> f32 { 1.0 }
+fn default_volume() -> f32 { 1.0 }
 
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +44,12 @@ pub struct Clip {
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen), default 0.0
     #[serde(default)]
     pub sharpness: f32,
+    /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
+    #[serde(default)]
+    pub pan: f32,
 }
 
 impl Clip {
@@ -66,6 +73,8 @@ impl Clip {
             saturation: 1.0,
             denoise: 0.0,
             sharpness: 0.0,
+            volume: 1.0,
+            pan: 0.0,
         }
     }
 
