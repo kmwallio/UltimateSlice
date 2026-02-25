@@ -493,13 +493,13 @@ fn handle_mcp_command(
                     let _ = done_tx.send(result);
                 });
 
-                match done_rx.recv_timeout(std::time::Duration::from_secs(45)) {
+                match done_rx.recv_timeout(std::time::Duration::from_secs(660)) {
                     Ok(Ok(())) => { let _ = reply.send(json!({"success": true, "path": path})); }
                     Ok(Err(e)) => { let _ = reply.send(json!({"success": false, "error": e})); }
                     Err(_) => {
                         let _ = reply.send(json!({
                             "success": false,
-                            "error": "MP4 export timed out after 45 seconds (export thread still running)"
+                            "error": "MP4 export timed out after 11 minutes (export thread still running)"
                         }));
                     }
                 }

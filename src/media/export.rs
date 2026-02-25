@@ -1,11 +1,8 @@
 use anyhow::{anyhow, Result};
-use gstreamer as gst;
-use gstreamer::prelude::*;
-use gstreamer_pbutils::prelude::*;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 use crate::model::project::Project;
-use crate::media::thumbnail::path_to_uri;
 
 /// Progress updates sent back to the UI thread
 #[derive(Debug)]
@@ -22,153 +19,81 @@ pub fn export_project(
     output_path: &str,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
-    gst::init()?;
-
-    // For the MVP we concatenate clips from the primary video+audio tracks
-    // using a GNonLin / nlecomposition approach via a manual pipeline.
-    // We use a simpler strategy here: concatenate clip URIs via a playlist pipeline.
-
-    let video_clips: Vec<_> = project.video_tracks()
+    let mut video_clips: Vec<_> = project.video_tracks()
         .flat_map(|t| t.clips.iter())
         .collect();
+    video_clips.sort_by_key(|c| c.timeline_start);
 
     if video_clips.is_empty() {
         return Err(anyhow!("No video clips to export"));
     }
 
-    // Build a concatenation pipeline using uridecodebin + concat + encode
-    let pipeline = gst::Pipeline::new();
+    let total_duration_us = project.duration().max(1) / 1_000;
+    let _ = tx.send(ExportProgress::Progress(0.0));
 
-    let video_concat = gst::ElementFactory::make("concat").build()?;
-    let audio_concat = gst::ElementFactory::make("concat").build()?;
-    let videoconvert = gst::ElementFactory::make("videoconvert").build()?;
-    let videoscale = gst::ElementFactory::make("videoscale").build()?;
-    let x264enc = gst::ElementFactory::make("x264enc")
-        .property("bitrate", 4000u32)
-        .property_from_str("tune", "zerolatency")
-        .build()?;
-    let audioconvert = gst::ElementFactory::make("audioconvert").build()?;
-    let audioresample = gst::ElementFactory::make("audioresample").build()?;
-    let aacenc = gst::ElementFactory::make("faac")
-        .build()
-        .or_else(|_| gst::ElementFactory::make("avenc_aac").build())
-        .or_else(|_| gst::ElementFactory::make("lamemp3enc").build())?;
-    let mp4mux = gst::ElementFactory::make("mp4mux").build()?;
-    let filesink = gst::ElementFactory::make("filesink")
-        .property("location", output_path)
-        .build()?;
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel").arg("error")
+        .arg("-progress").arg("pipe:2")
+        .arg("-nostats");
 
-    let capsfilter = gst::ElementFactory::make("capsfilter")
-        .property(
-            "caps",
-            gst::Caps::builder("video/x-raw")
-                .field("width", project.width as i32)
-                .field("height", project.height as i32)
-                .build(),
-        )
-        .build()?;
-
-    pipeline.add_many([
-        &video_concat, &audio_concat,
-        &videoconvert, &videoscale, &capsfilter, &x264enc,
-        &audioconvert, &audioresample, &aacenc,
-        &mp4mux, &filesink,
-    ])?;
-
-    // Link video chain
-    gst::Element::link_many([&video_concat, &videoconvert, &videoscale, &capsfilter, &x264enc])?;
-    x264enc.link_pads(Some("src"), &mp4mux, None)?;
-
-    // Link audio chain
-    gst::Element::link_many([&audio_concat, &audioconvert, &audioresample, &aacenc])?;
-    aacenc.link_pads(Some("src"), &mp4mux, None)?;
-
-    mp4mux.link(&filesink)?;
-
-    // Add a uridecodebin for each clip
     for clip in &video_clips {
-        let uri = path_to_uri(&clip.source_path);
-        let _source_in = clip.source_in;
-        let _source_out = clip.source_out;
-
-        let decode = gst::ElementFactory::make("uridecodebin")
-            .property("uri", &uri)
-            .build()?;
-
-        pipeline.add(&decode)?;
-
-        let vc = video_concat.clone();
-        let ac = audio_concat.clone();
-
-        decode.connect_pad_added(move |_src, src_pad| {
-            let caps = src_pad.current_caps().unwrap_or_else(|| src_pad.query_caps(None));
-            let structure = caps.structure(0).unwrap();
-            let name = structure.name();
-
-            if name.starts_with("video/") {
-                if let Some(sink_pad) = vc.request_pad_simple("sink_%u") {
-                    let _ = src_pad.link(&sink_pad);
-                }
-            } else if name.starts_with("audio/") {
-                if let Some(sink_pad) = ac.request_pad_simple("sink_%u") {
-                    let _ = src_pad.link(&sink_pad);
-                }
-            }
-        });
+        let in_s = clip.source_in as f64 / 1_000_000_000.0;
+        let dur_s = clip.duration() as f64 / 1_000_000_000.0;
+        cmd.arg("-ss").arg(format!("{in_s:.6}"))
+            .arg("-t").arg(format!("{dur_s:.6}"))
+            .arg("-i").arg(&clip.source_path);
     }
 
-    // Watch bus for progress and EOS
-    let bus = pipeline.bus().unwrap();
-    pipeline.set_state(gst::State::Playing)?;
+    let mut filter = String::new();
+    for (i, _) in video_clips.iter().enumerate() {
+        filter.push_str(&format!(
+            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,fps={}/{},format=yuv420p[v{i}];",
+            project.width, project.height, project.width, project.height,
+            project.frame_rate.numerator, project.frame_rate.denominator
+        ));
+    }
+    for i in 0..video_clips.len() {
+        filter.push_str(&format!("[v{i}]"));
+    }
+    filter.push_str(&format!("concat=n={}:v=1:a=0[vout]", video_clips.len()));
 
-    let total_duration = project.duration().max(1) as f64;
-    let started_at = Instant::now();
-    let hard_timeout = Duration::from_secs(180);
-    let stall_timeout = Duration::from_secs(20);
-    let mut last_pos_ns = 0u64;
-    let mut last_pos_change_at = Instant::now();
+    cmd.arg("-filter_complex").arg(filter)
+        .arg("-map").arg("[vout]")
+        .arg("-an")
+        .arg("-c:v").arg("libx264")
+        .arg("-pix_fmt").arg("yuv420p")
+        .arg("-movflags").arg("+faststart")
+        .arg(output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
 
-    loop {
-        if started_at.elapsed() > hard_timeout {
-            let _ = tx.send(ExportProgress::Error("Export timed out".to_string()));
-            pipeline.set_state(gst::State::Null)?;
-            return Err(anyhow!("Export timed out"));
-        }
+    let mut child = cmd.spawn().map_err(|e| anyhow!("Failed to start ffmpeg: {e}"))?;
+    let stderr = child.stderr.take().ok_or_else(|| anyhow!("Failed to capture ffmpeg stderr"))?;
+    let reader = BufReader::new(stderr);
 
-        let msg = bus.timed_pop(gst::ClockTime::from_mseconds(100));
-        if let Some(msg) = msg {
-            use gst::MessageView;
-            match msg.view() {
-                MessageView::Eos(_) => {
-                    let _ = tx.send(ExportProgress::Done);
-                    break;
-                }
-                MessageView::Error(e) => {
-                    let err_str = e.error().to_string();
-                    let _ = tx.send(ExportProgress::Error(err_str.clone()));
-                    pipeline.set_state(gst::State::Null)?;
-                    return Err(anyhow!("Export error: {err_str}"));
-                }
-                _ => {}
+    for line in reader.lines().map_while(|r| r.ok()) {
+        if let Some(v) = line.strip_prefix("out_time_us=") {
+            if let Ok(us) = v.parse::<u64>() {
+                let p = (us as f64 / total_duration_us as f64).clamp(0.0, 1.0);
+                let _ = tx.send(ExportProgress::Progress(p));
             }
-        }
-
-        // Report progress
-        if let Some(pos) = pipeline.query_position::<gst::ClockTime>() {
-            let pos_ns = pos.nseconds();
-            if pos_ns != last_pos_ns {
-                last_pos_ns = pos_ns;
-                last_pos_change_at = Instant::now();
-            } else if last_pos_change_at.elapsed() > stall_timeout {
-                let _ = tx.send(ExportProgress::Error("Export stalled without progress".to_string()));
-                pipeline.set_state(gst::State::Null)?;
-                return Err(anyhow!("Export stalled without progress"));
+        } else if let Some(v) = line.strip_prefix("out_time_ms=") {
+            if let Ok(ms) = v.parse::<u64>() {
+                let us = ms.saturating_mul(1000);
+                let p = (us as f64 / total_duration_us as f64).clamp(0.0, 1.0);
+                let _ = tx.send(ExportProgress::Progress(p));
             }
-            let progress = pos_ns as f64 / total_duration;
-            let _ = tx.send(ExportProgress::Progress(progress.min(1.0)));
         }
     }
 
-    pipeline.set_state(gst::State::Null)?;
+    let status = child.wait().map_err(|e| anyhow!("Failed waiting for ffmpeg: {e}"))?;
+    if !status.success() {
+        let _ = tx.send(ExportProgress::Error("ffmpeg export failed".to_string()));
+        return Err(anyhow!("ffmpeg export failed with status {status}"));
+    }
+
+    let _ = tx.send(ExportProgress::Done);
     Ok(())
 }
