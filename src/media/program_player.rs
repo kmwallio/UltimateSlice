@@ -242,7 +242,7 @@ impl ProgramPlayer {
     pub fn update_current_audio(&mut self, volume: f64, pan: f64) {
         self.pipeline.set_property("volume", volume.clamp(0.0, 2.0));
         if let Some(ref ap) = self.audiopanorama {
-            ap.set_property("panorama", pan.clamp(-1.0, 1.0));
+            ap.set_property("panorama", (pan as f32).clamp(-1.0, 1.0));
         }
     }
 
@@ -272,7 +272,7 @@ impl ProgramPlayer {
         // Apply per-clip audio volume and pan
         self.pipeline.set_property("volume", clip.volume.clamp(0.0, 2.0));
         if let Some(ref ap) = self.audiopanorama {
-            ap.set_property("panorama", clip.pan.clamp(-1.0, 1.0));
+            ap.set_property("panorama", (clip.pan as f32).clamp(-1.0, 1.0));
         }
 
         if self.current_idx == Some(idx) {
