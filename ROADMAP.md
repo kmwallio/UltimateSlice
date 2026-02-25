@@ -113,6 +113,7 @@ Tracking docs:
 - [ ] Magnetic timeline mode (gap-free)
 - [ ] Cross-dissolve transitions between clips
 - [ ] Ripple/roll/slip/slide edit modes
+- [ ] Reorder tracks in the timeline
 
 ### Program Monitor
 - [x] Program Monitor panel showing assembled timeline playback
@@ -129,7 +130,9 @@ Tracking docs:
 ### Color & Effects
 - [ ] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
 - [ ] LUT import / apply
+- [ ] Apply multiple LUTs to a clip
 - [ ] Titles / text overlay (`textoverlay`)
+- [ ] Transition effects (fade, wipe, etc.)
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
@@ -146,6 +149,8 @@ Tracking docs:
 - [x] Keyboard shortcut reference overlay (? or / key opens a modal dialog)
 - [ ] Preferences dialog (theme, default frame rate, etc.)
 - [ ] Accessibility: keyboard navigation in all panels
+- [ ] Welcome window for choosing recent project or new one
+- [ ] Help documentation and tutorials
 - [ ] Application icon and desktop integration (`.desktop` file)
 
 ---

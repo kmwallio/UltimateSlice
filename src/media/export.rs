@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use crate::model::clip::ClipKind;
 use crate::model::project::Project;
 
 /// Progress updates sent back to the UI thread
@@ -28,6 +29,13 @@ pub fn export_project(
         return Err(anyhow!("No video clips to export"));
     }
 
+    // Collect audio-only clips from non-muted audio tracks
+    let mut audio_clips: Vec<_> = project.audio_tracks()
+        .filter(|t| !t.muted)
+        .flat_map(|t| t.clips.iter())
+        .collect();
+    audio_clips.sort_by_key(|c| c.timeline_start);
+
     let total_duration_us = project.duration().max(1) / 1_000;
     let _ = tx.send(ExportProgress::Progress(0.0));
 
@@ -38,6 +46,7 @@ pub fn export_project(
         .arg("-progress").arg("pipe:2")
         .arg("-nostats");
 
+    // Video clip inputs: indices 0..video_clips.len()
     for clip in &video_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
         let dur_s = clip.duration() as f64 / 1_000_000_000.0;
@@ -46,7 +55,18 @@ pub fn export_project(
             .arg("-i").arg(&clip.source_path);
     }
 
+    // Audio-only clip inputs: indices video_clips.len()..
+    for clip in &audio_clips {
+        let in_s = clip.source_in as f64 / 1_000_000_000.0;
+        let dur_s = clip.duration() as f64 / 1_000_000_000.0;
+        cmd.arg("-ss").arg(format!("{in_s:.6}"))
+            .arg("-t").arg(format!("{dur_s:.6}"))
+            .arg("-i").arg(&clip.source_path);
+    }
+
     let mut filter = String::new();
+
+    // === Video pipeline: scale/pad each clip then concatenate ===
     for (i, _) in video_clips.iter().enumerate() {
         filter.push_str(&format!(
             "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p[v{i}];",
@@ -59,10 +79,48 @@ pub fn export_project(
     }
     filter.push_str(&format!("concat=n={}:v=1:a=0[vout]", video_clips.len()));
 
-    cmd.arg("-filter_complex").arg(filter)
-        .arg("-map").arg("[vout]")
-        .arg("-an")
-        .arg("-c:v").arg("libx264")
+    // === Audio pipeline: delay each stream to its timeline position then mix ===
+    let mut audio_labels: Vec<String> = Vec::new();
+
+    // Extract embedded audio from video clips (only ClipKind::Video, not images)
+    for (i, clip) in video_clips.iter().enumerate() {
+        if clip.kind == ClipKind::Video {
+            let delay_ms = clip.timeline_start / 1_000_000;
+            let label = format!("va{i}");
+            filter.push_str(&format!(";[{i}:a]adelay={delay_ms}:all=1[{label}]"));
+            audio_labels.push(label);
+        }
+    }
+
+    // Extract audio from audio-only clips
+    let audio_base = video_clips.len();
+    for (j, clip) in audio_clips.iter().enumerate() {
+        let delay_ms = clip.timeline_start / 1_000_000;
+        let label = format!("aa{j}");
+        filter.push_str(&format!(";[{}:a]adelay={delay_ms}:all=1[{label}]", audio_base + j));
+        audio_labels.push(label);
+    }
+
+    // Mix all audio streams into one output
+    let has_audio = !audio_labels.is_empty();
+    if has_audio {
+        let n = audio_labels.len();
+        for label in &audio_labels {
+            filter.push_str(&format!("[{label}]"));
+        }
+        filter.push_str(&format!("amix=inputs={n}:normalize=0[aout]"));
+    }
+
+    cmd.arg("-filter_complex").arg(&filter)
+        .arg("-map").arg("[vout]");
+
+    if has_audio {
+        cmd.arg("-map").arg("[aout]")
+            .arg("-c:a").arg("aac")
+            .arg("-b:a").arg("192k");
+    }
+
+    cmd.arg("-c:v").arg("libx264")
         .arg("-pix_fmt").arg("yuv420p")
         .arg("-movflags").arg("+faststart")
         .arg(output_path)
