@@ -96,7 +96,13 @@ pub fn build_media_browser(
             }
             drop(lib);
             if thumb_cache.borrow_mut().poll() {
-                flow_box.queue_draw();
+                // In GTK4, queue_draw() on a FlowBox does not propagate into
+                // descendant DrawingArea widgets. Queue each child directly.
+                let mut child = flow_box.first_child();
+                while let Some(w) = child {
+                    w.queue_draw();
+                    child = w.next_sibling();
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -161,6 +167,9 @@ fn make_grid_item(
     duration_ns: u64,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
 ) -> FlowBoxChild {
+    // Kick off thumbnail loading immediately — don't wait for the draw func to run.
+    thumb_cache.borrow_mut().request(path, 0);
+
     let cell = GBox::new(Orientation::Vertical, 2);
     cell.set_margin_start(2);
     cell.set_margin_end(2);
