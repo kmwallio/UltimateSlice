@@ -267,20 +267,19 @@ impl ProgramPlayer {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
             gb.set_property("sigma", sigma);
         }
-        // In PAUSED state, force frame redecode at the current source position.
+        // In PAUSED state, force frame redecode using tracked timeline_pos_ns.
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
-            let src_pos = self.pipeline
-                .query_position::<gst::ClockTime>()
-                .map(|t| t.nseconds())
-                .unwrap_or(0);
-            let _ = self.pipeline.seek_simple(
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_nseconds(src_pos),
-            );
+            let pos = self.timeline_pos_ns;
+            if let Some(idx) = self.clip_at(pos) {
+                let clip = &self.clips[idx];
+                let source_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
+                let _ = self.pipeline.seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::ClockTime::from_nseconds(source_ns),
+                );
+            }
         }
     }
-
-    /// Directly update volume and pan on the current clip.
     pub fn update_current_audio(&mut self, volume: f64, pan: f64) {
         self.pipeline.set_property("volume", volume.clamp(0.0, 2.0));
         if let Some(ref ap) = self.audiopanorama {
@@ -319,16 +318,19 @@ impl ProgramPlayer {
     /// Directly update transform on the current clip without reloading the pipeline.
     pub fn update_current_transform(&mut self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32, rotate: i32, flip_h: bool, flip_v: bool) {
         self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v);
-        // In PAUSED state, force frame redecode at the current source position.
+        // Force the current frame to redecode with the new transform by seeking to the
+        // current timeline position. Use timeline_pos_ns (not query_position, which can
+        // return 0 during pre-roll and would jump the playhead to the start).
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
-            let src_pos = self.pipeline
-                .query_position::<gst::ClockTime>()
-                .map(|t| t.nseconds())
-                .unwrap_or(0);
-            let _ = self.pipeline.seek_simple(
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_nseconds(src_pos),
-            );
+            let pos = self.timeline_pos_ns;
+            if let Some(idx) = self.clip_at(pos) {
+                let clip = &self.clips[idx];
+                let source_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
+                let _ = self.pipeline.seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::ClockTime::from_nseconds(source_ns),
+                );
+            }
         }
     }
 
