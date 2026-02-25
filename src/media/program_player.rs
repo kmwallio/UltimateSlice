@@ -206,10 +206,23 @@ impl ProgramPlayer {
     }
 
     pub fn play(&mut self) {
+        let pos = self.timeline_pos_ns;
         if self.current_idx.is_none() {
-            if let Some(idx) = self.clip_at(self.timeline_pos_ns) {
-                self.load_clip_idx(idx, self.timeline_pos_ns);
+            if let Some(idx) = self.clip_at(pos) {
+                self.load_clip_idx(idx, pos);
             }
+        }
+        // Block briefly until the pipeline reaches PAUSED so our seek is accepted.
+        // The initial seek in load_clip_idx can be dropped if issued during async pre-roll.
+        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(100));
+        // Re-seek to make sure we start at the right position.
+        if let Some(idx) = self.current_idx {
+            let clip = &self.clips[idx];
+            let source_seek_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
+            let _ = self.pipeline.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_nseconds(source_seek_ns),
+            );
         }
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.state = PlayerState::Playing;
