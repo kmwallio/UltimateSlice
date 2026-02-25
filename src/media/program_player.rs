@@ -210,6 +210,24 @@ impl ProgramPlayer {
         &self.state
     }
 
+    /// Return the transform of the clip currently loaded in the pipeline, if any.
+    pub fn current_clip_transform(&self) -> Option<crate::ui::program_monitor::ClipTransform> {
+        let c = self.clips.get(self.current_idx?)?;
+        Some(crate::ui::program_monitor::ClipTransform {
+            crop_left:   c.crop_left,
+            crop_right:  c.crop_right,
+            crop_top:    c.crop_top,
+            crop_bottom: c.crop_bottom,
+            rotate:      c.rotate,
+            flip_h:      c.flip_h,
+            flip_v:      c.flip_v,
+        })
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.state == PlayerState::Playing
+    }
+
     /// Poll pipeline position, detect clip boundary, advance to next clip.
     /// Returns `true` if the timeline position changed (caller should redraw).
     pub fn poll(&mut self) -> bool {

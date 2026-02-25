@@ -168,21 +168,8 @@ pub fn build_program_monitor(
 
     root.append(&controls);
 
-    // 100 ms timer: poll position + update timecode label
-    {
-        let pp = program_player.clone();
-        let pos_label = pos_label.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            let mut player = pp.borrow_mut();
-            player.poll();
-            let pos_ns = player.timeline_pos_ns;
-            drop(player);
-            pos_label.set_text(&format_timecode(pos_ns));
-            glib::ControlFlow::Continue
-        });
-    }
-
     // ── Overlay state ──────────────────────────────────────────────────────
+    // (constructed before the timer so the timer can update overlay during playback)
     let state = Rc::new(RefCell::new(OverlayState {
         transform: None,
         drag_handle: None,
@@ -192,6 +179,29 @@ pub fn build_program_monitor(
         video_w: DEFAULT_VID_W,
         video_h: DEFAULT_VID_H,
     }));
+
+    // 100 ms timer: poll position, update timecode, update overlay during playback
+    {
+        let pp = program_player.clone();
+        let pos_label = pos_label.clone();
+        let state = state.clone();
+        let area_weak = transform_area.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            let mut player = pp.borrow_mut();
+            player.poll();
+            let pos_ns = player.timeline_pos_ns;
+            let is_playing = player.is_playing();
+            let current_transform = if is_playing { player.current_clip_transform() } else { None };
+            drop(player);
+            pos_label.set_text(&format_timecode(pos_ns));
+            // During playback, update the overlay to show the playing clip's crop
+            if is_playing {
+                state.borrow_mut().transform = current_transform;
+                if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // ── Draw function ──────────────────────────────────────────────────────
     {
