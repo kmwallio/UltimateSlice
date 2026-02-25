@@ -12,6 +12,10 @@ pub enum ClipKind {
 fn default_contrast() -> f32 { 1.0 }
 fn default_saturation() -> f32 { 1.0 }
 fn default_volume() -> f32 { 1.0 }
+fn default_title_font() -> String { "Sans Bold 36".to_string() }
+fn default_title_color() -> u32 { 0xFFFFFFFF }
+fn default_title_x() -> f64 { 0.5 }
+fn default_title_y() -> f64 { 0.9 }
 
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +69,17 @@ pub struct Clip {
     pub flip_h: bool,
     #[serde(default)]
     pub flip_v: bool,
+    // Title / text overlay
+    #[serde(default)]
+    pub title_text: String,
+    #[serde(default = "default_title_font")]
+    pub title_font: String,
+    #[serde(default = "default_title_color")]
+    pub title_color: u32,   // 0xRRGGBBAA
+    #[serde(default = "default_title_x")]
+    pub title_x: f64,       // 0.0–1.0 relative horizontal position
+    #[serde(default = "default_title_y")]
+    pub title_y: f64,       // 0.0–1.0 relative vertical position
 }
 
 impl Clip {
@@ -97,6 +112,11 @@ impl Clip {
             rotate: 0,
             flip_h: false,
             flip_v: false,
+            title_text: String::new(),
+            title_font: default_title_font(),
+            title_color: default_title_color(),
+            title_x: default_title_x(),
+            title_y: default_title_y(),
         }
     }
 

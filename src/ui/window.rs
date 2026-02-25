@@ -119,6 +119,37 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_title_changed: text/position → direct update on textoverlay element
+        {
+            let prog_player = prog_player.clone();
+            let project = project.clone();
+            let window_weak = window_weak.clone();
+            move |text: String, x: f64, y: f64| {
+                // Get font/color from the currently selected clip
+                let (font, color) = {
+                    let proj = project.borrow();
+                    let pp = prog_player.borrow();
+                    if let Some(idx) = pp.current_clip_idx() {
+                        if let Some(clip) = proj.tracks.iter()
+                            .flat_map(|t| t.clips.iter())
+                            .nth(idx)
+                        {
+                            (clip.title_font.clone(), clip.title_color)
+                        } else {
+                            ("Sans Bold 36".to_string(), 0xFFFFFFFF)
+                        }
+                    } else {
+                        ("Sans Bold 36".to_string(), 0xFFFFFFFF)
+                    }
+                };
+                prog_player.borrow_mut().update_current_title(&text, &font, color, x, y);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -418,6 +449,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         rotate:            c.rotate,
                         flip_h:            c.flip_h,
                         flip_v:            c.flip_v,
+                        title_text:        c.title_text.clone(),
+                        title_font:        c.title_font.clone(),
+                        title_color:       c.title_color,
+                        title_x:           c.title_x,
+                        title_y:           c.title_y,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.

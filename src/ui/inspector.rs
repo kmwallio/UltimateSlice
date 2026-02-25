@@ -34,6 +34,10 @@ pub struct InspectorView {
     pub rotate_combo: gtk4::ComboBoxText,
     pub flip_h_btn: gtk4::ToggleButton,
     pub flip_v_btn: gtk4::ToggleButton,
+    // Title / text overlay
+    pub title_entry: Entry,
+    pub title_x_slider: Scale,
+    pub title_y_slider: Scale,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
 }
@@ -77,6 +81,9 @@ impl InspectorView {
                 self.rotate_combo.set_active_id(Some(&c.rotate.to_string()));
                 self.flip_h_btn.set_active(c.flip_h);
                 self.flip_v_btn.set_active(c.flip_v);
+                self.title_entry.set_text(&c.title_text);
+                self.title_x_slider.set_value(c.title_x);
+                self.title_y_slider.set_value(c.title_y);
             }
             None => {
                 self.name_entry.set_text("");
@@ -98,6 +105,9 @@ impl InspectorView {
                 self.rotate_combo.set_active_id(Some("0"));
                 self.flip_h_btn.set_active(false);
                 self.flip_v_btn.set_active(false);
+                self.title_entry.set_text("");
+                self.title_x_slider.set_value(0.5);
+                self.title_y_slider.set_value(0.9);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -118,6 +128,7 @@ pub fn build_inspector(
     on_color_changed: impl Fn(f32, f32, f32, f32, f32) + 'static,
     on_audio_changed: impl Fn(f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool) + 'static,
+    on_title_changed: impl Fn(String, f64, f64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -296,6 +307,30 @@ pub fn build_inspector(
 
     vbox.append(&Separator::new(Orientation::Horizontal));
 
+    // Title / text overlay section
+    let title_section_lbl = Label::new(Some("Title Overlay"));
+    title_section_lbl.add_css_class("browser-header");
+    title_section_lbl.set_halign(gtk4::Align::Start);
+    vbox.append(&title_section_lbl);
+
+    let title_entry = Entry::new();
+    title_entry.set_placeholder_text(Some("Overlay text…"));
+    vbox.append(&title_entry);
+
+    row_label(&vbox, "Position X");
+    let title_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    title_x_slider.set_value(0.5);
+    title_x_slider.set_hexpand(true);
+    vbox.append(&title_x_slider);
+
+    row_label(&vbox, "Position Y");
+    let title_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    title_y_slider.set_value(0.9);
+    title_y_slider.set_hexpand(true);
+    vbox.append(&title_y_slider);
+
+    vbox.append(&Separator::new(Orientation::Horizontal));
+
     // Apply name button
     let apply_btn = Button::with_label("Apply Name");
     vbox.append(&apply_btn);
@@ -306,6 +341,7 @@ pub fn build_inspector(
     let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool)> = Rc::new(on_transform_changed);
+    let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -662,6 +698,86 @@ pub fn build_inspector(
         });
     }
 
+    // Title entry and position sliders
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let title_x = title_x_slider.clone();
+        let title_y = title_y_slider.clone();
+        let on_title_changed = on_title_changed.clone();
+        title_entry.connect_changed(move |entry| {
+            if *updating.borrow() { return; }
+            let text = entry.text().to_string();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_text = text.clone();
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_changed(text, title_x.value(), title_y.value());
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let title_entry_x = title_entry.clone();
+        let title_y = title_y_slider.clone();
+        let on_title_changed = on_title_changed.clone();
+        title_x_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() { return; }
+            let x = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_x = x;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_changed(title_entry_x.text().to_string(), x, title_y.value());
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let title_entry_y = title_entry.clone();
+        let title_x = title_x_slider.clone();
+        let on_title_changed = on_title_changed.clone();
+        title_y_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() { return; }
+            let y = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_y = y;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_changed(title_entry_y.text().to_string(), title_x.value(), y);
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -684,6 +800,9 @@ pub fn build_inspector(
         rotate_combo,
         flip_h_btn,
         flip_v_btn,
+        title_entry,
+        title_x_slider,
+        title_y_slider,
         updating,
     });
 

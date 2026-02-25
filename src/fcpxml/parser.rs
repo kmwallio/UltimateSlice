@@ -112,6 +112,11 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                     if let Some(v) = attrs.get("us:rotate")     { clip.rotate     = v.parse().unwrap_or(0); }
                                     if let Some(v) = attrs.get("us:flip-h")     { clip.flip_h     = v.parse().unwrap_or(false); }
                                     if let Some(v) = attrs.get("us:flip-v")     { clip.flip_v     = v.parse().unwrap_or(false); }
+                                    if let Some(v) = attrs.get("us:title-text") { clip.title_text = v.clone(); }
+                                    if let Some(v) = attrs.get("us:title-font") { clip.title_font = v.clone(); }
+                                    if let Some(v) = attrs.get("us:title-color"){ clip.title_color = u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF); }
+                                    if let Some(v) = attrs.get("us:title-x")    { clip.title_x    = v.parse().unwrap_or(0.5); }
+                                    if let Some(v) = attrs.get("us:title-y")    { clip.title_y    = v.parse().unwrap_or(0.9); }
                                     track.add_clip(clip);
                                 }
                             }

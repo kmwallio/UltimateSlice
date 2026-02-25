@@ -35,6 +35,12 @@ pub struct ProgramClip {
     pub rotate: i32,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// Title text overlay
+    pub title_text: String,
+    pub title_font: String,
+    pub title_color: u32,
+    pub title_x: f64,
+    pub title_y: f64,
 }
 
 impl ProgramClip {
@@ -67,6 +73,8 @@ pub struct ProgramPlayer {
     videoflip_rotate: Option<gst::Element>,
     /// videoflip element for horizontal/vertical flip
     videoflip_flip: Option<gst::Element>,
+    /// textoverlay element for per-clip title
+    textoverlay: Option<gst::Element>,
 }
 
 impl ProgramPlayer {
@@ -102,6 +110,7 @@ impl ProgramPlayer {
             .name("videoflip_flip")
             .build()
             .ok();
+        let textoverlay = gst::ElementFactory::make("textoverlay").build().ok();
 
         if videobalance.is_some() && gaussianblur.is_some() {
             let vb = videobalance.as_ref().unwrap();
@@ -120,12 +129,23 @@ impl ProgramPlayer {
                     .expect("videoconvert must be available");
                 let conv4 = gst::ElementFactory::make("videoconvert").build()
                     .expect("videoconvert must be available");
-                bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
-                gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
-                let sink_pad = vc.static_pad("sink").unwrap();
-                let src_pad = vff.static_pad("src").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                if let Some(ref to) = textoverlay {
+                    to.set_property("text", "");
+                    to.set_property("silent", true);
+                    bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, to]).ok();
+                    gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, to]).ok();
+                    let sink_pad = vc.static_pad("sink").unwrap();
+                    let src_pad = to.static_pad("src").unwrap();
+                    bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                    bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                } else {
+                    bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
+                    gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
+                    let sink_pad = vc.static_pad("sink").unwrap();
+                    let src_pad = vff.static_pad("src").unwrap();
+                    bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                    bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                }
             } else {
                 bin.add_many([vb, &conv1, gb]).ok();
                 gst::Element::link_many([vb, &conv1, gb]).ok();
@@ -157,6 +177,7 @@ impl ProgramPlayer {
                 videocrop,
                 videoflip_rotate,
                 videoflip_flip,
+                textoverlay,
             },
             paintable,
         ))
@@ -222,6 +243,10 @@ impl ProgramPlayer {
             flip_h:      c.flip_h,
             flip_v:      c.flip_v,
         })
+    }
+
+    pub fn current_clip_idx(&self) -> Option<usize> {
+        self.current_idx
     }
 
     pub fn is_playing(&self) -> bool {
@@ -333,6 +358,46 @@ impl ProgramPlayer {
         }
     }
 
+    /// Sets textoverlay properties for the per-clip title.
+    pub fn set_title(&self, text: &str, font: &str, color_rgba: u32, rel_x: f64, rel_y: f64) {
+        if let Some(ref to) = self.textoverlay {
+            let silent = text.is_empty();
+            to.set_property("silent", silent);
+            if !silent {
+                to.set_property("text", text);
+                to.set_property("font-desc", font);
+                // textoverlay uses xpos/ypos as relative (0.0–1.0) when halignment/valignment = "position"
+                to.set_property_from_str("halignment", "position");
+                to.set_property_from_str("valignment", "position");
+                to.set_property("xpos", rel_x);
+                to.set_property("ypos", rel_y);
+                // Convert color from 0xRRGGBBAA to argb u32
+                let r = (color_rgba >> 24) & 0xFF;
+                let g = (color_rgba >> 16) & 0xFF;
+                let b = (color_rgba >> 8)  & 0xFF;
+                let a = color_rgba & 0xFF;
+                let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                to.set_property("color", argb);
+            }
+        }
+    }
+
+    /// Directly update title on the current clip without reloading the pipeline.
+    pub fn update_current_title(&mut self, text: &str, font: &str, color_rgba: u32, rel_x: f64, rel_y: f64) {
+        self.set_title(text, font, color_rgba, rel_x, rel_y);
+        if self.current_idx.is_some() && self.state != PlayerState::Playing {
+            let pos = self.timeline_pos_ns;
+            if let Some(idx) = self.clip_at(pos) {
+                let clip = &self.clips[idx];
+                let source_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
+                let _ = self.pipeline.seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::ClockTime::from_nseconds(source_ns),
+                );
+            }
+        }
+    }
+
     /// Directly update transform on the current clip without reloading the pipeline.
     pub fn update_current_transform(&mut self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32, rotate: i32, flip_h: bool, flip_v: bool) {
         self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v);
@@ -383,6 +448,8 @@ impl ProgramPlayer {
         // Apply per-clip transform (crop, rotate, flip)
         self.set_transform(clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom,
                            clip.rotate, clip.flip_h, clip.flip_v);
+        // Apply per-clip title overlay
+        self.set_title(&clip.title_text, &clip.title_font, clip.title_color, clip.title_x, clip.title_y);
 
         if self.current_idx == Some(idx) {
             // Same clip already loaded — just seek to the new position. No pipeline reset.

@@ -72,6 +72,11 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:rotate",     clip.rotate.to_string().as_str()));
             asset_clip.push_attribute(("us:flip-h",     clip.flip_h.to_string().as_str()));
             asset_clip.push_attribute(("us:flip-v",     clip.flip_v.to_string().as_str()));
+            asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));
+            asset_clip.push_attribute(("us:title-font", clip.title_font.as_str()));
+            asset_clip.push_attribute(("us:title-color", format!("{:08X}", clip.title_color).as_str()));
+            asset_clip.push_attribute(("us:title-x",    clip.title_x.to_string().as_str()));
+            asset_clip.push_attribute(("us:title-y",    clip.title_y.to_string().as_str()));
             writer.write_event(Event::Empty(asset_clip))?;
         }
     }

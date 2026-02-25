@@ -143,7 +143,7 @@ Tracking docs:
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [ ] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
-- [ ] Titles / text overlay (`textoverlay`)
+- [x] Titles / text overlay (`textoverlay`)
 - [ ] Transition effects (fade, wipe, etc.)
 
 ### Video Transform (per clip)

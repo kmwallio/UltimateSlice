@@ -12,6 +12,12 @@ All notable project changes and progress should be recorded here.
 - **`list_clips` MCP response now includes color fields**: `brightness`, `contrast`, `saturation` are included alongside other clip properties.
 
 ### Added
+- **Titles / text overlay per clip**:
+  - New **Title Overlay** section in the Inspector panel: text entry, X/Y position sliders (0.0–1.0 relative).
+  - GStreamer `textoverlay` element injected at the end of the video filter bin; hidden (`silent=true`) when text is empty.
+  - Default font `Sans Bold 36`, default color white, default position bottom-center (x=0.5, y=0.9).
+  - Changes apply live to the program monitor without pipeline reload.
+  - FCPXML persistence via `us:title-text`, `us:title-font`, `us:title-color`, `us:title-x`, `us:title-y` attributes.
 - **Timeline markers / chapter points**:
   - Press `M` at any playhead position to drop a colored marker on the timeline ruler.
   - Markers are drawn as filled triangles with a vertical line and label; default color is orange (0xFF8C00FF).
