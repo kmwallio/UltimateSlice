@@ -686,13 +686,19 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     {
         let state = state.clone();
         let area_weak = area.downgrade();
-        scroll.connect_scroll(move |_ctrl, dx, dy| {
+        scroll.connect_scroll(move |ctrl, dx, dy| {
             let mut st = state.borrow_mut();
-            // Ctrl+scroll = zoom, plain scroll = pan
-            let factor = if dy < 0.0 { 1.1 } else { 0.9 };
-            st.pixels_per_second = (st.pixels_per_second * factor).clamp(10.0, 2000.0);
-            if dx.abs() > 0.1 {
+            let ctrl_held = ctrl.current_event_state()
+                .contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            // Ctrl+scroll OR pure vertical scroll = zoom
+            // Horizontal scroll (dx dominant, e.g. Shift+scroll or trackpad) = pan
+            if dx.abs() > dy.abs() {
+                // Horizontal pan
                 st.scroll_offset = (st.scroll_offset + dx * 20.0).max(0.0);
+            } else if ctrl_held || dy.abs() > 0.0 {
+                // Zoom (Ctrl+scroll or plain vertical scroll)
+                let factor = if dy < 0.0 { 1.1 } else { 0.9 };
+                st.pixels_per_second = (st.pixels_per_second * factor).clamp(10.0, 2000.0);
             }
             if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
             glib::Propagation::Stop
