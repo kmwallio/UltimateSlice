@@ -50,6 +50,15 @@ To run with MCP server enabled:
 cargo run -- --mcp
 ```
 
+## Flatpak
+
+A Flatpak manifest is provided at `io.github.ultimateslice.yml`.
+
+```/dev/null/bash#L1-3
+flatpak-builder build-dir io.github.ultimateslice.yml --user --install --force-clean
+flatpak run io.github.ultimateslice
+```
+
 ## Notes
 
 - GTK4 callbacks cannot unwind panics. Avoid `RefCell` double-borrows in UI callbacks.
