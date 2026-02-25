@@ -310,3 +310,30 @@ entry:focus {
     color: #aaaaaa;
     font-size: 11px;
 }
+
+/* ── Source monitor marks bar ──────────────────────────────────────────── */
+.marks-bar {
+    background-color: #1e1e22;
+    border: 1px solid #333338;
+    border-radius: 4px;
+    padding: 4px 12px;
+}
+
+.marks-timecode {
+    font-family: monospace;
+    font-size: 11px;
+    color: #d0d0d0;
+    letter-spacing: 0.5px;
+}
+
+.marks-in {
+    color: #33e655;
+}
+
+.marks-out {
+    color: #ff9926;
+}
+
+.marks-dur {
+    color: #aaaaaa;
+}

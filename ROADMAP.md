@@ -99,8 +99,8 @@ Tracking docs:
 
 ### Source Monitor Improvements
 - [x] Clip name shown in source monitor header
-- [ ] Frame-accurate jog/shuttle control
-- [ ] Mark-in / Mark-out visible as timecodes in a dedicated bar
+- [x] Frame-accurate jog/shuttle control
+- [x] Mark-in / Mark-out visible as timecodes in a dedicated bar
 
 ### Timeline Improvements
 - [x] Clip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
