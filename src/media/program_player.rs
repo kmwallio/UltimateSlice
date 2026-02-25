@@ -227,6 +227,20 @@ impl ProgramPlayer {
         }
     }
 
+    /// Stop playback and return to position 0.
+    pub fn stop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        self.state = PlayerState::Paused;
+        self.timeline_pos_ns = 0;
+        if let Some(idx) = self.clip_at(0) {
+            self.load_clip_idx(idx, 0);
+        } else {
+            let _ = self.pipeline.set_state(gst::State::Ready);
+            self.current_idx = None;
+        }
+        self.state = PlayerState::Stopped;
+    }
+
     pub fn state(&self) -> &PlayerState {
         &self.state
     }

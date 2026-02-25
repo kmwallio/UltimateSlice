@@ -1,6 +1,5 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, Button, Label, Orientation, Picture};
-use glib;
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::media::program_player::ProgramPlayer;
@@ -19,10 +18,14 @@ pub struct ClipTransform {
 }
 
 /// Build the program monitor widget.
+/// Returns `(widget, pos_label)`. The caller should set up the poll timer
+/// and wire the stop button using the returned references.
 pub fn build_program_monitor(
     program_player: Rc<RefCell<ProgramPlayer>>,
     paintable: gdk4::Paintable,
-) -> GBox {
+    on_stop: impl Fn() + 'static,
+    on_play_pause: impl Fn() + 'static,
+) -> (GBox, Label) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
     root.set_vexpand(true);
@@ -68,40 +71,19 @@ pub fn build_program_monitor(
     controls.set_margin_bottom(6);
 
     let btn_play = Button::with_label("▶ Play");
-    {
-        let pp = program_player.clone();
-        btn_play.connect_clicked(move |_| {
-            pp.borrow_mut().toggle_play_pause();
-        });
-    }
+    btn_play.connect_clicked(move |_| on_play_pause());
     controls.append(&btn_play);
 
     let btn_stop = Button::with_label("■ Stop");
-    {
-        let pp = program_player.clone();
-        btn_stop.connect_clicked(move |_| {
-            pp.borrow_mut().seek(0);
-        });
-    }
+    btn_stop.connect_clicked(move |_| on_stop());
     controls.append(&btn_stop);
 
     root.append(&controls);
 
-    // 100 ms timer: poll position and update timecode label
-    {
-        let pp = program_player.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            pp.borrow_mut().poll();
-            let pos_ns = pp.borrow().timeline_pos_ns;
-            pos_label.set_text(&format_timecode(pos_ns));
-            glib::ControlFlow::Continue
-        });
-    }
-
-    root
+    (root, pos_label)
 }
 
-fn format_timecode(ns: u64) -> String {
+pub fn format_timecode(ns: u64) -> String {
     let total_frames = ns / (1_000_000_000 / 30);
     let frames = total_frames % 30;
     let secs   = ns / 1_000_000_000;

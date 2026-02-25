@@ -1,5 +1,6 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
+use glib;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -235,10 +236,55 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     }
 
     // ── Build program monitor ──────────────────────────────────────────────
-    let prog_monitor_widget = program_monitor::build_program_monitor(
+    // timeline_panel doesn't exist yet; use a shared cell filled in after build.
+    let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+
+    let (prog_monitor_widget, pos_label) = program_monitor::build_program_monitor(
         prog_player.clone(),
         prog_paintable,
+        // on_stop
+        {
+            let pp = prog_player.clone();
+            let ts = timeline_state.clone();
+            let cell = timeline_panel_cell.clone();
+            move || {
+                pp.borrow_mut().stop();
+                ts.borrow_mut().playhead_ns = 0;
+                if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+            }
+        },
+        // on_play_pause
+        {
+            let pp = prog_player.clone();
+            let player = player.clone();
+            move || {
+                let p = player.borrow();
+                match p.state() {
+                    crate::media::player::PlayerState::Playing => { let _ = p.pause(); }
+                    _ => { let _ = p.play(); }
+                }
+                drop(p);
+                pp.borrow_mut().toggle_play_pause();
+            }
+        },
     );
+
+    // 100 ms poll timer: update timecode label AND sync timeline playhead during playback
+    {
+        let pp = prog_player.clone();
+        let ts = timeline_state.clone();
+        let cell = timeline_panel_cell.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            let changed = pp.borrow_mut().poll();
+            let pos_ns = pp.borrow().timeline_pos_ns;
+            pos_label.set_text(&program_monitor::format_timecode(pos_ns));
+            if changed {
+                ts.borrow_mut().playhead_ns = pos_ns;
+                if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     top_paned.set_end_child(Some(&prog_monitor_widget));
 
@@ -322,6 +368,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let timeline_panel = build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
     timeline_scroll.set_child(Some(&timeline_panel));
     root_vpaned.set_end_child(Some(&timeline_scroll));
+
+    // Fill in the timeline panel cell so the poll timer + stop button can redraw it.
+    *timeline_panel_cell.borrow_mut() = Some(timeline_panel.clone().upcast::<gtk4::Widget>());
 
     // Now that timeline_panel exists, fill in the real on_project_changed implementation.
     // This runs after every edit: updates title, inspector, program player clip list,
