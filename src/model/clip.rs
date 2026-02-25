@@ -37,6 +37,12 @@ pub struct Clip {
     /// Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid), default 1.0
     #[serde(default = "default_saturation")]
     pub saturation: f32,
+    /// Denoise strength: 0.0 (off) to 1.0 (heavy), default 0.0
+    #[serde(default)]
+    pub denoise: f32,
+    /// Sharpness: -1.0 (soften) to 1.0 (sharpen), default 0.0
+    #[serde(default)]
+    pub sharpness: f32,
 }
 
 impl Clip {
@@ -58,6 +64,8 @@ impl Clip {
             brightness: 0.0,
             contrast: 1.0,
             saturation: 1.0,
+            denoise: 0.0,
+            sharpness: 0.0,
         }
     }
 

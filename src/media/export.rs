@@ -80,8 +80,23 @@ pub fn export_project(
         } else {
             String::new()
         };
+        // hqdn3d for denoise (luma_spatial, luma_tmp proportional to strength)
+        let denoise_filter = if clip.denoise > 0.0 {
+            let d = clip.denoise.clamp(0.0, 1.0);
+            format!(",hqdn3d={:.4}:{:.4}:{:.4}:{:.4}",
+                d * 4.0, d * 3.0, d * 6.0, d * 4.5)
+        } else {
+            String::new()
+        };
+        // unsharp for sharpness (positive = sharpen, negative = soften/blur)
+        let sharpen_filter = if clip.sharpness != 0.0 {
+            let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
+            format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
+        } else {
+            String::new()
+        };
         filter.push_str(&format!(
-            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}[v{i}];",
+            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}[v{i}];",
             project.width, project.height, project.width, project.height,
             project.frame_rate.numerator, project.frame_rate.denominator
         ));

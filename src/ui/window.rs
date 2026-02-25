@@ -60,13 +60,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let cb = on_project_changed.clone();
             move || cb()
         },
-        // on_color_changed: color slider → direct videobalance update, no pipeline reload
+        // on_color_changed: slider → direct filter update, no pipeline reload
         {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |b, c, s| {
-                prog_player.borrow_mut().update_current_color(b as f64, c as f64, s as f64);
+            move |b, c, s, d, sh| {
+                prog_player.borrow_mut().update_current_effects(
+                    b as f64, c as f64, s as f64, d as f64, sh as f64);
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
@@ -285,6 +286,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         brightness:        c.brightness as f64,
                         contrast:          c.contrast as f64,
                         saturation:        c.saturation as f64,
+                        denoise:           c.denoise as f64,
+                        sharpness:         c.sharpness as f64,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
@@ -430,6 +433,8 @@ fn handle_mcp_command(
                     "brightness":       c.brightness,
                     "contrast":         c.contrast,
                     "saturation":       c.saturation,
+                    "denoise":          c.denoise,
+                    "sharpness":        c.sharpness,
                 })))
                 .collect();
             reply.send(json!(clips)).ok();
@@ -512,7 +517,7 @@ fn handle_mcp_command(
             if found { on_project_changed(); }
         }
 
-        McpCommand::SetClipColor { clip_id, brightness, contrast, saturation, reply } => {
+        McpCommand::SetClipColor { clip_id, brightness, contrast, saturation, denoise, sharpness, reply } => {
             let mut proj = project.borrow_mut();
             let mut found = false;
             'outer: for track in proj.tracks.iter_mut() {
@@ -521,6 +526,8 @@ fn handle_mcp_command(
                         clip.brightness = brightness as f32;
                         clip.contrast   = contrast as f32;
                         clip.saturation = saturation as f32;
+                        clip.denoise    = denoise as f32;
+                        clip.sharpness  = sharpness as f32;
                         proj.dirty = true;
                         found = true;
                         break 'outer;

@@ -18,6 +18,10 @@ pub struct ProgramClip {
     pub brightness: f64,
     pub contrast: f64,
     pub saturation: f64,
+    /// Denoise strength: 0.0 (off) to 1.0 (heavy)
+    pub denoise: f64,
+    /// Sharpness: -1.0 (soften) to 1.0 (sharpen)
+    pub sharpness: f64,
 }
 
 impl ProgramClip {
@@ -40,6 +44,8 @@ pub struct ProgramPlayer {
     pub timeline_dur_ns: u64,
     /// videobalance element for per-clip color correction
     videobalance: Option<gst::Element>,
+    /// gaussianblur element for per-clip denoise/sharpness
+    gaussianblur: Option<gst::Element>,
 }
 
 impl ProgramPlayer {
@@ -67,7 +73,23 @@ impl ProgramPlayer {
             .build()?;
 
         let videobalance = gst::ElementFactory::make("videobalance").build().ok();
-        if let Some(ref vb) = videobalance {
+        let gaussianblur = gst::ElementFactory::make("gaussianblur").build().ok();
+
+        if videobalance.is_some() && gaussianblur.is_some() {
+            let vb = videobalance.as_ref().unwrap();
+            let gb = gaussianblur.as_ref().unwrap();
+            gb.set_property("sigma", 0.0_f64);
+            let bin = gst::Bin::new();
+            let conv = gst::ElementFactory::make("videoconvert").build()
+                .expect("videoconvert must be available");
+            bin.add_many([vb, &conv, gb]).ok();
+            gst::Element::link_many([vb, &conv, gb]).ok();
+            let sink_pad = vb.static_pad("sink").unwrap();
+            let src_pad = gb.static_pad("src").unwrap();
+            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+            pipeline.set_property("video-filter", &bin);
+        } else if let Some(ref vb) = videobalance {
             pipeline.set_property("video-filter", vb);
         }
 
@@ -80,6 +102,7 @@ impl ProgramPlayer {
                 timeline_pos_ns: 0,
                 timeline_dur_ns: 0,
                 videobalance,
+                gaussianblur,
             },
             paintable,
         ))
@@ -172,17 +195,25 @@ impl ProgramPlayer {
         changed
     }
 
-    /// Directly update color correction on the current clip without reloading the pipeline.
-    /// Sets the videobalance properties and forces a re-seek at the current source position
-    /// so the PAUSED frame is redrawn with the new color.
+    /// Directly update effects on the current clip without reloading the pipeline.
+    /// Sets videobalance and gaussianblur properties then force-seeks so the PAUSED
+    /// frame is redrawn with the new values.
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
+        self.update_current_effects(brightness, contrast, saturation, 0.0, 0.0);
+    }
+
+    /// Same as update_current_color but also applies denoise and sharpness.
+    pub fn update_current_effects(&mut self, brightness: f64, contrast: f64, saturation: f64, denoise: f64, sharpness: f64) {
         if let Some(ref vb) = self.videobalance {
             vb.set_property("brightness", brightness.clamp(-1.0, 1.0));
             vb.set_property("contrast",   contrast.clamp(0.0, 2.0));
             vb.set_property("saturation", saturation.clamp(0.0, 2.0));
         }
+        if let Some(ref gb) = self.gaussianblur {
+            let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
+            gb.set_property("sigma", sigma);
+        }
         // In PAUSED state, force frame redecode at the current source position.
-        // In PLAYING state, the next decoded frame will automatically pick up the new values.
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
             let src_pos = self.pipeline
                 .query_position::<gst::ClockTime>()
@@ -213,6 +244,10 @@ impl ProgramPlayer {
             vb.set_property("brightness", clip.brightness.clamp(-1.0, 1.0));
             vb.set_property("contrast",   clip.contrast.clamp(0.0, 2.0));
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
+        }
+        if let Some(ref gb) = self.gaussianblur {
+            let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
+            gb.set_property("sigma", sigma);
         }
 
         if self.current_idx == Some(idx) {

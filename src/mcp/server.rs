@@ -148,14 +148,16 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_color",
-            "description": "Set color correction (brightness, contrast, saturation) for a clip by id.",
+            "description": "Set color correction and denoise/sharpness effects for a clip by id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id":    { "type": "string",  "description": "Clip id (from list_clips)." },
                     "brightness": { "type": "number",  "description": "Brightness adjustment: -1.0 (darkest) to 1.0 (brightest). Default 0.0." },
                     "contrast":   { "type": "number",  "description": "Contrast multiplier: 0.0 to 2.0. Default 1.0." },
-                    "saturation": { "type": "number",  "description": "Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid). Default 1.0." }
+                    "saturation": { "type": "number",  "description": "Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid). Default 1.0." },
+                    "denoise":    { "type": "number",  "description": "Denoise strength: 0.0 (off) to 1.0 (heavy). Default 0.0." },
+                    "sharpness":  { "type": "number",  "description": "Sharpness: -1.0 (soften) to 1.0 (sharpen). Default 0.0." }
                 },
                 "required": ["clip_id"]
             }
@@ -258,6 +260,8 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             brightness: args["brightness"].as_f64().unwrap_or(0.0),
             contrast:   args["contrast"].as_f64().unwrap_or(1.0),
             saturation: args["saturation"].as_f64().unwrap_or(1.0),
+            denoise:    args["denoise"].as_f64().unwrap_or(0.0),
+            sharpness:  args["sharpness"].as_f64().unwrap_or(0.0),
             reply: tx,
         },
 

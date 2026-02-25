@@ -131,6 +131,8 @@ Tracking docs:
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
+- [x] Denoise filter per clip (GStreamer `gaussianblur` positive sigma; ffmpeg `hqdn3d` on export)
+- [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [ ] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
 - [ ] Titles / text overlay (`textoverlay`)

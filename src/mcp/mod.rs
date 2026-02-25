@@ -25,6 +25,8 @@ pub enum McpCommand {
         brightness: f64,
         contrast:   f64,
         saturation: f64,
+        denoise:    f64,
+        sharpness:  f64,
         reply:      SyncSender<Value>,
     },
     SetTitle    { title: String, reply: SyncSender<Value> },

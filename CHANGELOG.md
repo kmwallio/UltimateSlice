@@ -12,6 +12,12 @@ All notable project changes and progress should be recorded here.
 - **`list_clips` MCP response now includes color fields**: `brightness`, `contrast`, `saturation` are included alongside other clip properties.
 
 ### Added
+- **Denoise and Sharpness per clip**:
+  - Added `denoise: f32` (0.0–1.0, default 0.0) and `sharpness: f32` (-1.0–1.0, default 0.0) fields to `Clip` model with `#[serde(default)]`.
+  - GStreamer preview: upgraded video-filter from a single `videobalance` element to a bin `videobalance ! videoconvert ! gaussianblur`. Positive sigma = denoise/blur; negative sigma = sharpen. Combined sigma = `denoise * 4 − sharpness * 6`.
+  - Inspector: two new sliders — **Denoise** (0.0–1.0) and **Sharpness** (−1.0–1.0) — in a new "Denoise / Sharpness" section below Color. Sliders update the preview live via `update_current_effects` without a pipeline reload.
+  - Export (ffmpeg): `hqdn3d` filter added per-clip when `denoise > 0`; `unsharp` filter added when `sharpness ≠ 0`, chained after the existing `eq` color filter.
+  - MCP `set_clip_color` tool extended with optional `denoise` and `sharpness` parameters; `list_clips` response includes both new fields.
 - Basic color correction per clip (brightness / contrast / saturation):
   - Added `brightness` (f32, default 0.0), `contrast` (f32, default 1.0), `saturation` (f32, default 1.0) fields to `Clip` model with `#[serde(default)]` so existing FCPXML/save files load without change.
   - Inspector panel: new "Color" section with three horizontal `Scale` sliders (brightness −1→1, contrast 0→2, saturation 0→2). Sliders update the clip live and trigger project-changed; feedback loop prevented by an `updating` flag during programmatic value set.

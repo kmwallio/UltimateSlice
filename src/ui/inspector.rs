@@ -20,6 +20,9 @@ pub struct InspectorView {
     pub brightness_slider: Scale,
     pub contrast_slider: Scale,
     pub saturation_slider: Scale,
+    // Denoise / sharpness sliders
+    pub denoise_slider: Scale,
+    pub sharpness_slider: Scale,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
 }
@@ -52,6 +55,8 @@ impl InspectorView {
                 self.brightness_slider.set_value(c.brightness as f64);
                 self.contrast_slider.set_value(c.contrast as f64);
                 self.saturation_slider.set_value(c.saturation as f64);
+                self.denoise_slider.set_value(c.denoise as f64);
+                self.sharpness_slider.set_value(c.sharpness as f64);
             }
             None => {
                 self.name_entry.set_text("");
@@ -62,6 +67,8 @@ impl InspectorView {
                 self.brightness_slider.set_value(0.0);
                 self.contrast_slider.set_value(1.0);
                 self.saturation_slider.set_value(1.0);
+                self.denoise_slider.set_value(0.0);
+                self.sharpness_slider.set_value(0.0);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -72,12 +79,13 @@ impl InspectorView {
 /// Returns `(widget, InspectorView)` — keep `InspectorView` and call `.update()` on selection changes.
 ///
 /// - `on_clip_changed`: fired when the clip name is applied (triggers full project-changed cycle).
-/// - `on_color_changed`: fired on every color slider movement with `(brightness, contrast, saturation)`;
-///   should update the program player's videobalance directly without a full pipeline reload.
+/// - `on_color_changed`: fired on every color/effects slider movement with
+///   `(brightness, contrast, saturation, denoise, sharpness)`;
+///   should update the program player's video filter elements directly without a full pipeline reload.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32) + 'static,
+    on_color_changed: impl Fn(f32, f32, f32, f32, f32) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -157,6 +165,28 @@ pub fn build_inspector(
     saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
     vbox.append(&saturation_slider);
 
+    // Denoise / Sharpness section
+    let ds_title = Label::new(Some("Denoise / Sharpness"));
+    ds_title.set_halign(gtk::Align::Start);
+    ds_title.add_css_class("browser-header");
+    vbox.append(&ds_title);
+
+    row_label(&vbox, "Denoise");
+    let denoise_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    denoise_slider.set_value(0.0);
+    denoise_slider.set_draw_value(true);
+    denoise_slider.set_digits(2);
+    denoise_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    vbox.append(&denoise_slider);
+
+    row_label(&vbox, "Sharpness");
+    let sharpness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    sharpness_slider.set_value(0.0);
+    sharpness_slider.set_draw_value(true);
+    sharpness_slider.set_digits(2);
+    sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    vbox.append(&sharpness_slider);
+
     vbox.append(&Separator::new(Orientation::Horizontal));
 
     // Apply name button
@@ -168,7 +198,7 @@ pub fn build_inspector(
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed = Rc::new(on_clip_changed);
-    let on_color_changed = Rc::new(on_color_changed);
+    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -197,17 +227,19 @@ pub fn build_inspector(
         });
     }
 
-    // Helper: connect a color slider — updates the model and fires on_color_changed
-    // with all three color values so the program player can update its videobalance directly.
+    // Helper: connect an effects slider — updates the model field then fires on_color_changed
+    // with all five current values so the program player can update its filters directly.
     fn connect_color_slider(
         slider: &Scale,
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_color_changed: Rc<dyn Fn(f32, f32, f32)>,
+        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)>,
         brightness_slider: Scale,
         contrast_slider: Scale,
         saturation_slider: Scale,
+        denoise_slider: Scale,
+        sharpness_slider: Scale,
         apply: fn(&mut crate::model::clip::Clip, f32),
     ) {
         slider.connect_value_changed(move |s| {
@@ -215,7 +247,6 @@ pub fn build_inspector(
             let val = s.value() as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
-                // Update the correct field in the model
                 {
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
@@ -226,11 +257,13 @@ pub fn build_inspector(
                         }
                     }
                 }
-                // Fire lightweight color callback with all three current values
-                let b = brightness_slider.value() as f32;
-                let c = contrast_slider.value() as f32;
+                // Fire lightweight effects callback with all five current values
+                let b   = brightness_slider.value() as f32;
+                let c   = contrast_slider.value() as f32;
                 let sat = saturation_slider.value() as f32;
-                on_color_changed(b, c, sat);
+                let d   = denoise_slider.value() as f32;
+                let sh  = sharpness_slider.value() as f32;
+                on_color_changed(b, c, sat, d, sh);
             }
         });
     }
@@ -239,19 +272,36 @@ pub fn build_inspector(
         &brightness_slider, project.clone(), selected_clip_id.clone(),
         updating.clone(), on_color_changed.clone(),
         brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
+        denoise_slider.clone(), sharpness_slider.clone(),
         |clip, v| clip.brightness = v,
     );
     connect_color_slider(
         &contrast_slider, project.clone(), selected_clip_id.clone(),
         updating.clone(), on_color_changed.clone(),
         brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
+        denoise_slider.clone(), sharpness_slider.clone(),
         |clip, v| clip.contrast = v,
     );
     connect_color_slider(
         &saturation_slider, project.clone(), selected_clip_id.clone(),
         updating.clone(), on_color_changed.clone(),
         brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
+        denoise_slider.clone(), sharpness_slider.clone(),
         |clip, v| clip.saturation = v,
+    );
+    connect_color_slider(
+        &denoise_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_color_changed.clone(),
+        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
+        denoise_slider.clone(), sharpness_slider.clone(),
+        |clip, v| clip.denoise = v,
+    );
+    connect_color_slider(
+        &sharpness_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_color_changed.clone(),
+        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
+        denoise_slider.clone(), sharpness_slider.clone(),
+        |clip, v| clip.sharpness = v,
     );
 
     let view = Rc::new(InspectorView {
@@ -265,6 +315,8 @@ pub fn build_inspector(
         brightness_slider,
         contrast_slider,
         saturation_slider,
+        denoise_slider,
+        sharpness_slider,
         updating,
     });
 

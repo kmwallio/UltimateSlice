@@ -17,8 +17,10 @@ pub enum PlayerState {
 pub struct Player {
     pipeline: gst::Element,
     state: Arc<Mutex<PlayerState>>,
-    /// videobalance element inserted as playbin's video-filter for color correction
+    /// videobalance element for color correction (brightness/contrast/saturation)
     videobalance: Option<gst::Element>,
+    /// gaussianblur element for denoise (positive sigma) / sharpness (negative sigma)
+    gaussianblur: Option<gst::Element>,
 }
 
 impl Player {
@@ -53,16 +55,37 @@ impl Player {
             .property("video-sink", &video_sink)
             .build()?;
 
-        // Build a videobalance element for per-clip color correction.
-        // Set it as playbin's video-filter (must be done while in NULL state).
+        // Build a filter bin: videobalance ! videoconvert ! gaussianblur
+        // Chained as playbin's video-filter for per-clip color + denoise/sharpness.
+        // gaussianblur requires AYUV caps, so videoconvert is inserted between them.
         let videobalance = gst::ElementFactory::make("videobalance").build().ok();
-        if let Some(ref vb) = videobalance {
+        let gaussianblur = gst::ElementFactory::make("gaussianblur").build().ok();
+
+        if videobalance.is_some() && gaussianblur.is_some() {
+            let vb = videobalance.as_ref().unwrap();
+            let gb = gaussianblur.as_ref().unwrap();
+            // sigma=0 means no blur/sharpen (neutral)
+            gb.set_property("sigma", 0.0_f64);
+
+            let bin = gst::Bin::new();
+            let conv = gst::ElementFactory::make("videoconvert").build()
+                .expect("videoconvert must be available");
+            bin.add_many([vb, &conv, gb]).ok();
+            gst::Element::link_many([vb, &conv, gb]).ok();
+            // Ghost pads expose the bin's sink (videobalance) and src (gaussianblur) pads
+            let sink_pad = vb.static_pad("sink").unwrap();
+            let src_pad = gb.static_pad("src").unwrap();
+            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+            pipeline.set_property("video-filter", &bin);
+        } else if let Some(ref vb) = videobalance {
+            // Fallback: videobalance only (no gaussianblur plugin)
             pipeline.set_property("video-filter", vb);
         }
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
 
-        Ok((Self { pipeline, state, videobalance }, paintable))
+        Ok((Self { pipeline, state, videobalance, gaussianblur }, paintable))
     }
 
     /// Load a URI (e.g. `file:///path/to/video.mp4`)
@@ -157,15 +180,26 @@ impl Player {
         self.state.lock().unwrap().clone()
     }
 
-    /// Apply color correction to the video-filter (videobalance element).
+    /// Apply color correction and denoise/sharpness to the video filter elements.
     /// - brightness: -1.0 to 1.0 (0.0 = neutral)
     /// - contrast:   0.0 to 2.0  (1.0 = neutral)
     /// - saturation: 0.0 to 2.0  (1.0 = neutral)
+    /// - denoise:    0.0 to 1.0  (0.0 = off; maps to positive gaussianblur sigma)
+    /// - sharpness:  -1.0 to 1.0 (0.0 = neutral; negative = soften, positive = sharpen)
     pub fn set_color(&self, brightness: f64, contrast: f64, saturation: f64) {
         if let Some(ref vb) = self.videobalance {
             vb.set_property("brightness", brightness.clamp(-1.0, 1.0));
             vb.set_property("contrast", contrast.clamp(0.0, 2.0));
             vb.set_property("saturation", saturation.clamp(0.0, 2.0));
+        }
+    }
+
+    /// Apply denoise and sharpness via the gaussianblur video filter.
+    /// Combined sigma = denoise * 4 − sharpness * 6 (clamped to −20..20).
+    pub fn set_denoise_sharpness(&self, denoise: f64, sharpness: f64) {
+        if let Some(ref gb) = self.gaussianblur {
+            let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
+            gb.set_property("sigma", sigma);
         }
     }
 
