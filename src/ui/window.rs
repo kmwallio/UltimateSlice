@@ -501,6 +501,34 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
+    // ── Window-level M key: add marker at current playhead (works regardless of focus) ──
+    {
+        let project = project.clone();
+        let prog_player = prog_player.clone();
+        let on_project_changed = on_project_changed.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, _mods| {
+            use gtk4::gdk::Key;
+            if key != Key::m && key != Key::M {
+                return glib::Propagation::Proceed;
+            }
+            // Don't intercept M when a text entry or similar has focus
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let pos = prog_player.borrow().timeline_pos_ns;
+            project.borrow_mut().add_marker(pos, "Marker");
+            on_project_changed();
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
+
     window.present();
 }
 

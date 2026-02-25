@@ -654,13 +654,6 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 Key::z if ctrl && shift  => { st.redo(); notify_project = true; true }
                 Key::y if ctrl           => { st.redo(); notify_project = true; true }
                 Key::Delete | Key::BackSpace => { st.delete_selected(); notify_project = true; true }
-                Key::m | Key::M => {
-                    // M = add marker at playhead
-                    let pos = st.playhead_ns;
-                    st.project.borrow_mut().add_marker(pos, "Marker");
-                    notify_project = true;
-                    true
-                }
                 Key::space => {
                     let pp_cb = st.on_play_pause.clone();
                     drop(st);
