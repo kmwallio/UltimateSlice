@@ -35,12 +35,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
 
-    // ── Build inspector ───────────────────────────────────────────────────
-    let (inspector_box, inspector_view) = inspector::build_inspector(
-        project.clone(),
-        || {},
-    );
-
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
 
@@ -57,6 +51,31 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
         })
     };
+
+    // ── Build inspector (after on_project_changed is defined so we can pass it) ──
+    let (inspector_box, inspector_view) = inspector::build_inspector(
+        project.clone(),
+        // on_clip_changed: name changes → full project-changed cycle
+        {
+            let cb = on_project_changed.clone();
+            move || cb()
+        },
+        // on_color_changed: color slider → direct videobalance update, no pipeline reload
+        {
+            let prog_player = prog_player.clone();
+            let window_weak = window_weak.clone();
+            let project = project.clone();
+            move |b, c, s| {
+                prog_player.borrow_mut().update_current_color(b as f64, c as f64, s as f64);
+                // Update window title dirty marker without a full reload
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
+    );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
     {
@@ -285,8 +304,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
 
-            // Reload program player (GStreamer state change; must not hold proj borrow)
+            // Reload program player — preserve current position so the monitor
+            // doesn't jump to 0 on every project change (e.g., clip name edit).
+            let prev_pos = prog_player.borrow().timeline_pos_ns;
+            let was_playing = matches!(
+                prog_player.borrow().state(),
+                crate::media::player::PlayerState::Playing
+            );
             prog_player.borrow_mut().load_clips(clips);
+            // Seek back to the previous position (loads the clip at that point
+            // and applies the current color correction values).
+            if !prog_player.borrow().clips.is_empty() {
+                prog_player.borrow_mut().seek(prev_pos);
+                if was_playing {
+                    prog_player.borrow_mut().play();
+                }
+            }
 
             // Force immediate timeline redraw (don't wait for 100ms timer)
             if let Some(p) = panel_weak.upgrade() {
@@ -394,6 +427,9 @@ fn handle_mcp_command(
                     "source_in_ns":     c.source_in,
                     "source_out_ns":    c.source_out,
                     "duration_ns":      c.duration(),
+                    "brightness":       c.brightness,
+                    "contrast":         c.contrast,
+                    "saturation":       c.saturation,
                 })))
                 .collect();
             reply.send(json!(clips)).ok();

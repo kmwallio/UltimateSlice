@@ -4,6 +4,13 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Fixed
+- **Timeline scrubber position preservation**: `on_project_changed` now saves the current playhead position before rebuilding the program monitor clip list and restores it via a seek afterward, preventing the playhead from jumping to 0:00 on every project change (clip rename, color adjustment, etc.).
+- **Inspector callbacks wired correctly**: `build_inspector` was previously called with an empty `|| {}` closure before `on_project_changed` was defined; it is now called after, and receives the real callback so clip name changes trigger proper UI updates.
+- **Color sliders update preview live**: Color slider changes now call `prog_player.update_current_color()` directly (sets GStreamer `videobalance` properties + issues a flush seek to force frame redecode) rather than routing through the full `load_clips` pipeline reset, giving instant visual feedback without position loss.
+- **Same-clip seek optimization in ProgramPlayer**: `load_clip_idx` now detects when the requested clip is already loaded and performs a lightweight seek instead of a full pipeline teardown, making scrubbing within a single clip fast and reliable.
+- **`list_clips` MCP response now includes color fields**: `brightness`, `contrast`, `saturation` are included alongside other clip properties.
+
 ### Added
 - Basic color correction per clip (brightness / contrast / saturation):
   - Added `brightness` (f32, default 0.0), `contrast` (f32, default 1.0), `saturation` (f32, default 1.0) fields to `Clip` model with `#[serde(default)]` so existing FCPXML/save files load without change.

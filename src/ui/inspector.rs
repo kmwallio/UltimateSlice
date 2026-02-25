@@ -70,9 +70,14 @@ impl InspectorView {
 
 /// Build the inspector panel.
 /// Returns `(widget, InspectorView)` — keep `InspectorView` and call `.update()` on selection changes.
+///
+/// - `on_clip_changed`: fired when the clip name is applied (triggers full project-changed cycle).
+/// - `on_color_changed`: fired on every color slider movement with `(brightness, contrast, saturation)`;
+///   should update the program player's videobalance directly without a full pipeline reload.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
-    on_clip_updated: impl Fn() + 'static,
+    on_clip_changed: impl Fn() + 'static,
+    on_color_changed: impl Fn(f32, f32, f32) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -162,14 +167,15 @@ pub fn build_inspector(
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
-    let on_clip_updated = Rc::new(on_clip_updated);
+    let on_clip_changed = Rc::new(on_clip_changed);
+    let on_color_changed = Rc::new(on_color_changed);
 
-    // Apply name button
+    // Apply name button — triggers full on_project_changed
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let name_entry_cb = name_entry.clone();
-        let on_clip_updated = on_clip_updated.clone();
+        let on_clip_changed = on_clip_changed.clone();
 
         apply_btn.connect_clicked(move |_| {
             let new_name = name_entry_cb.text().to_string();
@@ -186,18 +192,22 @@ pub fn build_inspector(
                         }
                     }
                 }
-                on_clip_updated();
+                on_clip_changed();
             }
         });
     }
 
-    // Helper: connect a color slider to update the clip and notify
+    // Helper: connect a color slider — updates the model and fires on_color_changed
+    // with all three color values so the program player can update its videobalance directly.
     fn connect_color_slider(
         slider: &Scale,
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_clip_updated: Rc<dyn Fn()>,
+        on_color_changed: Rc<dyn Fn(f32, f32, f32)>,
+        brightness_slider: Scale,
+        contrast_slider: Scale,
+        saturation_slider: Scale,
         apply: fn(&mut crate::model::clip::Clip, f32),
     ) {
         slider.connect_value_changed(move |s| {
@@ -205,6 +215,7 @@ pub fn build_inspector(
             let val = s.value() as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
+                // Update the correct field in the model
                 {
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
@@ -215,24 +226,31 @@ pub fn build_inspector(
                         }
                     }
                 }
-                on_clip_updated();
+                // Fire lightweight color callback with all three current values
+                let b = brightness_slider.value() as f32;
+                let c = contrast_slider.value() as f32;
+                let sat = saturation_slider.value() as f32;
+                on_color_changed(b, c, sat);
             }
         });
     }
 
     connect_color_slider(
         &brightness_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_clip_updated.clone(),
+        updating.clone(), on_color_changed.clone(),
+        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
         |clip, v| clip.brightness = v,
     );
     connect_color_slider(
         &contrast_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_clip_updated.clone(),
+        updating.clone(), on_color_changed.clone(),
+        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
         |clip, v| clip.contrast = v,
     );
     connect_color_slider(
         &saturation_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_clip_updated.clone(),
+        updating.clone(), on_color_changed.clone(),
+        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
         |clip, v| clip.saturation = v,
     );
 

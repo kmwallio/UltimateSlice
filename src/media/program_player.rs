@@ -32,7 +32,7 @@ impl ProgramClip {
 pub struct ProgramPlayer {
     pipeline: gst::Element,
     state: PlayerState,
-    clips: Vec<ProgramClip>,
+    pub clips: Vec<ProgramClip>,
     current_idx: Option<usize>,
     /// Cached timeline position in nanoseconds (updated by `poll`)
     pub timeline_pos_ns: u64,
@@ -172,6 +172,29 @@ impl ProgramPlayer {
         changed
     }
 
+    /// Directly update color correction on the current clip without reloading the pipeline.
+    /// Sets the videobalance properties and forces a re-seek at the current source position
+    /// so the PAUSED frame is redrawn with the new color.
+    pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
+        if let Some(ref vb) = self.videobalance {
+            vb.set_property("brightness", brightness.clamp(-1.0, 1.0));
+            vb.set_property("contrast",   contrast.clamp(0.0, 2.0));
+            vb.set_property("saturation", saturation.clamp(0.0, 2.0));
+        }
+        // In PAUSED state, force frame redecode at the current source position.
+        // In PLAYING state, the next decoded frame will automatically pick up the new values.
+        if self.current_idx.is_some() && self.state != PlayerState::Playing {
+            let src_pos = self.pipeline
+                .query_position::<gst::ClockTime>()
+                .map(|t| t.nseconds())
+                .unwrap_or(0);
+            let _ = self.pipeline.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_nseconds(src_pos),
+            );
+        }
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────
 
     fn clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
@@ -185,23 +208,31 @@ impl ProgramPlayer {
         let source_seek_ns = clip.source_in_ns
             + timeline_pos_ns.saturating_sub(clip.timeline_start_ns);
 
-        let uri = format!("file://{}", clip.source_path);
-        let _ = self.pipeline.set_state(gst::State::Ready);
-        self.pipeline.set_property("uri", &uri);
-        let _ = self.pipeline.set_state(gst::State::Paused);
-
-        // Apply per-clip color correction
+        // Apply per-clip color correction (always, before seek so new frame uses it)
         if let Some(ref vb) = self.videobalance {
             vb.set_property("brightness", clip.brightness.clamp(-1.0, 1.0));
             vb.set_property("contrast",   clip.contrast.clamp(0.0, 2.0));
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
         }
 
-        // Seek to correct source position
-        let _ = self.pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-            gst::ClockTime::from_nseconds(source_seek_ns),
-        );
+        if self.current_idx == Some(idx) {
+            // Same clip already loaded — just seek to the new position. No pipeline reset.
+            let _ = self.pipeline.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_nseconds(source_seek_ns),
+            );
+        } else {
+            // Different clip — reload the pipeline.
+            let uri = format!("file://{}", clip.source_path);
+            let _ = self.pipeline.set_state(gst::State::Ready);
+            self.pipeline.set_property("uri", &uri);
+            let _ = self.pipeline.set_state(gst::State::Paused);
+            // Seek with FLUSH — valid during async PAUSED pre-roll for local files.
+            let _ = self.pipeline.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_nseconds(source_seek_ns),
+            );
+        }
 
         self.current_idx = Some(idx);
         self.timeline_pos_ns = timeline_pos_ns;
