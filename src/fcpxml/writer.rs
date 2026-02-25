@@ -56,6 +56,13 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("duration", duration.as_str()));
             asset_clip.push_attribute(("start", start.as_str()));
             asset_clip.push_attribute(("name", clip.label.as_str()));
+            // Store color/effects as custom vendor attributes (us: prefix).
+            // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
+            asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
+            asset_clip.push_attribute(("us:contrast",   clip.contrast.to_string().as_str()));
+            asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
+            asset_clip.push_attribute(("us:denoise",    clip.denoise.to_string().as_str()));
+            asset_clip.push_attribute(("us:sharpness",  clip.sharpness.to_string().as_str()));
             writer.write_event(Event::Empty(asset_clip))?;
         }
     }

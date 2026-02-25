@@ -97,6 +97,12 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                     clip.source_out = source_in + duration;
                                     clip.timeline_start = timeline_start;
                                     clip.label = label;
+                                    // Restore color/effects from vendor attributes
+                                    if let Some(v) = attrs.get("us:brightness") { clip.brightness = v.parse().unwrap_or(0.0); }
+                                    if let Some(v) = attrs.get("us:contrast")   { clip.contrast   = v.parse().unwrap_or(1.0); }
+                                    if let Some(v) = attrs.get("us:saturation") { clip.saturation = v.parse().unwrap_or(1.0); }
+                                    if let Some(v) = attrs.get("us:denoise")    { clip.denoise    = v.parse().unwrap_or(0.0); }
+                                    if let Some(v) = attrs.get("us:sharpness")  { clip.sharpness  = v.parse().unwrap_or(0.0); }
                                     track.add_clip(clip);
                                 }
                             }
