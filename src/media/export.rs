@@ -13,13 +13,62 @@ pub enum ExportProgress {
     Error(String),
 }
 
-/// Export the project to an MP4 file at `output_path`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VideoCodec { H264, H265, Vp9, ProRes, Av1 }
+#[derive(Debug, Clone, PartialEq)]
+pub enum AudioCodec { Aac, Opus, Flac, Pcm }
+#[derive(Debug, Clone, PartialEq)]
+pub enum Container { Mp4, Mov, WebM, Mkv }
+
+impl Container {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Container::Mp4  => "mp4",
+            Container::Mov  => "mov",
+            Container::WebM => "webm",
+            Container::Mkv  => "mkv",
+        }
+    }
+}
+
+/// Options for a single export operation.
+#[derive(Debug, Clone)]
+pub struct ExportOptions {
+    pub video_codec: VideoCodec,
+    pub container: Container,
+    /// 0 = use project resolution
+    pub output_width: u32,
+    pub output_height: u32,
+    /// CRF quality value (lower = better quality / larger file)
+    pub crf: u32,
+    pub audio_codec: AudioCodec,
+    pub audio_bitrate_kbps: u32,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            video_codec: VideoCodec::H264,
+            container: Container::Mp4,
+            output_width: 0,
+            output_height: 0,
+            crf: 23,
+            audio_codec: AudioCodec::Aac,
+            audio_bitrate_kbps: 192,
+        }
+    }
+}
+
+/// Export the project to a file at `output_path` using `options`.
 /// Sends progress to `tx`. Call this from a background thread.
 pub fn export_project(
     project: &Project,
     output_path: &str,
+    options: ExportOptions,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
+    let out_w = if options.output_width  == 0 { project.width  } else { options.output_width  };
+    let out_h = if options.output_height == 0 { project.height } else { options.output_height };
     let mut video_clips: Vec<_> = project.video_tracks()
         .flat_map(|t| t.clips.iter())
         .collect();
@@ -97,7 +146,7 @@ pub fn export_project(
         };
         filter.push_str(&format!(
             "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}[v{i}];",
-            project.width, project.height, project.width, project.height,
+            out_w, out_h, out_w, out_h,
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
@@ -143,15 +192,29 @@ pub fn export_project(
         .arg("-map").arg("[vout]");
 
     if has_audio {
-        cmd.arg("-map").arg("[aout]")
-            .arg("-c:a").arg("aac")
-            .arg("-b:a").arg("192k");
+        cmd.arg("-map").arg("[aout]");
+        match options.audio_codec {
+            AudioCodec::Aac  => { cmd.arg("-c:a").arg("aac").arg("-b:a").arg(format!("{}k", options.audio_bitrate_kbps)); }
+            AudioCodec::Opus => { cmd.arg("-c:a").arg("libopus").arg("-b:a").arg(format!("{}k", options.audio_bitrate_kbps)); }
+            AudioCodec::Flac => { cmd.arg("-c:a").arg("flac"); }
+            AudioCodec::Pcm  => { cmd.arg("-c:a").arg("pcm_s24le"); }
+        }
     }
 
-    cmd.arg("-c:v").arg("libx264")
-        .arg("-pix_fmt").arg("yuv420p")
-        .arg("-movflags").arg("+faststart")
-        .arg(output_path)
+    match options.video_codec {
+        VideoCodec::H264   => { cmd.arg("-c:v").arg("libx264").arg("-crf").arg(options.crf.to_string()).arg("-pix_fmt").arg("yuv420p"); }
+        VideoCodec::H265   => { cmd.arg("-c:v").arg("libx265").arg("-crf").arg(options.crf.to_string()).arg("-pix_fmt").arg("yuv420p"); }
+        VideoCodec::Vp9    => { cmd.arg("-c:v").arg("libvpx-vp9").arg("-crf").arg(options.crf.to_string()).arg("-b:v").arg("0").arg("-pix_fmt").arg("yuv420p"); }
+        VideoCodec::ProRes => { cmd.arg("-c:v").arg("prores_ks").arg("-profile:v").arg("3"); }
+        VideoCodec::Av1    => { cmd.arg("-c:v").arg("libaom-av1").arg("-crf").arg(options.crf.to_string()).arg("-b:v").arg("0").arg("-pix_fmt").arg("yuv420p"); }
+    }
+
+    // Container-specific flags
+    if matches!(options.container, Container::Mp4 | Container::Mov) {
+        cmd.arg("-movflags").arg("+faststart");
+    }
+
+    cmd.arg(output_path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 

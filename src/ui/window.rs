@@ -748,7 +748,7 @@ fn handle_mcp_command(
                 let path_worker = path.clone();
                 std::thread::spawn(move || {
                     let (tx, _rx) = std::sync::mpsc::channel();
-                    let result = crate::media::export::export_project(&proj_worker, &path_worker, tx)
+                    let result = crate::media::export::export_project(&proj_worker, &path_worker, crate::media::export::ExportOptions::default(), tx)
                         .map_err(|e| e.to_string())
                         .map(|_| ());
                     let _ = done_tx.send(result);

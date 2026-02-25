@@ -4,9 +4,9 @@ use gio;
 use glib;
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::model::project::Project;
+use crate::model::project::{Project, FrameRate};
 use crate::fcpxml;
-use crate::media::export::{export_project, ExportProgress};
+use crate::media::export::{export_project, ExportProgress, ExportOptions, VideoCodec, AudioCodec, Container};
 use crate::ui::timeline::{TimelineState, ActiveTool};
 
 /// Build the main `HeaderBar` toolbar.
@@ -137,78 +137,308 @@ pub fn build_toolbar(
     }
     header.pack_start(&btn_save);
 
-    // Export MP4
-    let btn_export = Button::with_label("Export MP4…");
-    btn_export.set_tooltip_text(Some("Export to MP4/H.264"));
+    // ── Project Settings ─────────────────────────────────────────────────
+    let btn_settings = Button::with_label("⚙ Settings");
+    btn_settings.set_tooltip_text(Some("Project canvas size and frame rate"));
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        btn_settings.connect_clicked(move |btn| {
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let proj = project.borrow();
+
+            let dialog = gtk::Dialog::builder()
+                .title("Project Settings")
+                .default_width(360)
+                .build();
+            dialog.set_transient_for(window.as_ref());
+            dialog.set_modal(true);
+
+            let grid = gtk::Grid::new();
+            grid.set_margin_start(16); grid.set_margin_end(16);
+            grid.set_margin_top(16);  grid.set_margin_bottom(16);
+            grid.set_row_spacing(10); grid.set_column_spacing(12);
+
+            // Resolution preset
+            let res_label = gtk::Label::new(Some("Resolution:"));
+            res_label.set_halign(gtk::Align::End);
+            let res_combo = gtk::DropDown::from_strings(&[
+                "1920 × 1080  (1080p HD)",
+                "3840 × 2160  (4K UHD)",
+                "1280 × 720   (720p HD)",
+                "720 × 480    (SD NTSC)",
+                "1080 × 1920  (9:16 Vertical)",
+                "1080 × 1080  (1:1 Square)",
+            ]);
+            let res_idx = match (proj.width, proj.height) {
+                (1920, 1080) => 0,
+                (3840, 2160) => 1,
+                (1280, 720)  => 2,
+                (720, 480)   => 3,
+                (1080, 1920) => 4,
+                (1080, 1080) => 5,
+                _             => 0,
+            };
+            res_combo.set_selected(res_idx);
+            grid.attach(&res_label, 0, 0, 1, 1);
+            grid.attach(&res_combo, 1, 0, 1, 1);
+
+            // Frame rate preset
+            let fps_label = gtk::Label::new(Some("Frame Rate:"));
+            fps_label.set_halign(gtk::Align::End);
+            let fps_combo = gtk::DropDown::from_strings(&[
+                "23.976 fps",
+                "24 fps",
+                "25 fps",
+                "29.97 fps",
+                "30 fps",
+                "60 fps",
+            ]);
+            let fps_idx = match (proj.frame_rate.numerator, proj.frame_rate.denominator) {
+                (24000, 1001) | (2997, 125) => 0,
+                (24, 1) => 1,
+                (25, 1) => 2,
+                (30000, 1001) => 3,
+                (30, 1) => 4,
+                (60, 1) => 5,
+                _ => 1,
+            };
+            fps_combo.set_selected(fps_idx);
+            grid.attach(&fps_label, 0, 1, 1, 1);
+            grid.attach(&fps_combo, 1, 1, 1, 1);
+
+            dialog.content_area().append(&grid);
+            dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            dialog.add_button("Apply", gtk::ResponseType::Accept);
+
+            drop(proj);
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            dialog.connect_response(move |d, resp| {
+                if resp == gtk::ResponseType::Accept {
+                    let (w, h) = match res_combo.selected() {
+                        0 => (1920, 1080),
+                        1 => (3840, 2160),
+                        2 => (1280, 720),
+                        3 => (720, 480),
+                        4 => (1080, 1920),
+                        5 => (1080, 1080),
+                        _ => (1920, 1080),
+                    };
+                    let fr = match fps_combo.selected() {
+                        0 => FrameRate { numerator: 24000, denominator: 1001 },
+                        1 => FrameRate { numerator: 24, denominator: 1 },
+                        2 => FrameRate { numerator: 25, denominator: 1 },
+                        3 => FrameRate { numerator: 30000, denominator: 1001 },
+                        4 => FrameRate { numerator: 30, denominator: 1 },
+                        5 => FrameRate { numerator: 60, denominator: 1 },
+                        _ => FrameRate { numerator: 24, denominator: 1 },
+                    };
+                    let mut proj = project.borrow_mut();
+                    proj.width = w;
+                    proj.height = h;
+                    proj.frame_rate = fr;
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+                d.close();
+            });
+            dialog.present();
+        });
+    }
+    header.pack_start(&btn_settings);
+
+    // ── Advanced Export ──────────────────────────────────────────────────
+    let btn_export = Button::with_label("Export…");
+    btn_export.set_tooltip_text(Some("Export with codec and resolution options"));
     btn_export.add_css_class("suggested-action");
     {
         let project = project.clone();
         btn_export.connect_clicked(move |btn| {
-            let dialog = gtk::FileDialog::new();
-            dialog.set_title("Export MP4");
-            dialog.set_initial_name(Some("export.mp4"));
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let proj_w = project.borrow().width;
+            let proj_h = project.borrow().height;
+
+            // ── Export options dialog ──
+            let opt_dialog = gtk::Dialog::builder()
+                .title("Export Settings")
+                .default_width(400)
+                .build();
+            opt_dialog.set_transient_for(window.as_ref());
+            opt_dialog.set_modal(true);
+
+            let grid = gtk::Grid::new();
+            grid.set_margin_start(16); grid.set_margin_end(16);
+            grid.set_margin_top(16);  grid.set_margin_bottom(16);
+            grid.set_row_spacing(10); grid.set_column_spacing(12);
+
+            // Video codec
+            let vc_label = gtk::Label::new(Some("Video Codec:"));
+            vc_label.set_halign(gtk::Align::End);
+            let vc_combo = gtk::DropDown::from_strings(&["H.264 (libx264)", "H.265 / HEVC (libx265)", "VP9 (libvpx-vp9)", "ProRes (prores_ks)", "AV1 (libaom-av1)"]);
+            vc_combo.set_selected(0);
+            grid.attach(&vc_label, 0, 0, 1, 1);
+            grid.attach(&vc_combo, 1, 0, 1, 1);
+
+            // Container
+            let ct_label = gtk::Label::new(Some("Container:"));
+            ct_label.set_halign(gtk::Align::End);
+            let ct_combo = gtk::DropDown::from_strings(&["MP4 (.mp4)", "QuickTime (.mov)", "WebM (.webm)", "Matroska (.mkv)"]);
+            ct_combo.set_selected(0);
+            grid.attach(&ct_label, 0, 1, 1, 1);
+            grid.attach(&ct_combo, 1, 1, 1, 1);
+
+            // Output resolution
+            let or_label = gtk::Label::new(Some("Resolution:"));
+            or_label.set_halign(gtk::Align::End);
+            let or_combo = gtk::DropDown::from_strings(&[
+                &format!("Same as project  ({}×{})", proj_w, proj_h),
+                "3840 × 2160  (4K)",
+                "1920 × 1080  (1080p)",
+                "1280 × 720   (720p)",
+                "854 × 480    (480p)",
+            ]);
+            or_combo.set_selected(0);
+            grid.attach(&or_label, 0, 2, 1, 1);
+            grid.attach(&or_combo, 1, 2, 1, 1);
+
+            // CRF
+            let crf_label = gtk::Label::new(Some("Quality (CRF):"));
+            crf_label.set_halign(gtk::Align::End);
+            let crf_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let crf_slider = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 51.0, 1.0);
+            crf_slider.set_value(23.0);
+            crf_slider.set_hexpand(true);
+            crf_slider.set_draw_value(true);
+            crf_slider.set_tooltip_text(Some("Lower = better quality / larger file (0–51)"));
+            let crf_hint = gtk::Label::new(Some("(lower = better)"));
+            crf_hint.add_css_class("dim-label");
+            crf_box.append(&crf_slider);
+            crf_box.append(&crf_hint);
+            grid.attach(&crf_label, 0, 3, 1, 1);
+            grid.attach(&crf_box,   1, 3, 1, 1);
+
+            // Audio codec
+            let ac_label = gtk::Label::new(Some("Audio Codec:"));
+            ac_label.set_halign(gtk::Align::End);
+            let ac_combo = gtk::DropDown::from_strings(&["AAC", "Opus", "FLAC (lossless)", "PCM (uncompressed)"]);
+            ac_combo.set_selected(0);
+            grid.attach(&ac_label, 0, 4, 1, 1);
+            grid.attach(&ac_combo, 1, 4, 1, 1);
+
+            // Audio bitrate
+            let ab_label = gtk::Label::new(Some("Audio Bitrate:"));
+            ab_label.set_halign(gtk::Align::End);
+            let ab_entry = gtk::Entry::new();
+            ab_entry.set_text("192");
+            ab_entry.set_tooltip_text(Some("Audio bitrate in kbps (ignored for FLAC/PCM)"));
+            grid.attach(&ab_label, 0, 5, 1, 1);
+            grid.attach(&ab_entry, 1, 5, 1, 1);
+
+            opt_dialog.content_area().append(&grid);
+            opt_dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            opt_dialog.add_button("Choose Output File…", gtk::ResponseType::Accept);
 
             let project = project.clone();
-            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            opt_dialog.connect_response(move |d, resp| {
+                if resp != gtk::ResponseType::Accept { d.close(); return; }
 
-            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        let output = path.to_string_lossy().to_string();
-                        let output_clone = output.clone();
-                        let proj = project.borrow().clone();
+                let video_codec = match vc_combo.selected() {
+                    0 => VideoCodec::H264,
+                    1 => VideoCodec::H265,
+                    2 => VideoCodec::Vp9,
+                    3 => VideoCodec::ProRes,
+                    4 => VideoCodec::Av1,
+                    _ => VideoCodec::H264,
+                };
+                let container = match ct_combo.selected() {
+                    0 => Container::Mp4,
+                    1 => Container::Mov,
+                    2 => Container::WebM,
+                    3 => Container::Mkv,
+                    _ => Container::Mp4,
+                };
+                let (out_w, out_h) = match or_combo.selected() {
+                    0 => (0u32, 0u32),
+                    1 => (3840, 2160),
+                    2 => (1920, 1080),
+                    3 => (1280, 720),
+                    4 => (854, 480),
+                    _ => (0, 0),
+                };
+                let crf = crf_slider.value() as u32;
+                let audio_codec = match ac_combo.selected() {
+                    0 => AudioCodec::Aac,
+                    1 => AudioCodec::Opus,
+                    2 => AudioCodec::Flac,
+                    3 => AudioCodec::Pcm,
+                    _ => AudioCodec::Aac,
+                };
+                let audio_bitrate_kbps = ab_entry.text().parse::<u32>().unwrap_or(192);
+                let ext = container.extension();
 
-                        let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
+                let options = ExportOptions { video_codec, container, output_width: out_w, output_height: out_h, crf, audio_codec, audio_bitrate_kbps };
+                d.close();
 
-                        // Run export on a background thread
-                        std::thread::spawn(move || {
-                            if let Err(e) = export_project(&proj, &output_clone, tx.clone()) {
-                                let _ = tx.send(ExportProgress::Error(e.to_string()));
+                // Now open file-chooser for the output path
+                let file_dialog = gtk::FileDialog::new();
+                file_dialog.set_title("Export — Choose Output File");
+                file_dialog.set_initial_name(Some(&format!("export.{ext}")));
+
+                let window: Option<gtk::Window> = None; // no parent at this point
+                let project = project.clone();
+                file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            let output = path.to_string_lossy().to_string();
+                            let output_clone = output.clone();
+                            let proj = project.borrow().clone();
+                            let opts = options.clone();
+
+                            let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
+
+                            std::thread::spawn(move || {
+                                if let Err(e) = export_project(&proj, &output_clone, opts, tx.clone()) {
+                                    let _ = tx.send(ExportProgress::Error(e.to_string()));
+                                }
+                            });
+
+                            // Progress dialog
+                            let progress_dialog = gtk::Window::builder()
+                                .title("Exporting…")
+                                .default_width(380)
+                                .build();
+                            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                            vbox.set_margin_start(20); vbox.set_margin_end(20);
+                            vbox.set_margin_top(20);   vbox.set_margin_bottom(20);
+
+                            let status_label = gtk::Label::new(Some("Preparing export…"));
+                            status_label.set_halign(gtk::Align::Start);
+
+                            let progress_bar = gtk::ProgressBar::new();
+                            progress_bar.set_show_text(true);
+                            progress_bar.set_text(Some("0%"));
+
+                            let close_btn = gtk::Button::with_label("Cancel");
+                            close_btn.set_halign(gtk::Align::End);
+
+                            vbox.append(&status_label);
+                            vbox.append(&progress_bar);
+                            vbox.append(&close_btn);
+                            progress_dialog.set_child(Some(&vbox));
+                            progress_dialog.present();
+
+                            {
+                                let pd = progress_dialog.clone();
+                                close_btn.connect_clicked(move |_| { pd.close(); });
                             }
-                        });
 
-                        // Build a progress dialog
-                        let progress_dialog = gtk::Window::builder()
-                            .title("Exporting…")
-                            .default_width(360)
-                            .build();
-                        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-                        vbox.set_margin_start(20);
-                        vbox.set_margin_end(20);
-                        vbox.set_margin_top(20);
-                        vbox.set_margin_bottom(20);
-
-                        let status_label = gtk::Label::new(Some("Preparing export…"));
-                        status_label.set_halign(gtk::Align::Start);
-
-                        let progress_bar = gtk::ProgressBar::new();
-                        progress_bar.set_show_text(true);
-                        progress_bar.set_text(Some("0%"));
-
-                        let cancel_btn = gtk::Button::with_label("Cancel");
-                        cancel_btn.set_halign(gtk::Align::End);
-
-                        vbox.append(&status_label);
-                        vbox.append(&progress_bar);
-                        vbox.append(&cancel_btn);
-                        progress_dialog.set_child(Some(&vbox));
-                        progress_dialog.present();
-
-                        // Cancel is not yet wired to stop the background thread —
-                        // just close the dialog for now
-                        {
-                            let pd = progress_dialog.clone();
-                            cancel_btn.connect_clicked(move |_| { pd.close(); });
-                        }
-
-                        // Poll progress on the GTK main loop
-                        glib::timeout_add_local(
-                            std::time::Duration::from_millis(200),
-                            move || {
+                            glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
                                 while let Ok(msg) = rx.try_recv() {
                                     match msg {
                                         ExportProgress::Progress(p) => {
-                                            progress_bar.set_fraction(p as f64);
+                                            progress_bar.set_fraction(p);
                                             progress_bar.set_text(Some(&format!("{:.0}%", p * 100.0)));
                                             status_label.set_text(&format!("Exporting to {output}…"));
                                         }
@@ -216,23 +446,24 @@ pub fn build_toolbar(
                                             progress_bar.set_fraction(1.0);
                                             progress_bar.set_text(Some("Done!"));
                                             status_label.set_text("Export complete.");
-                                            cancel_btn.set_label("Close");
+                                            close_btn.set_label("Close");
                                             return glib::ControlFlow::Break;
                                         }
                                         ExportProgress::Error(e) => {
                                             status_label.set_text(&format!("Error: {e}"));
-                                            cancel_btn.set_label("Close");
+                                            close_btn.set_label("Close");
                                             eprintln!("Export error: {e}");
                                             return glib::ControlFlow::Break;
                                         }
                                     }
                                 }
                                 glib::ControlFlow::Continue
-                            },
-                        );
+                            });
+                        }
                     }
-                }
+                });
             });
+            opt_dialog.present();
         });
     }
     header.pack_end(&btn_export);

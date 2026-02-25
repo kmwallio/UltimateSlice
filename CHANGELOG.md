@@ -4,6 +4,21 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Added
+- **Project Settings dialog** (`⚙ Settings` button in toolbar):
+  - Resolution presets: 1920×1080, 3840×2160, 1280×720, 720×480, 1080×1920 (vertical), 1080×1080 (square).
+  - Frame rate presets: 23.976, 24, 25, 29.97, 30, 60 fps.
+  - Changes apply immediately and mark the project dirty.
+  - Resolution and frame rate already persisted in FCPXML `<format>` element.
+- **Advanced Export dialog** (replaces the old single-button "Export MP4…"):
+  - Video codec: H.264, H.265/HEVC, VP9, ProRes (prores_ks), AV1.
+  - Container: MP4, QuickTime (.mov), WebM, Matroska (.mkv).
+  - Output resolution downscale presets: same as project, 4K, 1080p, 720p, 480p.
+  - CRF quality slider (0–51; lower = better quality).
+  - Audio codec: AAC, Opus, FLAC (lossless), PCM (uncompressed).
+  - Audio bitrate entry (kbps; ignored for lossless codecs).
+  - `ExportOptions` struct in `src/media/export.rs` drives all ffmpeg codec/container args.
+
 ### Fixed
 - **Timeline scrubber position preservation**: `on_project_changed` now saves the current playhead position before rebuilding the program monitor clip list and restores it via a seek afterward, preventing the playhead from jumping to 0:00 on every project change (clip rename, color adjustment, etc.).
 - **Inspector callbacks wired correctly**: `build_inspector` was previously called with an empty `|| {}` closure before `on_project_changed` was defined; it is now called after, and receives the real callback so clip name changes trigger proper UI updates.
