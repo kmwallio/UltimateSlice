@@ -423,10 +423,12 @@ pub fn build_preview(
             // Handle shuttle speeds != 0 and != 1 via frame stepping
             let spd = shuttle_speed.get();
             if spd != 0 && spd != 1 {
-                // Number of frames to step per 100ms tick: |speed| mapped 2→2, 3→4
+                // Frames to step per 100ms tick at each shuttle level
+                const SHUTTLE_2X_FRAMES: u64 = 2;
+                const SHUTTLE_4X_FRAMES: u64 = 4;
                 let step_frames: u64 = match spd.unsigned_abs() {
-                    2 => 2,
-                    3 => 4,
+                    2 => SHUTTLE_2X_FRAMES,
+                    3 => SHUTTLE_4X_FRAMES,
                     _ => 1,
                 };
                 let step_ns = step_frames * frame_ns.get();
@@ -522,8 +524,8 @@ fn draw_scrubber(
 fn ns_to_timecode_frames(ns: u64, frame_ns: u64) -> String {
     let frame_ns = frame_ns.max(1); // guard against division by zero
     let total_frames = ns / frame_ns;
-    let fps = (NS_PER_SECOND / frame_ns as f64).round() as u64;
-    let fps = fps.max(1);
+    // Derive fps from frame duration; clamp to at least 1 in case of rounding edge cases
+    let fps = (NS_PER_SECOND / frame_ns as f64).round().max(1.0) as u64;
     let ff = total_frames % fps;
     let total_secs = total_frames / fps;
     let h = total_secs / 3600;
