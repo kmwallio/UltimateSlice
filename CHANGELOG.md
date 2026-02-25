@@ -24,6 +24,9 @@ All notable project changes and progress should be recorded here.
   - Synced project clip sources into media library and refreshed browser list when library changes externally.
 - Media browser interaction:
   - Fixed click-to-select conflict introduced by drag source handling.
+- Timeline scrubber interaction:
+  - Fixed continuous click-and-drag scrubbing on the timeline ruler/playhead.
+  - Scrubbing now works even when Razor tool is active.
 
 ### Previous implemented milestones (recent)
 - Program monitor playback panel and timeline-linked seeking.

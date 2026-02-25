@@ -336,8 +336,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let state = state.clone();
             move |_gesture, x, y| {
                 let mut st = state.borrow_mut();
+                if y < RULER_HEIGHT {
+                    // Start ruler scrub immediately on drag-begin.
+                    let ns = st.x_to_ns(x);
+                    st.playhead_ns = ns;
+                    let seek_cb = st.on_seek.clone();
+                    drop(st);
+                    if let Some(cb) = seek_cb { cb(ns); }
+                    return;
+                }
                 if st.active_tool != ActiveTool::Select { return; }
-                if y < RULER_HEIGHT { return; }
 
                 let hit = st.hit_test(x, y);
                 if let Some(h) = hit {
@@ -383,6 +391,20 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             move |gesture, offset_x, _offset_y| {
                 let (start_x, _) = gesture.start_point().unwrap_or((0.0, 0.0));
                 let current_x = start_x + offset_x;
+                let (_, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
+
+                if start_y < RULER_HEIGHT {
+                    // Continuous ruler scrubbing while dragging.
+                    let mut st = state.borrow_mut();
+                    let ns = st.x_to_ns(current_x);
+                    st.playhead_ns = ns;
+                    let seek_cb = st.on_seek.clone();
+                    drop(st);
+                    if let Some(cb) = seek_cb { cb(ns); }
+                    if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+                    return;
+                }
+
                 let current_ns = {
                     let st = state.borrow();
                     st.x_to_ns(current_x)

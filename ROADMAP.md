@@ -50,7 +50,7 @@ Tracking docs:
 - [x] **Clip move** — drag clip body to reposition on timeline
 - [x] **Trim in-point** — drag left edge of selected clip
 - [x] **Trim out-point** — drag right edge of selected clip
-- [x] **Seek** — click ruler or scrub playhead
+- [x] **Seek/Scrub** — click and drag on ruler/playhead for continuous timeline scrubbing
 - [x] **Zoom** — scroll wheel zoom (10–2000 px/s range)
 - [x] **Pan** — horizontal scroll
 - [x] **Undo/Redo** — Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z; full command history
