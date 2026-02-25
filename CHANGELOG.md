@@ -27,6 +27,7 @@ All notable project changes and progress should be recorded here.
 - Timeline scrubber interaction:
   - Fixed continuous click-and-drag scrubbing on the timeline ruler/playhead.
   - Scrubbing now works even when Razor tool is active.
+  - Fixed timeline click/seek jumping back to 0 by syncing timeline playhead from program timeline position (not source monitor player position).
 
 ### Previous implemented milestones (recent)
 - Program monitor playback panel and timeline-linked seeking.

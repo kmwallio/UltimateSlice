@@ -299,14 +299,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     window.set_child(Some(&root_hpaned));
 
-    // Update timeline playhead from player position every 100ms.
-    // queue_draw on the panel triggers the DrawingArea inside it.
+    // Update timeline playhead from program timeline position every 100ms.
+    // (Using source player position can snap playhead back to 0 when source monitor is idle.)
     {
-        let player = player.clone();
+        let prog_player = prog_player.clone();
         let timeline_state = timeline_state.clone();
         let panel_weak = timeline_panel.downgrade();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            let pos = player.borrow().position();
+            let pos = prog_player.borrow().timeline_pos_ns;
             timeline_state.borrow_mut().playhead_ns = pos;
             if let Some(p) = panel_weak.upgrade() { p.queue_draw(); }
             glib::ControlFlow::Continue
