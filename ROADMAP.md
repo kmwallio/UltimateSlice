@@ -138,6 +138,14 @@ Tracking docs:
 - [ ] Titles / text overlay (`textoverlay`)
 - [ ] Transition effects (fade, wipe, etc.)
 
+### Video Transform (per clip)
+- [ ] Scale / resize clip (zoom in/out within frame)
+- [ ] Crop clip (left / right / top / bottom margins)
+- [ ] Rotate clip (arbitrary angle, 90° / 180° / 270° quick presets)
+- [ ] Flip horizontal / flip vertical
+- [ ] Position offset (X / Y translation within the output frame)
+- [ ] Persist transform settings in FCPXML (`us:` attributes) and apply via GStreamer `videocrop` + `videobox` + `videoflip`
+
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [ ] Recent projects list
