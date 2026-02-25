@@ -280,13 +280,12 @@ pub fn build_preview(
 
     // Set In
     {
-        let player = player.clone();
         let source_marks = source_marks.clone();
         let update_marks_bar = update_marks_bar.clone();
         let scrubber_weak = scrubber.downgrade();
         btn_set_in.connect_clicked(move |_| {
-            let pos = player.borrow().position();
             let mut m = source_marks.borrow_mut();
+            let pos = m.display_pos_ns;
             m.in_ns = pos.min(m.out_ns.saturating_sub(1_000_000));
             update_marks_bar(&m);
             drop(m);
@@ -296,13 +295,12 @@ pub fn build_preview(
 
     // Set Out
     {
-        let player = player.clone();
         let source_marks = source_marks.clone();
         let update_marks_bar = update_marks_bar.clone();
         let scrubber_weak = scrubber.downgrade();
         btn_set_out.connect_clicked(move |_| {
-            let pos = player.borrow().position();
             let mut m = source_marks.borrow_mut();
+            let pos = m.display_pos_ns;
             m.out_ns = pos.max(m.in_ns + 1_000_000);
             update_marks_bar(&m);
             drop(m);
@@ -394,8 +392,8 @@ pub fn build_preview(
             use gtk::gdk::Key;
             match key {
                 Key::i | Key::I => {
-                    let pos = player.borrow().position();
                     let mut m = source_marks.borrow_mut();
+                    let pos = m.display_pos_ns;
                     m.in_ns = pos.min(m.out_ns.saturating_sub(1_000_000));
                     update_marks_bar(&m);
                     drop(m);
@@ -403,8 +401,8 @@ pub fn build_preview(
                     glib::Propagation::Stop
                 }
                 Key::o | Key::O => {
-                    let pos = player.borrow().position();
                     let mut m = source_marks.borrow_mut();
+                    let pos = m.display_pos_ns;
                     m.out_ns = pos.max(m.in_ns + 1_000_000);
                     update_marks_bar(&m);
                     drop(m);
