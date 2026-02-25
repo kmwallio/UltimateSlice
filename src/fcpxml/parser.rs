@@ -105,6 +105,13 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                     if let Some(v) = attrs.get("us:sharpness")  { clip.sharpness  = v.parse().unwrap_or(0.0); }
                                     if let Some(v) = attrs.get("us:volume")     { clip.volume     = v.parse().unwrap_or(1.0); }
                                     if let Some(v) = attrs.get("us:pan")        { clip.pan        = v.parse().unwrap_or(0.0); }
+                                    if let Some(v) = attrs.get("us:crop-left")  { clip.crop_left  = v.parse().unwrap_or(0); }
+                                    if let Some(v) = attrs.get("us:crop-right") { clip.crop_right = v.parse().unwrap_or(0); }
+                                    if let Some(v) = attrs.get("us:crop-top")   { clip.crop_top   = v.parse().unwrap_or(0); }
+                                    if let Some(v) = attrs.get("us:crop-bottom"){ clip.crop_bottom= v.parse().unwrap_or(0); }
+                                    if let Some(v) = attrs.get("us:rotate")     { clip.rotate     = v.parse().unwrap_or(0); }
+                                    if let Some(v) = attrs.get("us:flip-h")     { clip.flip_h     = v.parse().unwrap_or(false); }
+                                    if let Some(v) = attrs.get("us:flip-v")     { clip.flip_v     = v.parse().unwrap_or(false); }
                                     track.add_clip(clip);
                                 }
                             }

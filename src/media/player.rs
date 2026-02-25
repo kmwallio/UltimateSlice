@@ -21,6 +21,12 @@ pub struct Player {
     videobalance: Option<gst::Element>,
     /// gaussianblur element for denoise (positive sigma) / sharpness (negative sigma)
     gaussianblur: Option<gst::Element>,
+    /// videocrop element for per-clip cropping
+    videocrop: Option<gst::Element>,
+    /// videoflip element for rotation
+    videoflip_rotate: Option<gst::Element>,
+    /// videoflip element for horizontal/vertical flip
+    videoflip_flip: Option<gst::Element>,
 }
 
 impl Player {
@@ -55,11 +61,18 @@ impl Player {
             .property("video-sink", &video_sink)
             .build()?;
 
-        // Build a filter bin: videobalance ! videoconvert ! gaussianblur
-        // Chained as playbin's video-filter for per-clip color + denoise/sharpness.
-        // gaussianblur requires AYUV caps, so videoconvert is inserted between them.
+        // Build a filter bin:
+        // videocrop ! videoconvert ! videobalance ! videoconvert ! gaussianblur
+        //   ! videoconvert ! videoflip_rotate ! videoconvert ! videoflip_flip
+        // Chained as playbin's video-filter for per-clip color + denoise/sharpness + transform.
         let videobalance = gst::ElementFactory::make("videobalance").build().ok();
         let gaussianblur = gst::ElementFactory::make("gaussianblur").build().ok();
+        let videocrop = gst::ElementFactory::make("videocrop").build().ok();
+        let videoflip_rotate = gst::ElementFactory::make("videoflip").build().ok();
+        let videoflip_flip = gst::ElementFactory::make("videoflip")
+            .name("videoflip_flip")
+            .build()
+            .ok();
 
         if videobalance.is_some() && gaussianblur.is_some() {
             let vb = videobalance.as_ref().unwrap();
@@ -68,15 +81,34 @@ impl Player {
             gb.set_property("sigma", 0.0_f64);
 
             let bin = gst::Bin::new();
-            let conv = gst::ElementFactory::make("videoconvert").build()
+            let conv1 = gst::ElementFactory::make("videoconvert").build()
                 .expect("videoconvert must be available");
-            bin.add_many([vb, &conv, gb]).ok();
-            gst::Element::link_many([vb, &conv, gb]).ok();
-            // Ghost pads expose the bin's sink (videobalance) and src (gaussianblur) pads
-            let sink_pad = vb.static_pad("sink").unwrap();
-            let src_pad = gb.static_pad("src").unwrap();
-            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+            let conv2 = gst::ElementFactory::make("videoconvert").build()
+                .expect("videoconvert must be available");
+
+            // Determine sink element (videocrop if available, else videobalance)
+            // and src element (last flip if available, else gaussianblur)
+            if let (Some(ref vc), Some(ref vfr), Some(ref vff)) =
+                (&videocrop, &videoflip_rotate, &videoflip_flip)
+            {
+                let conv3 = gst::ElementFactory::make("videoconvert").build()
+                    .expect("videoconvert must be available");
+                let conv4 = gst::ElementFactory::make("videoconvert").build()
+                    .expect("videoconvert must be available");
+                bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
+                gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
+                let sink_pad = vc.static_pad("sink").unwrap();
+                let src_pad = vff.static_pad("src").unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+            } else {
+                bin.add_many([vb, &conv1, gb]).ok();
+                gst::Element::link_many([vb, &conv1, gb]).ok();
+                let sink_pad = vb.static_pad("sink").unwrap();
+                let src_pad = gb.static_pad("src").unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+            }
             pipeline.set_property("video-filter", &bin);
         } else if let Some(ref vb) = videobalance {
             // Fallback: videobalance only (no gaussianblur plugin)
@@ -85,7 +117,7 @@ impl Player {
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
 
-        Ok((Self { pipeline, state, videobalance, gaussianblur }, paintable))
+        Ok((Self { pipeline, state, videobalance, gaussianblur, videocrop, videoflip_rotate, videoflip_flip }, paintable))
     }
 
     /// Load a URI (e.g. `file:///path/to/video.mp4`)
@@ -200,6 +232,34 @@ impl Player {
         if let Some(ref gb) = self.gaussianblur {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
             gb.set_property("sigma", sigma);
+        }
+    }
+
+    /// Apply crop, rotation, and flip transform to the video filter elements.
+    pub fn set_transform(&self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32, rotate: i32, flip_h: bool, flip_v: bool) {
+        if let Some(ref vc) = self.videocrop {
+            vc.set_property("left", crop_left.max(0));
+            vc.set_property("right", crop_right.max(0));
+            vc.set_property("top", crop_top.max(0));
+            vc.set_property("bottom", crop_bottom.max(0));
+        }
+        if let Some(ref vfr) = self.videoflip_rotate {
+            let method = match rotate {
+                90  => "clockwise",
+                180 => "rotate-180",
+                270 => "counterclockwise",
+                _   => "none",
+            };
+            vfr.set_property_from_str("method", method);
+        }
+        if let Some(ref vff) = self.videoflip_flip {
+            let method = match (flip_h, flip_v) {
+                (true, true)   => "rotate-180",
+                (true, false)  => "horizontal-flip",
+                (false, true)  => "vertical-flip",
+                (false, false) => "none",
+            };
+            vff.set_property_from_str("method", method);
         }
     }
 

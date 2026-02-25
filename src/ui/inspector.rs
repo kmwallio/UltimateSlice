@@ -26,6 +26,14 @@ pub struct InspectorView {
     // Audio sliders
     pub volume_slider: Scale,
     pub pan_slider: Scale,
+    // Transform sliders/controls
+    pub crop_left_slider: Scale,
+    pub crop_right_slider: Scale,
+    pub crop_top_slider: Scale,
+    pub crop_bottom_slider: Scale,
+    pub rotate_combo: gtk4::ComboBoxText,
+    pub flip_h_btn: gtk4::ToggleButton,
+    pub flip_v_btn: gtk4::ToggleButton,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
 }
@@ -62,6 +70,13 @@ impl InspectorView {
                 self.sharpness_slider.set_value(c.sharpness as f64);
                 self.volume_slider.set_value(c.volume as f64);
                 self.pan_slider.set_value(c.pan as f64);
+                self.crop_left_slider.set_value(c.crop_left as f64);
+                self.crop_right_slider.set_value(c.crop_right as f64);
+                self.crop_top_slider.set_value(c.crop_top as f64);
+                self.crop_bottom_slider.set_value(c.crop_bottom as f64);
+                self.rotate_combo.set_active_id(Some(&c.rotate.to_string()));
+                self.flip_h_btn.set_active(c.flip_h);
+                self.flip_v_btn.set_active(c.flip_v);
             }
             None => {
                 self.name_entry.set_text("");
@@ -76,6 +91,13 @@ impl InspectorView {
                 self.sharpness_slider.set_value(0.0);
                 self.volume_slider.set_value(1.0);
                 self.pan_slider.set_value(0.0);
+                self.crop_left_slider.set_value(0.0);
+                self.crop_right_slider.set_value(0.0);
+                self.crop_top_slider.set_value(0.0);
+                self.crop_bottom_slider.set_value(0.0);
+                self.rotate_combo.set_active_id(Some("0"));
+                self.flip_h_btn.set_active(false);
+                self.flip_v_btn.set_active(false);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -95,6 +117,7 @@ pub fn build_inspector(
     on_clip_changed: impl Fn() + 'static,
     on_color_changed: impl Fn(f32, f32, f32, f32, f32) + 'static,
     on_audio_changed: impl Fn(f32, f32) + 'static,
+    on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -219,19 +242,70 @@ pub fn build_inspector(
     pan_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     vbox.append(&pan_slider);
 
+    // Transform section
+    vbox.append(&Separator::new(Orientation::Horizontal));
+    let transform_title = Label::new(Some("Transform"));
+    transform_title.set_halign(gtk::Align::Start);
+    transform_title.add_css_class("browser-header");
+    vbox.append(&transform_title);
+
+    row_label(&vbox, "Crop Left");
+    let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    crop_left_slider.set_value(0.0);
+    crop_left_slider.set_draw_value(true);
+    crop_left_slider.set_digits(0);
+    vbox.append(&crop_left_slider);
+
+    row_label(&vbox, "Crop Right");
+    let crop_right_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    crop_right_slider.set_value(0.0);
+    crop_right_slider.set_draw_value(true);
+    crop_right_slider.set_digits(0);
+    vbox.append(&crop_right_slider);
+
+    row_label(&vbox, "Crop Top");
+    let crop_top_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    crop_top_slider.set_value(0.0);
+    crop_top_slider.set_draw_value(true);
+    crop_top_slider.set_digits(0);
+    vbox.append(&crop_top_slider);
+
+    row_label(&vbox, "Crop Bottom");
+    let crop_bottom_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    crop_bottom_slider.set_value(0.0);
+    crop_bottom_slider.set_draw_value(true);
+    crop_bottom_slider.set_digits(0);
+    vbox.append(&crop_bottom_slider);
+
+    row_label(&vbox, "Rotate");
+    let rotate_combo = gtk4::ComboBoxText::new();
+    rotate_combo.append(Some("0"),   "0°");
+    rotate_combo.append(Some("90"),  "90° CW");
+    rotate_combo.append(Some("180"), "180°");
+    rotate_combo.append(Some("270"), "270° CW");
+    rotate_combo.set_active_id(Some("0"));
+    vbox.append(&rotate_combo);
+
+    row_label(&vbox, "Flip");
+    let flip_row = GBox::new(Orientation::Horizontal, 8);
+    let flip_h_btn = gtk4::ToggleButton::with_label("Flip H");
+    let flip_v_btn = gtk4::ToggleButton::with_label("Flip V");
+    flip_row.append(&flip_h_btn);
+    flip_row.append(&flip_v_btn);
+    vbox.append(&flip_row);
+
     vbox.append(&Separator::new(Orientation::Horizontal));
 
     // Apply name button
     let apply_btn = Button::with_label("Apply Name");
     vbox.append(&apply_btn);
-
-    // Shared state: which clip is selected (set from outside via InspectorView::update())
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed = Rc::new(on_clip_changed);
     let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
+    let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool)> = Rc::new(on_transform_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -391,6 +465,203 @@ pub fn build_inspector(
         });
     }
 
+    // Wire transform sliders and buttons
+    // Helper macro-style: a closure that reads all transform values and fires the callback
+    fn connect_transform_slider(
+        slider: &Scale,
+        project: Rc<RefCell<Project>>,
+        selected_clip_id: Rc<RefCell<Option<String>>>,
+        updating: Rc<RefCell<bool>>,
+        on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool)>,
+        crop_left_s: Scale,
+        crop_right_s: Scale,
+        crop_top_s: Scale,
+        crop_bottom_s: Scale,
+        rotate_c: gtk4::ComboBoxText,
+        flip_h_b: gtk4::ToggleButton,
+        flip_v_b: gtk4::ToggleButton,
+        apply: fn(&mut crate::model::clip::Clip, i32),
+    ) {
+        slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let val = s.value() as i32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            apply(clip, val);
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                let cl = crop_left_s.value() as i32;
+                let cr = crop_right_s.value() as i32;
+                let ct = crop_top_s.value() as i32;
+                let cb = crop_bottom_s.value() as i32;
+                let rot = rotate_c.active_id()
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .unwrap_or(0);
+                let fh = flip_h_b.is_active();
+                let fv = flip_v_b.is_active();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+            }
+        });
+    }
+
+    connect_transform_slider(
+        &crop_left_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_transform_changed.clone(),
+        crop_left_slider.clone(), crop_right_slider.clone(),
+        crop_top_slider.clone(), crop_bottom_slider.clone(),
+        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        |clip, v| clip.crop_left = v,
+    );
+    connect_transform_slider(
+        &crop_right_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_transform_changed.clone(),
+        crop_left_slider.clone(), crop_right_slider.clone(),
+        crop_top_slider.clone(), crop_bottom_slider.clone(),
+        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        |clip, v| clip.crop_right = v,
+    );
+    connect_transform_slider(
+        &crop_top_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_transform_changed.clone(),
+        crop_left_slider.clone(), crop_right_slider.clone(),
+        crop_top_slider.clone(), crop_bottom_slider.clone(),
+        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        |clip, v| clip.crop_top = v,
+    );
+    connect_transform_slider(
+        &crop_bottom_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_transform_changed.clone(),
+        crop_left_slider.clone(), crop_right_slider.clone(),
+        crop_top_slider.clone(), crop_bottom_slider.clone(),
+        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        |clip, v| clip.crop_bottom = v,
+    );
+
+    // Wire rotate combo
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_transform_changed = on_transform_changed.clone();
+        let crop_left_s = crop_left_slider.clone();
+        let crop_right_s = crop_right_slider.clone();
+        let crop_top_s = crop_top_slider.clone();
+        let crop_bottom_s = crop_bottom_slider.clone();
+        let flip_h_b = flip_h_btn.clone();
+        let flip_v_b = flip_v_btn.clone();
+        rotate_combo.connect_changed(move |combo| {
+            if *updating.borrow() { return; }
+            let rot = combo.active_id()
+                .and_then(|id| id.parse::<i32>().ok())
+                .unwrap_or(0);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.rotate = rot;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                let cl = crop_left_s.value() as i32;
+                let cr = crop_right_s.value() as i32;
+                let ct = crop_top_s.value() as i32;
+                let cb = crop_bottom_s.value() as i32;
+                let fh = flip_h_b.is_active();
+                let fv = flip_v_b.is_active();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+            }
+        });
+    }
+
+    // Wire flip buttons
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_transform_changed = on_transform_changed.clone();
+        let crop_left_s = crop_left_slider.clone();
+        let crop_right_s = crop_right_slider.clone();
+        let crop_top_s = crop_top_slider.clone();
+        let crop_bottom_s = crop_bottom_slider.clone();
+        let rotate_c = rotate_combo.clone();
+        let flip_v_b = flip_v_btn.clone();
+        flip_h_btn.connect_toggled(move |btn| {
+            if *updating.borrow() { return; }
+            let fh = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.flip_h = fh;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                let cl = crop_left_s.value() as i32;
+                let cr = crop_right_s.value() as i32;
+                let ct = crop_top_s.value() as i32;
+                let cb = crop_bottom_s.value() as i32;
+                let rot = rotate_c.active_id()
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .unwrap_or(0);
+                let fv = flip_v_b.is_active();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_transform_changed = on_transform_changed.clone();
+        let crop_left_s = crop_left_slider.clone();
+        let crop_right_s = crop_right_slider.clone();
+        let crop_top_s = crop_top_slider.clone();
+        let crop_bottom_s = crop_bottom_slider.clone();
+        let rotate_c = rotate_combo.clone();
+        let flip_h_b = flip_h_btn.clone();
+        flip_v_btn.connect_toggled(move |btn| {
+            if *updating.borrow() { return; }
+            let fv = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.flip_v = fv;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                let cl = crop_left_s.value() as i32;
+                let cr = crop_right_s.value() as i32;
+                let ct = crop_top_s.value() as i32;
+                let cb = crop_bottom_s.value() as i32;
+                let rot = rotate_c.active_id()
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .unwrap_or(0);
+                let fh = flip_h_b.is_active();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -406,6 +677,13 @@ pub fn build_inspector(
         sharpness_slider,
         volume_slider,
         pan_slider,
+        crop_left_slider,
+        crop_right_slider,
+        crop_top_slider,
+        crop_bottom_slider,
+        rotate_combo,
+        flip_h_btn,
+        flip_v_btn,
         updating,
     });
 

@@ -90,6 +90,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_transform_changed: crop/rotate/flip → direct update, no pipeline reload
+        {
+            let player = player.clone();
+            let prog_player = prog_player.clone();
+            let window_weak = window_weak.clone();
+            let project = project.clone();
+            move |cl, cr, ct, cb, rot, fh, fv| {
+                player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                prog_player.borrow_mut().update_current_transform(cl, cr, ct, cb, rot, fh, fv);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -314,6 +330,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         sharpness:         c.sharpness as f64,
                         volume:            c.volume as f64,
                         pan:               c.pan as f64,
+                        crop_left:         c.crop_left,
+                        crop_right:        c.crop_right,
+                        crop_top:          c.crop_top,
+                        crop_bottom:       c.crop_bottom,
+                        rotate:            c.rotate,
+                        flip_h:            c.flip_h,
+                        flip_v:            c.flip_v,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.

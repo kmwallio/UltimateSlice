@@ -50,6 +50,21 @@ pub struct Clip {
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     #[serde(default)]
     pub pan: f32,
+    #[serde(default)]
+    pub crop_left: i32,
+    #[serde(default)]
+    pub crop_right: i32,
+    #[serde(default)]
+    pub crop_top: i32,
+    #[serde(default)]
+    pub crop_bottom: i32,
+    /// Rotation in degrees: 0, 90, 180, or 270
+    #[serde(default)]
+    pub rotate: i32,
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
 }
 
 impl Clip {
@@ -75,6 +90,13 @@ impl Clip {
             sharpness: 0.0,
             volume: 1.0,
             pan: 0.0,
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
+            rotate: 0,
+            flip_h: false,
+            flip_v: false,
         }
     }
 

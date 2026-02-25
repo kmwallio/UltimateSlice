@@ -65,6 +65,13 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:sharpness",  clip.sharpness.to_string().as_str()));
             asset_clip.push_attribute(("us:volume",     clip.volume.to_string().as_str()));
             asset_clip.push_attribute(("us:pan",        clip.pan.to_string().as_str()));
+            asset_clip.push_attribute(("us:crop-left",  clip.crop_left.to_string().as_str()));
+            asset_clip.push_attribute(("us:crop-right", clip.crop_right.to_string().as_str()));
+            asset_clip.push_attribute(("us:crop-top",   clip.crop_top.to_string().as_str()));
+            asset_clip.push_attribute(("us:crop-bottom",clip.crop_bottom.to_string().as_str()));
+            asset_clip.push_attribute(("us:rotate",     clip.rotate.to_string().as_str()));
+            asset_clip.push_attribute(("us:flip-h",     clip.flip_h.to_string().as_str()));
+            asset_clip.push_attribute(("us:flip-v",     clip.flip_v.to_string().as_str()));
             writer.write_event(Event::Empty(asset_clip))?;
         }
     }
