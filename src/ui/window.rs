@@ -240,12 +240,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         library.clone(),
         on_source_selected.clone(),
     );
-    // Left panel: media browser (expanding) with source preview below (hidden until selection)
+    // Left panel: vertical Paned — browser (top) + source preview (bottom, hidden until selection)
+    // The Paned lets the user resize the split after a source is selected.
     preview_widget.set_visible(false);
-    let left_panel = gtk::Box::new(Orientation::Vertical, 0);
-    left_panel.append(&browser);
-    left_panel.append(&preview_widget);
-    top_paned.set_start_child(Some(&left_panel));
+    let left_vpaned = Paned::new(Orientation::Vertical);
+    left_vpaned.set_vexpand(true);
+    left_vpaned.set_position(320); // browser gets ~320 px by default
+    left_vpaned.set_start_child(Some(&browser));
+    left_vpaned.set_end_child(Some(&preview_widget));
+    top_paned.set_start_child(Some(&left_vpaned));
 
     root_vpaned.set_start_child(Some(&top_paned));
 

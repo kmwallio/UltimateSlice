@@ -1,11 +1,15 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
+use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, FlowBox, FlowBoxChild, Label, Orientation, ScrolledWindow};
 use gdk4;
 use gio;
 use glib;
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::model::media_library::MediaItem;
+use crate::media::thumb_cache::ThumbnailCache;
+
+const THUMB_W: i32 = 160;
+const THUMB_H: i32 = 90;
 
 /// Builds the media browser panel.
 ///
@@ -31,43 +35,43 @@ pub fn build_media_browser(
 
     let scroll = ScrolledWindow::new();
     scroll.set_vexpand(true);
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
 
-    let list = ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.add_css_class("media-list");
-    scroll.set_child(Some(&list));
+    // Async thumbnail cache (per-browser instance, all on GTK main thread).
+    let thumb_cache: Rc<RefCell<ThumbnailCache>> = Rc::new(RefCell::new(ThumbnailCache::new()));
+
+    // Grid of thumbnail cells.
+    let flow_box = FlowBox::new();
+    flow_box.set_selection_mode(gtk::SelectionMode::Single);
+    flow_box.set_homogeneous(true);
+    flow_box.set_max_children_per_line(u32::MAX); // auto-wrap based on available width
+    flow_box.set_min_children_per_line(1);
+    flow_box.set_column_spacing(4);
+    flow_box.set_row_spacing(4);
+    flow_box.set_margin_start(4);
+    flow_box.set_margin_end(4);
+    flow_box.set_margin_top(4);
+    flow_box.add_css_class("media-grid");
+    scroll.set_child(Some(&flow_box));
     vbox.append(&scroll);
 
-    // Populate list from existing library items (e.g. after project load)
+    // Populate from existing library items (e.g. after project load).
     {
         let lib = library.borrow();
         for item in lib.iter() {
-            list.append(&make_list_row(&item.label, &item.source_path, item.duration_ns));
+            let child = make_grid_item(&item.label, &item.source_path, item.duration_ns, &thumb_cache);
+            flow_box.insert(&child, -1);
         }
     }
 
-    // Keep list in sync when library changes externally (e.g. opening FCPXML).
-    {
-        let library = library.clone();
-        let list = list.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            let lib = library.borrow();
-            let count = listbox_row_count(&list);
-            if count != lib.len() {
-                rebuild_listbox_from_library(&list, &lib);
-            }
-            glib::ControlFlow::Continue
-        });
-    }
-
-    // Selection → fire on_source_selected
+    // Selection → fire on_source_selected.
     {
         let library = library.clone();
         let on_source_selected = on_source_selected.clone();
-        list.connect_row_selected(move |_, row| {
-            if let Some(row) = row {
-                let idx = row.index() as usize;
+        flow_box.connect_selected_children_changed(move |fb| {
+            let selected = fb.selected_children();
+            if let Some(child) = selected.first() {
+                let idx = child.index() as usize;
                 let lib = library.borrow();
                 if let Some(item) = lib.get(idx) {
                     let path = item.source_path.clone();
@@ -79,11 +83,31 @@ pub fn build_media_browser(
         });
     }
 
-    // Import button → file chooser, adds to library only
+    // 250ms timer: keep grid in sync with library + poll thumbnail cache.
     {
         let library = library.clone();
-        let list = list.clone();
+        let flow_box = flow_box.clone();
+        let thumb_cache = thumb_cache.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            let lib = library.borrow();
+            let count = flowbox_child_count(&flow_box);
+            if count != lib.len() {
+                rebuild_flowbox(&flow_box, &lib, &thumb_cache);
+            }
+            drop(lib);
+            if thumb_cache.borrow_mut().poll() {
+                flow_box.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    // Import button → file chooser, adds to library and inserts grid cell.
+    {
+        let library = library.clone();
+        let flow_box = flow_box.clone();
         let on_source_selected = on_source_selected.clone();
+        let thumb_cache = thumb_cache.clone();
 
         import_btn.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
@@ -100,8 +124,9 @@ pub fn build_media_browser(
             dialog.set_filters(Some(&filters));
 
             let library = library.clone();
-            let list = list.clone();
+            let flow_box = flow_box.clone();
             let on_source_selected = on_source_selected.clone();
+            let thumb_cache = thumb_cache.clone();
 
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
@@ -115,14 +140,10 @@ pub fn build_media_browser(
                         let item = MediaItem::new(path_str.clone(), duration_ns);
                         let label = item.label.clone();
 
-                        // Add to library
                         library.borrow_mut().push(item);
-                        let row = make_list_row(&label, &path_str, duration_ns);
-                        list.append(&row);
-
-                        // Auto-select the newly imported item
-                        list.select_row(Some(&row));
-                        // Load into source viewer immediately
+                        let child = make_grid_item(&label, &path_str, duration_ns, &thumb_cache);
+                        flow_box.insert(&child, -1);
+                        flow_box.select_child(&child);
                         on_source_selected(path_str, duration_ns);
                     }
                 }
@@ -133,44 +154,72 @@ pub fn build_media_browser(
     vbox
 }
 
-fn make_list_row(label: &str, path: &str, duration_ns: u64) -> ListBoxRow {
-    let row = ListBoxRow::new();
-    let vbox = GBox::new(Orientation::Vertical, 2);
-    vbox.set_margin_start(8);
-    vbox.set_margin_end(8);
-    vbox.set_margin_top(4);
-    vbox.set_margin_bottom(4);
+/// Build a single thumbnail grid cell.
+fn make_grid_item(
+    label: &str,
+    path: &str,
+    duration_ns: u64,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+) -> FlowBoxChild {
+    let cell = GBox::new(Orientation::Vertical, 2);
+    cell.set_margin_start(2);
+    cell.set_margin_end(2);
+    cell.set_margin_top(2);
+    cell.set_margin_bottom(2);
 
-    let name_label = Label::new(Some(label));
-    name_label.set_halign(gtk::Align::Start);
+    // Thumbnail DrawingArea.
+    let thumb_area = DrawingArea::new();
+    thumb_area.set_content_width(THUMB_W);
+    thumb_area.set_content_height(THUMB_H);
+    {
+        let path_owned = path.to_string();
+        let thumb_cache = thumb_cache.clone();
+        thumb_area.set_draw_func(move |_, cr, w, h| {
+            let mut cache = thumb_cache.borrow_mut();
+            if cache.request(&path_owned, 0) {
+                if let Some(surf) = cache.get(&path_owned, 0) {
+                    let sx = w as f64 / THUMB_W as f64;
+                    let sy = h as f64 / THUMB_H as f64;
+                    cr.scale(sx, sy);
+                    let _ = cr.set_source_surface(surf, 0.0, 0.0);
+                    cr.paint().ok();
+                    return;
+                }
+            }
+            // Placeholder while loading.
+            cr.set_source_rgb(0.15, 0.15, 0.20);
+            cr.rectangle(0.0, 0.0, w as f64, h as f64);
+            cr.fill().ok();
+        });
+    }
+    cell.append(&thumb_area);
+
+    // Filename label (stem only, truncated).
+    let filename = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(label)
+        .to_string();
+    let name_label = Label::new(Some(&filename));
+    name_label.set_halign(gtk::Align::Center);
+    name_label.set_max_width_chars(22);
+    name_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     name_label.add_css_class("clip-name");
+    cell.append(&name_label);
 
-    let path_label = Label::new(Some(
-        std::path::Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path),
-    ));
-    path_label.set_halign(gtk::Align::Start);
-    path_label.add_css_class("clip-path");
-    path_label.set_opacity(0.6);
-
-    vbox.append(&name_label);
-    vbox.append(&path_label);
-    row.set_child(Some(&vbox));
+    let child = FlowBoxChild::new();
+    child.set_child(Some(&cell));
 
     // Drag source: payload = "{source_path}|{duration_ns}"
-    // Use set_content (static) instead of connect_prepare to avoid claiming
-    // the button-press event sequence, which would break ListBox row selection.
     let drag_src = gtk::DragSource::new();
     drag_src.set_actions(gdk4::DragAction::COPY);
     drag_src.set_exclusive(false);
     let payload = format!("{path}|{duration_ns}");
     let val = glib::Value::from(&payload);
     drag_src.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
-    row.add_controller(drag_src);
+    child.add_controller(drag_src);
 
-    row
+    child
 }
 
 /// Quickly probe the duration of a media file using GStreamer discoverer.
@@ -182,9 +231,9 @@ pub fn probe_duration(uri: &str) -> Option<u64> {
     info.duration().map(|d| d.nseconds())
 }
 
-fn listbox_row_count(list: &ListBox) -> usize {
+fn flowbox_child_count(fb: &FlowBox) -> usize {
     let mut count = 0usize;
-    let mut child = list.first_child();
+    let mut child = fb.first_child();
     while let Some(w) = child {
         count += 1;
         child = w.next_sibling();
@@ -192,11 +241,13 @@ fn listbox_row_count(list: &ListBox) -> usize {
     count
 }
 
-fn rebuild_listbox_from_library(list: &ListBox, lib: &[MediaItem]) {
-    while let Some(child) = list.first_child() {
-        list.remove(&child);
+fn rebuild_flowbox(fb: &FlowBox, lib: &[MediaItem], thumb_cache: &Rc<RefCell<ThumbnailCache>>) {
+    while let Some(child) = fb.first_child() {
+        fb.remove(&child);
     }
     for item in lib.iter() {
-        list.append(&make_list_row(&item.label, &item.source_path, item.duration_ns));
+        let child = make_grid_item(&item.label, &item.source_path, item.duration_ns, thumb_cache);
+        fb.insert(&child, -1);
     }
 }
+
