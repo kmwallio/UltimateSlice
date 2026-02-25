@@ -111,7 +111,7 @@ Tracking docs:
 - [x] Audio waveform rendering in audio track rows (background GStreamer decode, normalized peaks)
 - [x] Drag-and-drop from media browser onto a specific timeline track/position
 - [x] Snap-to-clip-edge when trimming (TrimIn and TrimOut snap to nearby edges)
-- [ ] Timeline markers / chapter points
+- [ ] Timeline markers / chapter points ✅
 - [ ] Magnetic timeline mode (gap-free)
 - [ ] Cross-dissolve transitions between clips
 - [ ] Ripple/roll/slip/slide edit modes

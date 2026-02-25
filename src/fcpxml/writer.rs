@@ -77,6 +77,17 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     }
 
     writer.write_event(Event::End(BytesEnd::new("spine")))?;
+
+    // Write markers as <marker> elements inside <sequence>
+    for marker in &project.markers {
+        let mut m = BytesStart::new("marker");
+        m.push_attribute(("start", ns_to_fcpxml_time(marker.position_ns, &project.frame_rate).as_str()));
+        m.push_attribute(("duration", "1/24s"));
+        m.push_attribute(("value", marker.label.as_str()));
+        m.push_attribute(("us:color", format!("{:08X}", marker.color).as_str()));
+        writer.write_event(Event::Empty(m))?;
+    }
+
     writer.write_event(Event::End(BytesEnd::new("sequence")))?;
     writer.write_event(Event::End(BytesEnd::new("project")))?;
     writer.write_event(Event::End(BytesEnd::new("event")))?;

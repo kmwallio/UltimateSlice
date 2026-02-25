@@ -278,12 +278,31 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let mut st = state.borrow_mut();
 
             if y < RULER_HEIGHT {
-                // Click in ruler → seek
-                let ns = st.x_to_ns(x);
-                st.playhead_ns = ns;
-                let seek_cb = st.on_seek.clone();
-                drop(st);
-                if let Some(cb) = seek_cb { cb(ns); }
+                if button == 3 {
+                    // Right-click in ruler → remove nearest marker within 8px
+                    let ns = st.x_to_ns(x);
+                    let threshold = (8.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                    let to_remove = {
+                        let proj = st.project.borrow();
+                        proj.markers.iter()
+                            .filter(|m| m.position_ns.abs_diff(ns) <= threshold)
+                            .min_by_key(|m| m.position_ns.abs_diff(ns))
+                            .map(|m| m.id.clone())
+                    };
+                    if let Some(id) = to_remove {
+                        st.project.borrow_mut().remove_marker(&id);
+                        let proj_cb = st.on_project_changed.clone();
+                        drop(st);
+                        if let Some(cb) = proj_cb { cb(); }
+                    }
+                } else {
+                    // Left-click in ruler → seek
+                    let ns = st.x_to_ns(x);
+                    st.playhead_ns = ns;
+                    let seek_cb = st.on_seek.clone();
+                    drop(st);
+                    if let Some(cb) = seek_cb { cb(ns); }
+                }
             } else if button == 1 {
                 match st.active_tool.clone() {
                     ActiveTool::Razor => {
@@ -635,6 +654,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 Key::z if ctrl && shift  => { st.redo(); notify_project = true; true }
                 Key::y if ctrl           => { st.redo(); notify_project = true; true }
                 Key::Delete | Key::BackSpace => { st.delete_selected(); notify_project = true; true }
+                Key::m | Key::M => {
+                    // M = add marker at playhead
+                    let pos = st.playhead_ns;
+                    st.project.borrow_mut().add_marker(pos, "Marker");
+                    notify_project = true;
+                    true
+                }
                 Key::space => {
                     let pp_cb = st.on_play_pause.clone();
                     drop(st);
@@ -829,6 +855,37 @@ fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState) {
             let _ = cr.show_text(&label);
         }
         t += tick_interval;
+    }
+
+    // Draw timeline markers (chapter points)
+    {
+        let proj = st.project.borrow();
+        cr.set_font_size(9.0);
+        for marker in &proj.markers {
+            let mx = st.ns_to_x(marker.position_ns);
+            if mx < TRACK_LABEL_WIDTH || mx > width { continue; }
+            let r = ((marker.color >> 24) & 0xFF) as f64 / 255.0;
+            let g = ((marker.color >> 16) & 0xFF) as f64 / 255.0;
+            let b = ((marker.color >>  8) & 0xFF) as f64 / 255.0;
+            cr.set_source_rgb(r, g, b);
+            // Triangle pointing down from ruler top
+            cr.move_to(mx, 2.0);
+            cr.line_to(mx - 5.0, 12.0);
+            cr.line_to(mx + 5.0, 12.0);
+            cr.close_path();
+            cr.fill().ok();
+            // Vertical line through ruler
+            cr.set_line_width(1.0);
+            cr.move_to(mx, 12.0);
+            cr.line_to(mx, RULER_HEIGHT);
+            cr.stroke().ok();
+            // Label
+            if !marker.label.is_empty() {
+                cr.set_source_rgba(r, g, b, 0.9);
+                let _ = cr.move_to(mx + 3.0, RULER_HEIGHT - 2.0);
+                let _ = cr.show_text(&marker.label);
+            }
+        }
     }
 
     cr.set_source_rgb(0.25, 0.25, 0.28);
@@ -1032,6 +1089,8 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("B",              "Toggle Razor (Blade) tool"),
         ("Escape",         "Switch to Select tool"),
         ("Delete / Bksp",  "Delete selected clip"),
+        ("M",              "Add marker at playhead"),
+        ("Right-click ruler", "Remove nearest marker"),
         ("Ctrl+Z",         "Undo"),
         ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
         ("Scroll",         "Zoom timeline (vertical scroll)"),

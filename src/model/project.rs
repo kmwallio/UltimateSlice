@@ -1,5 +1,32 @@
 use serde::{Deserialize, Serialize};
 use super::track::{Track, TrackKind};
+use uuid::Uuid;
+
+/// A timeline marker (chapter point / note) placed at a specific position.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Marker {
+    pub id: String,
+    /// Position on the timeline in nanoseconds
+    pub position_ns: u64,
+    /// Short label shown on the ruler
+    pub label: String,
+    /// RGBA colour packed as 0xRRGGBBAA (default orange = 0xFF8C00FF)
+    #[serde(default = "default_marker_color")]
+    pub color: u32,
+}
+
+fn default_marker_color() -> u32 { 0xFF8C00FF }
+
+impl Marker {
+    pub fn new(position_ns: u64, label: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            position_ns,
+            label: label.into(),
+            color: default_marker_color(),
+        }
+    }
+}
 
 /// Frame rate as a rational number
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +53,9 @@ pub struct Project {
     pub height: u32,
     pub frame_rate: FrameRate,
     pub tracks: Vec<Track>,
+    /// Timeline markers / chapter points
+    #[serde(default)]
+    pub markers: Vec<Marker>,
     /// Dirty flag — true if there are unsaved changes
     #[serde(skip)]
     pub dirty: bool,
@@ -42,6 +72,7 @@ impl Project {
             height: 1080,
             frame_rate: FrameRate::fps_24(),
             tracks: Vec::new(),
+            markers: Vec::new(),
             dirty: false,
             file_path: None,
         };
@@ -78,5 +109,21 @@ impl Project {
 
     pub fn track_mut(&mut self, track_id: &str) -> Option<&mut Track> {
         self.tracks.iter_mut().find(|t| t.id == track_id)
+    }
+
+    /// Add a marker at the given position. Returns the new marker's id.
+    pub fn add_marker(&mut self, position_ns: u64, label: impl Into<String>) -> String {
+        let m = Marker::new(position_ns, label);
+        let id = m.id.clone();
+        self.markers.push(m);
+        self.markers.sort_by_key(|m| m.position_ns);
+        self.dirty = true;
+        id
+    }
+
+    /// Remove a marker by id.
+    pub fn remove_marker(&mut self, id: &str) {
+        self.markers.retain(|m| m.id != id);
+        self.dirty = true;
     }
 }

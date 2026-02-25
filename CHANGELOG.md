@@ -12,6 +12,12 @@ All notable project changes and progress should be recorded here.
 - **`list_clips` MCP response now includes color fields**: `brightness`, `contrast`, `saturation` are included alongside other clip properties.
 
 ### Added
+- **Timeline markers / chapter points**:
+  - Press `M` at any playhead position to drop a colored marker on the timeline ruler.
+  - Markers are drawn as filled triangles with a vertical line and label; default color is orange (0xFF8C00FF).
+  - Right-click anywhere on the ruler to remove the nearest marker within 8 px.
+  - Markers persist across save/load via FCPXML (written as `<marker>` elements with custom `us:color` attribute).
+  - Keyboard shortcut dialog updated to list `M` and right-click-ruler actions.
 - **Snap-to-clip-edge when trimming**: `TrimIn` and `TrimOut` drag operations now snap to nearby clip edges (start/end of any other clip) within a 10 px threshold, matching the existing snap behavior for clip moves.
 - **Volume and Pan per clip**:
   - Added `volume: f32` (0.0–2.0, default 1.0) and `pan: f32` (−1.0–1.0, default 0.0) fields to `Clip` model with `#[serde(default)]`.

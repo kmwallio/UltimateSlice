@@ -117,6 +117,21 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                             }
                         }
                     }
+                    "marker" => {
+                        // Restore timeline markers
+                        if let Some(start_str) = attrs.get("start") {
+                            if let Some(pos_ns) = parse_fcpxml_time(start_str) {
+                                let label = attrs.get("value").cloned().unwrap_or_default();
+                                let color = attrs.get("us:color")
+                                    .and_then(|s| u32::from_str_radix(s, 16).ok())
+                                    .unwrap_or(0xFF8C00FF);
+                                use crate::model::project::Marker;
+                                let mut m = Marker::new(pos_ns, label);
+                                m.color = color;
+                                project.markers.push(m);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
