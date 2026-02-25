@@ -771,20 +771,26 @@ fn draw_timeline(
         draw_track_row(cr, w, y, track, st, cache, wcache);
     }
 
-    // Playhead
+    // Playhead (clipped to content area so it doesn't overdraw track labels)
     let ph_x = st.ns_to_x(st.playhead_ns);
+    cr.save().ok();
+    cr.rectangle(TRACK_LABEL_WIDTH, 0.0, w - TRACK_LABEL_WIDTH, h);
+    cr.clip();
     cr.set_source_rgb(1.0, 0.3, 0.3);
     cr.set_line_width(2.0);
     cr.move_to(ph_x, 0.0);
     cr.line_to(ph_x, h);
     cr.stroke().ok();
+    cr.restore().ok();
 
-    // Playhead triangle at top
-    cr.set_source_rgb(1.0, 0.3, 0.3);
-    cr.move_to(ph_x - 6.0, 0.0);
-    cr.line_to(ph_x + 6.0, 0.0);
-    cr.line_to(ph_x, 12.0);
-    cr.fill().ok();
+    // Playhead triangle at top (also clipped)
+    if ph_x >= TRACK_LABEL_WIDTH {
+        cr.set_source_rgb(1.0, 0.3, 0.3);
+        cr.move_to(ph_x - 6.0, 0.0);
+        cr.line_to(ph_x + 6.0, 0.0);
+        cr.line_to(ph_x, 12.0);
+        cr.fill().ok();
+    }
 
     // Tool indicator
     if st.active_tool == ActiveTool::Razor {
@@ -845,6 +851,12 @@ fn draw_track_row(
     cr.rectangle(TRACK_LABEL_WIDTH, y, width - TRACK_LABEL_WIDTH, TRACK_HEIGHT);
     cr.fill().ok();
 
+    // Draw clips first (they may overlap into label column before clipping)
+    for clip in &track.clips {
+        draw_clip(cr, y, clip, track, st, cache, wcache);
+    }
+
+    // Draw label column on top so it stays visible when timeline is scrolled
     cr.set_source_rgb(0.22, 0.22, 0.25);
     cr.rectangle(0.0, y, TRACK_LABEL_WIDTH, TRACK_HEIGHT);
     cr.fill().ok();
@@ -859,10 +871,6 @@ fn draw_track_row(
     cr.move_to(0.0, y + TRACK_HEIGHT);
     cr.line_to(width, y + TRACK_HEIGHT);
     cr.stroke().ok();
-
-    for clip in &track.clips {
-        draw_clip(cr, y, clip, track, st, cache, wcache);
-    }
 }
 
 fn draw_clip(
