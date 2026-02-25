@@ -11,6 +11,7 @@ When making changes, update these files as part of the same work:
 
 1. `CHANGELOG.md` — append a concise entry under **Unreleased** describing what changed and why.
 2. `ROADMAP.md` — keep implemented/planned checklists accurate for any affected feature area.
+3. MCP coverage — when adding a new user-facing feature, also add/update an MCP tool for it if one does not already exist and the feature is automatable via MCP.
 
 Do this continuously as work is completed (not only at the end of large efforts).
 

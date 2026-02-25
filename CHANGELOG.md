@@ -8,6 +8,8 @@ All notable project changes and progress should be recorded here.
 - MCP `export_mp4` tool:
   - Added `McpCommand::ExportMp4` and MCP tool schema/dispatch (`export_mp4`).
   - Added main-thread handler in `window.rs` to run export in a background worker and return JSON results.
+- Agent workflow rule:
+  - Added instruction that new user-facing features should also be added to MCP (when automatable and not already exposed).
 
 ### Fixed
 - MP4 export reliability:
