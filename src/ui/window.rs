@@ -263,6 +263,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         source_in_ns:      c.source_in,
                         source_out_ns:     c.source_out,
                         timeline_start_ns: c.timeline_start,
+                        brightness:        c.brightness as f64,
+                        contrast:          c.contrast as f64,
+                        saturation:        c.saturation as f64,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
@@ -462,6 +465,26 @@ fn handle_mcp_command(
                     if clip.id == clip_id {
                         clip.source_in  = source_in_ns;
                         clip.source_out = source_out_ns;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SetClipColor { clip_id, brightness, contrast, saturation, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.brightness = brightness as f32;
+                        clip.contrast   = contrast as f32;
+                        clip.saturation = saturation as f32;
                         proj.dirty = true;
                         found = true;
                         break 'outer;

@@ -14,6 +14,10 @@ pub struct ProgramClip {
     pub source_in_ns: u64,
     pub source_out_ns: u64,
     pub timeline_start_ns: u64,
+    /// Color correction: brightness -1.0..1.0, contrast 0.0..2.0, saturation 0.0..2.0
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
 }
 
 impl ProgramClip {
@@ -34,6 +38,8 @@ pub struct ProgramPlayer {
     pub timeline_pos_ns: u64,
     /// Total timeline duration
     pub timeline_dur_ns: u64,
+    /// videobalance element for per-clip color correction
+    videobalance: Option<gst::Element>,
 }
 
 impl ProgramPlayer {
@@ -60,6 +66,11 @@ impl ProgramPlayer {
             .property("video-sink", &video_sink)
             .build()?;
 
+        let videobalance = gst::ElementFactory::make("videobalance").build().ok();
+        if let Some(ref vb) = videobalance {
+            pipeline.set_property("video-filter", vb);
+        }
+
         Ok((
             Self {
                 pipeline,
@@ -68,6 +79,7 @@ impl ProgramPlayer {
                 current_idx: None,
                 timeline_pos_ns: 0,
                 timeline_dur_ns: 0,
+                videobalance,
             },
             paintable,
         ))
@@ -177,6 +189,13 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Ready);
         self.pipeline.set_property("uri", &uri);
         let _ = self.pipeline.set_state(gst::State::Paused);
+
+        // Apply per-clip color correction
+        if let Some(ref vb) = self.videobalance {
+            vb.set_property("brightness", clip.brightness.clamp(-1.0, 1.0));
+            vb.set_property("contrast",   clip.contrast.clamp(0.0, 2.0));
+            vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
+        }
 
         // Seek to correct source position
         let _ = self.pipeline.seek_simple(

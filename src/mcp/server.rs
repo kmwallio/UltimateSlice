@@ -147,6 +147,20 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_color",
+            "description": "Set color correction (brightness, contrast, saturation) for a clip by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":    { "type": "string",  "description": "Clip id (from list_clips)." },
+                    "brightness": { "type": "number",  "description": "Brightness adjustment: -1.0 (darkest) to 1.0 (brightest). Default 0.0." },
+                    "contrast":   { "type": "number",  "description": "Contrast multiplier: 0.0 to 2.0. Default 1.0." },
+                    "saturation": { "type": "number",  "description": "Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid). Default 1.0." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_project_title",
             "description": "Rename the project.",
             "inputSchema": {
@@ -236,6 +250,14 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             clip_id:       args["clip_id"].as_str().unwrap_or("").to_string(),
             source_in_ns:  args["source_in_ns"].as_u64().unwrap_or(0),
             source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "set_clip_color" => McpCommand::SetClipColor {
+            clip_id:    args["clip_id"].as_str().unwrap_or("").to_string(),
+            brightness: args["brightness"].as_f64().unwrap_or(0.0),
+            contrast:   args["contrast"].as_f64().unwrap_or(1.0),
+            saturation: args["saturation"].as_f64().unwrap_or(1.0),
             reply: tx,
         },
 

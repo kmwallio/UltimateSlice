@@ -20,6 +20,13 @@ pub enum McpCommand {
     RemoveClip  { clip_id: String, reply: SyncSender<Value> },
     MoveClip    { clip_id: String, new_start_ns: u64, reply: SyncSender<Value> },
     TrimClip    { clip_id: String, source_in_ns: u64, source_out_ns: u64, reply: SyncSender<Value> },
+    SetClipColor {
+        clip_id:    String,
+        brightness: f64,
+        contrast:   f64,
+        saturation: f64,
+        reply:      SyncSender<Value>,
+    },
     SetTitle    { title: String, reply: SyncSender<Value> },
     SaveFcpxml  { path: String, reply: SyncSender<Value> },
     ExportMp4   { path: String, reply: SyncSender<Value> },

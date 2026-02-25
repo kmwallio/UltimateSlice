@@ -5,6 +5,14 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- Basic color correction per clip (brightness / contrast / saturation):
+  - Added `brightness` (f32, default 0.0), `contrast` (f32, default 1.0), `saturation` (f32, default 1.0) fields to `Clip` model with `#[serde(default)]` so existing FCPXML/save files load without change.
+  - Inspector panel: new "Color" section with three horizontal `Scale` sliders (brightness −1→1, contrast 0→2, saturation 0→2). Sliders update the clip live and trigger project-changed; feedback loop prevented by an `updating` flag during programmatic value set.
+  - Playback: `Player::set_color()` applies a GStreamer `videobalance` element injected via `playbin`'s `video-filter` property. Program monitor (`ProgramPlayer`) applies per-clip color when loading each clip during timeline playback.
+  - Export: ffmpeg `eq` filter inserted into the per-clip video filter chain (`scale/pad/setsar/fps/format,eq=…`) when color values differ from neutral; neutral clips skip the filter to avoid no-op overhead.
+  - `SetClipColor` EditCommand added to `undo.rs` (reversible).
+  - MCP tool `set_clip_color` added: accepts `clip_id`, `brightness`, `contrast`, `saturation`; updates clip in place and fires `on_project_changed`.
+
 - Source Monitor — frame-accurate jog/shuttle control:
   - Frame step forward/backward buttons (◀▮ / ▮▶) in source monitor transport bar.
   - Left/Right arrow keyboard shortcuts for single-frame stepping.

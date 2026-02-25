@@ -67,10 +67,21 @@ pub fn export_project(
 
     let mut filter = String::new();
 
-    // === Video pipeline: scale/pad each clip then concatenate ===
-    for (i, _) in video_clips.iter().enumerate() {
+    // === Video pipeline: scale/pad each clip, apply color correction, then concatenate ===
+    for (i, clip) in video_clips.iter().enumerate() {
+        // Append eq filter only when values deviate from neutral to avoid no-op overhead.
+        let color_filter = if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
+            format!(
+                ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
+                clip.brightness.clamp(-1.0, 1.0),
+                clip.contrast.clamp(0.0, 2.0),
+                clip.saturation.clamp(0.0, 2.0),
+            )
+        } else {
+            String::new()
+        };
         filter.push_str(&format!(
-            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p[v{i}];",
+            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}[v{i}];",
             project.width, project.height, project.width, project.height,
             project.frame_rate.numerator, project.frame_rate.denominator
         ));

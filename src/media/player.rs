@@ -17,6 +17,8 @@ pub enum PlayerState {
 pub struct Player {
     pipeline: gst::Element,
     state: Arc<Mutex<PlayerState>>,
+    /// videobalance element inserted as playbin's video-filter for color correction
+    videobalance: Option<gst::Element>,
 }
 
 impl Player {
@@ -51,9 +53,16 @@ impl Player {
             .property("video-sink", &video_sink)
             .build()?;
 
+        // Build a videobalance element for per-clip color correction.
+        // Set it as playbin's video-filter (must be done while in NULL state).
+        let videobalance = gst::ElementFactory::make("videobalance").build().ok();
+        if let Some(ref vb) = videobalance {
+            pipeline.set_property("video-filter", vb);
+        }
+
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
 
-        Ok((Self { pipeline, state }, paintable))
+        Ok((Self { pipeline, state, videobalance }, paintable))
     }
 
     /// Load a URI (e.g. `file:///path/to/video.mp4`)
@@ -146,6 +155,18 @@ impl Player {
 
     pub fn state(&self) -> PlayerState {
         self.state.lock().unwrap().clone()
+    }
+
+    /// Apply color correction to the video-filter (videobalance element).
+    /// - brightness: -1.0 to 1.0 (0.0 = neutral)
+    /// - contrast:   0.0 to 2.0  (1.0 = neutral)
+    /// - saturation: 0.0 to 2.0  (1.0 = neutral)
+    pub fn set_color(&self, brightness: f64, contrast: f64, saturation: f64) {
+        if let Some(ref vb) = self.videobalance {
+            vb.set_property("brightness", brightness.clamp(-1.0, 1.0));
+            vb.set_property("contrast", contrast.clamp(0.0, 2.0));
+            vb.set_property("saturation", saturation.clamp(0.0, 2.0));
+        }
     }
 
     /// Get the underlying GStreamer pipeline (e.g. to connect bus signals)

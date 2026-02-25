@@ -264,6 +264,7 @@ Key design points:
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
+| `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.10 to a file path |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |

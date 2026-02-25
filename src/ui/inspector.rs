@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, Entry, Label, Orientation, Separator};
+use gtk4::{self as gtk, Box as GBox, Button, Entry, Label, Orientation, Scale, Separator};
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::model::project::Project;
@@ -14,6 +14,14 @@ pub struct InspectorView {
     pub out_value: Label,
     pub dur_value: Label,
     pub pos_value: Label,
+    /// Which clip is currently shown (kept in sync by update())
+    pub selected_clip_id: Rc<RefCell<Option<String>>>,
+    // Color correction sliders
+    pub brightness_slider: Scale,
+    pub contrast_slider: Scale,
+    pub saturation_slider: Scale,
+    /// Set true while update() runs to suppress feedback from slider signals
+    pub updating: Rc<RefCell<bool>>,
 }
 
 impl InspectorView {
@@ -24,6 +32,10 @@ impl InspectorView {
                 .flat_map(|t| t.clips.iter())
                 .find(|c| c.id == id)
         });
+
+        // Suppress slider value-changed signals while we set values programmatically
+        *self.updating.borrow_mut() = true;
+        *self.selected_clip_id.borrow_mut() = clip_id.map(|s| s.to_owned());
 
         match clip {
             Some(c) => {
@@ -37,6 +49,9 @@ impl InspectorView {
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
                 self.pos_value.set_text(&ns_to_timecode(c.timeline_start));
+                self.brightness_slider.set_value(c.brightness as f64);
+                self.contrast_slider.set_value(c.contrast as f64);
+                self.saturation_slider.set_value(c.saturation as f64);
             }
             None => {
                 self.name_entry.set_text("");
@@ -44,8 +59,12 @@ impl InspectorView {
                            &self.dur_value, &self.pos_value] {
                     l.set_text("—");
                 }
+                self.brightness_slider.set_value(0.0);
+                self.contrast_slider.set_value(1.0);
+                self.saturation_slider.set_value(1.0);
             }
         }
+        *self.updating.borrow_mut() = false;
     }
 }
 
@@ -103,36 +122,119 @@ pub fn build_inspector(
 
     vbox.append(&Separator::new(Orientation::Horizontal));
 
+    // Color correction section
+    let color_title = Label::new(Some("Color"));
+    color_title.set_halign(gtk::Align::Start);
+    color_title.add_css_class("browser-header");
+    vbox.append(&color_title);
+
+    row_label(&vbox, "Brightness");
+    let brightness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    brightness_slider.set_value(0.0);
+    brightness_slider.set_draw_value(true);
+    brightness_slider.set_digits(2);
+    brightness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    vbox.append(&brightness_slider);
+
+    row_label(&vbox, "Contrast");
+    let contrast_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    contrast_slider.set_value(1.0);
+    contrast_slider.set_draw_value(true);
+    contrast_slider.set_digits(2);
+    contrast_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    vbox.append(&contrast_slider);
+
+    row_label(&vbox, "Saturation");
+    let saturation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    saturation_slider.set_value(1.0);
+    saturation_slider.set_draw_value(true);
+    saturation_slider.set_digits(2);
+    saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    vbox.append(&saturation_slider);
+
+    vbox.append(&Separator::new(Orientation::Horizontal));
+
     // Apply name button
     let apply_btn = Button::with_label("Apply Name");
     vbox.append(&apply_btn);
 
-    // Shared state: which clip is selected (set from outside)
+    // Shared state: which clip is selected (set from outside via InspectorView::update())
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
+    let on_clip_updated = Rc::new(on_clip_updated);
+
+    // Apply name button
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let name_entry_cb = name_entry.clone();
-        let on_clip_updated = Rc::new(on_clip_updated);
+        let on_clip_updated = on_clip_updated.clone();
 
         apply_btn.connect_clicked(move |_| {
             let new_name = name_entry_cb.text().to_string();
             if new_name.is_empty() { return; }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
-                let mut proj = project.borrow_mut();
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                        clip.label = new_name.clone();
-                        proj.dirty = true;
-                        break;
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.label = new_name.clone();
+                            proj.dirty = true;
+                            break;
+                        }
                     }
                 }
                 on_clip_updated();
             }
         });
     }
+
+    // Helper: connect a color slider to update the clip and notify
+    fn connect_color_slider(
+        slider: &Scale,
+        project: Rc<RefCell<Project>>,
+        selected_clip_id: Rc<RefCell<Option<String>>>,
+        updating: Rc<RefCell<bool>>,
+        on_clip_updated: Rc<dyn Fn()>,
+        apply: fn(&mut crate::model::clip::Clip, f32),
+    ) {
+        slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let val = s.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            apply(clip, val);
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_clip_updated();
+            }
+        });
+    }
+
+    connect_color_slider(
+        &brightness_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_clip_updated.clone(),
+        |clip, v| clip.brightness = v,
+    );
+    connect_color_slider(
+        &contrast_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_clip_updated.clone(),
+        |clip, v| clip.contrast = v,
+    );
+    connect_color_slider(
+        &saturation_slider, project.clone(), selected_clip_id.clone(),
+        updating.clone(), on_clip_updated.clone(),
+        |clip, v| clip.saturation = v,
+    );
 
     let view = Rc::new(InspectorView {
         name_entry,
@@ -141,6 +243,11 @@ pub fn build_inspector(
         out_value,
         dur_value,
         pos_value,
+        selected_clip_id,
+        brightness_slider,
+        contrast_slider,
+        saturation_slider,
+        updating,
     });
 
     (vbox, view)

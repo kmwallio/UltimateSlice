@@ -130,7 +130,7 @@ Tracking docs:
 - [ ] Basic audio mixing (level meters)
 
 ### Color & Effects
-- [ ] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
+- [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
 - [ ] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
 - [ ] Titles / text overlay (`textoverlay`)

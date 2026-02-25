@@ -9,6 +9,9 @@ pub enum ClipKind {
     Image,
 }
 
+fn default_contrast() -> f32 { 1.0 }
+fn default_saturation() -> f32 { 1.0 }
+
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clip {
@@ -25,6 +28,15 @@ pub struct Clip {
     /// Human-readable label (defaults to filename)
     pub label: String,
     pub kind: ClipKind,
+    /// Brightness adjustment: -1.0 (darkest) to 1.0 (brightest), default 0.0
+    #[serde(default)]
+    pub brightness: f32,
+    /// Contrast multiplier: 0.0 to 2.0, default 1.0
+    #[serde(default = "default_contrast")]
+    pub contrast: f32,
+    /// Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid), default 1.0
+    #[serde(default = "default_saturation")]
+    pub saturation: f32,
 }
 
 impl Clip {
@@ -43,6 +55,9 @@ impl Clip {
             timeline_start,
             label,
             kind,
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
         }
     }
 

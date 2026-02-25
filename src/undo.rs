@@ -142,7 +142,43 @@ impl EditCommand for SplitClipCommand {
     fn description(&self) -> &str { "Razor cut" }
 }
 
-/// Stack of reversible commands
+/// Set color correction on a clip (brightness/contrast/saturation)
+pub struct SetClipColorCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_brightness: f32,
+    pub old_contrast: f32,
+    pub old_saturation: f32,
+    pub new_brightness: f32,
+    pub new_contrast: f32,
+    pub new_saturation: f32,
+}
+
+impl EditCommand for SetClipColorCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.brightness = self.new_brightness;
+                clip.contrast = self.new_contrast;
+                clip.saturation = self.new_saturation;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.brightness = self.old_brightness;
+                clip.contrast = self.old_contrast;
+                clip.saturation = self.old_saturation;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Set clip color" }
+}
+
+
 pub struct EditHistory {
     pub undo_stack: Vec<Box<dyn EditCommand>>,
     pub redo_stack: Vec<Box<dyn EditCommand>>,
