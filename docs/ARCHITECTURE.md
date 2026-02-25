@@ -34,7 +34,7 @@ src/
   media/
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
     thumbnail.rs            Frame extraction via GStreamer AppSink pipeline (unused in UI yet)
-    export.rs               MP4 export pipeline (concat → x264enc + aacenc → mp4mux → filesink)
+    export.rs               MP4 export via ffmpeg subprocess: filter_complex concat (video) + adelay/amix (audio) → libx264 + aac
 
   fcpxml/
     parser.rs               FCPXML 1.10 → Project (quick-xml; parses assets, spine, asset-clip)
@@ -266,6 +266,9 @@ Key design points:
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.10 to a file path |
+| `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
+| `list_library` | Items in the media library (not yet on timeline) |
+| `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
 
 ### Example session
 

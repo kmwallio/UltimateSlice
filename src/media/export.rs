@@ -39,7 +39,8 @@ pub fn export_project(
     let total_duration_us = project.duration().max(1) / 1_000;
     let _ = tx.send(ExportProgress::Progress(0.0));
 
-    let mut cmd = Command::new("ffmpeg");
+    let ffmpeg = find_ffmpeg()?;
+    let mut cmd = Command::new(&ffmpeg);
     cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel").arg("error")
@@ -82,9 +83,9 @@ pub fn export_project(
     // === Audio pipeline: delay each stream to its timeline position then mix ===
     let mut audio_labels: Vec<String> = Vec::new();
 
-    // Extract embedded audio from video clips (only ClipKind::Video, not images)
+    // Extract embedded audio from video clips (only ClipKind::Video with an audio stream)
     for (i, clip) in video_clips.iter().enumerate() {
-        if clip.kind == ClipKind::Video {
+        if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
             filter.push_str(&format!(";[{i}:a]adelay={delay_ms}:all=1[{label}]"));
@@ -105,6 +106,7 @@ pub fn export_project(
     let has_audio = !audio_labels.is_empty();
     if has_audio {
         let n = audio_labels.len();
+        filter.push(';');
         for label in &audio_labels {
             filter.push_str(&format!("[{label}]"));
         }
@@ -127,10 +129,13 @@ pub fn export_project(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
+    eprintln!("[export] ffmpeg args: {:?}", cmd.get_args().collect::<Vec<_>>());
+
     let mut child = cmd.spawn().map_err(|e| anyhow!("Failed to start ffmpeg: {e}"))?;
     let stderr = child.stderr.take().ok_or_else(|| anyhow!("Failed to capture ffmpeg stderr"))?;
     let reader = BufReader::new(stderr);
 
+    let mut error_lines: Vec<String> = Vec::new();
     for line in reader.lines().map_while(|r| r.ok()) {
         if let Some(v) = line.strip_prefix("out_time_us=") {
             if let Ok(us) = v.parse::<u64>() {
@@ -143,15 +148,51 @@ pub fn export_project(
                 let p = (us as f64 / total_duration_us as f64).clamp(0.0, 1.0);
                 let _ = tx.send(ExportProgress::Progress(p));
             }
+        } else if !line.starts_with("frame=") && !line.starts_with("fps=")
+               && !line.starts_with("progress=") && !line.starts_with("speed=")
+               && !line.starts_with("bitrate=") && !line.starts_with("size=")
+               && !line.starts_with("out_") && !line.starts_with("dup_")
+               && !line.starts_with("drop_") && !line.starts_with("stream_") {
+            eprintln!("[export] ffmpeg: {line}");
+            error_lines.push(line);
         }
     }
 
     let status = child.wait().map_err(|e| anyhow!("Failed waiting for ffmpeg: {e}"))?;
     if !status.success() {
-        let _ = tx.send(ExportProgress::Error("ffmpeg export failed".to_string()));
-        return Err(anyhow!("ffmpeg export failed with status {status}"));
+        let detail = error_lines.join("; ");
+        let msg = format!("ffmpeg export failed: {detail}");
+        let _ = tx.send(ExportProgress::Error(msg.clone()));
+        return Err(anyhow!("{msg}"));
     }
 
     let _ = tx.send(ExportProgress::Done);
     Ok(())
+}
+
+/// Return true if the media file at `path` contains at least one audio stream.
+fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
+    // Derive ffprobe path from ffmpeg path (they live side-by-side)
+    let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
+    Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "a:0",
+               "-show_entries", "stream=codec_type", "-of", "csv=p=0", path])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Find the ffmpeg binary, checking PATH and common install locations.
+fn find_ffmpeg() -> Result<String> {
+    // First try the name directly (respects the process PATH)
+    if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() {
+        return Ok("ffmpeg".to_string());
+    }
+    // Fall back to common absolute paths
+    for path in &["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"] {
+        if std::path::Path::new(path).exists() {
+            return Ok(path.to_string());
+        }
+    }
+    Err(anyhow!("ffmpeg not found — please install ffmpeg"))
 }

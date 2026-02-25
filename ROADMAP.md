@@ -79,8 +79,10 @@ Tracking docs:
 - [x] Placed at end of first Video track
 
 ### Export
-- [x] MP4/H.264 export via GStreamer pipeline (`concat → x264enc + aacenc → mp4mux`)
+- [x] MP4/H.264 + AAC export via ffmpeg (`-filter_complex` concat + adelay/amix for audio)
 - [x] Background thread with `mpsc::channel` progress reporting
+- [x] Audio from embedded video-clip streams and standalone audio-track clips included in export
+- [x] Clips without audio streams safely skipped via `ffprobe` probe
 
 ### FCPXML
 - [x] FCPXML 1.10 import (`quick-xml`) — parses assets, spine, asset-clip elements
@@ -91,7 +93,7 @@ Tracking docs:
 - [x] JSON-RPC 2.0 over stdio (MCP 2024-11-05 protocol)
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
-- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `list_library`, `import_media`
+- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
 
 ---
 
