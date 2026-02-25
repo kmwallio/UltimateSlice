@@ -3,6 +3,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_pbutils::prelude::*;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use crate::model::project::Project;
 use crate::media::thumbnail::path_to_uri;
 
@@ -121,8 +122,19 @@ pub fn export_project(
     pipeline.set_state(gst::State::Playing)?;
 
     let total_duration = project.duration().max(1) as f64;
+    let started_at = Instant::now();
+    let hard_timeout = Duration::from_secs(180);
+    let stall_timeout = Duration::from_secs(20);
+    let mut last_pos_ns = 0u64;
+    let mut last_pos_change_at = Instant::now();
 
     loop {
+        if started_at.elapsed() > hard_timeout {
+            let _ = tx.send(ExportProgress::Error("Export timed out".to_string()));
+            pipeline.set_state(gst::State::Null)?;
+            return Err(anyhow!("Export timed out"));
+        }
+
         let msg = bus.timed_pop(gst::ClockTime::from_mseconds(100));
         if let Some(msg) = msg {
             use gst::MessageView;
@@ -143,7 +155,16 @@ pub fn export_project(
 
         // Report progress
         if let Some(pos) = pipeline.query_position::<gst::ClockTime>() {
-            let progress = pos.nseconds() as f64 / total_duration;
+            let pos_ns = pos.nseconds();
+            if pos_ns != last_pos_ns {
+                last_pos_ns = pos_ns;
+                last_pos_change_at = Instant::now();
+            } else if last_pos_change_at.elapsed() > stall_timeout {
+                let _ = tx.send(ExportProgress::Error("Export stalled without progress".to_string()));
+                pipeline.set_state(gst::State::Null)?;
+                return Err(anyhow!("Export stalled without progress"));
+            }
+            let progress = pos_ns as f64 / total_duration;
             let _ = tx.send(ExportProgress::Progress(progress.min(1.0)));
         }
     }

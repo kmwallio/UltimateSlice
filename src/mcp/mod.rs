@@ -22,6 +22,7 @@ pub enum McpCommand {
     TrimClip    { clip_id: String, source_in_ns: u64, source_out_ns: u64, reply: SyncSender<Value> },
     SetTitle    { title: String, reply: SyncSender<Value> },
     SaveFcpxml  { path: String, reply: SyncSender<Value> },
+    ExportMp4   { path: String, reply: SyncSender<Value> },
     ListLibrary { reply: SyncSender<Value> },
     ImportMedia { path: String, reply: SyncSender<Value> },
 }

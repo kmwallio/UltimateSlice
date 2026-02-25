@@ -1,6 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use crate::model::project::Project;
 use crate::model::clip::{Clip, ClipKind};
@@ -225,6 +226,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
         let timeline_state = timeline_state.clone();
+        let library = library.clone();
         let window_weak = window_weak.clone();
         let prog_player = prog_player.clone();
         let panel_weak = timeline_panel.downgrade();
@@ -238,26 +240,51 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
 
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
-            let clips: Vec<ProgramClip> = {
+            let (clips, media_from_project): (Vec<ProgramClip>, Vec<(String, u64)>) = {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 inspector_view.update(&proj, selected.as_deref());
-                proj.tracks.iter().flat_map(|t| {
+                let clips = proj.tracks.iter().flat_map(|t| {
                     t.clips.iter().map(|c| ProgramClip {
                         source_path:       c.source_path.clone(),
                         source_in_ns:      c.source_in,
                         source_out_ns:     c.source_out,
                         timeline_start_ns: c.timeline_start,
                     })
-                }).collect()
+                }).collect();
+                // Keep media browser in sync with timeline clip sources after project open/load.
+                let media = proj.tracks.iter().flat_map(|t| t.clips.iter())
+                    .map(|c| (c.source_path.clone(), c.source_out))
+                    .collect();
+                (clips, media)
             }; // proj borrow dropped here — safe to call GStreamer below
+
+            {
+                let mut lib = library.borrow_mut();
+                let mut seen: HashSet<String> = lib.iter().map(|i| i.source_path.clone()).collect();
+                for (path, dur) in media_from_project {
+                    if seen.insert(path.clone()) {
+                        lib.push(MediaItem::new(path, dur));
+                    }
+                }
+            }
 
             // Reload program player (GStreamer state change; must not hold proj borrow)
             prog_player.borrow_mut().load_clips(clips);
 
             // Force immediate timeline redraw (don't wait for 100ms timer)
             if let Some(p) = panel_weak.upgrade() {
-                p.queue_draw();
+                if let Some(area_widget) = p.first_child() {
+                    if let Ok(area) = area_widget.downcast::<gtk::DrawingArea>() {
+                        let track_count = project.borrow().tracks.len().max(1);
+                        area.set_content_height((24.0 + 60.0 * track_count as f64) as i32);
+                        area.queue_draw();
+                    } else {
+                        p.queue_draw();
+                    }
+                } else {
+                    p.queue_draw();
+                }
             }
         }));
     }
@@ -450,6 +477,33 @@ fn handle_mcp_command(
                 Ok(_)  => reply.send(json!({"success": true, "path": path})).ok(),
                 Err(e) => reply.send(json!({"success": false, "error": e.to_string()})).ok(),
             };
+        }
+
+        McpCommand::ExportMp4 { path, reply } => {
+            let proj = project.borrow().clone();
+            std::thread::spawn(move || {
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+                let proj_worker = proj.clone();
+                let path_worker = path.clone();
+                std::thread::spawn(move || {
+                    let (tx, _rx) = std::sync::mpsc::channel();
+                    let result = crate::media::export::export_project(&proj_worker, &path_worker, tx)
+                        .map_err(|e| e.to_string())
+                        .map(|_| ());
+                    let _ = done_tx.send(result);
+                });
+
+                match done_rx.recv_timeout(std::time::Duration::from_secs(45)) {
+                    Ok(Ok(())) => { let _ = reply.send(json!({"success": true, "path": path})); }
+                    Ok(Err(e)) => { let _ = reply.send(json!({"success": false, "error": e})); }
+                    Err(_) => {
+                        let _ = reply.send(json!({
+                            "success": false,
+                            "error": "MP4 export timed out after 45 seconds (export thread still running)"
+                        }));
+                    }
+                }
+            });
         }
 
         McpCommand::ListLibrary { reply } => {

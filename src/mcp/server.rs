@@ -169,6 +169,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "export_mp4",
+            "description": "Export the current project to MP4/H.264 at the given absolute path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for the output .mp4 file." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "list_library",
             "description": "List all items currently in the media library (imported but not necessarily on the timeline).",
             "inputSchema": { "type": "object", "properties": {} }
@@ -234,6 +245,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
+            path:  args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "export_mp4" => McpCommand::ExportMp4 {
             path:  args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
