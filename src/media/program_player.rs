@@ -370,8 +370,11 @@ impl ProgramPlayer {
         let timeline_offset = if clip.speed > 0.0 { (offset_ns as f64 / clip.speed) as u64 } else { offset_ns };
         let new_pos = clip.timeline_start_ns + timeline_offset;
 
-        // Detect clip end (GStreamer position may slightly overshoot source_out)
-        if src_pos >= clip.source_out_ns || self.is_eos() {
+        // Detect clip end (GStreamer position may slightly overshoot source_out).
+        // Only trust EOS when we're already near the end to avoid stale EOS
+        // messages from a previous clip forcing a false stop/restart.
+        let near_end = src_pos.saturating_add(50_000_000) >= clip.source_out_ns; // 50ms
+        if src_pos >= clip.source_out_ns || (near_end && self.is_eos()) {
             // Find what should play at the current timeline position using track-priority logic.
             // This handles B-roll ending and resuming the primary clip underneath.
             let at_end_pos = clip.timeline_end_ns();
@@ -589,7 +592,7 @@ impl ProgramPlayer {
             // Same clip already loaded — just seek to the new position. No pipeline reset.
             let _ = self.pipeline.seek(
                 speed,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
                 gst::SeekType::None,
@@ -605,10 +608,11 @@ impl ProgramPlayer {
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.pipeline.set_property("uri", &uri);
             let _ = self.pipeline.set_state(gst::State::Paused);
+            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
             // Seek with FLUSH and the clip's speed as rate.
             let _ = self.pipeline.seek(
                 speed,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
                 gst::SeekType::None,
