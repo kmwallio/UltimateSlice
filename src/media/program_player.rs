@@ -359,6 +359,12 @@ impl ProgramPlayer {
             .map(|t| t.nseconds())
             .unwrap_or(0);
 
+        // If GStreamer reports position 0 but we know we're past the clip start
+        // (pipeline is still pre-rolling after a clip switch), skip this tick.
+        if src_pos == 0 && self.timeline_pos_ns > clip.timeline_start_ns {
+            return false;
+        }
+
         // Update timeline_pos from source position, accounting for speed
         let offset_ns = src_pos.saturating_sub(clip.source_in_ns);
         let timeline_offset = if clip.speed > 0.0 { (offset_ns as f64 / clip.speed) as u64 } else { offset_ns };
@@ -590,7 +596,11 @@ impl ProgramPlayer {
                 gst::ClockTime::NONE,
             );
         } else {
-            // Different clip — reload the pipeline.
+            // Different clip — flush stale bus messages (e.g. EOS from previous clip)
+            // then reload the pipeline.
+            if let Some(bus) = self.pipeline.bus() {
+                while bus.pop().is_some() {}
+            }
             let uri = format!("file://{}", clip.source_path);
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.pipeline.set_property("uri", &uri);
