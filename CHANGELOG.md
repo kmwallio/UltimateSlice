@@ -5,6 +5,17 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Background threading for media import**: `MediaProbeCache` (`src/media/probe_cache.rs`) moves
+  GStreamer Discoverer duration and audio-only probing off the main thread. Media files are added
+  to the library instantly; duration and type are filled in asynchronously via the existing 250 ms
+  polling timer. Eliminates ~5 s UI freeze per imported file.
+- **Background threading for project open**: Open and Recent-file handlers in `toolbar.rs` now
+  read and parse FCPXML on a background `std::thread`, polling for the result on the main thread
+  via a 50 ms `glib::timeout_add_local` timer. Eliminates UI freeze during project load.
+- `MediaItem.is_audio_only` field — cached from background probe, used by `on_source_selected`
+  to avoid a blocking `probe_is_audio_only` call when selecting a library item.
+
+### Added
 - **Advanced Editing Tools**:
   - **Ripple Edit Tool**:
     - Added `Ripple` tool to the toolbar (shortcut `R`).

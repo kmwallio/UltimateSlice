@@ -467,6 +467,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let source_marks = source_marks.clone();
         let preview_widget = preview_widget.clone();
         let clip_name_label = clip_name_label.clone();
+        let library = library.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
             preview_widget.set_visible(true);
@@ -478,7 +479,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 .to_string();
             clip_name_label.set_text(&name);
             let uri = format!("file://{path}");
-            let audio_only = crate::ui::media_browser::probe_is_audio_only(&uri);
+            // Look up is_audio_only from library item (set by background probe).
+            let audio_only = library.borrow().iter()
+                .find(|i| i.source_path == path)
+                .map(|i| i.is_audio_only)
+                .unwrap_or(false);
             let _ = player.borrow().load(&uri);
             let mut m = source_marks.borrow_mut();
             m.path = path;
@@ -1129,7 +1134,9 @@ fn handle_mcp_command(
             let uri = format!("file://{path}");
             let duration_ns = crate::ui::media_browser::probe_duration(&uri)
                 .unwrap_or(10 * 1_000_000_000);
-            let item = MediaItem::new(path.clone(), duration_ns);
+            let audio_only = crate::ui::media_browser::probe_is_audio_only(&uri);
+            let mut item = MediaItem::new(path.clone(), duration_ns);
+            item.is_audio_only = audio_only;
             let label = item.label.clone();
             library.borrow_mut().push(item);
             reply.send(json!({"success": true, "label": label, "duration_ns": duration_ns})).ok();

@@ -24,7 +24,7 @@ Tracking docs:
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
-- [x] GStreamer Discoverer probes duration on import
+- [x] GStreamer Discoverer probes duration on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
 - [x] Selecting a library item loads it in the source preview
 - [x] Imported clips are **not** auto-added to the timeline
@@ -87,6 +87,7 @@ Tracking docs:
 ### FCPXML
 - [x] FCPXML 1.10 import (`quick-xml`) — parses assets, spine, asset-clip elements
 - [x] FCPXML 1.10 export — writes resources/format/asset + library/event/project/sequence/spine
+- [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)
 - [x] `--mcp` flag enables the MCP (Model Context Protocol) server at startup
@@ -144,7 +145,9 @@ Tracking docs:
   - [x] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
   - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching
-  - [ ] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
+  - [x] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
+  - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`
+  - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
   - [ ] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)

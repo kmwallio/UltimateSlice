@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use crate::model::media_library::MediaItem;
 use crate::media::thumb_cache::ThumbnailCache;
+use crate::media::probe_cache::MediaProbeCache;
 
 const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
@@ -39,6 +40,9 @@ pub fn build_media_browser(
 
     // Async thumbnail cache (per-browser instance, all on GTK main thread).
     let thumb_cache: Rc<RefCell<ThumbnailCache>> = Rc::new(RefCell::new(ThumbnailCache::new()));
+
+    // Async media probe cache — duration/audio-only detection in background threads.
+    let probe_cache: Rc<RefCell<MediaProbeCache>> = Rc::new(RefCell::new(MediaProbeCache::new()));
 
     // Grid of thumbnail cells.
     let flow_box = FlowBox::new();
@@ -83,12 +87,33 @@ pub fn build_media_browser(
         });
     }
 
-    // 250ms timer: keep grid in sync with library + poll thumbnail cache.
+    // 250ms timer: keep grid in sync with library + poll thumbnail & probe caches.
     {
         let library = library.clone();
         let flow_box = flow_box.clone();
         let thumb_cache = thumb_cache.clone();
+        let probe_cache = probe_cache.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            // Drain completed probe results → update library items.
+            let resolved = probe_cache.borrow_mut().poll();
+            if !resolved.is_empty() {
+                let cache = probe_cache.borrow();
+                let mut lib = library.borrow_mut();
+                for path in &resolved {
+                    if let Some(result) = cache.get(path) {
+                        if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
+                            item.duration_ns = result.duration_ns;
+                            item.is_audio_only = result.is_audio_only;
+                        }
+                    }
+                }
+                drop(lib);
+                drop(cache);
+                // Rebuild grid to reflect updated durations.
+                let lib = library.borrow();
+                rebuild_flowbox(&flow_box, &lib, &thumb_cache);
+            }
+
             let lib = library.borrow();
             let count = flowbox_child_count(&flow_box);
             if count != lib.len() {
@@ -114,6 +139,7 @@ pub fn build_media_browser(
         let flow_box = flow_box.clone();
         let on_source_selected = on_source_selected.clone();
         let thumb_cache = thumb_cache.clone();
+        let probe_cache = probe_cache.clone();
 
         import_btn.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
@@ -133,6 +159,7 @@ pub fn build_media_browser(
             let flow_box = flow_box.clone();
             let on_source_selected = on_source_selected.clone();
             let thumb_cache = thumb_cache.clone();
+            let probe_cache = probe_cache.clone();
 
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
@@ -148,6 +175,7 @@ pub fn build_media_browser(
                             &library,
                             &flow_box,
                             &thumb_cache,
+                            &probe_cache,
                         ) {
                             last_import = Some(imported);
                         }
@@ -167,6 +195,7 @@ pub fn build_media_browser(
         let flow_box = flow_box.clone();
         let on_source_selected = on_source_selected.clone();
         let thumb_cache = thumb_cache.clone();
+        let probe_cache = probe_cache.clone();
         let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
         let flow_box_for_drop = flow_box.clone();
         drop_target.connect_drop(move |_target, value, _x, _y| {
@@ -176,7 +205,7 @@ pub fn build_media_browser(
             };
             let mut last_import: Option<(String, u64, FlowBoxChild)> = None;
             for path in parse_external_drop_paths(&payload) {
-                if let Some(imported) = import_path_into_library(path, &library, &flow_box_for_drop, &thumb_cache) {
+                if let Some(imported) = import_path_into_library(path, &library, &flow_box_for_drop, &thumb_cache, &probe_cache) {
                     last_import = Some(imported);
                 }
             }
@@ -306,10 +335,12 @@ fn import_path_into_library(
     library: &Rc<RefCell<Vec<MediaItem>>>,
     flow_box: &FlowBox,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    probe_cache: &Rc<RefCell<MediaProbeCache>>,
 ) -> Option<(String, u64, FlowBoxChild)> {
     if path_str.is_empty() { return None; }
-    let uri = format!("file://{path_str}");
-    let duration_ns = probe_duration(&uri).unwrap_or(10 * 1_000_000_000);
+    // Start background probe (non-blocking). Duration/audio-only updated by 250ms timer.
+    probe_cache.borrow_mut().request(&path_str);
+    let duration_ns = 0; // placeholder until probe completes
     let item = MediaItem::new(path_str.clone(), duration_ns);
     let label = item.label.clone();
     library.borrow_mut().push(item);

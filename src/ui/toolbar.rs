@@ -71,11 +71,24 @@ pub fn build_toolbar(
             dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
-                        match std::fs::read_to_string(&path) {
-                            Ok(xml) => match fcpxml::parser::parse_fcpxml(&xml) {
-                                Ok(mut new_proj) => {
-                                    new_proj.file_path = path.to_str().map(|s| s.to_string());
-                                    if let Some(p) = path.to_str() { recent::push(p); }
+                        let path_str = path.to_string_lossy().to_string();
+                        // Parse FCPXML on a background thread to avoid blocking the UI.
+                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+                        let path_bg = path_str.clone();
+                        std::thread::spawn(move || {
+                            let result = std::fs::read_to_string(&path_bg)
+                                .map_err(|e| format!("Failed to read file: {e}"))
+                                .and_then(|xml| fcpxml::parser::parse_fcpxml(&xml).map_err(|e| format!("FCPXML parse error: {e}")));
+                            let _ = tx.send(result);
+                        });
+                        let project = project.clone();
+                        let on_project_changed = on_project_changed.clone();
+                        let timeline_state_cb = timeline_state_cb.clone();
+                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                            match rx.try_recv() {
+                                Ok(Ok(mut new_proj)) => {
+                                    new_proj.file_path = Some(path_str.clone());
+                                    recent::push(&path_str);
                                     *project.borrow_mut() = new_proj;
                                     {
                                         let mut st = timeline_state_cb.borrow_mut();
@@ -86,11 +99,16 @@ pub fn build_toolbar(
                                         st.selected_track_id = None;
                                     }
                                     on_project_changed();
+                                    glib::ControlFlow::Break
                                 }
-                                Err(e) => eprintln!("FCPXML parse error: {e}"),
-                            },
-                            Err(e) => eprintln!("Failed to read file: {e}"),
-                        }
+                                Ok(Err(e)) => {
+                                    eprintln!("{e}");
+                                    glib::ControlFlow::Break
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                Err(_) => glib::ControlFlow::Break,
+                            }
+                        });
                     }
                 }
             });
@@ -150,9 +168,22 @@ pub fn build_toolbar(
                     let pop_weak = pop.downgrade();
                     row.connect_clicked(move |_| {
                         if let Some(pop) = pop_weak.upgrade() { pop.popdown(); }
-                        match std::fs::read_to_string(&path_owned) {
-                            Ok(xml) => match fcpxml::parser::parse_fcpxml(&xml) {
-                                Ok(mut new_proj) => {
+                        // Parse FCPXML on a background thread to avoid blocking the UI.
+                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+                        let path_bg = path_owned.clone();
+                        std::thread::spawn(move || {
+                            let result = std::fs::read_to_string(&path_bg)
+                                .map_err(|e| format!("Failed to open recent project: {e}"))
+                                .and_then(|xml| fcpxml::parser::parse_fcpxml(&xml).map_err(|e| format!("FCPXML parse error: {e}")));
+                            let _ = tx.send(result);
+                        });
+                        let project = project.clone();
+                        let timeline_state = timeline_state.clone();
+                        let on_project_changed = on_project_changed.clone();
+                        let path_owned = path_owned.clone();
+                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                            match rx.try_recv() {
+                                Ok(Ok(mut new_proj)) => {
                                     new_proj.file_path = Some(path_owned.clone());
                                     recent::push(&path_owned);
                                     *project.borrow_mut() = new_proj;
@@ -165,11 +196,16 @@ pub fn build_toolbar(
                                         st.selected_track_id = None;
                                     }
                                     on_project_changed();
+                                    glib::ControlFlow::Break
                                 }
-                                Err(e) => eprintln!("FCPXML parse error: {e}"),
-                            },
-                            Err(e) => eprintln!("Failed to open recent project: {e}"),
-                        }
+                                Ok(Err(e)) => {
+                                    eprintln!("{e}");
+                                    glib::ControlFlow::Break
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                Err(_) => glib::ControlFlow::Break,
+                            }
+                        });
                     });
                     vbox_ref.append(&row);
                 }

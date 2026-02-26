@@ -7,6 +7,9 @@ pub struct MediaItem {
     pub source_path: String,
     pub duration_ns: u64,
     pub label: String,
+    /// True when the file has no video streams (audio-only).
+    /// Set asynchronously after background probe completes.
+    pub is_audio_only: bool,
 }
 
 impl MediaItem {
@@ -22,6 +25,7 @@ impl MediaItem {
             source_path,
             duration_ns,
             label,
+            is_audio_only: false,
         }
     }
 }
