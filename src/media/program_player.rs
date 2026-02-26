@@ -782,13 +782,12 @@ impl ProgramPlayer {
             };
             let uri = format!("file://{}", effective_path);
             if self.state == PlayerState::Playing {
-                // During active playback, avoid dropping to Ready state which
-                // tears down the video sink and causes a visible black flash.
-                // Instead pause briefly, swap URI, and seek — the sink stays
-                // alive so the last frame remains on screen until the new
-                // source delivers its first decoded frame.
-                let _ = self.pipeline.set_state(gst::State::Paused);
+                // During active playback, go through Ready quickly to change
+                // the URI (playbin requires Ready/Null for URI changes) but
+                // transition directly to Playing to minimise the visible gap.
+                let _ = self.pipeline.set_state(gst::State::Ready);
                 self.pipeline.set_property("uri", &uri);
+                let _ = self.pipeline.set_state(gst::State::Playing);
             } else {
                 let _ = self.pipeline.set_state(gst::State::Ready);
                 self.pipeline.set_property("uri", &uri);
