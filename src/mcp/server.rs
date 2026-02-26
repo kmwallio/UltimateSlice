@@ -295,6 +295,17 @@ fn tools_list() -> Value {
                 },
                 "required": ["track_index", "clip_index", "kind", "duration_ns"]
             }
+        },
+        {
+            "name": "set_proxy_mode",
+            "description": "Set proxy preview mode ('off', 'half_res', or 'quarter_res'). When enabled, lightweight proxy files are generated for smoother preview playback. Export always uses original media.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["off", "half_res", "quarter_res"], "description": "Proxy preview mode." }
+                },
+                "required": ["mode"]
+            }
         }
     ]})
 }
@@ -402,6 +413,10 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             clip_index:  args["clip_index"].as_u64().unwrap_or(0) as usize,
             kind:        args["kind"].as_str().unwrap_or("").to_string(),
             duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+        "set_proxy_mode" => McpCommand::SetProxyMode {
+            mode: args["mode"].as_str().unwrap_or("off").to_string(),
             reply: tx,
         },
 

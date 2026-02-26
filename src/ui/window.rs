@@ -30,13 +30,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
     let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
+    let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
     let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
     let (mut prog_player_raw, prog_paintable) = ProgramPlayer::new()
         .expect("Failed to create program player");
     prog_player_raw.set_playback_priority(initial_playback_priority);
+    prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
+
+    let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
 
@@ -68,12 +72,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let preferences_state = preferences_state.clone();
         let player = player.clone();
         let prog_player = prog_player.clone();
+        let proxy_cache = proxy_cache.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
                 let preferences_state = preferences_state.clone();
                 let player = player.clone();
                 let prog_player = prog_player.clone();
+                let proxy_cache = proxy_cache.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
                     *preferences_state.borrow_mut() = new_state.clone();
                     crate::ui_state::save_preferences_state(&new_state);
@@ -81,6 +87,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         eprintln!("Failed to apply hardware acceleration setting: {e}");
                     }
                     prog_player.borrow_mut().set_playback_priority(new_state.playback_priority.clone());
+                    prog_player.borrow_mut().set_proxy_enabled(new_state.proxy_mode.is_enabled());
+                    if new_state.proxy_mode.is_enabled() {
+                        let paths = proxy_cache.borrow().proxies.clone();
+                        prog_player.borrow_mut().update_proxy_paths(paths);
+                    }
                 });
                 preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
             }
@@ -569,6 +580,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let library = library.clone();
         let window_weak = window_weak.clone();
         let prog_player = prog_player.clone();
+        let proxy_cache = proxy_cache.clone();
+        let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
@@ -649,6 +662,28 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 prog_player.borrow_mut().seek(prev_pos);
                 if was_playing {
                     prog_player.borrow_mut().play();
+                }
+            }
+
+            // Request proxy generation for all source files if proxy mode is enabled.
+            {
+                let prefs = preferences_state.borrow();
+                if prefs.proxy_mode.is_enabled() {
+                    let scale = match prefs.proxy_mode {
+                        crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+                        _ => crate::media::proxy_cache::ProxyScale::Half,
+                    };
+                    let paths: Vec<String> = {
+                        let proj = project.borrow();
+                        proj.tracks.iter()
+                            .flat_map(|t| t.clips.iter())
+                            .map(|c| c.source_path.clone())
+                            .collect()
+                    };
+                    let mut cache = proxy_cache.borrow_mut();
+                    for path in &paths {
+                        cache.request(path, scale);
+                    }
                 }
             }
 
@@ -737,7 +772,59 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     root_hpaned.set_end_child(Some(&right_sidebar));
 
-    window.set_child(Some(&root_hpaned));
+    // ── Status bar (proxy progress) ───────────────────────────────────────
+    let status_bar = gtk::Box::new(Orientation::Horizontal, 8);
+    status_bar.set_margin_start(8);
+    status_bar.set_margin_end(8);
+    status_bar.set_margin_top(4);
+    status_bar.set_margin_bottom(4);
+    status_bar.add_css_class("status-bar");
+    status_bar.set_visible(false);
+    let status_label = gtk::Label::new(Some("Generating proxies…"));
+    status_label.set_halign(gtk::Align::Start);
+    status_label.add_css_class("status-bar-label");
+    let status_progress = gtk::ProgressBar::new();
+    status_progress.set_hexpand(true);
+    status_progress.add_css_class("proxy-progress");
+    status_bar.append(&status_label);
+    status_bar.append(&status_progress);
+
+    // Wrap main content + status bar in a vertical box
+    let outer_vbox = gtk::Box::new(Orientation::Vertical, 0);
+    outer_vbox.append(&root_hpaned);
+    outer_vbox.append(&status_bar);
+    window.set_child(Some(&outer_vbox));
+
+    // Poll proxy cache every 500ms to drain completed transcodes and update status bar.
+    {
+        let proxy_cache = proxy_cache.clone();
+        let prog_player = prog_player.clone();
+        let preferences_state = preferences_state.clone();
+        let status_bar = status_bar.clone();
+        let status_label = status_label.clone();
+        let status_progress = status_progress.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            let resolved = proxy_cache.borrow_mut().poll();
+            if !resolved.is_empty() {
+                let prefs = preferences_state.borrow();
+                if prefs.proxy_mode.is_enabled() {
+                    let paths = proxy_cache.borrow().proxies.clone();
+                    prog_player.borrow_mut().update_proxy_paths(paths);
+                }
+            }
+            let progress = proxy_cache.borrow().progress();
+            if progress.in_flight {
+                status_bar.set_visible(true);
+                status_label.set_text(&format!("Generating proxies… {}/{}", progress.completed, progress.total));
+                if progress.total > 0 {
+                    status_progress.set_fraction(progress.completed as f64 / progress.total as f64);
+                }
+            } else {
+                status_bar.set_visible(false);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // ── MCP server (optional, enabled via --mcp flag) ─────────────────────
     if mcp_enabled {
@@ -937,7 +1024,8 @@ fn handle_mcp_command(
             let prefs = preferences_state.borrow().clone();
             reply.send(json!({
                 "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
-                "playback_priority": prefs.playback_priority.as_str()
+                "playback_priority": prefs.playback_priority.as_str(),
+                "proxy_mode": prefs.proxy_mode.as_str()
             })).ok();
         }
 
@@ -979,6 +1067,22 @@ fn handle_mcp_command(
             reply.send(json!({
                 "success": true,
                 "playback_priority": new_state.playback_priority.as_str()
+            })).ok();
+        }
+
+        McpCommand::SetProxyMode { mode, reply } => {
+            let parsed = crate::ui_state::ProxyMode::from_str(&mode);
+            let enabled = parsed.is_enabled();
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.proxy_mode = parsed;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            prog_player.borrow_mut().set_proxy_enabled(enabled);
+            reply.send(json!({
+                "success": true,
+                "proxy_mode": new_state.proxy_mode.as_str()
             })).ok();
         }
 

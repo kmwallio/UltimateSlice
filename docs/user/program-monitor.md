@@ -23,6 +23,7 @@ The **Program Monitor** shows the assembled timeline played back in real time, c
 - The **timeline playhead** moves in sync with program monitor playback (polled at ~33 ms, with redraw coalescing during playback).
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, title overlay, speed) are applied during playback.
 - Playback priority can be set in **Preferences → Playback** (`Smooth`, `Balanced`, `Accurate`) to control smoothness vs seek precision.
+- Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
 
 ## Seeking
 

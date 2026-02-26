@@ -39,6 +39,7 @@ src/
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
     thumbnail.rs            Frame extraction via GStreamer AppSink pipeline (unused in UI yet)
     export.rs               MP4 export via ffmpeg subprocess: filter_complex concat (video) + adelay/amix (audio) → libx264 + aac
+    proxy_cache.rs          Background proxy transcoding (half/quarter-res H.264 via ffmpeg) for preview playback
 
   fcpxml/
     parser.rs               FCPXML 1.10 → Project (quick-xml; parses assets, spine, asset-clip)
@@ -295,6 +296,7 @@ Key design points:
 | `get_preferences` | Get persisted application preferences |
 | `set_hardware_acceleration` | Set hardware-acceleration preference and apply to source preview playback |
 | `set_playback_priority` | Set program-monitor playback priority (`smooth` / `balanced` / `accurate`) |
+| `set_proxy_mode` | Set proxy preview mode (`off` / `half_res` / `quarter_res`) |
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |

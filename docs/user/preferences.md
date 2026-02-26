@@ -32,6 +32,20 @@ Preferences are grouped by category in a sidebar:
   - `get_preferences` returns `playback_priority`.
   - `set_playback_priority` updates the mode.
 
+## Proxy Preview Mode
+
+- **Proxy preview mode** generates lightweight proxy files for smoother preview playback with large/high-bitrate media:
+  - `Off` (default): uses original source media.
+  - `Half Res`: generates half-resolution H.264 proxies.
+  - `Quarter Res`: generates quarter-resolution H.264 proxies.
+- Proxy files are transcoded in the background via ffmpeg and stored in `.ultimateslice_proxies/` next to the source files.
+- A yellow progress bar appears at the bottom of the window during proxy generation.
+- Export always uses original full-resolution media regardless of proxy mode.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `proxy_mode`.
+  - `set_proxy_mode` updates the mode.
+
 ## Saving
 
 - Click **Save** to persist changes.

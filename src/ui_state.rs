@@ -51,11 +51,47 @@ impl PlaybackPriority {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    Off,
+    HalfRes,
+    QuarterRes,
+}
+
+impl Default for ProxyMode {
+    fn default() -> Self { Self::Off }
+}
+
+impl ProxyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::HalfRes => "half_res",
+            Self::QuarterRes => "quarter_res",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "half_res" => Self::HalfRes,
+            "quarter_res" => Self::QuarterRes,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreferencesState {
     #[serde(default)]
     pub hardware_acceleration_enabled: bool,
     #[serde(default)]
     pub playback_priority: PlaybackPriority,
+    #[serde(default)]
+    pub proxy_mode: ProxyMode,
 }
 
 impl Default for PreferencesState {
@@ -63,6 +99,7 @@ impl Default for PreferencesState {
         Self {
             hardware_acceleration_enabled: false,
             playback_priority: PlaybackPriority::default(),
+            proxy_mode: ProxyMode::default(),
         }
     }
 }

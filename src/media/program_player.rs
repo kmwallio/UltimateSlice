@@ -8,6 +8,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use crate::media::player::PlayerState;
 use crate::ui_state::PlaybackPriority;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
@@ -110,6 +111,10 @@ pub struct ProgramPlayer {
     /// alpha element for transition fade approximation in preview.
     alpha_filter: Option<gst::Element>,
     playback_priority: PlaybackPriority,
+    /// Proxy mode: when enabled, load_clip_idx uses proxy paths for preview.
+    proxy_enabled: bool,
+    /// Map from original source path → proxy file path.
+    proxy_paths: HashMap<String, String>,
 }
 
 impl ProgramPlayer {
@@ -241,6 +246,8 @@ impl ProgramPlayer {
                 textoverlay,
                 alpha_filter,
                 playback_priority: PlaybackPriority::default(),
+                proxy_enabled: false,
+                proxy_paths: HashMap::new(),
             },
             paintable,
         ))
@@ -248,6 +255,15 @@ impl ProgramPlayer {
 
     pub fn set_playback_priority(&mut self, playback_priority: PlaybackPriority) {
         self.playback_priority = playback_priority;
+    }
+
+    pub fn set_proxy_enabled(&mut self, enabled: bool) {
+        self.proxy_enabled = enabled;
+    }
+
+    /// Update the proxy path mapping. Called when new proxy transcodes complete.
+    pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
+        self.proxy_paths = paths;
     }
 
     fn should_block_preroll(&self) -> bool {
@@ -756,14 +772,30 @@ impl ProgramPlayer {
             if let Some(bus) = self.pipeline.bus() {
                 while bus.pop().is_some() {}
             }
-            let uri = format!("file://{}", clip.source_path);
-            let _ = self.pipeline.set_state(gst::State::Ready);
-            self.pipeline.set_property("uri", &uri);
-            let _ = self.pipeline.set_state(gst::State::Paused);
-            // Avoid blocking transition path during active playback; blocking here
-            // directly contributes to visible stutter at clip boundaries.
-            if self.should_block_preroll() && self.state != PlayerState::Playing {
-                let _ = self.pipeline.state(gst::ClockTime::from_mseconds(120));
+            // Use proxy file when proxy mode is enabled and a proxy exists.
+            let effective_path = if self.proxy_enabled {
+                self.proxy_paths.get(&clip.source_path)
+                    .map(|p| p.as_str())
+                    .unwrap_or(&clip.source_path)
+            } else {
+                &clip.source_path
+            };
+            let uri = format!("file://{}", effective_path);
+            if self.state == PlayerState::Playing {
+                // During active playback, avoid dropping to Ready state which
+                // tears down the video sink and causes a visible black flash.
+                // Instead pause briefly, swap URI, and seek — the sink stays
+                // alive so the last frame remains on screen until the new
+                // source delivers its first decoded frame.
+                let _ = self.pipeline.set_state(gst::State::Paused);
+                self.pipeline.set_property("uri", &uri);
+            } else {
+                let _ = self.pipeline.set_state(gst::State::Ready);
+                self.pipeline.set_property("uri", &uri);
+                let _ = self.pipeline.set_state(gst::State::Paused);
+                if self.should_block_preroll() {
+                    let _ = self.pipeline.state(gst::ClockTime::from_mseconds(120));
+                }
             }
             // Seek with FLUSH and the clip's speed as rate.
             let _ = self.pipeline.seek(

@@ -429,7 +429,7 @@ fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
 }
 
 /// Find the ffmpeg binary, checking PATH and common install locations.
-fn find_ffmpeg() -> Result<String> {
+pub(crate) fn find_ffmpeg() -> Result<String> {
     // First try the name directly (respects the process PATH)
     if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() {
         return Ok("ffmpeg".to_string());

@@ -337,3 +337,28 @@ entry:focus {
 .marks-dur {
     color: #aaaaaa;
 }
+
+/* ── Status bar (proxy progress) ──────────────────────────────────────── */
+.status-bar {
+    background-color: #1e1e22;
+    border-top: 1px solid #333338;
+    padding: 2px 8px;
+    min-height: 24px;
+}
+
+.status-bar-label {
+    color: #e0c050;
+    font-size: 0.85em;
+}
+
+.proxy-progress trough {
+    background-color: #2a2a30;
+    min-height: 8px;
+    border-radius: 4px;
+}
+
+.proxy-progress progress {
+    background-color: #e0c050;
+    min-height: 8px;
+    border-radius: 4px;
+}

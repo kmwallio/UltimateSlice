@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack, StackSidebar};
 use std::rc::Rc;
-use crate::ui_state::{PlaybackPriority, PreferencesState};
+use crate::ui_state::{PlaybackPriority, ProxyMode, PreferencesState};
 
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
@@ -77,6 +77,23 @@ pub fn show_preferences_dialog(
     playback_box.append(&Label::new(Some("Program monitor playback priority")));
     playback_box.append(&playback_priority);
     playback_box.append(&priority_hint);
+
+    let proxy_label = Label::new(Some("Proxy preview mode"));
+    proxy_label.set_halign(gtk::Align::Start);
+    let proxy_mode = gtk4::ComboBoxText::new();
+    proxy_mode.append(Some("off"), "Off (use original media)");
+    proxy_mode.append(Some("half_res"), "Half resolution");
+    proxy_mode.append(Some("quarter_res"), "Quarter resolution");
+    proxy_mode.set_active_id(Some(current.proxy_mode.as_str()));
+    proxy_mode.set_halign(gtk::Align::Start);
+    let proxy_hint = Label::new(Some("Generate lightweight proxy files for smoother preview playback. Export always uses original media."));
+    proxy_hint.set_halign(gtk::Align::Start);
+    proxy_hint.add_css_class("dim-label");
+    proxy_hint.set_wrap(true);
+    proxy_hint.set_max_width_chars(60);
+    playback_box.append(&proxy_label);
+    playback_box.append(&proxy_mode);
+    playback_box.append(&proxy_hint);
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     body.append(&sidebar);
@@ -88,6 +105,7 @@ pub fn show_preferences_dialog(
             on_save(PreferencesState {
                 hardware_acceleration_enabled: hw_accel.is_active(),
                 playback_priority: PlaybackPriority::from_str(playback_priority.active_id().as_deref().unwrap_or("smooth")),
+                proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
             });
         }
         d.close();

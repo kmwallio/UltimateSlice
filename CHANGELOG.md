@@ -10,6 +10,14 @@ All notable project changes and progress should be recorded here.
   - `Smooth` now prioritizes playback continuity (reduced blocking/preroll pressure during active playback).
   - Added MCP tool `set_playback_priority`; `get_preferences` now includes `playback_priority`.
   - Program monitor timeline redraws are now coalesced during playback to reduce UI pressure.
+- **Proxy preview mode**:
+  - Background proxy transcoding: generates lightweight half- or quarter-resolution H.264 proxy files via ffmpeg for smoother preview playback with heavy/4K media.
+  - Added `ProxyMode` preference (`Off`, `Half Res`, `Quarter Res`) in Preferences → Playback.
+  - Proxy files stored in `.ultimateslice_proxies/` next to source files; export always uses originals.
+  - Added MCP tool `set_proxy_mode`; `get_preferences` now includes `proxy_mode`.
+  - Yellow progress bar status bar at bottom of window shows proxy generation progress.
+- **Reduced black flash on clip switches**:
+  - During active playback, clip source changes no longer drop the pipeline to Ready state, avoiding the visible black frame flash between clips.
 - **Background threading for media import**: `MediaProbeCache` (`src/media/probe_cache.rs`) moves
   GStreamer Discoverer duration and audio-only probing off the main thread. Media files are added
   to the library instantly; duration and type are filled in asynchronously via the existing 250 ms
