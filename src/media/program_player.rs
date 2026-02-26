@@ -439,10 +439,13 @@ impl ProgramPlayer {
         // messages from a previous clip forcing a false stop/restart.
         let near_end = src_pos.saturating_add(50_000_000) >= clip.source_out_ns; // 50ms
         let near_timeline_end = new_pos.saturating_add(50_000_000) >= clip.timeline_end_ns();
-        if src_pos >= clip.source_out_ns || ((near_end || near_timeline_end) && eos) {
+        let at_end_pos = clip.timeline_end_ns();
+        let has_next_at_boundary = self.clip_at(at_end_pos).map(|n| n != idx).unwrap_or(false);
+        // Pre-emptive handoff shortly before boundary when a next clip exists.
+        let early_handoff = has_next_at_boundary && src_pos.saturating_add(80_000_000) >= clip.source_out_ns; // 80ms
+        if src_pos >= clip.source_out_ns || ((near_end || near_timeline_end) && eos) || early_handoff {
             // Find what should play at the current timeline position using track-priority logic.
             // This handles B-roll ending and resuming the primary clip underneath.
-            let at_end_pos = clip.timeline_end_ns();
             match self.clip_at(at_end_pos) {
                 Some(next_idx) if next_idx != idx => {
                     self.load_clip_idx(next_idx, at_end_pos);
@@ -693,7 +696,11 @@ impl ProgramPlayer {
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.pipeline.set_property("uri", &uri);
             let _ = self.pipeline.set_state(gst::State::Paused);
-            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
+            // Avoid blocking transition path during active playback; blocking here
+            // directly contributes to visible stutter at clip boundaries.
+            if self.state != PlayerState::Playing {
+                let _ = self.pipeline.state(gst::ClockTime::from_mseconds(120));
+            }
             // Seek with FLUSH and the clip's speed as rate.
             let _ = self.pipeline.seek(
                 speed,

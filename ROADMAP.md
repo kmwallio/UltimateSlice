@@ -142,6 +142,7 @@ Tracking docs:
   - [ ] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
   - [x] Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff
+  - [x] Reduce boundary stutter with pre-emptive clip handoff and non-blocking switch path during active playback
 
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)

@@ -294,14 +294,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         },
     );
 
-    // 100 ms poll timer: advance playback, update timecode + timeline playhead
+    // 33 ms poll timer (~30 FPS): smoother playhead/timeline updates and
+    // tighter clip-boundary handoff timing.
     {
         let pp = prog_player.clone();
         let ts = timeline_state.clone();
         let cell = timeline_panel_cell.clone();
         let last_pos_ns = Rc::new(Cell::new(u64::MAX));
         let last_pos_ns_c = last_pos_ns.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let pos_ns = {
                 let mut player = pp.borrow_mut();
                 player.poll();
