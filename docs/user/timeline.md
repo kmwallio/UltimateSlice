@@ -75,7 +75,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ## Undo / Redo
 
-All clip moves, trims, splits, and deletions are undoable.
+All clip moves, trims, splits, deletions, and track add/remove operations are undoable.
 
 - `Ctrl+Z` — Undo
 - `Ctrl+Y` or `Ctrl+Shift+Z` — Redo

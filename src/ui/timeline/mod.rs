@@ -34,15 +34,19 @@ pub fn build_timeline_panel(
         let on_project_changed = on_project_changed.clone();
         let area = area.clone();
         btn_add_video.connect_clicked(move |_| {
-            let count = {
-                let proj = state.borrow().project.borrow().tracks.len();
-                proj
+            let label = {
+                let count = state.borrow().project.borrow().tracks.len();
+                format!("Video {}", count + 1)
             };
-            let label = format!("Video {}", count + 1);
-            state.borrow().project.borrow_mut().tracks.push(
-                crate::model::track::Track::new_video(label)
-            );
-            state.borrow().project.borrow_mut().dirty = true;
+            let track = crate::model::track::Track::new_video(label);
+            {
+                let mut st = state.borrow_mut();
+                let index = st.project.borrow().tracks.len();
+                let cmd = crate::undo::AddTrackCommand { track, index };
+                let project_rc = st.project.clone();
+                let mut proj = project_rc.borrow_mut();
+                st.history.execute(Box::new(cmd), &mut proj);
+            }
             area.set_content_height(
                 (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32
             );
@@ -55,14 +59,19 @@ pub fn build_timeline_panel(
         let on_project_changed = on_project_changed.clone();
         let area = area.clone();
         btn_add_audio.connect_clicked(move |_| {
-            let count = {
-                state.borrow().project.borrow().tracks.len()
+            let label = {
+                let count = state.borrow().project.borrow().tracks.len();
+                format!("Audio {}", count + 1)
             };
-            let label = format!("Audio {}", count + 1);
-            state.borrow().project.borrow_mut().tracks.push(
-                crate::model::track::Track::new_audio(label)
-            );
-            state.borrow().project.borrow_mut().dirty = true;
+            let track = crate::model::track::Track::new_audio(label);
+            {
+                let mut st = state.borrow_mut();
+                let index = st.project.borrow().tracks.len();
+                let cmd = crate::undo::AddTrackCommand { track, index };
+                let project_rc = st.project.clone();
+                let mut proj = project_rc.borrow_mut();
+                st.history.execute(Box::new(cmd), &mut proj);
+            }
             area.set_content_height(
                 (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32
             );
@@ -77,16 +86,22 @@ pub fn build_timeline_panel(
         btn_remove.connect_clicked(move |_| {
             let selected_track = state.borrow().selected_track_id.clone();
             {
-                let st = state.borrow();
-                let mut proj = st.project.borrow_mut();
-                if let Some(ref tid) = selected_track {
-                    if proj.tracks.len() > 1 {
-                        proj.tracks.retain(|t| &t.id != tid);
-                        proj.dirty = true;
+                let mut st = state.borrow_mut();
+                let project_rc = st.project.clone();
+                let proj = project_rc.borrow();
+                if proj.tracks.len() > 1 {
+                    let remove_idx = if let Some(ref tid) = selected_track {
+                        proj.tracks.iter().position(|t| &t.id == tid)
+                    } else {
+                        Some(proj.tracks.len() - 1)
+                    };
+                    if let Some(idx) = remove_idx {
+                        let track = proj.tracks[idx].clone();
+                        drop(proj);
+                        let cmd = crate::undo::DeleteTrackCommand { track, index: idx };
+                        let mut proj = project_rc.borrow_mut();
+                        st.history.execute(Box::new(cmd), &mut proj);
                     }
-                } else if proj.tracks.len() > 1 {
-                    proj.tracks.pop();
-                    proj.dirty = true;
                 }
             }
             // Clear stale selection after removal

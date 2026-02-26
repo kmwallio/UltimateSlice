@@ -5,6 +5,8 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Undoable track add/remove**:
+  - Adding and removing tracks now goes through the undo system (`Ctrl+Z` restores a deleted track with all its clips).
 - **Active track highlighting**:
   - Clicking anywhere in a track row (including empty space) selects it as the active track.
   - The active track's label area shows a blue left-edge accent bar and brighter background.

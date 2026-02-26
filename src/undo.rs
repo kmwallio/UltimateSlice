@@ -202,6 +202,48 @@ impl EditCommand for SetClipColorCommand {
     fn description(&self) -> &str { "Set clip color" }
 }
 
+/// Delete a track (stores full track + index for undo).
+pub struct DeleteTrackCommand {
+    pub track: crate::model::track::Track,
+    pub index: usize,
+}
+
+impl EditCommand for DeleteTrackCommand {
+    fn execute(&self, project: &mut Project) {
+        if self.index < project.tracks.len() {
+            project.tracks.remove(self.index);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        let idx = self.index.min(project.tracks.len());
+        project.tracks.insert(idx, self.track.clone());
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Delete track" }
+}
+
+/// Add a track (stores track + insertion index for undo).
+pub struct AddTrackCommand {
+    pub track: crate::model::track::Track,
+    pub index: usize,
+}
+
+impl EditCommand for AddTrackCommand {
+    fn execute(&self, project: &mut Project) {
+        let idx = self.index.min(project.tracks.len());
+        project.tracks.insert(idx, self.track.clone());
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if self.index < project.tracks.len() {
+            project.tracks.remove(self.index);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Add track" }
+}
+
 /// Reorder a track from one index to another.
 pub struct ReorderTrackCommand {
     pub from_index: usize,
