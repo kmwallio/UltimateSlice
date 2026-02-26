@@ -5,6 +5,12 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Colour scopes panel**: A new collapsible panel below the program monitor provides
+  four professional analysis tools — Waveform, Histogram, RGB Parade, and Vectorscope.
+  Toggle with the "▾ Scopes" button. Frames are captured from a `tee`-based GStreamer
+  sink bin (320×180 RGBA) added to the main pipeline; scope rendering is Cairo-drawn
+  on the GTK main thread via the existing 33 ms poll timer.  No additional threads or
+  blocking pipeline waits are introduced.
 - **Cross-dissolve transitions — FCPXML persistence**: Transition metadata
   (`transition_after` kind and `transition_after_ns` duration) is now written
   as `us:transition-after` / `us:transition-after-ns` vendor attributes on

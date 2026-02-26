@@ -6,3 +6,4 @@ pub mod timeline;
 pub mod inspector;
 pub mod program_monitor;
 pub mod preferences;
+pub mod color_scopes;

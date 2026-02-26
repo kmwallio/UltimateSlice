@@ -411,6 +411,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         },
     );
 
+    // ── Build colour scopes panel (hidden by default) ──────────────────────
+    let (scopes_widget, scopes_state) = crate::ui::color_scopes::build_color_scopes();
+    let scopes_revealer = gtk::Revealer::new();
+    scopes_revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
+    scopes_revealer.set_child(Some(&scopes_widget));
+    scopes_revealer.set_reveal_child(false);
+
     // 33 ms poll timer (~30 FPS): smoother playhead/timeline updates and
     // tighter clip-boundary handoff timing.
     {
@@ -423,12 +430,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let last_draw_ns_c = last_draw_ns.clone();
         let vu = vu_meter.clone();
         let vu_pc = vu_peak_cell.clone();
+        let scopes_rev = scopes_revealer.clone();
+        let scopes_st  = scopes_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-            let (pos_ns, playing, opacity_a, opacity_b, peaks) = {
+            let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame) = {
                 let mut player = pp.borrow_mut();
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
-                (player.timeline_pos_ns, player.is_playing(), oa, ob, player.audio_peak_db)
+                let sf = if scopes_rev.reveals_child() { player.try_pull_scope_frame() } else { None };
+                (player.timeline_pos_ns, player.is_playing(), oa, ob, player.audio_peak_db, sf)
             };
             // Apply cross-dissolve opacities to the two program monitor pictures.
             picture_a.set_opacity(opacity_a);
@@ -436,6 +446,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             // Update VU meter with current audio peak levels.
             vu_pc.set(peaks);
             vu.queue_draw();
+            // Update colour scopes with the latest video frame.
+            if let Some(frame) = scope_frame {
+                crate::ui::color_scopes::update_scope_frame(&scopes_st, frame);
+            }
             if pos_ns != last_pos_ns_c.get() {
                 pos_label.set_text(&program_monitor::format_timecode(pos_ns));
                 ts.borrow_mut().playhead_ns = pos_ns;
@@ -456,6 +470,19 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     }
 
     prog_monitor_host.append(&prog_monitor_widget);
+    // Scopes toggle button — sits between the program monitor and the scopes panel.
+    {
+        let scopes_btn = gtk::ToggleButton::with_label("▾ Scopes");
+        scopes_btn.add_css_class("flat");
+        scopes_btn.set_halign(gtk::Align::Start);
+        scopes_btn.set_margin_start(4);
+        let rev = scopes_revealer.clone();
+        scopes_btn.connect_toggled(move |b| {
+            rev.set_reveal_child(b.is_active());
+        });
+        prog_monitor_host.append(&scopes_btn);
+    }
+    prog_monitor_host.append(&scopes_revealer);
     top_paned.set_end_child(Some(&prog_monitor_host));
 
     // Program monitor pop-out/dock toggle

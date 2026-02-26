@@ -169,7 +169,7 @@ Tracking docs:
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [x] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
-- [ ] Color scopes (waveform, vectorscope, RGB parade, histogram)
+- [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)
 - [ ] HDR workflow (PQ/HLG preview + export metadata)
 - [x] Titles / text overlay (`textoverlay`)

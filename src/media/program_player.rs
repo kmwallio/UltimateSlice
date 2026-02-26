@@ -6,10 +6,19 @@
 use anyhow::{anyhow, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_app::AppSink;
 use glib;
 use crate::media::player::PlayerState;
 use crate::ui_state::PlaybackPriority;
 use std::collections::HashMap;
+
+/// A single RGBA frame pulled from the scope appsink for colour scope analysis.
+#[derive(Clone)]
+pub struct ScopeFrame {
+    pub data: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+}
 
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
@@ -136,6 +145,9 @@ pub struct ProgramPlayer {
     /// Current audio peak level in dBFS per channel [left, right].
     /// Updated each poll tick from `level` element bus messages; decays toward -60 over time.
     pub audio_peak_db: [f64; 2],
+    /// AppSink for colour scope frame analysis (320×180 RGBA, drop=true).
+    /// None if the tee-based sink bin could not be built.
+    scope_appsink: Option<AppSink>,
 }
 
 impl ProgramPlayer {
@@ -150,12 +162,55 @@ impl ProgramPlayer {
                 .expect("gtk4paintablesink paintable must implement Paintable")
         };
 
-        let video_sink = match gst::ElementFactory::make("glsinkbin")
+        let video_sink_inner = match gst::ElementFactory::make("glsinkbin")
             .property("sink", &paintablesink)
             .build()
         {
             Ok(s) => s,
             Err(_) => paintablesink.clone(),
+        };
+
+        // Build a tee-based sink bin so frames are delivered to both the display
+        // paintable and a small appsink (320×180 RGBA) for colour scope analysis.
+        let scope_result: Option<(gst::Bin, AppSink)> = (|| {
+            let tee   = gst::ElementFactory::make("tee").build().ok()?;
+            let q1    = gst::ElementFactory::make("queue").build().ok()?;
+            let q2    = gst::ElementFactory::make("queue").build().ok()?;
+            let scale = gst::ElementFactory::make("videoscale").build().ok()?;
+            let conv  = gst::ElementFactory::make("videoconvert").build().ok()?;
+            let sink  = AppSink::builder()
+                .caps(&gst::Caps::builder("video/x-raw")
+                    .field("format", "RGBA")
+                    .field("width",  320i32)
+                    .field("height", 180i32)
+                    .build())
+                .max_buffers(1u32)
+                .drop(true)
+                .build();
+
+            let sink_bin = gst::Bin::new();
+            sink_bin.add_many([&tee, &q1, &video_sink_inner, &q2, &scale, &conv, sink.upcast_ref::<gst::Element>()]).ok()?;
+
+            // tee src_0 → queue1 → display sink
+            let tee_src0 = tee.request_pad_simple("src_%u")?;
+            tee_src0.link(&q1.static_pad("sink")?).ok()?;
+            gst::Element::link_many([&q1, &video_sink_inner]).ok()?;
+
+            // tee src_1 → queue2 → videoscale → videoconvert → appsink
+            let tee_src1 = tee.request_pad_simple("src_%u")?;
+            tee_src1.link(&q2.static_pad("sink")?).ok()?;
+            gst::Element::link_many([&q2, &scale, &conv, sink.upcast_ref::<gst::Element>()]).ok()?;
+
+            // Expose the tee's sink pad as the bin's ghost sink
+            let ghost = gst::GhostPad::with_target(&tee.static_pad("sink")?).ok()?;
+            sink_bin.add_pad(&ghost).ok()?;
+
+            Some((sink_bin, sink))
+        })();
+
+        let (video_sink, scope_appsink) = match scope_result {
+            Some((bin, appsink)) => (bin.upcast::<gst::Element>(), Some(appsink)),
+            None => (video_sink_inner, None),
         };
 
         let pipeline = gst::ElementFactory::make("playbin")
@@ -338,6 +393,7 @@ impl ProgramPlayer {
                 level_element,
                 level_element_audio,
                 audio_peak_db: [-60.0, -60.0],
+                scope_appsink,
             },
             paintable,
             paintable2,
@@ -374,6 +430,21 @@ impl ProgramPlayer {
             return (1.0 - t, t);
         }
         (1.0, 0.0)
+    }
+
+    /// Try to pull the latest decoded frame from the scope appsink (non-blocking).
+    /// Returns `None` if no new frame is available or if the scope appsink was not built.
+    /// The frame is 320×180 RGBA (4 bytes per pixel).
+    pub fn try_pull_scope_frame(&self) -> Option<ScopeFrame> {
+        let appsink = self.scope_appsink.as_ref()?;
+        let sample = appsink.try_pull_sample(gst::ClockTime::ZERO)?;
+        let buffer = sample.buffer()?;
+        let map = buffer.map_readable().ok()?;
+        Some(ScopeFrame {
+            data: map.as_slice().to_vec(),
+            width: 320,
+            height: 180,
+        })
     }
 
     /// Activate the cross-dissolve transition preview: load the incoming clip into
