@@ -131,6 +131,13 @@ Tracking docs:
   - Play/Stop transport controls; timecode display
   - Timeline seek (click ruler) also seeks the program monitor
   - Clips reload automatically on every project change
+- [ ] Preview rendering performance pass
+  - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching
+  - [ ] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
+  - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
+  - [ ] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
+  - [ ] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
+  - [ ] Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff
 
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
