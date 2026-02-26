@@ -31,6 +31,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
     let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
+    let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
     let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
@@ -43,6 +44,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
+    timeline_state.borrow_mut().show_waveform_on_video = initial_show_waveform_on_video;
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
@@ -74,6 +76,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
         let project = project.clone();
+        let timeline_state = timeline_state.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
@@ -83,6 +86,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let prog_player = prog_player.clone();
                 let proxy_cache = proxy_cache.clone();
                 let project = project.clone();
+                let timeline_state = timeline_state.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
                     *preferences_state.borrow_mut() = new_state.clone();
                     crate::ui_state::save_preferences_state(&new_state);
@@ -117,6 +121,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         let paths = proxy_cache.borrow().proxies.clone();
                         prog_player.borrow_mut().update_proxy_paths(paths);
                     }
+                    timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
                 });
                 preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
             }
@@ -124,6 +129,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     });
 
     // ── Build inspector (after on_project_changed is defined so we can pass it) ──
+    // timeline_panel_cell is shared between the inspector's on_audio_changed callback
+    // and the program monitor poll timer. Declare it early (filled in after timeline build).
+    let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
     let (inspector_box, inspector_view) = inspector::build_inspector(
         project.clone(),
         // on_clip_changed: name changes → full project-changed cycle
@@ -152,6 +160,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
+            let cell = timeline_panel_cell.clone();
             move |vol, pan| {
                 prog_player.borrow_mut().update_current_audio(vol as f64, pan as f64);
                 if let Some(win) = window_weak.upgrade() {
@@ -159,6 +168,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let title = format!("UltimateSlice — {} •", proj.title);
                     win.set_title(Some(&title));
                 }
+                // Redraw timeline so the waveform height/color reflects the new volume.
+                if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
             }
         },
         // on_transform_changed: crop/rotate/flip → direct update, no pipeline reload
@@ -358,8 +369,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     }
 
     // ── Build program monitor ──────────────────────────────────────────────
-    // timeline_panel doesn't exist yet; use a shared cell filled in after build.
-    let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
     let prog_monitor_host = gtk::Box::new(Orientation::Vertical, 0);
     prog_monitor_host.set_hexpand(true);
     prog_monitor_host.set_vexpand(true);

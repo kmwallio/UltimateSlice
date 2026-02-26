@@ -96,6 +96,27 @@ pub fn show_preferences_dialog(
     playback_box.append(&proxy_hint);
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
+    // ── Timeline section ──────────────────────────────────────────────────
+    let timeline_box = GBox::new(Orientation::Vertical, 10);
+    timeline_box.set_margin_start(8);
+    timeline_box.set_margin_end(8);
+    timeline_box.set_margin_top(8);
+    let timeline_label = Label::new(Some("Timeline"));
+    timeline_label.set_halign(gtk::Align::Start);
+    timeline_label.add_css_class("title-4");
+    let waveform_video_check = CheckButton::with_label("Show audio waveforms on video clips");
+    waveform_video_check.set_active(current.show_waveform_on_video);
+    waveform_video_check.set_halign(gtk::Align::Start);
+    let waveform_hint = Label::new(Some("Overlays color-coded audio waveforms on the lower portion of video clip tiles. Thumbnails remain visible above."));
+    waveform_hint.set_halign(gtk::Align::Start);
+    waveform_hint.add_css_class("dim-label");
+    waveform_hint.set_wrap(true);
+    waveform_hint.set_max_width_chars(60);
+    timeline_box.append(&timeline_label);
+    timeline_box.append(&waveform_video_check);
+    timeline_box.append(&waveform_hint);
+    stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
+
     body.append(&sidebar);
     body.append(&stack);
     dialog.content_area().append(&body);
@@ -106,6 +127,7 @@ pub fn show_preferences_dialog(
                 hardware_acceleration_enabled: hw_accel.is_active(),
                 playback_priority: PlaybackPriority::from_str(playback_priority.active_id().as_deref().unwrap_or("smooth")),
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
+                show_waveform_on_video: waveform_video_check.is_active(),
             });
         }
         d.close();

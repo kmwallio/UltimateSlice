@@ -88,6 +88,18 @@ All notable project changes and progress should be recorded here.
     L/R channel peaks with three zones: green (< −18 dBFS), yellow (−18 to −6 dBFS),
     red (> −6 dBFS). The meter decays at ~3 dB per frame toward −60 dBFS when audio
     is silent.
+  - VU meter updates when the playhead is seeked (paused preroll triggers a level message)
+    and when the volume slider is adjusted while paused (force re-seek causes a new preroll).
+- **Color-coded audio waveforms on timeline**:
+  - Timeline waveform bars are now colored per-amplitude: green (quiet, < −18 dBFS),
+    yellow (moderate, −18 to −6 dBFS), red (loud, > −6 dBFS). Zones match the VU meter.
+  - Applies to both audio-track waveforms and the new video-clip waveform overlay.
+- **Waveform overlay on video clips (Preferences → Timeline)**:
+  - New preference `Show audio waveforms on video clips` (Preferences → Timeline section).
+  - When enabled, the audio waveform is drawn on the lower ~40% of each video clip tile
+    with a semi-transparent dark backing so thumbnails remain visible above.
+  - Color-coded using the same green/yellow/red amplitude zones.
+  - Preference is persisted to disk (`show_waveform_on_video` in `ui-state.json`).
 - **LUT import / apply (per clip)**:
   - Added `lut_path: Option<String>` field to the `Clip` model for storing the path to a `.cube` LUT file.
   - Inspector panel now has a **Color LUT** section with an **Import LUT…** file chooser (filtered to `.cube`) and a **Clear** button. The assigned LUT filename is displayed; a note clarifies "Applied on export (.cube)".

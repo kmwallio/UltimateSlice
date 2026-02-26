@@ -93,6 +93,8 @@ pub struct TimelineState {
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
     hover_transition_pair: Option<(String, String)>,
+    /// Show audio waveforms overlaid on video clips in the timeline.
+    pub show_waveform_on_video: bool,
 }
 
 impl TimelineState {
@@ -114,6 +116,7 @@ impl TimelineState {
             on_drop_clip: None,
             magnetic_mode: false,
             hover_transition_pair: None,
+            show_waveform_on_video: false,
         }
     }
 
@@ -1711,18 +1714,50 @@ fn draw_clip(
             cr.save().ok();
             rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
             cr.clip();
-
             let mid = cy + ch / 2.0;
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.6);
             cr.set_line_width(1.0);
-
+            let vol = (clip.volume as f64).max(0.0);
             for (i, &peak) in peaks.iter().enumerate() {
                 let px = cx + i as f64;
-                let half_h = (peak as f64 * (ch / 2.0 - 2.0)).max(1.0);
+                let scaled = (peak as f64 * vol).clamp(0.0, 1.0);
+                let half_h = (scaled * (ch / 2.0 - 2.0)).max(1.0);
+                let (wr, wg, wb) = waveform_color(scaled);
+                cr.set_source_rgba(wr, wg, wb, 0.85);
                 cr.move_to(px + 0.5, mid - half_h);
                 cr.line_to(px + 0.5, mid + half_h);
+                cr.stroke().ok();
             }
-            cr.stroke().ok();
+            cr.restore().ok();
+        }
+    }
+
+    // ── Waveform overlay for video clips (when preference enabled) ────────
+    if track.kind == TrackKind::Video && st.show_waveform_on_video && cw > 8.0 {
+        wcache.request(&clip.source_path);
+        let px_count = cw as usize;
+        if let Some(peaks) = wcache.get_peaks(&clip.source_path, clip.source_in, clip.source_out, px_count) {
+            // Draw on the lower 40% of the clip so thumbnails stay visible.
+            let wave_h = (ch * 0.40).max(6.0);
+            let wave_y = cy + ch - wave_h - 1.0;
+            cr.save().ok();
+            rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
+            cr.clip();
+            // Semi-transparent dark backing so waveform is readable over thumbnails.
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+            cr.paint().ok();
+            cr.set_line_width(1.0);
+            let wave_mid = wave_y + wave_h / 2.0;
+            let vol = (clip.volume as f64).max(0.0);
+            for (i, &peak) in peaks.iter().enumerate() {
+                let px = cx + i as f64;
+                let scaled = (peak as f64 * vol).clamp(0.0, 1.0);
+                let half_h = (scaled * (wave_h / 2.0 - 1.0)).max(1.0);
+                let (wr, wg, wb) = waveform_color(scaled);
+                cr.set_source_rgba(wr, wg, wb, 0.9);
+                cr.move_to(px + 0.5, wave_mid - half_h);
+                cr.line_to(px + 0.5, wave_mid + half_h);
+                cr.stroke().ok();
+            }
             cr.restore().ok();
         }
     }
@@ -1800,6 +1835,18 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
     cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::PI / 2.0);
     cr.arc(x + r, y + h - r, r, std::f64::consts::PI / 2.0, std::f64::consts::PI);
     cr.close_path();
+}
+
+/// Map a normalized peak amplitude (0.0–1.0) to an RGB color for waveform display.
+/// Zones mirror the VU meter: green (quiet), yellow (moderate), red (loud).
+fn waveform_color(peak: f64) -> (f64, f64, f64) {
+    if peak >= 0.5 {
+        (0.95, 0.25, 0.15)  // red  — loud (≥ −6 dBFS)
+    } else if peak >= 0.126 {
+        (0.95, 0.85, 0.15)  // yellow — moderate (−18 to −6 dBFS)
+    } else {
+        (0.30, 0.90, 0.40)  // green — quiet (< −18 dBFS)
+    }
 }
 
 fn choose_tick_interval(pixels_per_second: f64) -> f64 {
