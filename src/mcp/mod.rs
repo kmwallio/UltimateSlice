@@ -55,6 +55,13 @@ pub enum McpCommand {
         lut_path: Option<String>,
         reply:    SyncSender<Value>,
     },
+    SetClipTransform {
+        clip_id:    String,
+        scale:      f64,
+        position_x: f64,
+        position_y: f64,
+        reply:      SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

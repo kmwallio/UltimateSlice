@@ -35,6 +35,9 @@ pub struct InspectorView {
     pub rotate_combo: gtk4::ComboBoxText,
     pub flip_h_btn: gtk4::ToggleButton,
     pub flip_v_btn: gtk4::ToggleButton,
+    pub scale_slider: Scale,
+    pub position_x_slider: Scale,
+    pub position_y_slider: Scale,
     // Title / text overlay
     pub title_entry: Entry,
     pub title_x_slider: Scale,
@@ -111,6 +114,9 @@ impl InspectorView {
                 self.rotate_combo.set_active_id(Some(&c.rotate.to_string()));
                 self.flip_h_btn.set_active(c.flip_h);
                 self.flip_v_btn.set_active(c.flip_v);
+                self.scale_slider.set_value(c.scale);
+                self.position_x_slider.set_value(c.position_x);
+                self.position_y_slider.set_value(c.position_y);
                 self.title_entry.set_text(&c.title_text);
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
@@ -150,6 +156,9 @@ impl InspectorView {
                 self.rotate_combo.set_active_id(Some("0"));
                 self.flip_h_btn.set_active(false);
                 self.flip_v_btn.set_active(false);
+                self.scale_slider.set_value(1.0);
+                self.position_x_slider.set_value(0.0);
+                self.position_y_slider.set_value(0.0);
                 self.title_entry.set_text("");
                 self.title_x_slider.set_value(0.5);
                 self.title_y_slider.set_value(0.9);
@@ -175,7 +184,7 @@ pub fn build_inspector(
     on_clip_changed: impl Fn() + 'static,
     on_color_changed: impl Fn(f32, f32, f32, f32, f32) + 'static,
     on_audio_changed: impl Fn(f32, f32) + 'static,
-    on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool) + 'static,
+    on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
     on_speed_changed: impl Fn(f64) + 'static,
     on_lut_changed: impl Fn(Option<String>) + 'static,
@@ -325,9 +334,44 @@ pub fn build_inspector(
     let transform_inner = GBox::new(Orientation::Vertical, 8);
     transform_expander.set_child(Some(&transform_inner));
 
+    row_label(&transform_inner, "Scale");
+    let scale_slider = Scale::with_range(Orientation::Horizontal, 0.1, 4.0, 0.05);
+    scale_slider.set_value(1.0);
+    scale_slider.set_draw_value(true);
+    scale_slider.set_digits(2);
+    scale_slider.add_mark(0.5,  gtk4::PositionType::Bottom, Some("½×"));
+    scale_slider.add_mark(1.0,  gtk4::PositionType::Bottom, Some("1×"));
+    scale_slider.add_mark(2.0,  gtk4::PositionType::Bottom, Some("2×"));
+    scale_slider.set_hexpand(true);
+    scale_slider.set_tooltip_text(Some("Scale: <1 = shrink with black borders, >1 = zoom in"));
+    transform_inner.append(&scale_slider);
+
+    row_label(&transform_inner, "Position X");
+    let position_x_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    position_x_slider.set_value(0.0);
+    position_x_slider.set_draw_value(true);
+    position_x_slider.set_digits(2);
+    position_x_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("←"));
+    position_x_slider.add_mark( 0.0, gtk4::PositionType::Bottom, Some("·"));
+    position_x_slider.add_mark( 1.0, gtk4::PositionType::Bottom, Some("→"));
+    position_x_slider.set_hexpand(true);
+    position_x_slider.set_tooltip_text(Some("Horizontal position: −1 = left, 0 = center, +1 = right"));
+    transform_inner.append(&position_x_slider);
+
+    row_label(&transform_inner, "Position Y");
+    let position_y_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    position_y_slider.set_value(0.0);
+    position_y_slider.set_draw_value(true);
+    position_y_slider.set_digits(2);
+    position_y_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("↑"));
+    position_y_slider.add_mark( 0.0, gtk4::PositionType::Bottom, Some("·"));
+    position_y_slider.add_mark( 1.0, gtk4::PositionType::Bottom, Some("↓"));
+    position_y_slider.set_hexpand(true);
+    position_y_slider.set_tooltip_text(Some("Vertical position: −1 = top, 0 = center, +1 = bottom"));
+    transform_inner.append(&position_y_slider);
+
     row_label(&transform_inner, "Crop Left");
-    let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
-    crop_left_slider.set_value(0.0);
+    let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);    crop_left_slider.set_value(0.0);
     crop_left_slider.set_draw_value(true);
     crop_left_slider.set_digits(0);
     transform_inner.append(&crop_left_slider);
@@ -461,7 +505,7 @@ pub fn build_inspector(
     let on_clip_changed = Rc::new(on_clip_changed);
     let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
-    let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool)> = Rc::new(on_transform_changed);
+    let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> = Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
     let on_speed_changed: Rc<dyn Fn(f64)> = Rc::new(on_speed_changed);
     let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
@@ -631,7 +675,7 @@ pub fn build_inspector(
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool)>,
+        on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)>,
         crop_left_s: Scale,
         crop_right_s: Scale,
         crop_top_s: Scale,
@@ -639,6 +683,9 @@ pub fn build_inspector(
         rotate_c: gtk4::ComboBoxText,
         flip_h_b: gtk4::ToggleButton,
         flip_v_b: gtk4::ToggleButton,
+        scale_s: Scale,
+        pos_x_s: Scale,
+        pos_y_s: Scale,
         apply: fn(&mut crate::model::clip::Clip, i32),
     ) {
         slider.connect_value_changed(move |s| {
@@ -665,7 +712,10 @@ pub fn build_inspector(
                     .unwrap_or(0);
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+                let sc = scale_s.value();
+                let px = pos_x_s.value();
+                let py = pos_y_s.value();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, sc, px, py);
             }
         });
     }
@@ -676,6 +726,7 @@ pub fn build_inspector(
         crop_left_slider.clone(), crop_right_slider.clone(),
         crop_top_slider.clone(), crop_bottom_slider.clone(),
         rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
         |clip, v| clip.crop_left = v,
     );
     connect_transform_slider(
@@ -684,6 +735,7 @@ pub fn build_inspector(
         crop_left_slider.clone(), crop_right_slider.clone(),
         crop_top_slider.clone(), crop_bottom_slider.clone(),
         rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
         |clip, v| clip.crop_right = v,
     );
     connect_transform_slider(
@@ -692,6 +744,7 @@ pub fn build_inspector(
         crop_left_slider.clone(), crop_right_slider.clone(),
         crop_top_slider.clone(), crop_bottom_slider.clone(),
         rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
         |clip, v| clip.crop_top = v,
     );
     connect_transform_slider(
@@ -700,6 +753,7 @@ pub fn build_inspector(
         crop_left_slider.clone(), crop_right_slider.clone(),
         crop_top_slider.clone(), crop_bottom_slider.clone(),
         rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
+        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
         |clip, v| clip.crop_bottom = v,
     );
 
@@ -715,6 +769,9 @@ pub fn build_inspector(
         let crop_bottom_s = crop_bottom_slider.clone();
         let flip_h_b = flip_h_btn.clone();
         let flip_v_b = flip_v_btn.clone();
+        let scale_s = scale_slider.clone();
+        let pos_x_s = position_x_slider.clone();
+        let pos_y_s = position_y_slider.clone();
         rotate_combo.connect_changed(move |combo| {
             if *updating.borrow() { return; }
             let rot = combo.active_id()
@@ -738,7 +795,7 @@ pub fn build_inspector(
                 let cb = crop_bottom_s.value() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), pos_y_s.value());
             }
         });
     }
@@ -755,6 +812,9 @@ pub fn build_inspector(
         let crop_bottom_s = crop_bottom_slider.clone();
         let rotate_c = rotate_combo.clone();
         let flip_v_b = flip_v_btn.clone();
+        let scale_s = scale_slider.clone();
+        let pos_x_s = position_x_slider.clone();
+        let pos_y_s = position_y_slider.clone();
         flip_h_btn.connect_toggled(move |btn| {
             if *updating.borrow() { return; }
             let fh = btn.is_active();
@@ -778,7 +838,7 @@ pub fn build_inspector(
                     .and_then(|id| id.parse::<i32>().ok())
                     .unwrap_or(0);
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), pos_y_s.value());
             }
         });
     }
@@ -793,6 +853,9 @@ pub fn build_inspector(
         let crop_bottom_s = crop_bottom_slider.clone();
         let rotate_c = rotate_combo.clone();
         let flip_h_b = flip_h_btn.clone();
+        let scale_s = scale_slider.clone();
+        let pos_x_s = position_x_slider.clone();
+        let pos_y_s = position_y_slider.clone();
         flip_v_btn.connect_toggled(move |btn| {
             if *updating.borrow() { return; }
             let fv = btn.is_active();
@@ -816,9 +879,137 @@ pub fn build_inspector(
                     .and_then(|id| id.parse::<i32>().ok())
                     .unwrap_or(0);
                 let fh = flip_h_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv);
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), pos_y_s.value());
             }
         });
+    }
+
+    // Wire scale and position sliders
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_transform_changed = on_transform_changed.clone();
+        let crop_left_s = crop_left_slider.clone();
+        let crop_right_s = crop_right_slider.clone();
+        let crop_top_s = crop_top_slider.clone();
+        let crop_bottom_s = crop_bottom_slider.clone();
+        let rotate_c = rotate_combo.clone();
+        let flip_h_b = flip_h_btn.clone();
+        let flip_v_b = flip_v_btn.clone();
+        let pos_x_s = position_x_slider.clone();
+        let pos_y_s = position_y_slider.clone();
+        let scale_s2 = scale_slider.clone();
+        scale_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() { return; }
+            let sc = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.scale = sc;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                let cl = crop_left_s.value() as i32;
+                let cr = crop_right_s.value() as i32;
+                let ct = crop_top_s.value() as i32;
+                let cb = crop_bottom_s.value() as i32;
+                let rot = rotate_c.active_id().and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
+                let fh = flip_h_b.is_active();
+                let fv = flip_v_b.is_active();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, sc, pos_x_s.value(), pos_y_s.value());
+            }
+        });
+        let _ = scale_s2; // silence unused warning
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_transform_changed = on_transform_changed.clone();
+        let crop_left_s = crop_left_slider.clone();
+        let crop_right_s = crop_right_slider.clone();
+        let crop_top_s = crop_top_slider.clone();
+        let crop_bottom_s = crop_bottom_slider.clone();
+        let rotate_c = rotate_combo.clone();
+        let flip_h_b = flip_h_btn.clone();
+        let flip_v_b = flip_v_btn.clone();
+        let scale_s = scale_slider.clone();
+        let pos_y_s = position_y_slider.clone();
+        let pos_x_s2 = position_x_slider.clone();
+        position_x_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() { return; }
+            let px = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.position_x = px;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                let cl = crop_left_s.value() as i32;
+                let cr = crop_right_s.value() as i32;
+                let ct = crop_top_s.value() as i32;
+                let cb = crop_bottom_s.value() as i32;
+                let rot = rotate_c.active_id().and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
+                let fh = flip_h_b.is_active();
+                let fv = flip_v_b.is_active();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), px, pos_y_s.value());
+            }
+        });
+        let _ = pos_x_s2;
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_transform_changed = on_transform_changed.clone();
+        let crop_left_s = crop_left_slider.clone();
+        let crop_right_s = crop_right_slider.clone();
+        let crop_top_s = crop_top_slider.clone();
+        let crop_bottom_s = crop_bottom_slider.clone();
+        let rotate_c = rotate_combo.clone();
+        let flip_h_b = flip_h_btn.clone();
+        let flip_v_b = flip_v_btn.clone();
+        let scale_s = scale_slider.clone();
+        let pos_x_s = position_x_slider.clone();
+        let pos_y_s2 = position_y_slider.clone();
+        position_y_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() { return; }
+            let py = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.position_y = py;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                let cl = crop_left_s.value() as i32;
+                let cr = crop_right_s.value() as i32;
+                let ct = crop_top_s.value() as i32;
+                let cb = crop_bottom_s.value() as i32;
+                let rot = rotate_c.active_id().and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
+                let fh = flip_h_b.is_active();
+                let fv = flip_v_b.is_active();
+                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), py);
+            }
+        });
+        let _ = pos_y_s2;
     }
 
     // Title entry and position sliders
@@ -1026,6 +1217,9 @@ pub fn build_inspector(
         rotate_combo,
         flip_h_btn,
         flip_v_btn,
+        scale_slider,
+        position_x_slider,
+        position_y_slider,
         title_entry,
         title_x_slider,
         title_y_slider,

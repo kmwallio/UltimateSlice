@@ -13,6 +13,7 @@ fn default_contrast() -> f32 { 1.0 }
 fn default_saturation() -> f32 { 1.0 }
 fn default_volume() -> f32 { 1.0 }
 fn default_speed() -> f64 { 1.0 }
+fn default_scale() -> f64 { 1.0 }
 fn default_title_font() -> String { "Sans Bold 36".to_string() }
 fn default_title_color() -> u32 { 0xFFFFFFFF }
 fn default_title_x() -> f64 { 0.5 }
@@ -95,6 +96,17 @@ pub struct Clip {
     /// None means no LUT is assigned.
     #[serde(default)]
     pub lut_path: Option<String>,
+    /// Scale multiplier for the clip within the frame: 1.0 = fill frame, 2.0 = zoom in 2×,
+    /// 0.5 = half-size with black borders. Range 0.1–4.0, default 1.0.
+    #[serde(default = "default_scale")]
+    pub scale: f64,
+    /// Horizontal position offset: −1.0 (clip anchored to left edge) to 1.0 (right edge).
+    /// Meaningful when scale ≠ 1.0. Default 0.0 (centered).
+    #[serde(default)]
+    pub position_x: f64,
+    /// Vertical position offset: −1.0 (top edge) to 1.0 (bottom edge). Default 0.0 (centered).
+    #[serde(default)]
+    pub position_y: f64,
 }
 
 impl Clip {
@@ -136,6 +148,9 @@ impl Clip {
             transition_after: String::new(),
             transition_after_ns: 0,
             lut_path: None,
+            scale: 1.0,
+            position_x: 0.0,
+            position_y: 0.0,
         }
     }
 

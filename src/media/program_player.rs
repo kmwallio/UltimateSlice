@@ -67,6 +67,12 @@ pub struct ProgramClip {
     pub transition_after_ns: u64,
     /// LUT file path for color grading (used for proxy lookup when proxy mode is enabled).
     pub lut_path: Option<String>,
+    /// Scale multiplier: 1.0 = fill frame, >1.0 = zoom in, <1.0 = shrink with black borders.
+    pub scale: f64,
+    /// Horizontal position offset: −1.0 (left) to 1.0 (right). Default 0.0.
+    pub position_x: f64,
+    /// Vertical position offset: −1.0 (top) to 1.0 (bottom). Default 0.0.
+    pub position_y: f64,
 }
 
 impl ProgramClip {
@@ -123,6 +129,15 @@ pub struct ProgramPlayer {
     textoverlay: Option<gst::Element>,
     /// alpha element for transition fade approximation in preview.
     alpha_filter: Option<gst::Element>,
+    /// videoscale element for zoom/scale in preview (scales to project_w*scale × project_h*scale).
+    videoscale_zoom: Option<gst::Element>,
+    /// capsfilter element for zoom (dynamically updated with scaled dimensions).
+    capsfilter_zoom: Option<gst::Element>,
+    /// videobox element for crop (zoom-in) or pad (zoom-out) + position offset.
+    videobox_zoom: Option<gst::Element>,
+    /// Project output dimensions (used for scale/position math). Default 1920×1080.
+    project_width: u32,
+    project_height: u32,
     playback_priority: PlaybackPriority,
     /// Proxy mode: when enabled, load_clip_idx uses proxy paths for preview.
     proxy_enabled: bool,
@@ -277,6 +292,25 @@ impl ProgramPlayer {
         let textoverlay = gst::ElementFactory::make("textoverlay").build().ok();
         let alpha_filter = gst::ElementFactory::make("alpha").build().ok();
 
+        // Zoom/scale/position chain: normalise → scale → crop/pad.
+        // Added at the END of the video filter bin so scale and position are
+        // applied AFTER all other per-clip effects (color, crop, flip, title).
+        let conv_zoom       = gst::ElementFactory::make("videoconvert").build().ok();
+        let videoscale_norm = gst::ElementFactory::make("videoscale").build().ok();
+        let capsfilter_proj = gst::ElementFactory::make("capsfilter").build().ok();
+        let videoscale_zoom = gst::ElementFactory::make("videoscale").build().ok();
+        let capsfilter_zoom = gst::ElementFactory::make("capsfilter").build().ok();
+        let videobox_zoom   = gst::ElementFactory::make("videobox").build().ok();
+
+        let default_proj_caps = gst::Caps::builder("video/x-raw")
+            .field("width", 1920i32).field("height", 1080i32).build();
+        if let Some(ref cf) = capsfilter_proj {
+            cf.set_property("caps", &default_proj_caps);
+        }
+        if let Some(ref cf) = capsfilter_zoom {
+            cf.set_property("caps", &default_proj_caps.copy());
+        }
+
         if videobalance.is_some() && gaussianblur.is_some() {
             let vb = videobalance.as_ref().unwrap();
             let gb = gaussianblur.as_ref().unwrap();
@@ -286,6 +320,11 @@ impl ProgramPlayer {
                 .expect("videoconvert must be available");
             let conv2 = gst::ElementFactory::make("videoconvert").build()
                 .expect("videoconvert must be available");
+
+            // Determine the last element of the inner chain, build the chain,
+            // and record the sink/src ghost-pad targets.
+            let sink_elem: gst::Element;
+            let last_inner: gst::Element;
 
             if let (Some(ref vc), Some(ref vfr), Some(ref vff)) =
                 (&videocrop, &videoflip_rotate, &videoflip_flip)
@@ -300,35 +339,46 @@ impl ProgramPlayer {
                     to.set_property("silent", true);
                     bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, a, to]).ok();
                     gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, a, to]).ok();
-                    let sink_pad = vc.static_pad("sink").unwrap();
-                    let src_pad = to.static_pad("src").unwrap();
-                    bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-                    bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                    sink_elem = vc.clone();
+                    last_inner = to.clone();
                 } else if let Some(ref to) = textoverlay {
                     to.set_property("text", "");
                     to.set_property("silent", true);
                     bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, to]).ok();
                     gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, to]).ok();
-                    let sink_pad = vc.static_pad("sink").unwrap();
-                    let src_pad = to.static_pad("src").unwrap();
-                    bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-                    bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                    sink_elem = vc.clone();
+                    last_inner = to.clone();
                 } else {
                     bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
                     gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
-                    let sink_pad = vc.static_pad("sink").unwrap();
-                    let src_pad = vff.static_pad("src").unwrap();
-                    bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-                    bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                    sink_elem = vc.clone();
+                    last_inner = vff.clone();
                 }
             } else {
                 bin.add_many([vb, &conv1, gb]).ok();
                 gst::Element::link_many([vb, &conv1, gb]).ok();
-                let sink_pad = vb.static_pad("sink").unwrap();
-                let src_pad = gb.static_pad("src").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                sink_elem = vb.clone();
+                last_inner = gb.clone();
             }
+
+            // Append the zoom chain to the bin and link from the inner chain's last element.
+            let src_elem = if let (Some(ref cz), Some(ref vsn), Some(ref cfp),
+                                   Some(ref vsz), Some(ref cfz), Some(ref vbz)) =
+                (&conv_zoom, &videoscale_norm, &capsfilter_proj,
+                 &videoscale_zoom, &capsfilter_zoom, &videobox_zoom)
+            {
+                bin.add_many([cz, vsn, cfp, vsz, cfz, vbz]).ok();
+                gst::Element::link_many([&last_inner, cz, vsn, cfp, vsz, cfz, vbz]).ok();
+                vbz.clone()
+            } else {
+                last_inner.clone()
+            };
+
+            let sink_pad = sink_elem.static_pad("sink").unwrap();
+            let src_pad  = src_elem.static_pad("src").unwrap();
+            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+
             pipeline.set_property("video-filter", &bin);
         } else if let Some(ref vb) = videobalance {
             pipeline.set_property("video-filter", vb);
@@ -431,6 +481,11 @@ impl ProgramPlayer {
                 videoflip_flip,
                 textoverlay,
                 alpha_filter,
+                videoscale_zoom,
+                capsfilter_zoom,
+                videobox_zoom,
+                project_width: 1920,
+                project_height: 1080,
                 playback_priority: PlaybackPriority::default(),
                 proxy_enabled: false,
                 proxy_paths: HashMap::new(),
@@ -460,6 +515,21 @@ impl ProgramPlayer {
     /// Update the proxy path mapping. Called when new proxy transcodes complete.
     pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
         self.proxy_paths = paths;
+    }
+
+    /// Set the project output dimensions used for scale/position math in preview.
+    /// Call this at startup and whenever the project resolution changes.
+    pub fn set_project_dimensions(&mut self, width: u32, height: u32) {
+        self.project_width = width;
+        self.project_height = height;
+        // Update capsfilter_proj to match new project resolution (no-op when scale=1.0).
+        if let Some(ref cf) = self.capsfilter_zoom {
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("width", width as i32)
+                .field("height", height as i32)
+                .build();
+            cf.set_property("caps", &caps);
+        }
     }
 
     /// Returns (opacity_a, opacity_b) for the two program monitor pictures.
@@ -1059,8 +1129,10 @@ impl ProgramPlayer {
         }
     }
 
-    /// Apply crop, rotation, and flip transform to the video filter elements.
-    pub fn set_transform(&self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32, rotate: i32, flip_h: bool, flip_v: bool) {
+    /// Apply crop, rotation, flip, scale, and position transform to the video filter elements.
+    pub fn set_transform(&self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32,
+                         rotate: i32, flip_h: bool, flip_v: bool,
+                         scale: f64, position_x: f64, position_y: f64) {
         if let Some(ref vc) = self.videocrop {
             vc.set_property("left", crop_left.max(0));
             vc.set_property("right", crop_right.max(0));
@@ -1084,6 +1156,49 @@ impl ProgramPlayer {
                 (false, false) => "none",
             };
             vff.set_property_from_str("method", method);
+        }
+        self.apply_zoom(scale, position_x, position_y);
+    }
+
+    /// Update capsfilter_zoom and videobox_zoom for scale and position.
+    ///
+    /// After `videoscale_norm` normalises the frame to `project_width × project_height`:
+    /// - `capsfilter_zoom` forces output to `w*scale × h*scale` (videoscale_zoom does the work)
+    /// - `videobox_zoom` crops (zoom-in) or pads (zoom-out) back to `w × h` with position offset
+    fn apply_zoom(&self, scale: f64, position_x: f64, position_y: f64) {
+        let scale = scale.clamp(0.1, 4.0);
+        let pw = self.project_width as f64;
+        let ph = self.project_height as f64;
+
+        // Update capsfilter_zoom caps to project_w*scale × project_h*scale.
+        if let Some(ref cf) = self.capsfilter_zoom {
+            let sw = (pw * scale).round() as i32;
+            let sh = (ph * scale).round() as i32;
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("width", sw)
+                .field("height", sh)
+                .build();
+            cf.set_property("caps", &caps);
+        }
+
+        // Compute videobox borders.
+        // For zoom-in (scale > 1.0): frame is larger than project res → negative box values (crop).
+        // For zoom-out (scale < 1.0): frame is smaller than project res → positive box values (pad).
+        // pos_x/pos_y in [−1, 1]: positive = shift viewport right/down.
+        let pos_x = position_x.clamp(-1.0, 1.0);
+        let pos_y = position_y.clamp(-1.0, 1.0);
+        let total_x = pw * (scale - 1.0); // positive = need to crop; negative = need to pad
+        let total_y = ph * (scale - 1.0);
+        let box_left   = -(total_x * (1.0 + pos_x) / 2.0) as i32;
+        let box_right  = -(total_x * (1.0 - pos_x) / 2.0) as i32;
+        let box_top    = -(total_y * (1.0 + pos_y) / 2.0) as i32;
+        let box_bottom = -(total_y * (1.0 - pos_y) / 2.0) as i32;
+
+        if let Some(ref vb) = self.videobox_zoom {
+            vb.set_property("left",   box_left);
+            vb.set_property("right",  box_right);
+            vb.set_property("top",    box_top);
+            vb.set_property("bottom", box_bottom);
         }
     }
 
@@ -1129,8 +1244,10 @@ impl ProgramPlayer {
     }
 
     /// Directly update transform on the current clip without reloading the pipeline.
-    pub fn update_current_transform(&mut self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32, rotate: i32, flip_h: bool, flip_v: bool) {
-        self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v);
+    pub fn update_current_transform(&mut self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32,
+                                    rotate: i32, flip_h: bool, flip_v: bool,
+                                    scale: f64, position_x: f64, position_y: f64) {
+        self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v, scale, position_x, position_y);
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
             let pos = self.timeline_pos_ns;
             if let Some(idx) = self.clip_at(pos) {
@@ -1190,9 +1307,10 @@ impl ProgramPlayer {
         if let Some(ref ap) = self.audiopanorama {
             ap.set_property("panorama", (clip.pan as f32).clamp(-1.0, 1.0));
         }
-        // Apply per-clip transform (crop, rotate, flip)
+        // Apply per-clip transform (crop, rotate, flip, scale, position)
         self.set_transform(clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom,
-                           clip.rotate, clip.flip_h, clip.flip_v);
+                           clip.rotate, clip.flip_h, clip.flip_v,
+                           clip.scale, clip.position_x, clip.position_y);
         // Apply per-clip title overlay
         self.set_title(&clip.title_text, &clip.title_font, clip.title_color, clip.title_x, clip.title_y);
 

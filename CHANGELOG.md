@@ -5,6 +5,14 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Scale / Position per clip**: Inspector Transform section now has Scale (0.1–4.0),
+  Position X (−1 to 1), and Position Y (−1 to 1) sliders. Scale > 1 zooms into the
+  clip (crops the frame); scale < 1 shrinks the clip with black letterbox/pillarbox.
+  Position X/Y shifts the viewport within the zoomed or shrunk frame. Applied in the
+  program monitor via a GStreamer `videoscale` + `videobox` chain appended to the
+  existing filter bin, and on export via ffmpeg `scale`+`crop`/`pad` filters. Settings
+  are saved to project JSON and round-trip through FCPXML (`us:scale`, `us:position-x`,
+  `us:position-y`). MCP server exposes a new `set_clip_transform` tool.
 - **Transition effects — Fade to black, Wipe right, Wipe left**: Three new transition
   types added to the transitions pane alongside Cross-dissolve. Drag any transition to a
   clip boundary to apply it. Preview uses dual-pipeline opacity blending (Fade to black

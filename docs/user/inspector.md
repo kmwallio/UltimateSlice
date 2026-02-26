@@ -53,10 +53,13 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 
 ## Video Transform
 
-Applied via GStreamer `videocrop` and `videoflip` (preview) and ffmpeg filters (export).
+Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (preview) and ffmpeg filters (export).
 
 | Control | Options | Description |
 |---|---|---|
+| **Scale** | 0.1 → 4.0 | Zoom factor. 1.0 = normal, 2.0 = 2× zoom in (crops), 0.5 = half size (letterbox/pillarbox) |
+| **Position X** | −1.0 → 1.0 | Horizontal offset within the frame. 0.0 = center, −1.0 = full left, 1.0 = full right |
+| **Position Y** | −1.0 → 1.0 | Vertical offset within the frame. 0.0 = center, −1.0 = full top, 1.0 = full bottom |
 | **Crop Left/Right/Top/Bottom** | 0 → 500 px | Crop pixels from each edge |
 | **Rotate** | 0° / 90° / 180° / 270° | Rotation preset |
 | **Flip H** | Toggle | Mirror horizontally |

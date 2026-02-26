@@ -172,15 +172,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
             }
         },
-        // on_transform_changed: crop/rotate/flip → direct update, no pipeline reload
+        // on_transform_changed: crop/rotate/flip/scale/position → direct update, no pipeline reload
         {
             let player = player.clone();
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |cl, cr, ct, cb, rot, fh, fv| {
+            move |cl, cr, ct, cb, rot, fh, fv, sc, px, py| {
                 player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
-                prog_player.borrow_mut().update_current_transform(cl, cr, ct, cb, rot, fh, fv);
+                prog_player.borrow_mut().update_current_transform(cl, cr, ct, cb, rot, fh, fv, sc, px, py);
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -747,6 +747,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         transition_after:  c.transition_after.clone(),
                         transition_after_ns:c.transition_after_ns,
                         lut_path:          c.lut_path.clone(),
+                        scale:             c.scale,
+                        position_x:        c.position_x,
+                        position_y:        c.position_y,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
@@ -1416,6 +1419,26 @@ fn handle_mcp_command(
                 for clip in track.clips.iter_mut() {
                     if clip.id == clip_id {
                         clip.lut_path = lut_path.clone();
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SetClipTransform { clip_id, scale, position_x, position_y, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.scale      = scale.clamp(0.1, 4.0);
+                        clip.position_x = position_x.clamp(-1.0, 1.0);
+                        clip.position_y = position_y.clamp(-1.0, 1.0);
                         proj.dirty = true;
                         found = true;
                         break 'outer;

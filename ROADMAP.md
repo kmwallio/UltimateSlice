@@ -176,12 +176,12 @@ Tracking docs:
 - [x] Transition effects (fade to black, wipe right, wipe left)
 
 ### Video Transform (per clip)
-- [ ] Scale / resize clip (zoom in/out within frame)
+- [x] Scale / resize clip (zoom in/out within frame) via GStreamer `videoscale` + `videobox`
 - [x] Crop clip (left / right / top / bottom margins) via GStreamer `videocrop`
 - [x] Rotate clip (90° / 180° / 270° presets) via GStreamer `videoflip`
 - [x] Flip horizontal / flip vertical via GStreamer `videoflip`
-- [ ] Position offset (X / Y translation within the output frame)
-- [x] Persist transform settings in FCPXML (`us:crop-*`, `us:rotate`, `us:flip-h/v` attributes)
+- [x] Position offset (X / Y translation within the output frame) via GStreamer `videobox`
+- [x] Persist transform settings in FCPXML (`us:crop-*`, `us:rotate`, `us:flip-h/v`, `us:scale`, `us:position-x/y` attributes)
 - [ ] Interactive crop/rotate handles in program monitor (removed; use Inspector sliders instead)
 
 ### Project Management
