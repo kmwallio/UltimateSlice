@@ -107,22 +107,30 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
 
-        // Build the popover content lazily each time it opens so it reflects the
-        // current list (which may have grown during the session).
-        btn_recent.connect_activate(move |mb| {
+        // Build the popover upfront so MenuButton can show it immediately.
+        // Repopulate the inner box each time the popover opens (connect_show)
+        // so the list reflects any projects opened during this session.
+        let pop = gtk::Popover::new();
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vbox.set_margin_start(4); vbox.set_margin_end(4);
+        vbox.set_margin_top(4);   vbox.set_margin_bottom(4);
+        pop.set_child(Some(&vbox));
+        btn_recent.set_popover(Some(&pop));
+
+        let vbox_ref = vbox.clone();
+        pop.connect_show(move |pop| {
+            // Clear previous children
+            while let Some(child) = vbox_ref.first_child() {
+                vbox_ref.remove(&child);
+            }
+
             let entries = recent::load();
-
-            let pop = gtk::Popover::new();
-            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
-            vbox.set_margin_start(4); vbox.set_margin_end(4);
-            vbox.set_margin_top(4);   vbox.set_margin_bottom(4);
-
             if entries.is_empty() {
                 let empty = gtk::Label::new(Some("No recent projects"));
                 empty.add_css_class("dim-label");
                 empty.set_margin_start(8); empty.set_margin_end(8);
                 empty.set_margin_top(4);   empty.set_margin_bottom(4);
-                vbox.append(&empty);
+                vbox_ref.append(&empty);
             } else {
                 for path_str in &entries {
                     let display = std::path::Path::new(path_str)
@@ -163,12 +171,9 @@ pub fn build_toolbar(
                             Err(e) => eprintln!("Failed to open recent project: {e}"),
                         }
                     });
-                    vbox.append(&row);
+                    vbox_ref.append(&row);
                 }
             }
-
-            pop.set_child(Some(&vbox));
-            mb.set_popover(Some(&pop));
         });
     }
     header.pack_start(&btn_recent);
