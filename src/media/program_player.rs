@@ -54,6 +54,8 @@ pub struct ProgramClip {
     pub transition_after: String,
     /// Transition duration in nanoseconds.
     pub transition_after_ns: u64,
+    /// LUT file path for color grading (used for proxy lookup when proxy mode is enabled).
+    pub lut_path: Option<String>,
 }
 
 impl ProgramClip {
@@ -775,8 +777,14 @@ impl ProgramPlayer {
                 while bus.pop().is_some() {}
             }
             // Use proxy file when proxy mode is enabled and a proxy exists.
+            // The proxy map is keyed by (source_path, lut_path) composite key so
+            // each LUT-assigned clip gets its own baked proxy.
             let effective_path = if self.proxy_enabled {
-                self.proxy_paths.get(&clip.source_path)
+                let key = crate::media::proxy_cache::proxy_key(
+                    &clip.source_path,
+                    clip.lut_path.as_deref(),
+                );
+                self.proxy_paths.get(&key)
                     .map(|p| p.as_str())
                     .unwrap_or(&clip.source_path)
             } else {

@@ -73,13 +73,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let player = player.clone();
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
+        let project = project.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
+                let old_proxy_mode = current.proxy_mode.clone();
                 let preferences_state = preferences_state.clone();
                 let player = player.clone();
                 let prog_player = prog_player.clone();
                 let proxy_cache = proxy_cache.clone();
+                let project = project.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
                     *preferences_state.borrow_mut() = new_state.clone();
                     crate::ui_state::save_preferences_state(&new_state);
@@ -89,6 +92,28 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     prog_player.borrow_mut().set_playback_priority(new_state.playback_priority.clone());
                     prog_player.borrow_mut().set_proxy_enabled(new_state.proxy_mode.is_enabled());
                     if new_state.proxy_mode.is_enabled() {
+                        // If the proxy scale changed, invalidate old entries so clips are
+                        // re-transcoded at the new resolution.
+                        if new_state.proxy_mode != old_proxy_mode {
+                            proxy_cache.borrow_mut().invalidate_all();
+                        }
+                        let scale = match new_state.proxy_mode {
+                            crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+                            _ => crate::media::proxy_cache::ProxyScale::Half,
+                        };
+                        let clips: Vec<(String, Option<String>)> = {
+                            let proj = project.borrow();
+                            proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .map(|c| (c.source_path.clone(), c.lut_path.clone()))
+                                .collect()
+                        };
+                        {
+                            let mut cache = proxy_cache.borrow_mut();
+                            for (path, lut) in &clips {
+                                cache.request(path, scale, lut.as_deref());
+                            }
+                        }
                         let paths = proxy_cache.borrow().proxies.clone();
                         prog_player.borrow_mut().update_proxy_paths(paths);
                     }
@@ -189,6 +214,41 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             move |_speed: f64| {
                 // Reload clips so the timeline width and player both reflect the new speed.
                 on_project_changed();
+            }
+        },
+        // on_lut_changed: LUT file assigned/cleared → full project-changed cycle + proxy re-request
+        {
+            let on_project_changed = on_project_changed.clone();
+            let proxy_cache = proxy_cache.clone();
+            let preferences_state = preferences_state.clone();
+            let project = project.clone();
+            let prog_player = prog_player.clone();
+            move |_lut_path: Option<String>| {
+                on_project_changed();
+                // Re-generate proxies so the newly assigned/cleared LUT is baked in.
+                let prefs = preferences_state.borrow();
+                if prefs.proxy_mode.is_enabled() {
+                    let scale = match prefs.proxy_mode {
+                        crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+                        _ => crate::media::proxy_cache::ProxyScale::Half,
+                    };
+                    let clips: Vec<(String, Option<String>)> = {
+                        let proj = project.borrow();
+                        proj.tracks.iter()
+                            .flat_map(|t| t.clips.iter())
+                            .map(|c| (c.source_path.clone(), c.lut_path.clone()))
+                            .collect()
+                    };
+                    {
+                        let mut cache = proxy_cache.borrow_mut();
+                        cache.invalidate_all();
+                        for (path, lut) in &clips {
+                            cache.request(path, scale, lut.as_deref());
+                        }
+                    }
+                    let paths = proxy_cache.borrow().proxies.clone();
+                    prog_player.borrow_mut().update_proxy_paths(paths);
+                }
             }
         },
     );
@@ -629,6 +689,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         track_index:       t_idx,
                         transition_after:  c.transition_after.clone(),
                         transition_after_ns:c.transition_after_ns,
+                        lut_path:          c.lut_path.clone(),
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
@@ -665,7 +726,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
 
-            // Request proxy generation for all source files if proxy mode is enabled.
+            // Request proxy generation for all clips if proxy mode is enabled.
+            // Each clip's lut_path is passed so LUT-assigned clips get their own baked proxy.
             {
                 let prefs = preferences_state.borrow();
                 if prefs.proxy_mode.is_enabled() {
@@ -673,16 +735,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
                         _ => crate::media::proxy_cache::ProxyScale::Half,
                     };
-                    let paths: Vec<String> = {
+                    let clip_sources: Vec<(String, Option<String>)> = {
                         let proj = project.borrow();
                         proj.tracks.iter()
                             .flat_map(|t| t.clips.iter())
-                            .map(|c| c.source_path.clone())
+                            .map(|c| (c.source_path.clone(), c.lut_path.clone()))
                             .collect()
                     };
                     let mut cache = proxy_cache.borrow_mut();
-                    for path in &paths {
-                        cache.request(path, scale);
+                    for (path, lut) in &clip_sources {
+                        cache.request(path, scale, lut.as_deref());
                     }
                 }
             }
@@ -835,6 +897,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let prog_player = prog_player.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
+        let proxy_cache = proxy_cache.clone();
         let on_close_preview = on_close_preview.clone();
         let on_project_changed = on_project_changed.clone();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
@@ -848,6 +911,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     &prog_player,
                     &timeline_state,
                     &preferences_state,
+                    &proxy_cache,
                     &on_close_preview,
                     &on_project_changed,
                 );
@@ -951,6 +1015,7 @@ fn handle_mcp_command(
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     timeline_state: &Rc<RefCell<TimelineState>>,
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
+    proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     on_close_preview: &Rc<dyn Fn()>,
     on_project_changed: &Rc<dyn Fn()>,
 ) {
@@ -1080,6 +1145,28 @@ fn handle_mcp_command(
             };
             crate::ui_state::save_preferences_state(&new_state);
             prog_player.borrow_mut().set_proxy_enabled(enabled);
+            if enabled {
+                let scale = match new_state.proxy_mode {
+                    crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+                    _ => crate::media::proxy_cache::ProxyScale::Half,
+                };
+                let clip_sources: Vec<(String, Option<String>)> = {
+                    let proj = project.borrow();
+                    proj.tracks.iter()
+                        .flat_map(|t| t.clips.iter())
+                        .map(|c| (c.source_path.clone(), c.lut_path.clone()))
+                        .collect()
+                };
+                {
+                    let mut cache = proxy_cache.borrow_mut();
+                    cache.invalidate_all();
+                    for (path, lut) in &clip_sources {
+                        cache.request(path, scale, lut.as_deref());
+                    }
+                }
+                let paths = proxy_cache.borrow().proxies.clone();
+                prog_player.borrow_mut().update_proxy_paths(paths);
+            }
             reply.send(json!({
                 "success": true,
                 "proxy_mode": new_state.proxy_mode.as_str()
@@ -1186,6 +1273,24 @@ fn handle_mcp_command(
                         clip.saturation = saturation as f32;
                         clip.denoise    = denoise as f32;
                         clip.sharpness  = sharpness as f32;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SetClipLut { clip_id, lut_path, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.lut_path = lut_path.clone();
                         proj.dirty = true;
                         found = true;
                         break 'outer;

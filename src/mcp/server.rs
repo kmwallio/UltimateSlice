@@ -306,6 +306,18 @@ fn tools_list() -> Value {
                 },
                 "required": ["mode"]
             }
+        },
+        {
+            "name": "set_clip_lut",
+            "description": "Assign or clear a 3D LUT (.cube) file for a clip. The LUT is applied on export via ffmpeg lut3d. Pass null or omit lut_path to clear.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":  { "type": "string", "description": "Clip id (from list_clips)." },
+                    "lut_path": { "type": ["string", "null"], "description": "Absolute path to a .cube LUT file, or null to clear." }
+                },
+                "required": ["clip_id"]
+            }
         }
     ]})
 }
@@ -417,6 +429,14 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
         "set_proxy_mode" => McpCommand::SetProxyMode {
             mode: args["mode"].as_str().unwrap_or("off").to_string(),
+            reply: tx,
+        },
+        "set_clip_lut" => McpCommand::SetClipLut {
+            clip_id:  args["clip_id"].as_str().unwrap_or("").to_string(),
+            lut_path: match &args["lut_path"] {
+                Value::String(s) => Some(s.clone()),
+                Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => None,
+            },
             reply: tx,
         },
 

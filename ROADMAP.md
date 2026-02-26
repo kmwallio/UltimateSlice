@@ -151,6 +151,8 @@ Tracking docs:
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
   - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
+  - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
+  - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
   - [x] Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff
   - [x] Reduce boundary stutter with pre-emptive clip handoff and non-blocking switch path during active playback
@@ -165,7 +167,7 @@ Tracking docs:
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
 - [x] Denoise filter per clip (GStreamer `gaussianblur` positive sigma; ffmpeg `hqdn3d` on export)
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
-- [ ] LUT import / apply
+- [x] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
 - [ ] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)

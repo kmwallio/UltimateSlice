@@ -1772,6 +1772,24 @@ fn draw_clip(
                 let _ = cr.show_text(&badge);
             }
         }
+
+        // LUT badge: small "LUT" indicator when a LUT file is assigned
+        if clip.lut_path.as_ref().map(|p| !p.is_empty()).unwrap_or(false) && cw > 80.0 {
+            let badge = "LUT";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                // Place to the left of the speed badge (or at the right edge)
+                let speed_offset = if (clip.speed - 1.0).abs() > 0.01 { 36.0 } else { 0.0 };
+                let bx = cx + cw - ext.width() - 6.0 - speed_offset;
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(0.4, 0.8, 1.0);
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
+            }
+        }
     }
 }
 

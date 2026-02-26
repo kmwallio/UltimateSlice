@@ -50,6 +50,11 @@ pub enum McpCommand {
         duration_ns: u64,
         reply: SyncSender<Value>,
     },
+    SetClipLut {
+        clip_id:  String,
+        lut_path: Option<String>,
+        reply:    SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

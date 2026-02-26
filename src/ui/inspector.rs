@@ -2,6 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, Button, Entry, Label, Orientation, Scale, Separator};
 use std::cell::RefCell;
 use std::rc::Rc;
+use gio;
 use crate::model::project::Project;
 
 /// Holds references to the inspector's display labels so they can be
@@ -40,6 +41,9 @@ pub struct InspectorView {
     pub title_y_slider: Scale,
     // Speed
     pub speed_slider: Scale,
+    // LUT (color grading)
+    pub lut_path_label: Label,
+    pub lut_clear_btn: Button,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
 }
@@ -87,6 +91,20 @@ impl InspectorView {
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
                 self.speed_slider.set_value(c.speed);
+                // LUT
+                match &c.lut_path {
+                    Some(p) => {
+                        let name = std::path::Path::new(p)
+                            .file_name().and_then(|n| n.to_str())
+                            .unwrap_or(p.as_str());
+                        self.lut_path_label.set_text(name);
+                        self.lut_clear_btn.set_sensitive(true);
+                    }
+                    None => {
+                        self.lut_path_label.set_text("None");
+                        self.lut_clear_btn.set_sensitive(false);
+                    }
+                }
             }
             None => {
                 self.name_entry.set_text("");
@@ -112,6 +130,8 @@ impl InspectorView {
                 self.title_x_slider.set_value(0.5);
                 self.title_y_slider.set_value(0.9);
                 self.speed_slider.set_value(1.0);
+                self.lut_path_label.set_text("None");
+                self.lut_clear_btn.set_sensitive(false);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -134,6 +154,7 @@ pub fn build_inspector(
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
     on_speed_changed: impl Fn(f64) + 'static,
+    on_lut_changed: impl Fn(Option<String>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -355,6 +376,34 @@ pub fn build_inspector(
 
     vbox.append(&Separator::new(Orientation::Horizontal));
 
+    // ── LUT (Color Look-Up Table) ──────────────────────────────────────────────
+    let lut_hdr = Label::new(Some("Color LUT"));
+    lut_hdr.add_css_class("browser-header");
+    lut_hdr.set_halign(gtk4::Align::Start);
+    vbox.append(&lut_hdr);
+
+    let lut_path_label = Label::new(Some("None"));
+    lut_path_label.set_halign(gtk4::Align::Start);
+    lut_path_label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
+    lut_path_label.set_max_width_chars(22);
+    lut_path_label.add_css_class("clip-path");
+    vbox.append(&lut_path_label);
+
+    let lut_btn_row = GBox::new(Orientation::Horizontal, 8);
+    let lut_import_btn = Button::with_label("Import LUT…");
+    let lut_clear_btn = Button::with_label("Clear");
+    lut_clear_btn.set_sensitive(false);
+    lut_btn_row.append(&lut_import_btn);
+    lut_btn_row.append(&lut_clear_btn);
+    vbox.append(&lut_btn_row);
+
+    let lut_note = Label::new(Some("Applied on export (.cube)"));
+    lut_note.set_halign(gtk4::Align::Start);
+    lut_note.add_css_class("clip-path");
+    vbox.append(&lut_note);
+
+    vbox.append(&Separator::new(Orientation::Horizontal));
+
     // Apply name button
     let apply_btn = Button::with_label("Apply Name");
     vbox.append(&apply_btn);
@@ -367,6 +416,7 @@ pub fn build_inspector(
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool)> = Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
     let on_speed_changed: Rc<dyn Fn(f64)> = Rc::new(on_speed_changed);
+    let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -829,6 +879,83 @@ pub fn build_inspector(
         });
     }
 
+    // LUT import button
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_lut_changed = on_lut_changed.clone();
+        let lut_path_label = lut_path_label.clone();
+        let lut_clear_btn = lut_clear_btn.clone();
+        lut_import_btn.connect_clicked(move |btn| {
+            let dialog = gtk4::FileDialog::new();
+            dialog.set_title("Import LUT");
+            let filter = gtk4::FileFilter::new();
+            filter.add_pattern("*.cube");
+            filter.set_name(Some("3D LUT Files (*.cube)"));
+            let filters = gio::ListStore::new::<gtk4::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let on_lut_changed = on_lut_changed.clone();
+            let lut_path_label = lut_path_label.clone();
+            let lut_clear_btn = lut_clear_btn.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+
+            dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let path_str = path.to_string_lossy().to_string();
+                        let id = selected_clip_id.borrow().clone();
+                        if let Some(ref clip_id) = id {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                    clip.lut_path = Some(path_str.clone());
+                                    proj.dirty = true;
+                                    break;
+                                }
+                            }
+                        }
+                        let name = path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&path_str)
+                            .to_string();
+                        lut_path_label.set_text(&name);
+                        lut_clear_btn.set_sensitive(true);
+                        on_lut_changed(Some(path_str));
+                    }
+                }
+            });
+        });
+    }
+
+    // LUT clear button
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_lut_changed = on_lut_changed.clone();
+        let lut_path_label = lut_path_label.clone();
+        let lut_clear_btn_cb = lut_clear_btn.clone();
+        lut_clear_btn.connect_clicked(move |_| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.lut_path = None;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+            }
+            lut_path_label.set_text("None");
+            lut_clear_btn_cb.set_sensitive(false);
+            on_lut_changed(None);
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -855,6 +982,8 @@ pub fn build_inspector(
         title_x_slider,
         title_y_slider,
         speed_slider,
+        lut_path_label,
+        lut_clear_btn,
         updating,
     });
 

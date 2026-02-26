@@ -5,6 +5,13 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **LUT import / apply (per clip)**:
+  - Added `lut_path: Option<String>` field to the `Clip` model for storing the path to a `.cube` LUT file.
+  - Inspector panel now has a **Color LUT** section with an **Import LUT…** file chooser (filtered to `.cube`) and a **Clear** button. The assigned LUT filename is displayed; a note clarifies "Applied on export (.cube)".
+  - On export, FFmpeg's `lut3d` filter is applied to each clip's video filter chain when a LUT is assigned. Applies to both primary and secondary (overlay) video tracks.
+  - A cyan **LUT** badge is rendered on timeline clips with an assigned LUT (analogous to the speed badge).
+  - FCPXML round-trip: `us:lut-path` attribute is written on export and read on import.
+  - MCP tool `set_clip_lut` added: accepts `clip_id` and optional `lut_path` (string or null to clear).
 - **Program monitor playback priority**:
   - Added a persisted Playback preference for program-monitor priority: `Smooth`, `Balanced`, `Accurate`.
   - `Smooth` now prioritizes playback continuity (reduced blocking/preroll pressure during active playback).
@@ -16,6 +23,9 @@ All notable project changes and progress should be recorded here.
   - Proxy files stored in `.ultimateslice_proxies/` next to source files; export always uses originals.
   - Added MCP tool `set_proxy_mode`; `get_preferences` now includes `proxy_mode`.
   - Yellow progress bar status bar at bottom of window shows proxy generation progress.
+  - **Bug fix**: Changing the proxy size (half ↔ quarter) in Preferences now invalidates existing proxies and re-generates them at the new resolution. Previously the old-resolution proxy was reused.
+  - **Improvement**: Proxy filenames now encode the scale and LUT assignment (e.g. `clip.proxy_half_lut1a2b3c4d.mp4`) so clips with different scales or LUTs each get their own distinct proxy file.
+  - **New**: When a LUT is assigned to or cleared from a clip, the proxy cache is invalidated and a new LUT-baked proxy is generated for that clip's source, allowing accurate preview of the color grade without waiting for export.
 - **Reduced black flash on clip switches**:
   - During active playback, clip source changes no longer drop the pipeline to Ready state, avoiding the visible black frame flash between clips.
 - **Background threading for media import**: `MediaProbeCache` (`src/media/probe_cache.rs`) moves

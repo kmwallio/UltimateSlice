@@ -146,8 +146,9 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
+        let lut_filter = build_lut_filter(clip);
         filter.push_str(&format!(
-            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{speed_filter}[pv{i}];",
+            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
@@ -211,10 +212,11 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
+        let lut_filter = build_lut_filter(clip);
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuva420p{color_filter}{denoise_filter}{sharpen_filter}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuva420p{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
@@ -372,6 +374,17 @@ fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
         let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
         format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
     } else { String::new() }
+}
+
+fn build_lut_filter(clip: &crate::model::clip::Clip) -> String {
+    if let Some(ref path) = clip.lut_path {
+        if !path.is_empty() && std::path::Path::new(path).exists() {
+            // Escape path for ffmpeg filter syntax (colons and backslashes need escaping)
+            let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
+            return format!(",lut3d={escaped}");
+        }
+    }
+    String::new()
 }
 
 fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {

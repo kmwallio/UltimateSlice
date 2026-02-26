@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
+use std::path::Path;
 use std::sync::mpsc;
 
 /// Result of a background proxy transcode.
 pub struct ProxyResult {
-    pub source_path: String,
+    /// Composite cache key (see `proxy_key()`).
+    pub cache_key: String,
     pub proxy_path: String,
     pub success: bool,
 }
@@ -30,6 +33,23 @@ impl ProxyScale {
             ProxyScale::Quarter => "scale=iw/4:ih/4",
         }
     }
+
+    fn suffix(&self) -> &'static str {
+        match self {
+            ProxyScale::Half => "half",
+            ProxyScale::Quarter => "quarter",
+        }
+    }
+}
+
+/// Build the composite cache key used in `ProxyCache::proxies` and `pending`.
+/// Encodes both the source path and any assigned LUT so that a scale or LUT
+/// change produces a distinct key (and therefore a distinct proxy file).
+pub fn proxy_key(source_path: &str, lut_path: Option<&str>) -> String {
+    match lut_path {
+        Some(lut) if !lut.is_empty() => format!("{}|lut:{}", source_path, lut),
+        _ => source_path.to_string(),
+    }
 }
 
 /// Asynchronous proxy media cache.
@@ -40,29 +60,34 @@ impl ProxyScale {
 ///
 /// Proxy files are stored in a `.ultimateslice_proxies/` directory next to
 /// the source file.
+///
+/// The map key is a composite of source path + optional LUT path (via
+/// `proxy_key()`), so changing the proxy scale or a clip's LUT assignment
+/// triggers a fresh transcode to a distinct output file.
 pub struct ProxyCache {
-    /// Map from source path → proxy file path (completed only).
+    /// Map from composite key → proxy file path (completed only).
     pub proxies: HashMap<String, String>,
-    /// Source paths currently being transcoded or queued.
+    /// Composite keys currently being transcoded or queued.
     pending: HashSet<String>,
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyResult>,
-    work_tx: Option<mpsc::Sender<(String, ProxyScale)>>,
+    work_tx: Option<mpsc::Sender<(String, ProxyScale, Option<String>)>>,
 }
 
 impl ProxyCache {
     pub fn new() -> Self {
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyResult>(32);
-        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale)>();
+        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Option<String>)>();
 
         // Single worker thread processes transcodes sequentially.
         std::thread::spawn(move || {
-            while let Ok((source_path, scale)) = work_rx.recv() {
-                let (proxy_path, success) = transcode_proxy(&source_path, scale);
+            while let Ok((source_path, scale, lut_path)) = work_rx.recv() {
+                let key = proxy_key(&source_path, lut_path.as_deref());
+                let (proxy_path, success) = transcode_proxy(&source_path, scale, lut_path.as_deref());
                 if result_tx
                     .send(ProxyResult {
-                        source_path,
+                        cache_key: key,
                         proxy_path,
                         success,
                     })
@@ -82,51 +107,51 @@ impl ProxyCache {
         }
     }
 
-    /// Enqueue a proxy transcode for `source_path`. No-op if already cached or pending.
-    pub fn request(&mut self, source_path: &str, scale: ProxyScale) {
-        if self.proxies.contains_key(source_path) || self.pending.contains(source_path) {
-            // Check if a proxy file already exists on disk from a previous session.
-            if !self.proxies.contains_key(source_path) && !self.pending.contains(source_path) {
-                if let Some(p) = proxy_path_for(source_path) {
-                    if Path::new(&p).exists() {
-                        self.proxies.insert(source_path.to_string(), p);
-                        return;
-                    }
-                }
-            }
+    /// Enqueue a proxy transcode for `source_path` (with optional `lut_path`).
+    /// No-op if already cached or pending for this exact (source, lut, scale) combination.
+    pub fn request(&mut self, source_path: &str, scale: ProxyScale, lut_path: Option<&str>) {
+        let key = proxy_key(source_path, lut_path);
+        if self.proxies.contains_key(&key) || self.pending.contains(&key) {
             return;
         }
         // Check for pre-existing proxy on disk before spawning work.
-        if let Some(p) = proxy_path_for(source_path) {
+        if let Some(p) = proxy_path_for(source_path, scale, lut_path) {
             if Path::new(&p).exists() {
-                self.proxies.insert(source_path.to_string(), p);
+                self.proxies.insert(key, p);
                 return;
             }
         }
-        self.pending.insert(source_path.to_string());
+        self.pending.insert(key);
         self.total_requested += 1;
         if let Some(ref tx) = self.work_tx {
-            let _ = tx.send((source_path.to_string(), scale));
+            let _ = tx.send((source_path.to_string(), scale, lut_path.map(|s| s.to_string())));
         }
     }
 
-    /// Drain completed background transcodes. Returns source paths that were just resolved.
+    /// Drain completed background transcodes. Returns cache keys that were just resolved.
     pub fn poll(&mut self) -> Vec<String> {
         let mut resolved = Vec::new();
         while let Ok(result) = self.result_rx.try_recv() {
-            self.pending.remove(&result.source_path);
+            self.pending.remove(&result.cache_key);
             if result.success {
-                self.proxies
-                    .insert(result.source_path.clone(), result.proxy_path);
+                self.proxies.insert(result.cache_key.clone(), result.proxy_path);
             }
-            resolved.push(result.source_path);
+            resolved.push(result.cache_key);
         }
         resolved
     }
 
-    /// Get the proxy path for a source, if transcoded.
-    pub fn get(&self, source_path: &str) -> Option<&String> {
-        self.proxies.get(source_path)
+    /// Get the proxy path for a (source, lut) pair, if transcoded.
+    pub fn get(&self, source_path: &str, lut_path: Option<&str>) -> Option<&String> {
+        self.proxies.get(&proxy_key(source_path, lut_path))
+    }
+
+    /// Clear all in-memory cached and pending entries (disk files are preserved).
+    /// Call this when the proxy scale changes so clips are re-requested at the new size.
+    pub fn invalidate_all(&mut self) {
+        self.proxies.clear();
+        self.pending.clear();
+        self.total_requested = 0;
     }
 
     /// Current progress snapshot.
@@ -140,19 +165,31 @@ impl ProxyCache {
     }
 }
 
-/// Compute the proxy output path for a given source path.
-/// Returns `<parent>/.ultimateslice_proxies/<stem>.proxy.mp4`.
-fn proxy_path_for(source_path: &str) -> Option<String> {
+/// Compute a short hash suffix for a LUT path to embed in the proxy filename.
+fn lut_hash(lut_path: &str) -> String {
+    let mut h = DefaultHasher::new();
+    lut_path.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
+/// Compute the proxy output path for a given source path, scale, and optional LUT.
+/// Pattern: `<parent>/.ultimateslice_proxies/<stem>.proxy_<scale>[_lut<hash>].mp4`
+fn proxy_path_for(source_path: &str, scale: ProxyScale, lut_path: Option<&str>) -> Option<String> {
     let src = Path::new(source_path);
     let parent = src.parent()?;
     let stem = src.file_stem()?.to_str()?;
     let proxy_dir = parent.join(".ultimateslice_proxies");
-    Some(proxy_dir.join(format!("{stem}.proxy.mp4")).to_string_lossy().into_owned())
+    let lut_suffix = match lut_path {
+        Some(lut) if !lut.is_empty() => format!("_lut{}", lut_hash(lut)),
+        _ => String::new(),
+    };
+    let filename = format!("{}.proxy_{}{}.mp4", stem, scale.suffix(), lut_suffix);
+    Some(proxy_dir.join(filename).to_string_lossy().into_owned())
 }
 
 /// Run ffmpeg to create a proxy file. Returns (proxy_path, success).
-fn transcode_proxy(source_path: &str, scale: ProxyScale) -> (String, bool) {
-    let proxy_path = match proxy_path_for(source_path) {
+fn transcode_proxy(source_path: &str, scale: ProxyScale, lut_path: Option<&str>) -> (String, bool) {
+    let proxy_path = match proxy_path_for(source_path, scale, lut_path) {
         Some(p) => p,
         None => return (String::new(), false),
     };
@@ -168,7 +205,15 @@ fn transcode_proxy(source_path: &str, scale: ProxyScale) -> (String, bool) {
         Err(_) => return (proxy_path, false),
     };
 
-    let filter = scale.ffmpeg_scale_filter();
+    // Build the -vf filter string: scale, then optional lut3d.
+    let mut filter = scale.ffmpeg_scale_filter().to_string();
+    if let Some(lut) = lut_path {
+        if !lut.is_empty() {
+            // Escape colons in the path for ffmpeg filter syntax.
+            let escaped = lut.replace('\\', "\\\\").replace(':', "\\:");
+            filter.push_str(&format!(",lut3d={escaped}"));
+        }
+    }
 
     let status = std::process::Command::new(&ffmpeg)
         .arg("-y")
@@ -178,7 +223,7 @@ fn transcode_proxy(source_path: &str, scale: ProxyScale) -> (String, bool) {
         .arg("-i")
         .arg(source_path)
         .arg("-vf")
-        .arg(filter)
+        .arg(&filter)
         .arg("-c:v")
         .arg("libx264")
         .arg("-preset")

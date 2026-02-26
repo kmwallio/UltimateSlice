@@ -40,11 +40,13 @@ Preferences are grouped by category in a sidebar:
   - `Quarter Res`: generates quarter-resolution H.264 proxies.
 - Proxy files are transcoded in the background via ffmpeg and stored in `.ultimateslice_proxies/` next to the source files.
 - A yellow progress bar appears at the bottom of the window during proxy generation.
+- **Changing the proxy size** (e.g. from Half Res to Quarter Res) automatically invalidates existing proxies and re-generates them at the new resolution.
+- **LUT-baked proxies**: when a LUT is assigned to a clip via the Inspector, a new proxy is generated for that clip with the LUT baked in, so the preview reflects the color grade. Removing the LUT regenerates a plain (ungraded) proxy.
 - Export always uses original full-resolution media regardless of proxy mode.
 - The setting is persisted across launches.
 - MCP automation:
   - `get_preferences` returns `proxy_mode`.
-  - `set_proxy_mode` updates the mode.
+  - `set_proxy_mode` updates the mode and re-generates proxies as needed.
 
 ## Saving
 

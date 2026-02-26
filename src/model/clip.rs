@@ -91,6 +91,10 @@ pub struct Clip {
     /// Transition duration in nanoseconds for `transition_after` (0 = none).
     #[serde(default)]
     pub transition_after_ns: u64,
+    /// Absolute path to a .cube LUT file for color grading (applied on export via ffmpeg lut3d).
+    /// None means no LUT is assigned.
+    #[serde(default)]
+    pub lut_path: Option<String>,
 }
 
 impl Clip {
@@ -131,6 +135,7 @@ impl Clip {
             title_y: default_title_y(),
             transition_after: String::new(),
             transition_after_ns: 0,
+            lut_path: None,
         }
     }
 

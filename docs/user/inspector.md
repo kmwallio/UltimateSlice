@@ -92,6 +92,22 @@ Preview uses GStreamer rate-seek. Export uses `setpts` (video) and chained `atem
 
 ---
 
+## Color LUT
+
+Assigns a 3D Look-Up Table (LUT) file for professional color grading. LUTs remap colors globally for cinematic looks, log-to-Rec.709 conversions, and other grade transformations.
+
+| Control | Description |
+|---|---|
+| **LUT filename** | Shows the assigned `.cube` filename, or "None" if no LUT is set. |
+| **Import LUT…** | Opens a file chooser filtered to `.cube` files. Select a LUT to assign it to the selected clip. |
+| **Clear** | Removes the currently assigned LUT from the clip. |
+
+> **Applied on export** — The LUT is applied via FFmpeg's `lut3d` filter during export (full quality). Preview playback does not apply the LUT. A cyan **LUT** badge appears on the clip in the timeline when a LUT is assigned.
+
+Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacking is a future feature.
+
+---
+
 ## Notes
 
 - All Inspector values are **persisted in the FCPXML** project file.
