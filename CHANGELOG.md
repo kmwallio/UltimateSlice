@@ -12,7 +12,7 @@ All notable project changes and progress should be recorded here.
   - Right-clicking a transition marker now removes that transition (undoable).
   - Export now applies cross-dissolve transitions on the primary video track using ffmpeg `xfade`.
   - Fixed transition export filter generation (resolved ffmpeg “Filter not found” parse errors).
-  - Program preview clip switching avoids `Ready` resets on source handoff to reduce boundary lag.
+  - Program preview reuses loaded source segments for same-file clip handoffs when possible.
   - Program preview now applies transition alpha ramps around cross-dissolve boundaries.
   - Added MCP tool `set_transition` to automate transition add/remove operations.
   - While dragging a transition into the timeline, the two target clips are now highlighted before drop.

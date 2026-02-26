@@ -735,7 +735,7 @@ impl ProgramPlayer {
                 while bus.pop().is_some() {}
             }
             let uri = format!("file://{}", clip.source_path);
-            let _ = self.pipeline.set_state(gst::State::Paused);
+            let _ = self.pipeline.set_state(gst::State::Ready);
             self.pipeline.set_property("uri", &uri);
             let _ = self.pipeline.set_state(gst::State::Paused);
             // Avoid blocking transition path during active playback; blocking here
