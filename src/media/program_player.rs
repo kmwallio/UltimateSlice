@@ -351,7 +351,46 @@ impl ProgramPlayer {
         if self.state != PlayerState::Playing {
             return false;
         }
-        let Some(idx) = self.current_idx else { return false };
+        if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
+            let _ = self.pipeline.set_state(gst::State::Ready);
+            let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.state = PlayerState::Stopped;
+            self.current_idx = None;
+            self.audio_current_idx = None;
+            self.timeline_pos_ns = self.timeline_dur_ns;
+            return true;
+        }
+
+        let Some(idx) = self.current_idx else {
+            // No video clip is currently active; keep tracking audio-only tails and
+            // stop cleanly at timeline end.
+            if let Some(aidx) = self.audio_current_idx {
+                let (start_ns, in_ns, speed) = {
+                    let aclip = &self.audio_clips[aidx];
+                    (aclip.timeline_start_ns, aclip.source_in_ns, aclip.speed)
+                };
+                let asrc_pos = self.audio_pipeline
+                    .query_position::<gst::ClockTime>()
+                    .map(|t| t.nseconds())
+                    .unwrap_or(0);
+                let aoff = asrc_pos.saturating_sub(in_ns);
+                let apos = start_ns + if speed > 0.0 { (aoff as f64 / speed) as u64 } else { aoff };
+                if apos > self.timeline_pos_ns {
+                    self.timeline_pos_ns = apos;
+                }
+                self.poll_audio(self.timeline_pos_ns);
+                if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
+                    let _ = self.pipeline.set_state(gst::State::Ready);
+                    let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                    self.state = PlayerState::Stopped;
+                    self.current_idx = None;
+                    self.audio_current_idx = None;
+                    self.timeline_pos_ns = self.timeline_dur_ns;
+                    return true;
+                }
+            }
+            return false;
+        };
         let clip = &self.clips[idx];
         let cur_track_idx = clip.track_index;
 
@@ -412,6 +451,15 @@ impl ProgramPlayer {
 
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
+        if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
+            let _ = self.pipeline.set_state(gst::State::Ready);
+            let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.state = PlayerState::Stopped;
+            self.current_idx = None;
+            self.audio_current_idx = None;
+            self.timeline_pos_ns = self.timeline_dur_ns;
+            return true;
+        }
 
         // Advance audio pipeline if needed (audio clip boundary)
         self.poll_audio(new_pos);
