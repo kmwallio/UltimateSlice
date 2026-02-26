@@ -249,6 +249,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let prog_monitor_host = gtk::Box::new(Orientation::Vertical, 0);
     prog_monitor_host.set_hexpand(true);
     prog_monitor_host.set_vexpand(true);
+    let monitor_state = Rc::new(RefCell::new(crate::ui_state::load_program_monitor_state()));
     let popout_window_cell: Rc<RefCell<Option<ApplicationWindow>>> = Rc::new(RefCell::new(None));
     let monitor_popped = Rc::new(Cell::new(false));
     let on_toggle_popout_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
@@ -326,13 +327,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let monitor = prog_monitor_widget.clone();
         let pop_cell = popout_window_cell.clone();
         let popped = monitor_popped.clone();
+        let monitor_state = monitor_state.clone();
         Rc::new(move || {
             if !popped.get() {
+                let state = monitor_state.borrow().clone();
                 let pop_win = ApplicationWindow::builder()
                     .application(&app)
                     .title("UltimateSlice — Program Monitor")
-                    .default_width(960)
-                    .default_height(540)
+                    .default_width(state.width.max(320))
+                    .default_height(state.height.max(180))
                     .build();
 
                 host.remove(&monitor);
@@ -342,7 +345,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let monitor_c = monitor.clone();
                 let pop_cell_c = pop_cell.clone();
                 let popped_c = popped.clone();
+                let monitor_state_c = monitor_state.clone();
                 pop_win.connect_close_request(move |w| {
+                    let mut state = monitor_state_c.borrow_mut();
+                    state.width = w.width().max(320);
+                    state.height = w.height().max(180);
+                    state.popped = false;
+                    crate::ui_state::save_program_monitor_state(&state);
                     w.set_child(Option::<&gtk::Widget>::None);
                     if monitor_c.parent().is_none() {
                         host_c.append(&monitor_c);
@@ -354,6 +363,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
                 pop_win.present();
                 popped.set(true);
+                {
+                    let mut state = monitor_state.borrow_mut();
+                    state.popped = true;
+                    crate::ui_state::save_program_monitor_state(&state);
+                }
                 *pop_cell.borrow_mut() = Some(pop_win);
             } else {
                 let win = pop_cell.borrow().as_ref().cloned();
@@ -642,6 +656,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             glib::Propagation::Stop
         });
         window.add_controller(key_ctrl);
+    }
+
+    if monitor_state.borrow().popped {
+        on_toggle_popout();
     }
 
     window.present();

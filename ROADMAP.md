@@ -134,7 +134,7 @@ Tracking docs:
 - [ ] Detachable Program Monitor window (pop-out preview)
   - [x] Pop out Program Monitor into a separate top-level window for dual-display workflows
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
-  - [ ] Persist monitor window geometry and last docked/popped state across sessions
+  - [x] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
   - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching
   - [ ] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
