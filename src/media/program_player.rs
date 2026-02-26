@@ -591,6 +591,16 @@ impl ProgramPlayer {
     /// Poll pipeline position, detect clip boundary, advance to next clip.
     /// Returns `true` if the timeline position changed (caller should redraw).
     pub fn poll(&mut self) -> bool {
+        // Always drain the bus for level messages so the VU meter updates on seeks
+        // and paused state changes (the level element fires one message per preroll).
+        let eos = self.poll_bus();
+        // Apply decay only during active playback so the meter holds its value
+        // when paused (showing the most recent preroll level reading).
+        if self.state == PlayerState::Playing {
+            self.audio_peak_db[0] = (self.audio_peak_db[0] - 3.0).max(-60.0);
+            self.audio_peak_db[1] = (self.audio_peak_db[1] - 3.0).max(-60.0);
+        }
+
         if self.state != PlayerState::Playing {
             return false;
         }
@@ -681,11 +691,6 @@ impl ProgramPlayer {
             .query_position::<gst::ClockTime>()
             .map(|t| t.nseconds())
             .unwrap_or(0);
-        // Decay audio peak toward -60 dBFS (~3 dB per 33ms frame) before reading
-        // new level messages, so the meter falls smoothly when audio goes quiet.
-        self.audio_peak_db[0] = (self.audio_peak_db[0] - 3.0).max(-60.0);
-        self.audio_peak_db[1] = (self.audio_peak_db[1] - 3.0).max(-60.0);
-        let eos = self.poll_bus();
 
         // Update timeline_pos from source position, accounting for speed.
         // Determine once per seek whether query_position is segment-relative
@@ -827,6 +832,20 @@ impl ProgramPlayer {
         self.pipeline.set_property("volume", volume.clamp(0.0, 2.0));
         if let Some(ref ap) = self.audiopanorama {
             ap.set_property("panorama", (pan as f32).clamp(-1.0, 1.0));
+        }
+        // When paused, force a re-seek to trigger a new preroll buffer through
+        // the level element so the VU meter reflects the updated volume.
+        if self.current_idx.is_some() && self.state != PlayerState::Playing {
+            let pos = self.timeline_pos_ns;
+            if let Some(idx) = self.clip_at(pos) {
+                let clip = &self.clips[idx];
+                let source_ns = clip.source_pos_ns(pos);
+                let speed = clip.speed;
+                let _ = self.pipeline.seek(speed,
+                    Self::paused_seek_flags(),
+                    gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
+                    gst::SeekType::None, gst::ClockTime::NONE);
+            }
         }
     }
 
