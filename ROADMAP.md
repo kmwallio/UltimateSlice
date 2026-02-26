@@ -120,7 +120,7 @@ Tracking docs:
 - [x] Active track highlighting (click empty area to select, visual accent bar)
 - [x] Smart Append (auto-detects audio/video, targets active or first matching track)
 - [x] Transitions pane with drag-and-drop transition application to timeline boundaries
-- [ ] Cross-dissolve transitions between clips
+- [x] Cross-dissolve transitions between clips
 - [x] Ripple edit mode (Trim In/Out)
 - [x] Roll edit mode
 - [ ] Slip/slide edit modes

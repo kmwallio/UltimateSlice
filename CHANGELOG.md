@@ -4,6 +4,16 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Added
+- **Cross-dissolve transitions — FCPXML persistence**: Transition metadata
+  (`transition_after` kind and `transition_after_ns` duration) is now written
+  as `us:transition-after` / `us:transition-after-ns` vendor attributes on
+  `<asset-clip>` elements in the FCPXML writer, and parsed back on project
+  load. Transitions set via the drag-and-drop transitions pane (or MCP
+  `set_transition` tool) now survive save/load round-trips. Preview blending
+  (opacity crossfade via dual GStreamer pipelines) and ffmpeg `xfade` export
+  were already functional; this completes the end-to-end feature.
+
 ### Fixed
 - **Media buttons (Append, Set In, Set Out) broken after first import**:
   - When a file is first imported, `duration_ns = 0` because the ffprobe runs in the background.

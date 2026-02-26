@@ -145,6 +145,8 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                 if let Some(v) = attrs.get("us:title-y")    { clip.title_y    = v.parse().unwrap_or(0.9); }
                                 if let Some(v) = attrs.get("us:speed")      { clip.speed      = v.parse().unwrap_or(1.0); }
                                 if let Some(v) = attrs.get("us:lut-path")  { clip.lut_path   = Some(v.clone()); }
+                                if let Some(v) = attrs.get("us:transition-after")    { clip.transition_after    = v.clone(); }
+                                if let Some(v) = attrs.get("us:transition-after-ns") { clip.transition_after_ns = v.parse().unwrap_or(0); }
                                 track.add_clip(clip);
                             }
                         }

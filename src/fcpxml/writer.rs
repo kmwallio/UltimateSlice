@@ -91,6 +91,10 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             if let Some(ref lut) = clip.lut_path {
                 asset_clip.push_attribute(("us:lut-path", lut.as_str()));
             }
+            if !clip.transition_after.is_empty() {
+                asset_clip.push_attribute(("us:transition-after",    clip.transition_after.as_str()));
+                asset_clip.push_attribute(("us:transition-after-ns", clip.transition_after_ns.to_string().as_str()));
+            }
             writer.write_event(Event::Empty(asset_clip))?;
         }
     }
