@@ -374,7 +374,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         })
     };
 
-    let (prog_monitor_widget, pos_label, picture_a, picture_b) = program_monitor::build_program_monitor(
+    let (prog_monitor_widget, pos_label, picture_a, picture_b, vu_meter, vu_peak_cell) = program_monitor::build_program_monitor(
         prog_player.clone(),
         prog_paintable,
         prog_paintable2,
@@ -412,16 +412,21 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let last_pos_ns_c = last_pos_ns.clone();
         let last_draw_ns = Rc::new(Cell::new(u64::MAX));
         let last_draw_ns_c = last_draw_ns.clone();
+        let vu = vu_meter.clone();
+        let vu_pc = vu_peak_cell.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-            let (pos_ns, playing, opacity_a, opacity_b) = {
+            let (pos_ns, playing, opacity_a, opacity_b, peaks) = {
                 let mut player = pp.borrow_mut();
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
-                (player.timeline_pos_ns, player.is_playing(), oa, ob)
+                (player.timeline_pos_ns, player.is_playing(), oa, ob, player.audio_peak_db)
             };
             // Apply cross-dissolve opacities to the two program monitor pictures.
             picture_a.set_opacity(opacity_a);
             picture_b.set_opacity(opacity_b);
+            // Update VU meter with current audio peak levels.
+            vu_pc.set(peaks);
+            vu.queue_draw();
             if pos_ns != last_pos_ns_c.get() {
                 pos_label.set_text(&program_monitor::format_timecode(pos_ns));
                 ts.borrow_mut().playhead_ns = pos_ns;

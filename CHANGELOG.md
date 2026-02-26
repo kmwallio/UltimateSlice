@@ -78,6 +78,16 @@ All notable project changes and progress should be recorded here.
   - During the transition window (final `d` ns of the outgoing clip), pipeline2 loads
     the incoming clip, seeks to its `source_in_ns`, and plays. After the window closes,
     pipeline2 is stopped and opacities reset to (1.0, 0.0).
+- **Audio level meters (VU meter) in program monitor**:
+  - A GStreamer `level` element is inserted in the audio filter chain of both the main
+    video pipeline (`audiopanorama → audioconvert → level`) and the dedicated audio-only
+    pipeline. The element posts peak/RMS values (dBFS) to the bus every 50 ms.
+  - Peak values are read in the 33 ms poll timer alongside EOS detection (consolidated
+    into `poll_bus()`), so no bus messages are discarded.
+  - A Cairo `DrawingArea` VU meter is displayed in the program monitor title bar showing
+    L/R channel peaks with three zones: green (< −18 dBFS), yellow (−18 to −6 dBFS),
+    red (> −6 dBFS). The meter decays at ~3 dB per frame toward −60 dBFS when audio
+    is silent.
 - **LUT import / apply (per clip)**:
   - Added `lut_path: Option<String>` field to the `Clip` model for storing the path to a `.cube` LUT file.
   - Inspector panel now has a **Color LUT** section with an **Import LUT…** file chooser (filtered to `.cube`) and a **Clear** button. The assigned LUT filename is displayed; a note clarifies "Applied on export (.cube)".

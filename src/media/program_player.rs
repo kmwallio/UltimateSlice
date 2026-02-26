@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use glib;
 use crate::media::player::PlayerState;
 use crate::ui_state::PlaybackPriority;
 use std::collections::HashMap;
@@ -128,6 +129,13 @@ pub struct ProgramPlayer {
     /// cleared on the next poll() tick after the seek is issued. Avoids any blocking
     /// wait for pipeline2 preroll on the GTK UI thread.
     pipeline2_pending_seek_ns: Option<u64>,
+    /// GStreamer `level` element for metering audio on the main pipeline.
+    level_element: Option<gst::Element>,
+    /// GStreamer `level` element for metering audio on the audio-only pipeline.
+    level_element_audio: Option<gst::Element>,
+    /// Current audio peak level in dBFS per channel [left, right].
+    /// Updated each poll tick from `level` element bus messages; decays toward -60 over time.
+    pub audio_peak_db: [f64; 2],
 }
 
 impl ProgramPlayer {
@@ -223,8 +231,31 @@ impl ProgramPlayer {
             pipeline.set_property("video-filter", vb);
         }
 
+        // Build audio filter: audiopanorama → audioconvert → level (metering).
+        // If level is unavailable, fall back to audiopanorama alone.
+        let level_element = gst::ElementFactory::make("level")
+            .property("post-messages", true)
+            .property("interval", 50_000_000u64) // 50ms
+            .build()
+            .ok();
         if let Some(ref ap) = audiopanorama {
-            pipeline.set_property("audio-filter", ap);
+            if let Some(ref lv) = level_element {
+                // Wrap audiopanorama + audioconvert + level into a bin for audio-filter.
+                let audio_bin = gst::Bin::new();
+                let aconv = gst::ElementFactory::make("audioconvert").build()
+                    .expect("audioconvert must be available");
+                audio_bin.add_many([ap, &aconv, lv]).ok();
+                gst::Element::link_many([ap, &aconv, lv]).ok();
+                let sink_pad = ap.static_pad("sink").unwrap();
+                let src_pad = lv.static_pad("src").unwrap();
+                audio_bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                audio_bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                pipeline.set_property("audio-filter", &audio_bin);
+            } else {
+                pipeline.set_property("audio-filter", ap);
+            }
+        } else if let Some(ref lv) = level_element {
+            pipeline.set_property("audio-filter", lv);
         }
 
         // Dedicated audio-only pipeline: video routed to fakesink so it plays
@@ -235,6 +266,16 @@ impl ProgramPlayer {
             .property("video-sink", &fakevideo)
             .build()
             .unwrap_or_else(|_| gst::ElementFactory::make("playbin").build().unwrap());
+
+        // Add a second level element to the audio-only pipeline for metering.
+        let level_element_audio = gst::ElementFactory::make("level")
+            .property("post-messages", true)
+            .property("interval", 50_000_000u64) // 50ms
+            .build()
+            .ok();
+        if let Some(ref lv) = level_element_audio {
+            audio_pipeline.set_property("audio-filter", lv);
+        }
 
         // Second pipeline for cross-dissolve transition preview.
         // It is a bare playbin (no color-correction filters) used only to feed the
@@ -294,6 +335,9 @@ impl ProgramPlayer {
                 transition_active: false,
                 transition_incoming_idx: None,
                 pipeline2_pending_seek_ns: None,
+                level_element,
+                level_element_audio,
+                audio_peak_db: [-60.0, -60.0],
             },
             paintable,
             paintable2,
@@ -637,7 +681,11 @@ impl ProgramPlayer {
             .query_position::<gst::ClockTime>()
             .map(|t| t.nseconds())
             .unwrap_or(0);
-        let eos = self.is_eos();
+        // Decay audio peak toward -60 dBFS (~3 dB per 33ms frame) before reading
+        // new level messages, so the meter falls smoothly when audio goes quiet.
+        self.audio_peak_db[0] = (self.audio_peak_db[0] - 3.0).max(-60.0);
+        self.audio_peak_db[1] = (self.audio_peak_db[1] - 3.0).max(-60.0);
+        let eos = self.poll_bus();
 
         // Update timeline_pos from source position, accounting for speed.
         // Determine once per seek whether query_position is segment-relative
@@ -1043,12 +1091,52 @@ impl ProgramPlayer {
         alpha
     }
 
-    fn is_eos(&self) -> bool {
-        let bus = match self.pipeline.bus() { Some(b) => b, None => return false };
-        while let Some(msg) = bus.pop() {
-            if let gstreamer::MessageView::Eos(_) = msg.view() { return true; }
+    /// Drain both pipeline buses, returning `true` if an EOS was found on the main
+    /// pipeline. Also extracts `level` element peak messages and updates `audio_peak_db`.
+    fn poll_bus(&mut self) -> bool {
+        let mut eos = false;
+        // Main pipeline bus.
+        if let Some(bus) = self.pipeline.bus() {
+            while let Some(msg) = bus.pop() {
+                match msg.view() {
+                    gstreamer::MessageView::Eos(_) => eos = true,
+                    gstreamer::MessageView::Element(e) => {
+                        if let Some(s) = e.structure() {
+                            if s.name() == "level" {
+                                if let Ok(peak) = s.get::<glib::ValueArray>("peak") {
+                                    let vals = peak.as_slice();
+                                    let l = vals.first().and_then(|v| v.get::<f64>().ok()).unwrap_or(-60.0);
+                                    let r = vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
+                                    // Take max so the peak reading wins over decay within a single poll.
+                                    self.audio_peak_db[0] = self.audio_peak_db[0].max(l);
+                                    self.audio_peak_db[1] = self.audio_peak_db[1].max(r);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
-        false
+        // Audio-only pipeline bus (metering only; no EOS propagation needed here).
+        if let Some(abus) = self.audio_pipeline.bus() {
+            while let Some(msg) = abus.pop() {
+                if let gstreamer::MessageView::Element(e) = msg.view() {
+                    if let Some(s) = e.structure() {
+                        if s.name() == "level" {
+                            if let Ok(peak) = s.get::<glib::ValueArray>("peak") {
+                                let vals = peak.as_slice();
+                                let l = vals.first().and_then(|v| v.get::<f64>().ok()).unwrap_or(-60.0);
+                                let r = vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
+                                self.audio_peak_db[0] = self.audio_peak_db[0].max(l);
+                                self.audio_peak_db[1] = self.audio_peak_db[1].max(r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eos
     }
 
     fn audio_clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
