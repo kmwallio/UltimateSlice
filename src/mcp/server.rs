@@ -318,6 +318,16 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_id"]
             }
+        },
+        {
+            "name": "create_project",
+            "description": "Create a new empty project, discarding the current one. Resets the timeline to a blank state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Title for the new project (default: 'Untitled')." }
+                }
+            }
         }
     ]})
 }
@@ -437,6 +447,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
                 Value::String(s) => Some(s.clone()),
                 Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => None,
             },
+            reply: tx,
+        },
+
+        "create_project" => McpCommand::CreateProject {
+            title: args["title"].as_str().unwrap_or("Untitled").to_string(),
             reply: tx,
         },
 
