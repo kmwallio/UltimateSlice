@@ -353,6 +353,7 @@ impl ProgramPlayer {
         }
         let Some(idx) = self.current_idx else { return false };
         let clip = &self.clips[idx];
+        let cur_track_idx = clip.track_index;
 
         let src_pos = self.pipeline
             .query_position::<gst::ClockTime>()
@@ -368,7 +369,11 @@ impl ProgramPlayer {
         // Update timeline_pos from source position, accounting for speed
         let offset_ns = src_pos.saturating_sub(clip.source_in_ns);
         let timeline_offset = if clip.speed > 0.0 { (offset_ns as f64 / clip.speed) as u64 } else { offset_ns };
-        let new_pos = clip.timeline_start_ns + timeline_offset;
+        let mut new_pos = clip.timeline_start_ns + timeline_offset;
+        // Prevent tiny decoder/keyframe backsteps from rewinding timeline state.
+        if new_pos < self.timeline_pos_ns {
+            new_pos = self.timeline_pos_ns;
+        }
 
         // Detect clip end (GStreamer position may slightly overshoot source_out).
         // Only trust EOS when we're already near the end to avoid stale EOS
@@ -387,8 +392,7 @@ impl ProgramPlayer {
                     // Same clip selected — try advancing past it to avoid infinite loop
                     let past = at_end_pos + 1;
                     if let Some(next_idx) = self.clip_at(past) {
-                        let next_start = self.clips[next_idx].timeline_start_ns;
-                        self.load_clip_idx(next_idx, next_start);
+                        self.load_clip_idx(next_idx, past);
                         let _ = self.pipeline.set_state(gst::State::Playing);
                     } else {
                         let _ = self.pipeline.set_state(gst::State::Ready);
@@ -419,8 +423,13 @@ impl ProgramPlayer {
         // If the desired clip changed (e.g. B-roll became active mid-playback), switch to it
         if let Some(wanted) = self.clip_at(new_pos) {
             if wanted != idx {
-                self.load_clip_idx(wanted, new_pos);
-                let _ = self.pipeline.set_state(gst::State::Playing);
+                // Only switch here when moving to a higher-priority track.
+                // Lower-priority fallback (e.g. B-roll ending) is handled by end-of-clip logic.
+                let wanted_track_idx = self.clips[wanted].track_index;
+                if wanted_track_idx > cur_track_idx {
+                    self.load_clip_idx(wanted, new_pos);
+                    let _ = self.pipeline.set_state(gst::State::Playing);
+                }
             }
         }
 
