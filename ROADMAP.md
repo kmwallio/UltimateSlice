@@ -131,6 +131,10 @@ Tracking docs:
   - Play/Stop transport controls; timecode display
   - Timeline seek (click ruler) also seeks the program monitor
   - Clips reload automatically on every project change
+- [ ] Detachable Program Monitor window (pop-out preview)
+  - [ ] Pop out Program Monitor into a separate top-level window for dual-display workflows
+  - [ ] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
+  - [ ] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
   - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching
   - [ ] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
@@ -150,6 +154,9 @@ Tracking docs:
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [ ] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
+- [ ] Color scopes (waveform, vectorscope, RGB parade, histogram)
+- [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)
+- [ ] HDR workflow (PQ/HLG preview + export metadata)
 - [x] Titles / text overlay (`textoverlay`)
 - [ ] Transition effects (fade, wipe, etc.)
 
@@ -193,6 +200,36 @@ Tracking docs:
 - [ ] Welcome window for choosing recent project or new one
 - [ ] Help documentation and tutorials
 - [ ] Application icon and desktop integration (`.desktop` file)
+
+### Professional Workflow (The "Pro" Edge)
+- [ ] Multicam editing (sync by audio or timecode)
+- [ ] Nested Timelines / Compound Clips
+- [ ] 3-Point and 4-Point editing (Insert/Overwrite from Source)
+- [ ] J/K/L scrubbing with pitch-corrected audio
+- [ ] Match Frame (shortcut to find timeline clip in media library)
+- [ ] Proxy Workflow: One-click toggle between original and proxy media
+- [ ] Keyword ranges + favorite/reject ratings in browser
+- [ ] Auditions / clip versions (swap alternate takes nondestructively)
+- [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
+
+### Advanced Audio
+- [ ] Audio Roles (Dialogue, Effects, Music) with submixing
+- [ ] Support for LV2 / LADSPA audio plugins
+- [ ] Voiceover recording tool with countdown and punch-in
+- [ ] Automatic Ducking (music volume lowers during dialogue)
+- [ ] Audio normalization and peak-matching
+
+### AI & Automation
+- [ ] Speech-to-Text: Automatic subtitle generation and transcription
+- [ ] AI Scene Cut Detection for long source files
+- [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
+- [ ] Optical Flow slow-motion (AI frame interpolation)
+
+### Performance & Integration
+- [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
+- [ ] Background rendering for complex effect stacks
+- [ ] OpenTimelineIO (OTIO) import/export
+- [ ] Shared Project/Library support for collaborative editing
 
 ---
 
