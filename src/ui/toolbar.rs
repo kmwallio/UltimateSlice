@@ -587,6 +587,10 @@ pub fn build_toolbar(
     btn_ripple.set_tooltip_text(Some("Ripple edit tool (R)"));
     btn_ripple.set_group(Some(&btn_select));
 
+    let btn_roll = ToggleButton::with_label("⇋ Roll");
+    btn_roll.set_tooltip_text(Some("Roll edit tool (E)"));
+    btn_roll.set_group(Some(&btn_select));
+
     {
         let timeline_state = timeline_state.clone();
         btn_select.connect_toggled(move |btn| {
@@ -611,6 +615,14 @@ pub fn build_toolbar(
             }
         });
     }
+    {
+        let timeline_state = timeline_state.clone();
+        btn_roll.connect_toggled(move |btn| {
+            if btn.is_active() {
+                timeline_state.borrow_mut().active_tool = ActiveTool::Roll;
+            }
+        });
+    }
     let btn_magnetic = ToggleButton::with_label("Magnetic");
     btn_magnetic.set_tooltip_text(Some("Gap-free timeline mode (edited track)"));
     btn_magnetic.set_active(timeline_state.borrow().magnetic_mode);
@@ -626,6 +638,7 @@ pub fn build_toolbar(
     header.pack_start(&btn_select);
     header.pack_start(&btn_razor);
     header.pack_start(&btn_ripple);
+    header.pack_start(&btn_roll);
     header.pack_start(&btn_magnetic);
 
     header

@@ -5,6 +5,18 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Advanced Editing Tools**:
+  - **Ripple Edit Tool**:
+    - Added `Ripple` tool to the toolbar (shortcut `R`).
+    - **Ripple Trim Out**: Dragging the right edge of a clip shifts all subsequent clips on the track.
+    - **Ripple Trim In**: Dragging the left edge of a clip shifts all subsequent clips on the track (preserving gapless sequence).
+    - Undo/Redo fully supported for ripple operations.
+  - **Roll Edit Tool**:
+    - Added `Roll` tool to the toolbar (shortcut `E`).
+    - Dragging the boundary between two adjacent clips adjusts the cut point.
+    - Left clip's out-point and right clip's in-point are adjusted simultaneously.
+    - Total duration of the sequence remains constant; subsequent clips do not move.
+    - Undo/Redo fully supported.
 - **Transitions pane (v1)**:
   - Added a right-sidebar **Transitions** pane below the Inspector with a hide/show toggle.
   - Added a draggable **Cross-dissolve** transition item so future transitions can be added to the same pane.

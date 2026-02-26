@@ -120,7 +120,9 @@ Tracking docs:
 - [x] Smart Append (auto-detects audio/video, targets active or first matching track)
 - [x] Transitions pane with drag-and-drop transition application to timeline boundaries
 - [ ] Cross-dissolve transitions between clips
-- [ ] Ripple/roll/slip/slide edit modes
+- [x] Ripple edit mode (Trim In/Out)
+- [x] Roll edit mode
+- [ ] Slip/slide edit modes
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export

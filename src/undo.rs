@@ -146,6 +146,128 @@ impl EditCommand for RippleTrimOutCommand {
     fn description(&self) -> &str { "Ripple trim" }
 }
 
+/// Ripple trim the in-point of a clip (shifting subsequent clips)
+pub struct RippleTrimInCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_source_in: u64,
+    pub new_source_in: u64,
+    pub old_timeline_start: u64,
+    pub new_timeline_start: u64,
+    /// The delta applied to subsequent clips (can be positive or negative)
+    pub delta: i64,
+}
+
+impl EditCommand for RippleTrimInCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            let mut original_start = None;
+            // 1. Find the clip, get its ORIGINAL start, then apply change
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                original_start = Some(clip.timeline_start);
+                clip.source_in = self.new_source_in;
+                clip.timeline_start = self.new_timeline_start;
+            }
+            
+            // 2. Shift subsequent clips based on ORIGINAL start threshold
+            // Note: Since we are trimming the IN point, the clip itself moves (timeline_start changes).
+            // We use the ORIGINAL timeline_start as the threshold for subsequent clips.
+            // Any clip starting AFTER the original start of this clip should be shifted.
+            if let Some(threshold) = original_start {
+                for clip in &mut track.clips {
+                    // Skip the clip itself (by ID)
+                    if clip.id == self.clip_id { continue; }
+                    
+                    if clip.timeline_start >= threshold {
+                        let new_start = (clip.timeline_start as i64 + self.delta).max(0) as u64;
+                        clip.timeline_start = new_start;
+                    }
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            let mut current_start = None;
+            // 1. Restore clip
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                current_start = Some(clip.timeline_start); // This is the 'new' start
+                clip.source_in = self.old_source_in;
+                clip.timeline_start = self.old_timeline_start;
+            }
+            
+            // 2. Shift clips back
+            // We use the CURRENT (new) start as threshold, because that's where clips are relative to.
+            // Wait, if we moved start from 10 to 12 (delta +2). Subsequent clips moved +2.
+            // To undo, we want to move them -2.
+            // Threshold should be 12 (new_timeline_start).
+            if let Some(threshold) = current_start {
+                for clip in &mut track.clips {
+                    if clip.id == self.clip_id { continue; }
+
+                    if clip.timeline_start >= threshold {
+                        let new_start = (clip.timeline_start as i64 - self.delta).max(0) as u64;
+                        clip.timeline_start = new_start;
+                    }
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Ripple trim in-point" }
+}
+
+/// Roll edit: adjust the cut point between two clips (left out-point, right in-point/start)
+/// Total duration remains constant.
+pub struct RollEditCommand {
+    pub left_clip_id: String,
+    pub right_clip_id: String,
+    pub track_id: String,
+    
+    // Left clip changes
+    pub old_left_out: u64,
+    pub new_left_out: u64,
+    
+    // Right clip changes
+    pub old_right_in: u64,
+    pub new_right_in: u64,
+    pub old_right_start: u64,
+    pub new_right_start: u64,
+}
+
+impl EditCommand for RollEditCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            // Update left clip
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.left_clip_id) {
+                clip.source_out = self.new_left_out;
+            }
+            // Update right clip
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.right_clip_id) {
+                clip.source_in = self.new_right_in;
+                clip.timeline_start = self.new_right_start;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+             // Restore left clip
+             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.left_clip_id) {
+                clip.source_out = self.old_left_out;
+            }
+            // Restore right clip
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.right_clip_id) {
+                clip.source_in = self.old_right_in;
+                clip.timeline_start = self.old_right_start;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Roll edit" }
+}
+
 /// Delete a clip from a track
 pub struct DeleteClipCommand {
     pub clip: Clip,

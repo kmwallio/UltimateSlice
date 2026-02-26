@@ -21,6 +21,7 @@ pub enum ActiveTool {
     Select,
     Razor,
     Ripple,
+    Roll,
 }
 
 /// What a drag gesture is currently doing
@@ -50,6 +51,15 @@ enum DragOp {
         track_id: String,
         original_source_out: u64,
         original_track_clips: Vec<Clip>,
+    },
+    /// Roll edit between two clips
+    Roll {
+        left_clip_id: String,
+        right_clip_id: String,
+        track_id: String,
+        original_left_out: u64,
+        original_right_in: u64,
+        original_right_start: u64,
     },
     /// Reordering a track by dragging its label
     ReorderTrack {
@@ -209,6 +219,30 @@ impl TimelineState {
 
         let proj = self.project.borrow();
         let track = proj.tracks.get(track_idx)?;
+
+        // Special handling for Roll tool: find adjacent clips at cursor
+        if self.active_tool == ActiveTool::Roll {
+            let ns = self.x_to_ns(x);
+            // Use larger threshold for detection?
+            let threshold_ns = (TRIM_HANDLE_PX / self.pixels_per_second * NS_PER_SECOND) as u64;
+
+            for clip in &track.clips {
+                let end = clip.timeline_end();
+                if ns.abs_diff(end) < threshold_ns {
+                    // This clip is the candidate "left" clip. Check for a "right" clip starting exactly at `end`.
+                    if let Some(right) = track.clips.iter().find(|c| c.timeline_start == end) {
+                         return Some(HitResult {
+                            clip_id: clip.id.clone(),
+                            track_id: track.id.clone(),
+                            track_idx,
+                            zone: HitZone::Roll,
+                            other_clip_id: Some(right.id.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
         for clip in &track.clips {
             let cx = self.ns_to_x(clip.timeline_start);
             let cw = (clip.duration() as f64 / NS_PER_SECOND) * self.pixels_per_second;
@@ -226,6 +260,7 @@ impl TimelineState {
                     track_id: track.id.clone(),
                     track_idx,
                     zone,
+                    other_clip_id: None,
                 });
             }
         }
@@ -238,6 +273,7 @@ struct HitResult {
     track_id: String,
     track_idx: usize,
     zone: HitZone,
+    other_clip_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -245,6 +281,7 @@ enum HitZone {
     TrimIn,
     TrimOut,
     Body,
+    Roll,
 }
 
 /// Build and return the timeline `DrawingArea` widget.
@@ -344,7 +381,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         if let Some(cb) = seek_cb { cb(ns); }
                         if let Some(cb) = proj_cb { cb(); }
                     }
-                    ActiveTool::Select | ActiveTool::Ripple => {
+                    ActiveTool::Select | ActiveTool::Ripple | ActiveTool::Roll => {
                         // Select clip
                         let hit = st.hit_test(x, y);
                         match hit {
@@ -496,6 +533,32 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 original_source_out: src_out,
                                 original_track_clips: track_snapshot,
                             },
+                            HitZone::Roll => {
+                                // For Roll, we need data for both clips.
+                                // h.clip_id is LEFT clip. h.other_clip_id is RIGHT clip.
+                                if let Some(right_id) = h.other_clip_id {
+                                    let proj = st.project.borrow();
+                                    let right_data = proj.tracks.iter()
+                                        .flat_map(|t| t.clips.iter())
+                                        .find(|c| c.id == right_id)
+                                        .map(|c| (c.source_in, c.timeline_start));
+                                    
+                                    if let Some((right_in, right_start)) = right_data {
+                                        DragOp::Roll {
+                                            left_clip_id: h.clip_id.clone(),
+                                            right_clip_id: right_id,
+                                            track_id: h.track_id.clone(),
+                                            original_left_out: src_out,
+                                            original_right_in: right_in,
+                                            original_right_start: right_start,
+                                        }
+                                    } else {
+                                        DragOp::None
+                                    }
+                                } else {
+                                    DragOp::None
+                                }
+                            }
                         };
                         st.selected_clip_id = Some(h.clip_id);
                         st.selected_track_id = Some(h.track_id);
@@ -633,12 +696,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
-                    DragOp::TrimIn { ref clip_id, ref track_id, original_source_in, original_timeline_start, .. } => {
-                        let drag_ns = current_ns.saturating_sub(original_timeline_start);
+                    DragOp::TrimIn { ref clip_id, ref track_id, original_source_in, original_timeline_start, ref original_track_clips } => {
+                        let drag_ns = current_ns as i64 - original_timeline_start as i64;
                         // Snap the new timeline_start to nearby clip edges
-                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
-                        let new_start_raw = original_timeline_start + drag_ns;
-                        let snapped_start = {
+                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as i64;
+                        let new_start_raw = (original_timeline_start as i64 + drag_ns).max(0) as u64;
+                        
+                        let snapped_start = if st.active_tool == ActiveTool::Ripple {
+                            // Ripple mode: we can push clips, but let's still snap to edges for precision
+                            // We shouldn't snap to OURSELF or clips we are pushing?
+                            // For simplicity, snap to anything but self.
                             let proj = st.project.borrow();
                             let edges: Vec<u64> = proj.tracks.iter()
                                 .flat_map(|t| t.clips.iter())
@@ -646,18 +713,54 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 .flat_map(|c| [c.timeline_start, c.timeline_end()])
                                 .collect();
                             edges.iter().copied()
-                                .filter(|&e| (e as i64 - new_start_raw as i64).unsigned_abs() < snap_ns)
-                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).unsigned_abs())
+                                .filter(|&e| (e as i64 - new_start_raw as i64).abs() < snap_ns)
+                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).abs())
+                                .unwrap_or(new_start_raw)
+                        } else {
+                            // Standard TrimIn: constrained by adjacent clips?
+                            // Current logic didn't constrain, just snapped.
+                            let proj = st.project.borrow();
+                            let edges: Vec<u64> = proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter(|c| &c.id != clip_id)
+                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
+                                .collect();
+                            edges.iter().copied()
+                                .filter(|&e| (e as i64 - new_start_raw as i64).abs() < snap_ns)
+                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).abs())
                                 .unwrap_or(new_start_raw)
                         };
-                        let snapped_drag = snapped_start.saturating_sub(original_timeline_start);
+
+                        let snapped_drag = snapped_start as i64 - original_timeline_start as i64;
+                        
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
+                            // 1. Update the trimmed clip
+                            let mut new_ts = original_timeline_start;
                             if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                let new_source_in = original_source_in + snapped_drag;
+                                let new_source_in = (original_source_in as i64 + snapped_drag).max(0) as u64;
+                                // Check valid duration (source_in < source_out)
                                 if new_source_in < clip.source_out.saturating_sub(1_000_000) {
                                     clip.source_in = new_source_in;
-                                    clip.timeline_start = original_timeline_start + snapped_drag;
+                                    clip.timeline_start = (original_timeline_start as i64 + snapped_drag).max(0) as u64;
+                                    new_ts = clip.timeline_start;
+                                }
+                            }
+                            
+                            // 2. If Ripple, shift subsequent clips
+                            if st.active_tool == ActiveTool::Ripple {
+                                let threshold = original_timeline_start; 
+                                let actual_delta = new_ts as i64 - original_timeline_start as i64;
+                                
+                                for clip in &mut track.clips {
+                                    if clip.id == *clip_id { continue; }
+                                    // Use original positions to avoid drift
+                                    if let Some(orig) = original_track_clips.iter().find(|c| c.id == clip.id) {
+                                        if orig.timeline_start > threshold {
+                                            let new_pos = (orig.timeline_start as i64 + actual_delta).max(0) as u64;
+                                            clip.timeline_start = new_pos;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -719,6 +822,36 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                         let offset = snapped_ns.saturating_sub(clip.timeline_start);
                                         clip.source_out = clip.source_in + offset;
                                     }
+                                }
+                            }
+                        }
+                    }
+                    DragOp::Roll { left_clip_id, right_clip_id, track_id, original_left_out: _, original_right_in, original_right_start } => {
+                        let current_ns = st.x_to_ns(current_x);
+                        let drag_ns = current_ns as i64 - original_right_start as i64;
+                        let new_cut_pos = (original_right_start as i64 + drag_ns).max(0) as u64;
+                        
+                        let mut proj = st.project.borrow_mut();
+                        if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == &track_id) {
+                            // Find left start to ensure we don't go past it
+                            let left_start = track.clips.iter().find(|c| &c.id == &left_clip_id).map(|c| c.timeline_start).unwrap_or(0);
+                            
+                            // Simple update:
+                            if new_cut_pos > left_start + 1_000_000 {
+                                // Update Left
+                                if let Some(left) = track.clips.iter_mut().find(|c| &c.id == &left_clip_id) {
+                                    let new_dur = new_cut_pos - left.timeline_start;
+                                    left.source_out = left.source_in + new_dur;
+                                }
+                                // Update Right
+                                if let Some(right) = track.clips.iter_mut().find(|c| &c.id == &right_clip_id) {
+                                    // Right source_in increases if we move cut right.
+                                    let new_right_in = (original_right_in as i64 + drag_ns).max(0) as u64;
+                                    // Basic bounds check (simplified)
+                                    // if new_right_in < right.source_out.saturating_sub(1_000_000) {
+                                        right.source_in = new_right_in;
+                                        right.timeline_start = new_cut_pos;
+                                    // }
                                 }
                             }
                         }
@@ -852,7 +985,29 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                     .map(|c| (c.source_in, c.timeline_start))
                                     .unwrap_or((original_source_in, original_timeline_start))
                             };
-                            if new_si != original_source_in {
+                            
+                            if st.active_tool == ActiveTool::Ripple {
+                                if new_si != original_source_in {
+                                    // Delta: if new_ts > original_ts, delta is positive (clips shift right)
+                                    // If we trimmed from left (shortened), source_in increased.
+                                    // timeline_start increased. delta = new_ts - original_ts.
+                                    // If we extended to left, source_in decreased. timeline_start decreased.
+                                    let delta = new_ts as i64 - original_timeline_start as i64;
+                                    
+                                    let cmd = crate::undo::RippleTrimInCommand {
+                                        clip_id: clip_id.clone(),
+                                        track_id: track_id.clone(),
+                                        old_source_in: original_source_in,
+                                        new_source_in: new_si,
+                                        old_timeline_start: original_timeline_start,
+                                        new_timeline_start: new_ts,
+                                        delta,
+                                    };
+                                    st.history.undo_stack.push(Box::new(cmd));
+                                    st.history.redo_stack.clear();
+                                    st.project.borrow_mut().dirty = true;
+                                }
+                            } else if new_si != original_source_in {
                                 let cmd = TrimClipCommand {
                                     clip_id: clip_id.clone(),
                                     track_id: track_id.clone(),
@@ -939,6 +1094,37 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
+                    DragOp::Roll { ref left_clip_id, ref right_clip_id, ref track_id, original_left_out, original_right_in, original_right_start } => {
+                         let (new_left_out, new_right_in, new_right_start) = {
+                             let proj = st.project.borrow();
+                             if let Some(track) = proj.tracks.iter().find(|t| &t.id == track_id) {
+                                 let left_out = track.clips.iter().find(|c| &c.id == left_clip_id).map(|c| c.source_out).unwrap_or(original_left_out);
+                                 let (right_in, right_start) = track.clips.iter().find(|c| &c.id == right_clip_id)
+                                     .map(|c| (c.source_in, c.timeline_start))
+                                     .unwrap_or((original_right_in, original_right_start));
+                                 (left_out, right_in, right_start)
+                             } else {
+                                 (original_left_out, original_right_in, original_right_start)
+                             }
+                         };
+                         
+                         if new_left_out != original_left_out || new_right_in != original_right_in {
+                             let cmd = crate::undo::RollEditCommand {
+                                 left_clip_id: left_clip_id.clone(),
+                                 right_clip_id: right_clip_id.clone(),
+                                 track_id: track_id.clone(),
+                                 old_left_out: original_left_out,
+                                 new_left_out: new_left_out,
+                                 old_right_in: original_right_in,
+                                 new_right_in: new_right_in,
+                                 old_right_start: original_right_start,
+                                 new_right_start: new_right_start,
+                             };
+                             st.history.undo_stack.push(Box::new(cmd));
+                             st.history.redo_stack.clear();
+                             st.project.borrow_mut().dirty = true;
+                         }
+                    }
                     DragOp::ReorderTrack { track_idx, target_idx } => {
                         if track_idx != target_idx {
                             let track_count = st.project.borrow().tracks.len();
@@ -1005,6 +1191,15 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         ActiveTool::Select
                     } else {
                         ActiveTool::Ripple
+                    };
+                    true
+                }
+                Key::e | Key::E => {
+                    // E = Roll Edit
+                    st.active_tool = if st.active_tool == ActiveTool::Roll {
+                        ActiveTool::Select
+                    } else {
+                        ActiveTool::Roll
                     };
                     true
                 }
