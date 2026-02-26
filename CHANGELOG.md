@@ -5,6 +5,17 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Media buttons (Append, Set In, Set Out) broken after first import**:
+  - When a file is first imported, `duration_ns = 0` because the ffprobe runs in the background.
+    `on_source_selected` set `source_marks.out_ns = 0`, which caused Append to create a
+    zero-duration clip (silent no-op) and Set In to always clamp to zero regardless of
+    scrubber position.
+  - Clicking away and back on the item worked because by then the probe had completed and
+    the correct duration was used.
+  - Fix: the 100ms preview poll timer (which already queries `p.duration()` for the timecode
+    label) now syncs `source_marks.duration_ns` and `source_marks.out_ns` from the player
+    the first time a valid duration becomes available. The player pipeline prerolls in
+    ~100–300ms, well before the user can click any buttons.
 - **Proxy media not used on startup / LUT invisible in preview**:
   - `on_project_changed` called `cache.request()` (which synchronously adds disk-cached
     proxies to the in-memory map) but never pushed the result to the player.

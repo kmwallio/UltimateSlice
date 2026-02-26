@@ -554,6 +554,16 @@ pub fn build_preview(
             if pos > 0 {
                 source_marks.borrow_mut().display_pos_ns = pos;
             }
+            // Sync duration when the file was imported before the background probe
+            // completed (duration was 0 at import time). The player pipeline prerolls
+            // within ~100-300ms so p.duration() is available well before user interaction.
+            if dur > 0 {
+                let mut m = source_marks.borrow_mut();
+                if m.duration_ns == 0 {
+                    m.duration_ns = dur;
+                    m.out_ns = dur;
+                }
+            }
             let fns = frame_ns.get();
             label.set_text(&format!(
                 "{} / {}",
