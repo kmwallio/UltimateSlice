@@ -469,14 +469,24 @@ impl ProgramPlayer {
         if !self.transition_active { return (1.0, 0.0); }
         let Some(idx) = self.current_idx else { return (1.0, 0.0) };
         let clip = &self.clips[idx];
-        if clip.transition_after != "cross_dissolve" || clip.transition_after_ns == 0 {
+        if clip.transition_after.is_empty() || clip.transition_after_ns == 0 {
             return (1.0, 0.0);
         }
         let d = clip.transition_after_ns.min(clip.duration_ns());
         let start = clip.timeline_end_ns().saturating_sub(d);
         if self.timeline_pos_ns >= start && self.timeline_pos_ns < clip.timeline_end_ns() && d > 0 {
             let t = ((self.timeline_pos_ns - start) as f64 / d as f64).clamp(0.0, 1.0);
-            return (1.0 - t, t);
+            return match clip.transition_after.as_str() {
+                "fade_to_black" => {
+                    // First half: A fades to black; second half: B fades in from black.
+                    let a = (1.0 - 2.0 * t).clamp(0.0, 1.0);
+                    let b = (2.0 * t - 1.0).clamp(0.0, 1.0);
+                    (a, b)
+                }
+                // wipe_right / wipe_left and any future kind: approximate with crossfade
+                // in preview; exact geometry is rendered by ffmpeg xfade on export.
+                _ => (1.0 - t, t),
+            };
         }
         (1.0, 0.0)
     }
@@ -852,9 +862,9 @@ impl ProgramPlayer {
             );
         }
 
-        // Cross-dissolve transition management: activate pipeline2 when entering the
-        // last `transition_after_ns` ns of an outgoing clip, deactivate on exit.
-        if clip_transition_kind == "cross_dissolve" && clip_transition_ns > 0 {
+        // Transition management: activate pipeline2 when entering the transition
+        // window of any transition type, deactivate on exit.
+        if !clip_transition_kind.is_empty() && clip_transition_ns > 0 {
             let d = clip_transition_ns.min(clip_timeline_end_ns.saturating_sub(
                 self.clips[idx].timeline_start_ns)); // same as duration_ns() approx
             let window_start = clip_timeline_end_ns.saturating_sub(d);
@@ -1273,7 +1283,7 @@ impl ProgramPlayer {
         let Some(clip) = self.clips.get(idx) else { return 1.0 };
         let mut alpha = 1.0_f64;
         // Outgoing transition on this clip
-        if clip.transition_after == "cross_dissolve" && clip.transition_after_ns > 0 {
+        if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
             let d = clip.transition_after_ns.min(clip.duration_ns());
             let start = clip.timeline_end_ns().saturating_sub(d);
             if timeline_pos_ns >= start && timeline_pos_ns < clip.timeline_end_ns() && d > 0 {
@@ -1285,7 +1295,7 @@ impl ProgramPlayer {
         if let Some(prev) = self.clips.iter().find(|c|
             c.track_index == clip.track_index
                 && c.timeline_end_ns() == clip.timeline_start_ns
-                && c.transition_after == "cross_dissolve"
+                && !c.transition_after.is_empty()
                 && c.transition_after_ns > 0
         ) {
             let d = prev.transition_after_ns.min(clip.duration_ns());

@@ -173,7 +173,7 @@ Tracking docs:
 - [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)
 - [ ] HDR workflow (PQ/HLG preview + export metadata)
 - [x] Titles / text overlay (`textoverlay`)
-- [ ] Transition effects (fade, wipe, etc.)
+- [x] Transition effects (fade to black, wipe right, wipe left)
 
 ### Video Transform (per clip)
 - [ ] Scale / resize clip (zoom in/out within frame)

@@ -861,28 +861,34 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     transitions_list.add_css_class("boxed-list");
     transitions_list.set_selection_mode(gtk::SelectionMode::None);
 
-    let transition_row = gtk::ListBoxRow::new();
-    let transition_box = gtk::Box::new(Orientation::Horizontal, 6);
-    transition_box.set_margin_start(8);
-    transition_box.set_margin_end(8);
-    transition_box.set_margin_top(6);
-    transition_box.set_margin_bottom(6);
-    let transition_name = gtk::Label::new(Some("Cross-dissolve"));
-    transition_name.set_halign(gtk::Align::Start);
-    transition_name.set_hexpand(true);
-    let transition_hint = gtk::Label::new(Some("Drag to clip boundary"));
-    transition_hint.add_css_class("dim-label");
-    transition_box.append(&transition_name);
-    transition_box.append(&transition_hint);
-    transition_row.set_child(Some(&transition_box));
-    let drag_src = gtk::DragSource::new();
-    drag_src.set_actions(gdk4::DragAction::COPY);
-    drag_src.set_exclusive(false);
-    let payload = String::from("transition:cross_dissolve");
-    let val = glib::Value::from(&payload);
-    drag_src.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
-    transition_row.add_controller(drag_src);
-    transitions_list.append(&transition_row);
+    // Helper: add a transition row with drag-source to the list.
+    let add_transition_row = |list: &gtk::ListBox, display: &str, kind: &str| {
+        let row = gtk::ListBoxRow::new();
+        let bx = gtk::Box::new(Orientation::Horizontal, 6);
+        bx.set_margin_start(8); bx.set_margin_end(8);
+        bx.set_margin_top(6);   bx.set_margin_bottom(6);
+        let name_lbl = gtk::Label::new(Some(display));
+        name_lbl.set_halign(gtk::Align::Start);
+        name_lbl.set_hexpand(true);
+        let hint_lbl = gtk::Label::new(Some("Drag to clip boundary"));
+        hint_lbl.add_css_class("dim-label");
+        bx.append(&name_lbl);
+        bx.append(&hint_lbl);
+        row.set_child(Some(&bx));
+        let drag_src = gtk::DragSource::new();
+        drag_src.set_actions(gdk4::DragAction::COPY);
+        drag_src.set_exclusive(false);
+        let payload = format!("transition:{kind}");
+        let val = glib::Value::from(&payload);
+        drag_src.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
+        row.add_controller(drag_src);
+        list.append(&row);
+    };
+
+    add_transition_row(&transitions_list, "Cross-dissolve",  "cross_dissolve");
+    add_transition_row(&transitions_list, "Fade to black",   "fade_to_black");
+    add_transition_row(&transitions_list, "Wipe right →",    "wipe_right");
+    add_transition_row(&transitions_list, "← Wipe left",     "wipe_left");
 
     transitions_revealer.set_child(Some(&transitions_list));
     right_sidebar.append(&transitions_revealer);
@@ -1549,8 +1555,9 @@ fn handle_mcp_command(
             };
             let Some((track_id, clip_id, old_kind, old_duration_ns, clip_dur_ns)) = candidate else { return; };
             let new_kind = kind.trim().to_string();
-            if !new_kind.is_empty() && new_kind != "cross_dissolve" {
-                reply.send(json!({"error":"Unsupported transition kind","supported":["cross_dissolve"]})).ok();
+            let supported = ["cross_dissolve", "fade_to_black", "wipe_right", "wipe_left"];
+            if !new_kind.is_empty() && !supported.contains(&new_kind.as_str()) {
+                reply.send(json!({"error":"Unsupported transition kind","supported":supported})).ok();
                 return;
             }
             let new_duration_ns = if new_kind.is_empty() {

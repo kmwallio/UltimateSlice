@@ -5,6 +5,13 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Transition effects — Fade to black, Wipe right, Wipe left**: Three new transition
+  types added to the transitions pane alongside Cross-dissolve. Drag any transition to a
+  clip boundary to apply it. Preview uses dual-pipeline opacity blending (Fade to black
+  has its own curve: outgoing fades to black then incoming fades up; wipes approximate
+  with crossfade in preview). Export uses the correct ffmpeg `xfade` filter:
+  `fadeblack`, `wiperight`, `wipeleft`. MCP `set_transition` updated to accept all
+  four kinds.
 - **J/K/L shuttle scrubbing**: Global keyboard shortcuts for shuttle control of the
   program monitor. `L` plays forward and each subsequent press doubles the speed
   (1×→2×→4×→8×); `J` plays in reverse (−1×→−2×→−4×→−8×); `K` pauses and resets

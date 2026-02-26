@@ -156,12 +156,23 @@ pub fn export_project(
     let has_xfade = check_filter_support(&ffmpeg, "xfade");
     let has_tpad = check_filter_support(&ffmpeg, "tpad");
 
+    // Map transition kind string to the ffmpeg xfade transition name.
+    let transition_xfade_name = |kind: &str| -> &'static str {
+        match kind {
+            "cross_dissolve" => "fade",
+            "fade_to_black"  => "fadeblack",
+            "wipe_right"     => "wiperight",
+            "wipe_left"      => "wipeleft",
+            _                => "fade", // safe fallback
+        }
+    };
+
     // Build primary-track sequence:
     // - If transitions exist AND filters are supported, chain xfade filters
     // - Otherwise use concat (original behavior).
     let has_primary_transitions = primary_clips.iter()
         .take(primary_clips.len().saturating_sub(1))
-        .any(|c| c.transition_after == "cross_dissolve" && c.transition_after_ns > 0);
+        .any(|c| !c.transition_after.is_empty() && c.transition_after_ns > 0);
     
     if primary_clips.len() == 1 {
         filter.push_str("[pv0]copy[vbase]");
@@ -172,8 +183,9 @@ pub fn export_project(
         for i in 0..(primary_clips.len() - 1) {
             let next_label = format!("pv{}", i + 1);
             let out_label = format!("vxd{}", i + 1);
-            let mut d_s = if primary_clips[i].transition_after == "cross_dissolve" {
-                primary_clips[i].transition_after_ns as f64 / 1_000_000_000.0
+            let clip = &primary_clips[i];
+            let mut d_s = if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
+                clip.transition_after_ns as f64 / 1_000_000_000.0
             } else {
                 0.0
             };
@@ -184,8 +196,9 @@ pub fn export_project(
             }
             let offset_s = (running_s - d_s).max(0.0);
             let sep = if i == 0 { "" } else { ";" };
+            let xfade = transition_xfade_name(&clip.transition_after);
             filter.push_str(&format!(
-                "{sep}[{prev_label}][{next_label}]xfade=transition=fade:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
+                "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
             ));
             running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
             total_overlap_s += d_s;
