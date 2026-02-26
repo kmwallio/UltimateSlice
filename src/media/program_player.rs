@@ -483,9 +483,13 @@ impl ProgramPlayer {
                     let b = (2.0 * t - 1.0).clamp(0.0, 1.0);
                     (a, b)
                 }
-                // wipe_right / wipe_left and any future kind: approximate with crossfade
-                // in preview; exact geometry is rendered by ffmpeg xfade on export.
-                _ => (1.0 - t, t),
+                "wipe_right" | "wipe_left" => {
+                    // True wipe geometry is rendered by ffmpeg xfade on export.
+                    // In the live preview, approximate with a step at t=0.5 so the
+                    // visual is clearly different from a cross-dissolve (which blends).
+                    if t < 0.5 { (1.0, 0.0) } else { (0.0, 1.0) }
+                }
+                _ => (1.0 - t, t), // cross_dissolve and future unknown kinds
             };
         }
         (1.0, 0.0)
@@ -928,8 +932,14 @@ impl ProgramPlayer {
         let at_end_pos = clip_timeline_end_ns;
         let has_next_at_boundary = self.clip_at(at_end_pos).map(|n| n != idx).unwrap_or(false);
         // Pre-emptive handoff shortly before boundary when a next clip exists.
-        let early_handoff = has_next_at_boundary && src_pos.saturating_add(80_000_000) >= clip_source_out_ns; // 80ms
-        if src_pos >= clip_source_out_ns || ((near_end || near_timeline_end) && eos) || early_handoff {
+        // Suppressed while a transition is active — the transition window IS the handoff.
+        let early_handoff = !self.transition_active
+            && has_next_at_boundary
+            && src_pos.saturating_add(80_000_000) >= clip_source_out_ns; // 80ms
+        // Also suppress near_end/EOS early exit during an active transition so the
+        // outgoing clip keeps playing through the full transition window.
+        let allow_early_end = !self.transition_active;
+        if src_pos >= clip_source_out_ns || ((near_end || near_timeline_end) && eos && allow_early_end) || early_handoff {
             // Transition is complete when the outgoing clip ends.
             self.deactivate_transition();
             // Find what should play at the current timeline position using track-priority logic.
