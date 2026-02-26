@@ -77,6 +77,7 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:title-color", format!("{:08X}", clip.title_color).as_str()));
             asset_clip.push_attribute(("us:title-x",    clip.title_x.to_string().as_str()));
             asset_clip.push_attribute(("us:title-y",    clip.title_y.to_string().as_str()));
+            asset_clip.push_attribute(("us:speed",      clip.speed.to_string().as_str()));
             writer.write_event(Event::Empty(asset_clip))?;
         }
     }

@@ -5,19 +5,17 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
-- **Project Settings dialog** (`⚙ Settings` button in toolbar):
-  - Resolution presets: 1920×1080, 3840×2160, 1280×720, 720×480, 1080×1920 (vertical), 1080×1080 (square).
-  - Frame rate presets: 23.976, 24, 25, 29.97, 30, 60 fps.
-  - Changes apply immediately and mark the project dirty.
-  - Resolution and frame rate already persisted in FCPXML `<format>` element.
-- **Advanced Export dialog** (replaces the old single-button "Export MP4…"):
-  - Video codec: H.264, H.265/HEVC, VP9, ProRes (prores_ks), AV1.
-  - Container: MP4, QuickTime (.mov), WebM, Matroska (.mkv).
-  - Output resolution downscale presets: same as project, 4K, 1080p, 720p, 480p.
-  - CRF quality slider (0–51; lower = better quality).
-  - Audio codec: AAC, Opus, FLAC (lossless), PCM (uncompressed).
-  - Audio bitrate entry (kbps; ignored for lossless codecs).
-  - `ExportOptions` struct in `src/media/export.rs` drives all ffmpeg codec/container args.
+- **Per-clip speed change**:
+  - New **Speed** section in the Inspector with a slider (0.25×–4.0×) and marks at ½×, 1×, 2×.
+  - Changing speed updates `clip.speed` in the model immediately; the slider fires `on_project_changed` so the timeline clip width and program player both update.
+  - `Clip::duration()` now returns timeline duration (`source_duration / speed`); `source_duration()` helper returns raw source material length.
+  - GStreamer preview: `pipeline.seek(rate, ...)` with `rate = clip.speed` so the program monitor plays at the correct speed.
+  - `poll()` converts GStreamer source position back to timeline position accounting for speed.
+  - ffmpeg export: video filter gets `setpts=PTS/{speed}`, audio gets a chained `atempo` filter (handles full 0.25–4.0 range by splitting into ≤2.0 steps), input `-t` uses `source_duration` so the full source material is read.
+  - Yellow speed badge (e.g. "2×") drawn on the clip in the timeline when speed ≠ 1.0.
+  - FCPXML persistence via `us:speed` attribute.
+- **Project Settings dialog** (`⚙ Settings` button in toolbar)
+- **Advanced Export dialog** (replaces "Export MP4…")
 
 ### Fixed
 - **Timeline scrubber position preservation**: `on_project_changed` now saves the current playhead position before rebuilding the program monitor clip list and restores it via a seek afterward, preventing the playhead from jumping to 0:00 on every project change (clip rename, color adjustment, etc.).

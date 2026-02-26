@@ -99,18 +99,19 @@ pub fn export_project(
     // Video clip inputs: indices 0..video_clips.len()
     for clip in &video_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
-        let dur_s = clip.duration() as f64 / 1_000_000_000.0;
+        // Read from source file using source material duration (before speed change)
+        let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
         cmd.arg("-ss").arg(format!("{in_s:.6}"))
-            .arg("-t").arg(format!("{dur_s:.6}"))
+            .arg("-t").arg(format!("{src_dur_s:.6}"))
             .arg("-i").arg(&clip.source_path);
     }
 
     // Audio-only clip inputs: indices video_clips.len()..
     for clip in &audio_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
-        let dur_s = clip.duration() as f64 / 1_000_000_000.0;
+        let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
         cmd.arg("-ss").arg(format!("{in_s:.6}"))
-            .arg("-t").arg(format!("{dur_s:.6}"))
+            .arg("-t").arg(format!("{src_dur_s:.6}"))
             .arg("-i").arg(&clip.source_path);
     }
 
@@ -144,8 +145,14 @@ pub fn export_project(
         } else {
             String::new()
         };
+        // Speed: setpts adjusts video PTS (PTS/speed → 2x faster video at speed=2.0)
+        let speed_filter = if (clip.speed - 1.0).abs() > 0.001 {
+            format!(",setpts=PTS/{:.6}", clip.speed)
+        } else {
+            String::new()
+        };
         filter.push_str(&format!(
-            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}[v{i}];",
+            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{speed_filter}[v{i}];",
             out_w, out_h, out_w, out_h,
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
@@ -163,7 +170,8 @@ pub fn export_project(
         if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
-            filter.push_str(&format!(";[{i}:a]adelay={delay_ms}:all=1[{label}]"));
+            let atempo = build_atempo(clip.speed);
+            filter.push_str(&format!(";[{i}:a]{atempo}adelay={delay_ms}:all=1[{label}]"));
             audio_labels.push(label);
         }
     }
@@ -173,7 +181,8 @@ pub fn export_project(
     for (j, clip) in audio_clips.iter().enumerate() {
         let delay_ms = clip.timeline_start / 1_000_000;
         let label = format!("aa{j}");
-        filter.push_str(&format!(";[{}:a]adelay={delay_ms}:all=1[{label}]", audio_base + j));
+        let atempo = build_atempo(clip.speed);
+        filter.push_str(&format!(";[{}:a]{atempo}adelay={delay_ms}:all=1[{label}]", audio_base + j));
         audio_labels.push(label);
     }
 
@@ -259,7 +268,27 @@ pub fn export_project(
     Ok(())
 }
 
-/// Return true if the media file at `path` contains at least one audio stream.
+/// Build atempo filter chain for audio speed change.
+/// atempo is limited to 0.5–2.0 per filter, so chain multiple for extremes.
+/// Returns a string like "atempo=2.0," (with trailing comma) or "" for 1.0x.
+fn build_atempo(speed: f64) -> String {
+    if (speed - 1.0).abs() < 0.001 { return String::new(); }
+    let mut remaining = speed;
+    let mut filters = String::new();
+    // Chain atempo in [0.5, 2.0] steps
+    while remaining > 2.0 {
+        filters.push_str("atempo=2.0,");
+        remaining /= 2.0;
+    }
+    while remaining < 0.5 {
+        filters.push_str("atempo=0.5,");
+        remaining /= 0.5;
+    }
+    filters.push_str(&format!("atempo={remaining:.6},"));
+    filters
+}
+
+
 fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
     // Derive ffprobe path from ffmpeg path (they live side-by-side)
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");

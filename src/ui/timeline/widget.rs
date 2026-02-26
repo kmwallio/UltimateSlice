@@ -1030,6 +1030,27 @@ fn draw_clip(
         cr.set_font_size(11.0);
         let _ = cr.move_to(cx + 6.0, cy + ch / 2.0 + 4.0);
         let _ = cr.show_text(&clip.label);
+
+        // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0
+        if (clip.speed - 1.0).abs() > 0.01 && cw > 60.0 {
+            let badge = if clip.speed == clip.speed.floor() {
+                format!("{}×", clip.speed as u32)
+            } else {
+                format!("{:.2}×", clip.speed)
+            };
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(&badge) {
+                let bx = cx + cw - ext.width() - 6.0;
+                let by = cy + 14.0;
+                // Badge background
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(1.0, 0.9, 0.2);
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(&badge);
+            }
+        }
     }
 }
 

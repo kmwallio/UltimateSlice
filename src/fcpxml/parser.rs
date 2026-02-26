@@ -117,6 +117,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                     if let Some(v) = attrs.get("us:title-color"){ clip.title_color = u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF); }
                                     if let Some(v) = attrs.get("us:title-x")    { clip.title_x    = v.parse().unwrap_or(0.5); }
                                     if let Some(v) = attrs.get("us:title-y")    { clip.title_y    = v.parse().unwrap_or(0.9); }
+                                    if let Some(v) = attrs.get("us:speed")      { clip.speed      = v.parse().unwrap_or(1.0); }
                                     track.add_clip(clip);
                                 }
                             }

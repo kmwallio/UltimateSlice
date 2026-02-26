@@ -38,6 +38,8 @@ pub struct InspectorView {
     pub title_entry: Entry,
     pub title_x_slider: Scale,
     pub title_y_slider: Scale,
+    // Speed
+    pub speed_slider: Scale,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
 }
@@ -84,6 +86,7 @@ impl InspectorView {
                 self.title_entry.set_text(&c.title_text);
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
+                self.speed_slider.set_value(c.speed);
             }
             None => {
                 self.name_entry.set_text("");
@@ -108,6 +111,7 @@ impl InspectorView {
                 self.title_entry.set_text("");
                 self.title_x_slider.set_value(0.5);
                 self.title_y_slider.set_value(0.9);
+                self.speed_slider.set_value(1.0);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -129,6 +133,7 @@ pub fn build_inspector(
     on_audio_changed: impl Fn(f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
+    on_speed_changed: impl Fn(f64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -329,6 +334,25 @@ pub fn build_inspector(
     title_y_slider.set_hexpand(true);
     vbox.append(&title_y_slider);
 
+    // ── Speed ─────────────────────────────────────────────────────────────────
+    vbox.append(&Separator::new(Orientation::Horizontal));
+    let speed_hdr = Label::new(Some("Speed"));
+    speed_hdr.add_css_class("browser-header");
+    speed_hdr.set_halign(gtk4::Align::Start);
+    vbox.append(&speed_hdr);
+
+    row_label(&vbox, "Speed Multiplier");
+    let speed_slider = Scale::with_range(Orientation::Horizontal, 0.25, 4.0, 0.05);
+    speed_slider.set_value(1.0);
+    speed_slider.set_draw_value(true);
+    speed_slider.set_digits(2);
+    speed_slider.add_mark(0.5,  gtk4::PositionType::Bottom, Some("½×"));
+    speed_slider.add_mark(1.0,  gtk4::PositionType::Bottom, Some("1×"));
+    speed_slider.add_mark(2.0,  gtk4::PositionType::Bottom, Some("2×"));
+    speed_slider.set_hexpand(true);
+    speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
+    vbox.append(&speed_slider);
+
     vbox.append(&Separator::new(Orientation::Horizontal));
 
     // Apply name button
@@ -342,6 +366,7 @@ pub fn build_inspector(
     let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool)> = Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
+    let on_speed_changed: Rc<dyn Fn(f64)> = Rc::new(on_speed_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -778,6 +803,32 @@ pub fn build_inspector(
         });
     }
 
+    // Speed slider
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_speed_changed = on_speed_changed.clone();
+        speed_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() { return; }
+            let speed = sl.value();
+            if let Some(ref id) = *selected_clip_id.borrow() {
+                let mut proj = project.borrow_mut();
+                let mut found = false;
+                for track in &mut proj.tracks {
+                    for clip in &mut track.clips {
+                        if clip.id == *id {
+                            clip.speed = speed;
+                            found = true;
+                        }
+                    }
+                }
+                if found { proj.dirty = true; }
+            }
+            on_speed_changed(speed);
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -803,6 +854,7 @@ pub fn build_inspector(
         title_entry,
         title_x_slider,
         title_y_slider,
+        speed_slider,
         updating,
     });
 

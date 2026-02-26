@@ -12,6 +12,7 @@ pub enum ClipKind {
 fn default_contrast() -> f32 { 1.0 }
 fn default_saturation() -> f32 { 1.0 }
 fn default_volume() -> f32 { 1.0 }
+fn default_speed() -> f64 { 1.0 }
 fn default_title_font() -> String { "Sans Bold 36".to_string() }
 fn default_title_color() -> u32 { 0xFFFFFFFF }
 fn default_title_x() -> f64 { 0.5 }
@@ -54,6 +55,10 @@ pub struct Clip {
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     #[serde(default)]
     pub pan: f32,
+    /// Playback speed multiplier: 0.25 (slow) to 4.0 (fast), default 1.0.
+    /// Values > 1.0 speed up (clip takes less time on timeline); < 1.0 slow down.
+    #[serde(default = "default_speed")]
+    pub speed: f64,
     #[serde(default)]
     pub crop_left: i32,
     #[serde(default)]
@@ -105,6 +110,7 @@ impl Clip {
             sharpness: 0.0,
             volume: 1.0,
             pan: 0.0,
+            speed: 1.0,
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
@@ -120,9 +126,16 @@ impl Clip {
         }
     }
 
-    /// Duration of the clip on the timeline, in nanoseconds
-    pub fn duration(&self) -> u64 {
+    /// Raw source material duration (source_out − source_in), unaffected by speed.
+    pub fn source_duration(&self) -> u64 {
         self.source_out.saturating_sub(self.source_in)
+    }
+
+    /// Duration of the clip on the **timeline**, in nanoseconds.
+    /// A 2× speed clip occupies half the wall-clock time; 0.5× occupies double.
+    pub fn duration(&self) -> u64 {
+        let src = self.source_duration();
+        if self.speed > 0.0 { (src as f64 / self.speed) as u64 } else { src }
     }
 
     /// Exclusive end position on the timeline, in nanoseconds

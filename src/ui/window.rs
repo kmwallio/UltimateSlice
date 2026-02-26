@@ -138,6 +138,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_speed_changed: speed slider → reload current clip at new rate
+        {
+            let on_project_changed = on_project_changed.clone();
+            move |_speed: f64| {
+                // Reload clips so the timeline width and player both reflect the new speed.
+                on_project_changed();
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -422,6 +430,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         title_color:       c.title_color,
                         title_x:           c.title_x,
                         title_y:           c.title_y,
+                        speed:             c.speed,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.

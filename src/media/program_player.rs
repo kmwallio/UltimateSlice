@@ -41,14 +41,26 @@ pub struct ProgramClip {
     pub title_color: u32,
     pub title_x: f64,
     pub title_y: f64,
+    /// Playback speed multiplier (default 1.0). >1 = fast, <1 = slow.
+    pub speed: f64,
 }
 
 impl ProgramClip {
-    pub fn duration_ns(&self) -> u64 {
+    pub fn source_duration_ns(&self) -> u64 {
         self.source_out_ns.saturating_sub(self.source_in_ns)
+    }
+    /// Timeline duration accounting for speed.
+    pub fn duration_ns(&self) -> u64 {
+        let src = self.source_duration_ns();
+        if self.speed > 0.0 { (src as f64 / self.speed) as u64 } else { src }
     }
     pub fn timeline_end_ns(&self) -> u64 {
         self.timeline_start_ns + self.duration_ns()
+    }
+    /// Convert a timeline position offset to the corresponding source file position.
+    pub fn source_pos_ns(&self, timeline_pos_ns: u64) -> u64 {
+        let offset = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
+        self.source_in_ns + (offset as f64 * self.speed) as u64
     }
 }
 
@@ -215,13 +227,18 @@ impl ProgramPlayer {
         // Block briefly until the pipeline reaches PAUSED so our seek is accepted.
         // The initial seek in load_clip_idx can be dropped if issued during async pre-roll.
         let _ = self.pipeline.state(gst::ClockTime::from_mseconds(100));
-        // Re-seek to make sure we start at the right position.
+        // Re-seek to make sure we start at the right position with the correct rate.
         if let Some(idx) = self.current_idx {
             let clip = &self.clips[idx];
-            let source_seek_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
-            let _ = self.pipeline.seek_simple(
+            let source_seek_ns = clip.source_pos_ns(pos);
+            let speed = clip.speed;
+            let _ = self.pipeline.seek(
+                speed,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
             );
         }
         let _ = self.pipeline.set_state(gst::State::Playing);
@@ -311,9 +328,10 @@ impl ProgramPlayer {
             return true;
         }
 
-        // Update timeline_pos from source position
-        let new_pos = clip.timeline_start_ns
-            + src_pos.saturating_sub(clip.source_in_ns);
+        // Update timeline_pos from source position, accounting for speed
+        let offset_ns = src_pos.saturating_sub(clip.source_in_ns);
+        let timeline_offset = if clip.speed > 0.0 { (offset_ns as f64 / clip.speed) as u64 } else { offset_ns };
+        let new_pos = clip.timeline_start_ns + timeline_offset;
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
         changed
@@ -342,11 +360,12 @@ impl ProgramPlayer {
             let pos = self.timeline_pos_ns;
             if let Some(idx) = self.clip_at(pos) {
                 let clip = &self.clips[idx];
-                let source_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
-                let _ = self.pipeline.seek_simple(
+                let source_ns = clip.source_pos_ns(pos);
+                let speed = clip.speed;
+                let _ = self.pipeline.seek(speed,
                     gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                    gst::ClockTime::from_nseconds(source_ns),
-                );
+                    gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
+                    gst::SeekType::None, gst::ClockTime::NONE);
             }
         }
     }
@@ -416,11 +435,12 @@ impl ProgramPlayer {
             let pos = self.timeline_pos_ns;
             if let Some(idx) = self.clip_at(pos) {
                 let clip = &self.clips[idx];
-                let source_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
-                let _ = self.pipeline.seek_simple(
+                let source_ns = clip.source_pos_ns(pos);
+                let speed = clip.speed;
+                let _ = self.pipeline.seek(speed,
                     gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                    gst::ClockTime::from_nseconds(source_ns),
-                );
+                    gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
+                    gst::SeekType::None, gst::ClockTime::NONE);
             }
         }
     }
@@ -428,18 +448,16 @@ impl ProgramPlayer {
     /// Directly update transform on the current clip without reloading the pipeline.
     pub fn update_current_transform(&mut self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32, rotate: i32, flip_h: bool, flip_v: bool) {
         self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v);
-        // Force the current frame to redecode with the new transform by seeking to the
-        // current timeline position. Use timeline_pos_ns (not query_position, which can
-        // return 0 during pre-roll and would jump the playhead to the start).
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
             let pos = self.timeline_pos_ns;
             if let Some(idx) = self.clip_at(pos) {
                 let clip = &self.clips[idx];
-                let source_ns = clip.source_in_ns + pos.saturating_sub(clip.timeline_start_ns);
-                let _ = self.pipeline.seek_simple(
+                let source_ns = clip.source_pos_ns(pos);
+                let speed = clip.speed;
+                let _ = self.pipeline.seek(speed,
                     gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                    gst::ClockTime::from_nseconds(source_ns),
-                );
+                    gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
+                    gst::SeekType::None, gst::ClockTime::NONE);
             }
         }
     }
@@ -454,8 +472,8 @@ impl ProgramPlayer {
 
     fn load_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
         let clip = &self.clips[idx];
-        let source_seek_ns = clip.source_in_ns
-            + timeline_pos_ns.saturating_sub(clip.timeline_start_ns);
+        let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
+        let speed = clip.speed;
 
         // Apply per-clip color correction (always, before seek so new frame uses it)
         if let Some(ref vb) = self.videobalance {
@@ -480,9 +498,13 @@ impl ProgramPlayer {
 
         if self.current_idx == Some(idx) {
             // Same clip already loaded — just seek to the new position. No pipeline reset.
-            let _ = self.pipeline.seek_simple(
+            let _ = self.pipeline.seek(
+                speed,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
             );
         } else {
             // Different clip — reload the pipeline.
@@ -490,10 +512,14 @@ impl ProgramPlayer {
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.pipeline.set_property("uri", &uri);
             let _ = self.pipeline.set_state(gst::State::Paused);
-            // Seek with FLUSH — valid during async PAUSED pre-roll for local files.
-            let _ = self.pipeline.seek_simple(
+            // Seek with FLUSH and the clip's speed as rate.
+            let _ = self.pipeline.seek(
+                speed,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
             );
         }
 

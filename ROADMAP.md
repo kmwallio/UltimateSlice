@@ -118,12 +118,12 @@ Tracking docs:
 - [ ] Reorder tracks in the timeline
 
 ### Speed Ramps (per clip)
-- [ ] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer `videorate` + `pitch` for audio-pitch correction
+- [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
+- [x] Speed indicator badge on clip in timeline (yellow "2×" badge)
+- [x] Persist speed data in FCPXML (`us:speed` attribute)
 - [ ] Variable speed ramps: multiple keyframed speed segments within a single clip
 - [ ] Reverse playback
 - [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
-- [ ] Persist speed data in FCPXML (`us:speed` / `us:speed-keyframes` attributes)
-- [ ] Speed indicator overlay on clip in timeline (e.g. "0.5×" badge)
 
 ### Program Monitor
 - [x] Program Monitor panel showing assembled timeline playback
