@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 
 /// Result of a background media probe.
@@ -10,52 +10,63 @@ pub struct ProbeResult {
 
 /// Asynchronous media probe cache.
 ///
-/// Follows the same pattern as `ThumbnailCache` / `WaveformCache`:
-/// 1. Call `request(path)` to start a background GStreamer Discoverer probe.
+/// Uses a **single** background worker thread with a queue to serialise
+/// GStreamer Discoverer calls, avoiding resource contention with the
+/// playback pipeline and thumbnail extraction threads.
+///
+/// 1. Call `request(path)` to enqueue a probe.
 /// 2. Call `poll()` periodically to drain completed results.
 /// 3. Call `get(path)` to retrieve a finished probe result.
 pub struct MediaProbeCache {
     pub results: HashMap<String, ProbeResult>,
-    loading: HashSet<String>,
-    tx: mpsc::SyncSender<ProbeResult>,
-    rx: mpsc::Receiver<ProbeResult>,
+    pending: HashSet<String>,
+    result_tx: mpsc::SyncSender<ProbeResult>,
+    result_rx: mpsc::Receiver<ProbeResult>,
+    work_tx: Option<mpsc::Sender<String>>,
 }
 
 impl MediaProbeCache {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::sync_channel(32);
+        let (result_tx, result_rx) = mpsc::sync_channel(32);
+        let (work_tx, work_rx) = mpsc::channel::<String>();
+
+        // Single dedicated worker thread processes probes one at a time.
+        let tx = result_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(path) = work_rx.recv() {
+                let uri = format!("file://{path}");
+                let (duration_ns, is_audio_only) = probe_media_bg(&uri);
+                if tx.send(ProbeResult { path, duration_ns, is_audio_only }).is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             results: HashMap::new(),
-            loading: HashSet::new(),
-            tx,
-            rx,
+            pending: HashSet::new(),
+            result_tx,
+            result_rx,
+            work_tx: Some(work_tx),
         }
     }
 
-    /// Start a background probe for `source_path`. No-op if already cached or pending.
+    /// Enqueue a background probe for `source_path`. No-op if already cached or pending.
     pub fn request(&mut self, source_path: &str) {
-        if self.results.contains_key(source_path) || self.loading.contains(source_path) {
+        if self.results.contains_key(source_path) || self.pending.contains(source_path) {
             return;
         }
-        self.loading.insert(source_path.to_string());
-        let tx = self.tx.clone();
-        let path = source_path.to_string();
-        std::thread::spawn(move || {
-            let uri = format!("file://{path}");
-            let (duration_ns, is_audio_only) = probe_media_bg(&uri);
-            let _ = tx.send(ProbeResult {
-                path,
-                duration_ns,
-                is_audio_only,
-            });
-        });
+        self.pending.insert(source_path.to_string());
+        if let Some(ref tx) = self.work_tx {
+            let _ = tx.send(source_path.to_string());
+        }
     }
 
     /// Drain completed background probes. Returns paths that were just resolved.
     pub fn poll(&mut self) -> Vec<String> {
         let mut resolved = Vec::new();
-        while let Ok(result) = self.rx.try_recv() {
-            self.loading.remove(&result.path);
+        while let Ok(result) = self.result_rx.try_recv() {
+            self.pending.remove(&result.path);
             let path = result.path.clone();
             self.results.insert(result.path.clone(), result);
             resolved.push(path);

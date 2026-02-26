@@ -39,6 +39,10 @@ impl WaveformCache {
         if self.data.contains_key(source_path) || self.loading.contains(source_path) {
             return;
         }
+        // Limit concurrent extraction threads to avoid starving playback.
+        if self.loading.len() >= 2 {
+            return; // will be re-requested on next timeline draw cycle
+        }
         self.loading.insert(source_path.to_string());
         let key = source_path.to_string();
         let tx = self.tx.clone();
