@@ -1,0 +1,20 @@
+{
+  "sheet-order" : [
+    "ROADMAP.md",
+    "CHANGELOG.md",
+    "README.md"
+  ],
+  "hidden-folders" : [
+    "target",
+    "Sample-Media",
+    "src"
+  ],
+  "folder-order" : [
+    "target",
+    "Sample-Media",
+    "src",
+    "docs"
+  ],
+  "notes" : "",
+  "icon" : ""
+}
