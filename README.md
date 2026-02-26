@@ -1,5 +1,7 @@
 # UltimateSlice
 
+![UltimateSlice Screenshot](ultimateslice.png)
+
 **UltimateSlice** is a Final Cut Pro–inspired non-linear video editor built with **Rust** and **GTK4**, powered by **GStreamer** for media playback and export.
 
 ## Features
