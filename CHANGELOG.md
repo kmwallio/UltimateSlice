@@ -5,6 +5,10 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Timeline filmstrip thumbnails now follow clip time**:
+  - Video clip thumbnail strips now sample frames across the clip instead of repeating a single frame.
+  - Each tile maps to its corresponding position between clip `source_in` and `source_out`, so trims/in-out changes are reflected in the strip.
+  - Rendering keeps async `ThumbnailCache` extraction and uses a per-clip tile cap to avoid excessive request churn.
 - **Preferences window + `Ctrl+,` shortcut**:
   - Added a categorized Preferences dialog (General, Playback) opened with **`Ctrl+,`**.
   - Added an initial **Hardware Acceleration** preference toggle in Preferences.

@@ -106,7 +106,7 @@ Tracking docs:
 - [x] Mark-in / Mark-out visible as timecodes in a dedicated bar
 
 ### Timeline Improvements
-- [x] Clip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
+- [x] Time-mapped clip filmstrip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
 - [x] Snap-to-clip-edge when moving clips (10 px threshold, snaps both start and end edges)
 - [x] Multiple video tracks and audio tracks (Add/Remove Track buttons below timeline)
 - [x] Audio waveform rendering in audio track rows (background GStreamer decode, normalized peaks)

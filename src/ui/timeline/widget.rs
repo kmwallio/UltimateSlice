@@ -1066,29 +1066,51 @@ fn draw_clip(
 
     // ── Thumbnail strip for video clips ──────────────────────────────────
     if track.kind == TrackKind::Video && cw > 20.0 {
-        // Request thumb at the clip's source in-point
-        cache.request(&clip.source_path, clip.source_in);
-        if let Some(surf) = cache.get(&clip.source_path, clip.source_in) {
+        const THUMB_ASPECT: f64 = 160.0 / 90.0;
+        const MAX_THUMB_TILES_PER_CLIP: usize = 24;
+
+        let inner_x = cx + 1.0;
+        let inner_y = cy + 1.0;
+        let inner_w = (cw - 2.0).max(0.0);
+        let inner_h = (ch - 2.0).max(0.0);
+
+        if inner_w > 1.0 && inner_h > 1.0 {
+            let nominal_tile_w = (inner_h * THUMB_ASPECT).max(1.0);
+            let approx_tiles = (inner_w / nominal_tile_w).ceil().max(1.0) as usize;
+            let tile_count = approx_tiles.min(MAX_THUMB_TILES_PER_CLIP).max(1);
+            let src_span = clip.source_out.saturating_sub(clip.source_in);
+            let scale_y = inner_h / 90.0;
+
             cr.save().ok();
-            // Clip to the clip rectangle (with 1px inset)
-            rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
+            rounded_rect(cr, inner_x, inner_y, inner_w, inner_h, 3.0);
             cr.clip();
 
-            let thumb_aspect = 160.0_f64 / 90.0_f64;
-            let tile_h = ch - 2.0;
-            let tile_w = tile_h * thumb_aspect;
-            let scale = tile_h / 90.0;
+            for i in 0..tile_count {
+                let f0 = i as f64 / tile_count as f64;
+                let f1 = (i + 1) as f64 / tile_count as f64;
+                let x0 = inner_x + f0 * inner_w;
+                let x1 = inner_x + f1 * inner_w;
+                let draw_w = (x1 - x0).max(1.0);
+                let mid = (f0 + f1) * 0.5;
 
-            // Tile thumbnails across the clip width
-            let mut tile_x = cx + 1.0;
-            while tile_x < cx + cw - 1.0 {
-                cr.save().ok();
-                cr.translate(tile_x, cy + 1.0);
-                cr.scale(scale, scale);
-                cr.set_source_surface(surf, 0.0, 0.0).ok();
-                cr.paint_with_alpha(0.75).ok();
-                cr.restore().ok();
-                tile_x += tile_w;
+                let src_offset = if src_span <= 1 {
+                    0
+                } else {
+                    ((mid * src_span as f64) as u64).min(src_span - 1)
+                };
+                let sample_time = clip.source_in + src_offset;
+
+                cache.request(&clip.source_path, sample_time);
+                if let Some(surf) = cache.get(&clip.source_path, sample_time) {
+                    cr.save().ok();
+                    cr.rectangle(x0, inner_y, draw_w, inner_h);
+                    cr.clip();
+                    cr.translate(x0, inner_y);
+                    cr.scale(draw_w / 160.0, scale_y);
+                    cr.set_source_surface(surf, 0.0, 0.0).ok();
+                    cr.paint_with_alpha(0.75).ok();
+                    cr.restore().ok();
+                }
             }
             cr.restore().ok();
 
