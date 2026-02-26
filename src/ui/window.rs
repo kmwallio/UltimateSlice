@@ -1068,5 +1068,31 @@ fn handle_mcp_command(
             reply.send(json!({"success": true, "label": label, "duration_ns": duration_ns})).ok();
             on_project_changed();
         }
+
+        McpCommand::ReorderTrack { from_index, to_index, reply } => {
+            let track_count = {
+                let proj = project.borrow();
+                proj.tracks.len()
+            };
+            if from_index >= track_count || to_index >= track_count {
+                reply.send(json!({"error": "Index out of range", "track_count": track_count})).ok();
+            } else if from_index == to_index {
+                reply.send(json!({"success": true, "message": "No change needed"})).ok();
+            } else {
+                let cmd = crate::undo::ReorderTrackCommand {
+                    from_index,
+                    to_index,
+                };
+                {
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    timeline_state.borrow_mut().history.execute(Box::new(cmd), &mut proj);
+                }
+                reply.send(json!({"success": true, "from_index": from_index, "to_index": to_index})).ok();
+                on_project_changed();
+            }
+        }
     }
 }

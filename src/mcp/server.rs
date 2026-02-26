@@ -258,6 +258,18 @@ fn tools_list() -> Value {
                 },
                 "required": ["path"]
             }
+        },
+        {
+            "name": "reorder_track",
+            "description": "Move a track from one position to another (0-based indices).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_index": { "type": "integer", "description": "Current 0-based track index." },
+                    "to_index":   { "type": "integer", "description": "Target 0-based track index." }
+                },
+                "required": ["from_index", "to_index"]
+            }
         }
     ]})
 }
@@ -348,6 +360,12 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "import_media" => McpCommand::ImportMedia {
             path:  args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "reorder_track" => McpCommand::ReorderTrack {
+            from_index: args["from_index"].as_u64().unwrap_or(0) as usize,
+            to_index:   args["to_index"].as_u64().unwrap_or(0) as usize,
             reply: tx,
         },
 

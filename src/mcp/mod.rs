@@ -40,6 +40,7 @@ pub enum McpCommand {
     ExportMp4   { path: String, reply: SyncSender<Value> },
     ListLibrary { reply: SyncSender<Value> },
     ImportMedia { path: String, reply: SyncSender<Value> },
+    ReorderTrack { from_index: usize, to_index: usize, reply: SyncSender<Value> },
 }
 
 /// Spawn the MCP stdio server on a background thread.

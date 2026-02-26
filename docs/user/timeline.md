@@ -23,7 +23,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 
 The default tool. Use it to:
 - **Select** a clip by clicking on it (highlighted yellow border).
-- **Move** a clip by dragging its body.
+- **Move** a clip by dragging its body (horizontally within a track, or vertically to another track of the same kind).
 - **Trim** the In-point by dragging the left edge of a selected clip.
 - **Trim** the Out-point by dragging the right edge of a selected clip.
 
@@ -67,6 +67,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 ## Tracks
 
 - **Add Track** buttons below the timeline add a new Video or Audio track.
+- **Reorder tracks** by dragging a track's label vertically; a blue indicator line shows the drop target. Release to confirm.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Muting an audio track excludes it from both preview and export.
 

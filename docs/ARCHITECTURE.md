@@ -304,6 +304,7 @@ Key design points:
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
 | `list_library` | Items in the media library (not yet on timeline) |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
+| `reorder_track` | Move a track from one index to another (undoable) |
 
 ### Example session
 

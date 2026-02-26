@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::model::clip::Clip;
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
-use crate::undo::{EditHistory, DeleteClipCommand, MoveClipCommand, SetTrackClipsCommand, SplitClipCommand, TrimClipCommand, TrimOutCommand};
+use crate::undo::{EditHistory, DeleteClipCommand, MoveClipCommand, ReorderTrackCommand, SetTrackClipsCommand, SplitClipCommand, TrimClipCommand, TrimOutCommand};
 
 const TRACK_HEIGHT: f64 = 60.0;
 const TRACK_LABEL_WIDTH: f64 = 80.0;
@@ -26,10 +26,11 @@ pub enum ActiveTool {
 #[derive(Debug, Clone)]
 enum DragOp {
     None,
-    /// Moving a clip: (clip_id, track_id, original_timeline_start, drag_offset_in_clip_ns)
+    /// Moving a clip (possibly across tracks of the same kind)
     MoveClip {
         clip_id: String,
-        track_id: String,
+        original_track_id: String,
+        current_track_id: String,
         original_start: u64,
         clip_offset_ns: u64,
         original_track_clips: Vec<Clip>,
@@ -48,6 +49,11 @@ enum DragOp {
         track_id: String,
         original_source_out: u64,
         original_track_clips: Vec<Clip>,
+    },
+    /// Reordering a track by dragging its label
+    ReorderTrack {
+        track_idx: usize,
+        target_idx: usize,
     },
 }
 
@@ -411,7 +417,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         st.drag_op = match h.zone {
                             HitZone::Body => DragOp::MoveClip {
                                 clip_id: h.clip_id.clone(),
-                                track_id: h.track_id.clone(),
+                                original_track_id: h.track_id.clone(),
+                                current_track_id: h.track_id.clone(),
                                 original_start: tl_start,
                                 clip_offset_ns: offset_ns,
                                 original_track_clips: track_snapshot.clone(),
@@ -433,6 +440,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         st.selected_clip_id = Some(h.clip_id);
                         st.selected_track_id = Some(h.track_id);
                     }
+                } else if x < TRACK_LABEL_WIDTH && y > RULER_HEIGHT {
+                    // Drag started in track label area → track reorder
+                    let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
+                    let track_count = st.project.borrow().tracks.len();
+                    if track_idx < track_count {
+                        st.drag_op = DragOp::ReorderTrack {
+                            track_idx,
+                            target_idx: track_idx,
+                        };
+                    }
                 }
             }
         });
@@ -440,10 +457,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         drag.connect_drag_update({
             let state = state.clone();
             let area_weak = area_weak.clone();
-            move |gesture, offset_x, _offset_y| {
-                let (start_x, _) = gesture.start_point().unwrap_or((0.0, 0.0));
+            move |gesture, offset_x, offset_y| {
+                let (start_x, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
                 let current_x = start_x + offset_x;
-                let (_, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
+                let current_y = start_y + offset_y;
 
                 if start_y < RULER_HEIGHT {
                     // Drag on ruler = pan the timeline.
@@ -458,16 +475,61 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     st.x_to_ns(current_x)
                 };
 
-                let st = state.borrow_mut();
+                let mut st = state.borrow_mut();
                 let drag_op = st.drag_op.clone();
                 match drag_op {
-                    DragOp::MoveClip { ref clip_id, ref track_id, clip_offset_ns, .. } => {
+                    DragOp::MoveClip { ref clip_id, ref current_track_id, clip_offset_ns, .. } => {
                         let raw_start = current_ns.saturating_sub(clip_offset_ns);
+                        // ── Determine target track from y position ──────────
+                        let target_track_idx = if current_y > RULER_HEIGHT {
+                            ((current_y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
+                        } else { 0 };
+                        let (target_track_id, same_kind) = {
+                            let proj = st.project.borrow();
+                            let cur_kind = proj.tracks.iter()
+                                .find(|t| &t.id == current_track_id)
+                                .map(|t| t.kind.clone());
+                            match proj.tracks.get(target_track_idx) {
+                                Some(target) if Some(&target.kind) == cur_kind.as_ref() && target.id != *current_track_id => {
+                                    (Some(target.id.clone()), true)
+                                }
+                                _ => (None, false)
+                            }
+                        };
+                        // Move clip between tracks if target is valid and different
+                        if same_kind {
+                            if let Some(ref new_tid) = target_track_id {
+                                let mut proj = st.project.borrow_mut();
+                                let extracted = {
+                                    let from = proj.tracks.iter_mut().find(|t| &t.id == current_track_id);
+                                    from.and_then(|t| {
+                                        let pos = t.clips.iter().position(|c| &c.id == clip_id);
+                                        pos.map(|i| t.clips.remove(i))
+                                    })
+                                };
+                                if let Some(mut clip) = extracted {
+                                    clip.timeline_start = raw_start;
+                                    if let Some(to_track) = proj.tracks.iter_mut().find(|t| &t.id == new_tid) {
+                                        to_track.add_clip(clip);
+                                    }
+                                }
+                                drop(proj);
+                                // Update drag_op with new current_track_id
+                                if let DragOp::MoveClip { ref mut current_track_id, .. } = st.drag_op {
+                                    *current_track_id = new_tid.clone();
+                                }
+                                st.selected_track_id = Some(new_tid.clone());
+                            }
+                        }
+
                         // ── Snap to clip edges ──────────────────────────────
+                        let active_track_id = if let DragOp::MoveClip { ref current_track_id, .. } = st.drag_op {
+                            current_track_id.clone()
+                        } else { String::new() };
+
                         let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
                         let (clip_dur, snap_start) = {
                             let proj = st.project.borrow();
-                            // Collect all edge times from OTHER clips
                             let edges: Vec<u64> = proj.tracks.iter()
                                 .flat_map(|t| t.clips.iter())
                                 .filter(|c| &c.id != clip_id)
@@ -478,11 +540,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 .find(|c| &c.id == clip_id)
                                 .map(|c| c.duration())
                                 .unwrap_or(0);
-                            // Snap clip start edge
                             let by_start = edges.iter().copied()
                                 .filter(|&e| (e as i64 - raw_start as i64).unsigned_abs() < snap_ns)
                                 .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
-                            // Snap clip end edge
                             let by_end = edges.iter().copied()
                                 .filter(|&e| {
                                     let end = raw_start + this_dur;
@@ -505,9 +565,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             };
                             (this_dur, snapped)
                         };
-                        let _ = clip_dur; // used above
+                        let _ = clip_dur;
                         let mut proj = st.project.borrow_mut();
-                        if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
+                        if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == active_track_id) {
                             if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                                 clip.timeline_start = snap_start;
                             }
@@ -567,6 +627,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
+                    DragOp::ReorderTrack { track_idx, .. } => {
+                        let new_target = if current_y > RULER_HEIGHT {
+                            let idx = ((current_y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
+                            let count = st.project.borrow().tracks.len();
+                            idx.min(count.saturating_sub(1))
+                        } else { 0 };
+                        if let DragOp::ReorderTrack { ref mut target_idx, .. } = st.drag_op {
+                            *target_idx = new_target;
+                        }
+                    }
                     DragOp::None => {}
                 }
 
@@ -583,19 +653,42 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
                 // Commit drag to undo history
                 match drag_op {
-                    DragOp::MoveClip { ref clip_id, ref track_id, original_start, original_track_clips, .. } => {
+                    DragOp::MoveClip { ref clip_id, ref original_track_id, ref current_track_id, original_start, original_track_clips, .. } => {
+                        let cross_track = original_track_id != current_track_id;
                         if magnetic_mode {
+                            // Compact the current (destination) track
                             let mut new_clips = {
                                 let proj = st.project.borrow();
                                 proj.tracks.iter()
-                                    .find(|t| &t.id == track_id)
+                                    .find(|t| &t.id == current_track_id)
                                     .map(|t| t.clips.clone())
                                     .unwrap_or_default()
                             };
                             compact_gap_free_clips(&mut new_clips);
-                            if new_clips != original_track_clips {
+                            if cross_track {
+                                // Also compact the original (source) track
+                                let mut orig_clips_now = {
+                                    let proj = st.project.borrow();
+                                    proj.tracks.iter()
+                                        .find(|t| &t.id == original_track_id)
+                                        .map(|t| t.clips.clone())
+                                        .unwrap_or_default()
+                                };
+                                compact_gap_free_clips(&mut orig_clips_now);
+                                // Apply both compacted states
+                                {
+                                    let mut proj = st.project.borrow_mut();
+                                    if let Some(t) = proj.tracks.iter_mut().find(|t| &t.id == current_track_id) {
+                                        t.clips = new_clips;
+                                    }
+                                    if let Some(t) = proj.tracks.iter_mut().find(|t| &t.id == original_track_id) {
+                                        t.clips = orig_clips_now;
+                                    }
+                                    proj.dirty = true;
+                                }
+                            } else if new_clips != original_track_clips {
                                 let cmd = SetTrackClipsCommand {
-                                    track_id: track_id.clone(),
+                                    track_id: current_track_id.clone(),
                                     old_clips: original_track_clips,
                                     new_clips,
                                     label: "Move clip (magnetic)".to_string(),
@@ -604,20 +697,24 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 let mut proj = project.borrow_mut();
                                 st.history.execute(Box::new(cmd), &mut proj);
                             }
+                            // For cross-track magnetic, we clear redo (complex multi-track undo is out of scope for v1)
+                            if cross_track {
+                                st.history.redo_stack.clear();
+                            }
                         } else {
                             let new_start = {
                                 let proj = st.project.borrow();
                                 proj.tracks.iter()
-                                    .find(|t| &t.id == track_id)
+                                    .find(|t| &t.id == current_track_id)
                                     .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
                                     .map(|c| c.timeline_start)
                             };
                             if let Some(new_start) = new_start {
-                                if new_start != original_start {
+                                if new_start != original_start || cross_track {
                                     let cmd = MoveClipCommand {
                                         clip_id: clip_id.clone(),
-                                        from_track_id: track_id.clone(),
-                                        to_track_id: track_id.clone(),
+                                        from_track_id: original_track_id.clone(),
+                                        to_track_id: current_track_id.clone(),
                                         old_timeline_start: original_start,
                                         new_timeline_start: new_start,
                                     };
@@ -714,6 +811,20 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 st.history.undo_stack.push(Box::new(cmd));
                                 st.history.redo_stack.clear();
                                 st.project.borrow_mut().dirty = true;
+                            }
+                        }
+                    }
+                    DragOp::ReorderTrack { track_idx, target_idx } => {
+                        if track_idx != target_idx {
+                            let track_count = st.project.borrow().tracks.len();
+                            if track_idx < track_count && target_idx < track_count {
+                                let cmd = ReorderTrackCommand {
+                                    from_index: track_idx,
+                                    to_index: target_idx,
+                                };
+                                let project = st.project.clone();
+                                let mut proj = project.borrow_mut();
+                                st.history.execute(Box::new(cmd), &mut proj);
                             }
                         }
                     }
@@ -923,6 +1034,19 @@ fn draw_timeline(
         };
         let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, y);
         let _ = cr.show_text("[Magnetic]");
+    }
+
+    // Track reorder drop indicator
+    if let DragOp::ReorderTrack { track_idx, target_idx } = &st.drag_op {
+        if track_idx != target_idx {
+            let indicator_y = RULER_HEIGHT + *target_idx as f64 * TRACK_HEIGHT +
+                if target_idx > track_idx { TRACK_HEIGHT } else { 0.0 };
+            cr.set_source_rgba(0.2, 0.7, 1.0, 0.9);
+            cr.set_line_width(3.0);
+            cr.move_to(0.0, indicator_y);
+            cr.line_to(w, indicator_y);
+            cr.stroke().ok();
+        }
     }
 }
 

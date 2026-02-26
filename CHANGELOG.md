@@ -5,6 +5,15 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Cross-track clip dragging**:
+  - Clips can now be dragged vertically between tracks of the same kind (video → video, audio → audio).
+  - Undo/redo fully supported for cross-track moves (including magnetic mode).
+  - Snapping behaviour works across tracks.
+- **Track reordering**:
+  - Drag a track label vertically to reorder tracks in the timeline.
+  - A blue drop indicator shows the target position during the drag.
+  - Undoable via `Ctrl+Z`.
+  - Added MCP tool `reorder_track` for automation.
 - **Timeline filmstrip thumbnails now follow clip time**:
   - Video clip thumbnail strips now sample frames across the clip instead of repeating a single frame.
   - Each tile maps to its corresponding position between clip `source_in` and `source_out`, so trims/in-out changes are reflected in the strip.

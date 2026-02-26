@@ -114,9 +114,10 @@ Tracking docs:
 - [x] Snap-to-clip-edge when trimming (TrimIn and TrimOut snap to nearby edges)
 - [x] Timeline markers / chapter points
 - [x] Magnetic timeline mode (gap-free)
+- [x] Cross-track clip dragging (same-kind restriction)
+- [x] Reorder tracks in the timeline (drag track labels)
 - [ ] Cross-dissolve transitions between clips
 - [ ] Ripple/roll/slip/slide edit modes
-- [ ] Reorder tracks in the timeline
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export

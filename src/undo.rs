@@ -202,6 +202,30 @@ impl EditCommand for SetClipColorCommand {
     fn description(&self) -> &str { "Set clip color" }
 }
 
+/// Reorder a track from one index to another.
+pub struct ReorderTrackCommand {
+    pub from_index: usize,
+    pub to_index: usize,
+}
+
+impl EditCommand for ReorderTrackCommand {
+    fn execute(&self, project: &mut Project) {
+        reorder_track(&mut project.tracks, self.from_index, self.to_index);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        reorder_track(&mut project.tracks, self.to_index, self.from_index);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Reorder track" }
+}
+
+fn reorder_track<T>(vec: &mut Vec<T>, from: usize, to: usize) {
+    if from >= vec.len() || to >= vec.len() || from == to { return; }
+    let item = vec.remove(from);
+    vec.insert(to, item);
+}
+
 
 pub struct EditHistory {
     pub undo_stack: Vec<Box<dyn EditCommand>>,
