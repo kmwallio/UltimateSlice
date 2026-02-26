@@ -48,6 +48,10 @@ pub struct ProgramClip {
     pub is_audio_only: bool,
     /// Track index — higher index clips (B-roll, overlays) take priority in preview.
     pub track_index: usize,
+    /// Transition to next clip on same track (e.g. "cross_dissolve").
+    pub transition_after: String,
+    /// Transition duration in nanoseconds.
+    pub transition_after_ns: u64,
 }
 
 impl ProgramClip {
@@ -102,6 +106,8 @@ pub struct ProgramPlayer {
     videoflip_flip: Option<gst::Element>,
     /// textoverlay element for per-clip title
     textoverlay: Option<gst::Element>,
+    /// alpha element for transition fade approximation in preview.
+    alpha_filter: Option<gst::Element>,
 }
 
 impl ProgramPlayer {
@@ -138,6 +144,7 @@ impl ProgramPlayer {
             .build()
             .ok();
         let textoverlay = gst::ElementFactory::make("textoverlay").build().ok();
+        let alpha_filter = gst::ElementFactory::make("alpha").build().ok();
 
         if videobalance.is_some() && gaussianblur.is_some() {
             let vb = videobalance.as_ref().unwrap();
@@ -156,7 +163,17 @@ impl ProgramPlayer {
                     .expect("videoconvert must be available");
                 let conv4 = gst::ElementFactory::make("videoconvert").build()
                     .expect("videoconvert must be available");
-                if let Some(ref to) = textoverlay {
+                if let (Some(ref a), Some(ref to)) = (&alpha_filter, &textoverlay) {
+                    a.set_property("alpha", 1.0_f64);
+                    to.set_property("text", "");
+                    to.set_property("silent", true);
+                    bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, a, to]).ok();
+                    gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, a, to]).ok();
+                    let sink_pad = vc.static_pad("sink").unwrap();
+                    let src_pad = to.static_pad("src").unwrap();
+                    bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                    bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                } else if let Some(ref to) = textoverlay {
                     to.set_property("text", "");
                     to.set_property("silent", true);
                     bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff, to]).ok();
@@ -220,6 +237,7 @@ impl ProgramPlayer {
                 videoflip_rotate,
                 videoflip_flip,
                 textoverlay,
+                alpha_filter,
             },
             paintable,
         ))
@@ -415,6 +433,10 @@ impl ProgramPlayer {
         };
         let clip = &self.clips[idx];
         let cur_track_idx = clip.track_index;
+        if let Some(ref a) = self.alpha_filter {
+            let alpha = self.transition_alpha(idx, self.timeline_pos_ns);
+            a.set_property("alpha", alpha.clamp(0.0, 1.0));
+        }
 
         let src_pos = self.pipeline
             .query_position::<gst::ClockTime>()
@@ -495,6 +517,10 @@ impl ProgramPlayer {
 
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
+        if let Some(ref a) = self.alpha_filter {
+            let alpha = self.transition_alpha(idx, new_pos);
+            a.set_property("alpha", alpha.clamp(0.0, 1.0));
+        }
         if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
             let _ = self.pipeline.set_state(gst::State::Ready);
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
@@ -709,7 +735,7 @@ impl ProgramPlayer {
                 while bus.pop().is_some() {}
             }
             let uri = format!("file://{}", clip.source_path);
-            let _ = self.pipeline.set_state(gst::State::Ready);
+            let _ = self.pipeline.set_state(gst::State::Paused);
             self.pipeline.set_property("uri", &uri);
             let _ = self.pipeline.set_state(gst::State::Paused);
             // Avoid blocking transition path during active playback; blocking here
@@ -733,6 +759,43 @@ impl ProgramPlayer {
         self.seek_anchor_source_ns = source_seek_ns;
         self.seek_reports_relative = None;
         self.timeline_pos_ns = timeline_pos_ns;
+        if let Some(ref a) = self.alpha_filter {
+            let alpha = self.transition_alpha(idx, timeline_pos_ns);
+            a.set_property("alpha", alpha.clamp(0.0, 1.0));
+        }
+    }
+
+    /// Transition alpha approximation for preview:
+    /// fade-out at end of outgoing clip + fade-in at start of incoming clip.
+    fn transition_alpha(&self, idx: usize, timeline_pos_ns: u64) -> f64 {
+        let Some(clip) = self.clips.get(idx) else { return 1.0 };
+        let mut alpha = 1.0_f64;
+        // Outgoing transition on this clip
+        if clip.transition_after == "cross_dissolve" && clip.transition_after_ns > 0 {
+            let d = clip.transition_after_ns.min(clip.duration_ns());
+            let start = clip.timeline_end_ns().saturating_sub(d);
+            if timeline_pos_ns >= start && timeline_pos_ns < clip.timeline_end_ns() && d > 0 {
+                let t = (timeline_pos_ns - start) as f64 / d as f64;
+                alpha = alpha.min((1.0 - t).clamp(0.0, 1.0));
+            }
+        }
+        // Incoming transition from previous clip on same track
+        if let Some(prev) = self.clips.iter().find(|c|
+            c.track_index == clip.track_index
+                && c.timeline_end_ns() == clip.timeline_start_ns
+                && c.transition_after == "cross_dissolve"
+                && c.transition_after_ns > 0
+        ) {
+            let d = prev.transition_after_ns.min(clip.duration_ns());
+            if timeline_pos_ns >= clip.timeline_start_ns
+                && timeline_pos_ns < clip.timeline_start_ns.saturating_add(d)
+                && d > 0
+            {
+                let t = (timeline_pos_ns - clip.timeline_start_ns) as f64 / d as f64;
+                alpha = alpha.min(t.clamp(0.0, 1.0));
+            }
+        }
+        alpha
     }
 
     fn is_eos(&self) -> bool {

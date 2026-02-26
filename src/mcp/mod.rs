@@ -41,6 +41,13 @@ pub enum McpCommand {
     ListLibrary { reply: SyncSender<Value> },
     ImportMedia { path: String, reply: SyncSender<Value> },
     ReorderTrack { from_index: usize, to_index: usize, reply: SyncSender<Value> },
+    SetTransition {
+        track_index: usize,
+        clip_index: usize,
+        kind: String,
+        duration_ns: u64,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

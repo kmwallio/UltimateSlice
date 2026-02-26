@@ -136,25 +136,59 @@ pub fn build_media_browser(
 
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
-            dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        let path_str = path.to_string_lossy().to_string();
-                        let uri = format!("file://{path_str}");
-                        let duration_ns = probe_duration(&uri).unwrap_or(10 * 1_000_000_000);
-
-                        let item = MediaItem::new(path_str.clone(), duration_ns);
-                        let label = item.label.clone();
-
-                        library.borrow_mut().push(item);
-                        let child = make_grid_item(&label, &path_str, duration_ns, &thumb_cache);
-                        flow_box.insert(&child, -1);
+            dialog.open_multiple(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(files) = result {
+                    let mut last_import: Option<(String, u64, FlowBoxChild)> = None;
+                    for i in 0..files.n_items() {
+                        let Some(obj) = files.item(i) else { continue };
+                        let Ok(file) = obj.downcast::<gio::File>() else { continue };
+                        let Some(path) = file.path() else { continue };
+                        if let Some(imported) = import_path_into_library(
+                            path.to_string_lossy().to_string(),
+                            &library,
+                            &flow_box,
+                            &thumb_cache,
+                        ) {
+                            last_import = Some(imported);
+                        }
+                    }
+                    if let Some((path_str, duration_ns, child)) = last_import {
                         flow_box.select_child(&child);
                         on_source_selected(path_str, duration_ns);
                     }
                 }
             });
         });
+    }
+
+    // External drag-and-drop import into media pane (e.g. from file manager).
+    {
+        let library = library.clone();
+        let flow_box = flow_box.clone();
+        let on_source_selected = on_source_selected.clone();
+        let thumb_cache = thumb_cache.clone();
+        let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
+        let flow_box_for_drop = flow_box.clone();
+        drop_target.connect_drop(move |_target, value, _x, _y| {
+            let payload = match value.get::<String>() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let mut last_import: Option<(String, u64, FlowBoxChild)> = None;
+            for path in parse_external_drop_paths(&payload) {
+                if let Some(imported) = import_path_into_library(path, &library, &flow_box_for_drop, &thumb_cache) {
+                    last_import = Some(imported);
+                }
+            }
+            if let Some((path_str, duration_ns, child)) = last_import {
+                flow_box_for_drop.select_child(&child);
+                on_source_selected(path_str, duration_ns);
+                true
+            } else {
+                false
+            }
+        });
+        flow_box.add_controller(drop_target);
     }
 
     let clear_selection: Rc<dyn Fn()> = {
@@ -265,6 +299,44 @@ fn flowbox_child_count(fb: &FlowBox) -> usize {
         child = w.next_sibling();
     }
     count
+}
+
+fn import_path_into_library(
+    path_str: String,
+    library: &Rc<RefCell<Vec<MediaItem>>>,
+    flow_box: &FlowBox,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+) -> Option<(String, u64, FlowBoxChild)> {
+    if path_str.is_empty() { return None; }
+    let uri = format!("file://{path_str}");
+    let duration_ns = probe_duration(&uri).unwrap_or(10 * 1_000_000_000);
+    let item = MediaItem::new(path_str.clone(), duration_ns);
+    let label = item.label.clone();
+    library.borrow_mut().push(item);
+    let child = make_grid_item(&label, &path_str, duration_ns, thumb_cache);
+    flow_box.insert(&child, -1);
+    Some((path_str, duration_ns, child))
+}
+
+fn parse_external_drop_paths(payload: &str) -> Vec<String> {
+    // Ignore internal app payloads ("{source_path}|{duration_ns}").
+    if payload.contains('|') && !payload.contains("file://") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for line in payload.lines() {
+        let s = line.trim();
+        if s.is_empty() || s.starts_with('#') { continue; }
+        if s.starts_with("file://") {
+            let f = gio::File::for_uri(s);
+            if let Some(path) = f.path() {
+                out.push(path.to_string_lossy().to_string());
+            }
+        } else if std::path::Path::new(s).is_absolute() {
+            out.push(s.to_string());
+        }
+    }
+    out
 }
 
 fn rebuild_flowbox(fb: &FlowBox, lib: &[MediaItem], thumb_cache: &Rc<RefCell<ThumbnailCache>>) {

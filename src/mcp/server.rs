@@ -270,6 +270,20 @@ fn tools_list() -> Value {
                 },
                 "required": ["from_index", "to_index"]
             }
+        },
+        {
+            "name": "set_transition",
+            "description": "Set or clear a clip-boundary transition on a track. clip_index refers to the clip that transitions into the next clip on the same track.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_index": { "type": "integer", "description": "0-based track index." },
+                    "clip_index":  { "type": "integer", "description": "0-based clip index within the track (must have a next clip)." },
+                    "kind":        { "type": "string",  "description": "Transition kind. Use 'cross_dissolve' to set, or empty string to clear." },
+                    "duration_ns": { "type": "integer", "description": "Transition duration in nanoseconds." }
+                },
+                "required": ["track_index", "clip_index", "kind", "duration_ns"]
+            }
         }
     ]})
 }
@@ -366,6 +380,13 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "reorder_track" => McpCommand::ReorderTrack {
             from_index: args["from_index"].as_u64().unwrap_or(0) as usize,
             to_index:   args["to_index"].as_u64().unwrap_or(0) as usize,
+            reply: tx,
+        },
+        "set_transition" => McpCommand::SetTransition {
+            track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
+            clip_index:  args["clip_index"].as_u64().unwrap_or(0) as usize,
+            kind:        args["kind"].as_str().unwrap_or("").to_string(),
+            duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
             reply: tx,
         },
 

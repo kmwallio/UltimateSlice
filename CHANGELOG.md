@@ -10,8 +10,18 @@ All notable project changes and progress should be recorded here.
   - Added a draggable **Cross-dissolve** transition item so future transitions can be added to the same pane.
   - Dragging the transition onto a clip boundary in the timeline applies a transition marker (undoable).
   - Right-clicking a transition marker now removes that transition (undoable).
+  - Export now applies cross-dissolve transitions on the primary video track using ffmpeg `xfade`.
+  - Fixed transition export filter generation (resolved ffmpeg “Filter not found” parse errors).
+  - Program preview clip switching avoids `Ready` resets on source handoff to reduce boundary lag.
+  - Program preview now applies transition alpha ramps around cross-dissolve boundaries.
+  - Added MCP tool `set_transition` to automate transition add/remove operations.
+  - While dragging a transition into the timeline, the two target clips are now highlighted before drop.
+  - Fixed transition-hover preview so clip-pair highlighting updates correctly during drag motion.
 - **Undoable track add/remove**:
   - Adding and removing tracks now goes through the undo system (`Ctrl+Z` restores a deleted track with all its clips).
+- **Media import improvements**:
+  - Import dialog now supports selecting and importing multiple files in one action.
+  - Media Library now accepts external file drops (drag files from file manager into the pane to import).
 - **Active track highlighting**:
   - Clicking anywhere in a track row (including empty space) selects it as the active track.
   - The active track's label area shows a blue left-edge accent bar and brighter background.

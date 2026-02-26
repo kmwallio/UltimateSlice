@@ -305,6 +305,7 @@ Key design points:
 | `list_library` | Items in the media library (not yet on timeline) |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
 | `reorder_track` | Move a track from one index to another (undoable) |
+| `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
 
 ### Example session
 

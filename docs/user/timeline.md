@@ -79,7 +79,10 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Use the **Transitions** pane on the right (below Inspector) to browse available transitions.
 - Use the pane's button to **hide/show** the transition list.
 - Drag **Cross-dissolve** from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
+- While dragging, the two clips that will receive the transition are highlighted as a live preview.
 - **Remove a transition** by right-clicking its boundary marker in the timeline.
+- Exports apply cross-dissolves on the primary video track.
+- Preview shows transition fade ramps at clip boundaries for cross-dissolve markers.
 - Transitions are designed to be extensible: future transition types will appear in the same pane.
 
 ## Undo / Redo

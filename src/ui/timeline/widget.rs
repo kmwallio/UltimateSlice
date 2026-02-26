@@ -80,6 +80,8 @@ pub struct TimelineState {
     pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
+    /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
+    hover_transition_pair: Option<(String, String)>,
 }
 
 impl TimelineState {
@@ -100,6 +102,7 @@ impl TimelineState {
             on_play_pause: None,
             on_drop_clip: None,
             magnetic_mode: false,
+            hover_transition_pair: None,
         }
     }
 
@@ -994,6 +997,51 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let drop_target = DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
         let state = state.clone();
         let area_weak = area.downgrade();
+        {
+            let state = state.clone();
+            let area_weak = area_weak.clone();
+            drop_target.connect_motion(move |_target, x, y| {
+                let mut st = state.borrow_mut();
+                let track_idx = if y > RULER_HEIGHT {
+                    ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
+                } else { usize::MAX };
+                let tns = st.x_to_ns(x);
+                let threshold_ns = ((12.0 / st.pixels_per_second) * NS_PER_SECOND as f64) as u64;
+                let pair = {
+                    let proj = st.project.borrow();
+                    proj.tracks.get(track_idx).and_then(|track| {
+                        let mut best: Option<(String, String, u64)> = None;
+                        for i in 0..track.clips.len().saturating_sub(1) {
+                            let left = &track.clips[i];
+                            let right = &track.clips[i + 1];
+                            let diff = left.timeline_end().abs_diff(tns);
+                            if diff <= threshold_ns {
+                                match best {
+                                    Some((_, _, d)) if d <= diff => {}
+                                    _ => best = Some((left.id.clone(), right.id.clone(), diff)),
+                                }
+                            }
+                        }
+                        best.map(|(l, r, _)| (l, r))
+                    })
+                };
+                if st.hover_transition_pair != pair {
+                    st.hover_transition_pair = pair;
+                    if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+                }
+                gdk4::DragAction::COPY
+            });
+        }
+        {
+            let state = state.clone();
+            let area_weak = area_weak.clone();
+            drop_target.connect_leave(move |_| {
+                let mut st = state.borrow_mut();
+                if st.hover_transition_pair.take().is_some() {
+                    if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+                }
+            });
+        }
         drop_target.connect_drop(move |_target, value, x, y| {
             let payload = match value.get::<String>() {
                 Ok(s) => s,
@@ -1045,10 +1093,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let mut proj = project_rc.borrow_mut();
                     st.history.execute(Box::new(cmd), &mut proj);
                     let cb = st.on_project_changed.clone();
+                    st.hover_transition_pair = None;
                     drop(proj);
                     drop(st);
                     if let Some(cb) = cb { cb(); }
                 } else {
+                    st.hover_transition_pair = None;
                     drop(st);
                 }
             } else {
@@ -1070,6 +1120,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 if let Some(cb) = cb {
                     cb(source_path, duration_ns, track_idx, timeline_start_ns);
                 }
+                state.borrow_mut().hover_transition_pair = None;
             }
             if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
             true
@@ -1312,6 +1363,9 @@ fn draw_clip(
     if cx + cw < TRACK_LABEL_WIDTH || cx > 4000.0 { return; }
 
     let is_selected = st.selected_clip_id.as_deref() == Some(&clip.id);
+    let is_transition_hover = st.hover_transition_pair.as_ref().map(|(l, r)| {
+        clip.id == *l || clip.id == *r
+    }).unwrap_or(false);
 
     let (r, g, b) = match track.kind {
         TrackKind::Video => (0.17, 0.47, 0.85),
@@ -1415,6 +1469,11 @@ fn draw_clip(
         cr.fill().ok();
         cr.rectangle(cx + cw - TRIM_HANDLE_PX, cy, TRIM_HANDLE_PX, ch);
         cr.fill().ok();
+    } else if is_transition_hover {
+        cr.set_source_rgba(0.55, 0.85, 1.0, 0.95);
+        cr.set_line_width(2.0);
+        rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
+        cr.stroke().ok();
     }
 
     if cw > 30.0 {

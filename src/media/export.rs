@@ -151,10 +151,52 @@ pub fn export_project(
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
-    for i in 0..primary_clips.len() {
-        filter.push_str(&format!("[pv{i}]"));
+    // Build primary-track sequence:
+    // - If transitions exist, chain xfade filters and compensate output length
+    //   with trailing tpad so timeline timing stays aligned with audio.
+    // - Otherwise use concat (original behavior).
+    let has_primary_transitions = primary_clips.iter()
+        .take(primary_clips.len().saturating_sub(1))
+        .any(|c| c.transition_after == "cross_dissolve" && c.transition_after_ns > 0);
+    if primary_clips.len() == 1 {
+        filter.push_str("[pv0]copy[vbase]");
+    } else if has_primary_transitions {
+        let mut prev_label = "pv0".to_string();
+        let mut running_s = primary_clips[0].duration() as f64 / 1_000_000_000.0;
+        let mut total_overlap_s = 0.0_f64;
+        for i in 0..(primary_clips.len() - 1) {
+            let next_label = format!("pv{}", i + 1);
+            let out_label = format!("vxd{}", i + 1);
+            let mut d_s = if primary_clips[i].transition_after == "cross_dissolve" {
+                primary_clips[i].transition_after_ns as f64 / 1_000_000_000.0
+            } else {
+                0.0
+            };
+            let max_d = (primary_clips[i].duration().min(primary_clips[i + 1].duration()) as f64 / 1_000_000_000.0) - 0.001;
+            d_s = d_s.clamp(0.0, max_d.max(0.0));
+            if d_s <= 0.0 {
+                d_s = 0.001;
+            }
+            let offset_s = (running_s - d_s).max(0.0);
+            let sep = if i == 0 { "" } else { ";" };
+            filter.push_str(&format!(
+                "{sep}[{prev_label}][{next_label}]xfade=transition=fade:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
+            ));
+            running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
+            total_overlap_s += d_s;
+            prev_label = out_label;
+        }
+        if total_overlap_s > 0.0 {
+            filter.push_str(&format!(";[{prev_label}]tpad=stop_mode=clone:stop_duration={total_overlap_s:.6}[vbase]"));
+        } else {
+            filter.push_str(&format!(";[{prev_label}]copy[vbase]"));
+        }
+    } else {
+        for i in 0..primary_clips.len() {
+            filter.push_str(&format!("[pv{i}]"));
+        }
+        filter.push_str(&format!("concat=n={}:v=1:a=0[vbase]", primary_clips.len()));
     }
-    filter.push_str(&format!("concat=n={}:v=1:a=0[vbase]", primary_clips.len()));
 
     // === Secondary video tracks: overlay each clip at its timeline position ===
     // Chain overlays: [vbase] → overlay clip 0 → [vcomp0] → overlay clip 1 → [vcomp1] → ...

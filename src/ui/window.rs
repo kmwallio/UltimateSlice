@@ -608,6 +608,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         speed:             c.speed,
                         is_audio_only:     audio_only,
                         track_index:       t_idx,
+                        transition_after:  c.transition_after.clone(),
+                        transition_after_ns:c.transition_after_ns,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
@@ -1173,6 +1175,55 @@ fn handle_mcp_command(
                 reply.send(json!({"success": true, "from_index": from_index, "to_index": to_index})).ok();
                 on_project_changed();
             }
+        }
+        McpCommand::SetTransition { track_index, clip_index, kind, duration_ns, reply } => {
+            let candidate = {
+                let proj = project.borrow();
+                let Some(track) = proj.tracks.get(track_index) else {
+                    reply.send(json!({"error":"Track index out of range","track_count":proj.tracks.len()})).ok();
+                    return;
+                };
+                if clip_index + 1 >= track.clips.len() {
+                    reply.send(json!({"error":"clip_index must reference a clip with a following clip","clip_count":track.clips.len()})).ok();
+                    return;
+                }
+                let clip = &track.clips[clip_index];
+                Some((track.id.clone(), clip.id.clone(), clip.transition_after.clone(), clip.transition_after_ns, clip.duration()))
+            };
+            let Some((track_id, clip_id, old_kind, old_duration_ns, clip_dur_ns)) = candidate else { return; };
+            let new_kind = kind.trim().to_string();
+            if !new_kind.is_empty() && new_kind != "cross_dissolve" {
+                reply.send(json!({"error":"Unsupported transition kind","supported":["cross_dissolve"]})).ok();
+                return;
+            }
+            let new_duration_ns = if new_kind.is_empty() {
+                0
+            } else {
+                duration_ns.min(clip_dur_ns.saturating_sub(1_000_000))
+            };
+            let cmd = crate::undo::SetClipTransitionCommand {
+                clip_id,
+                track_id,
+                old_transition: old_kind,
+                old_transition_ns: old_duration_ns,
+                new_transition: new_kind.clone(),
+                new_transition_ns: new_duration_ns,
+            };
+            {
+                let st = timeline_state.borrow_mut();
+                let project_rc = st.project.clone();
+                drop(st);
+                let mut proj = project_rc.borrow_mut();
+                timeline_state.borrow_mut().history.execute(Box::new(cmd), &mut proj);
+            }
+            reply.send(json!({
+                "success": true,
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "kind": new_kind,
+                "duration_ns": new_duration_ns
+            })).ok();
+            on_project_changed();
         }
     }
 }
