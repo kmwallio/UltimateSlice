@@ -24,7 +24,8 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
     // Clear default tracks — we'll add them from the FCPXML
     project.tracks.clear();
 
-    let mut primary_track: Option<Track> = None;
+    // track_idx → Track (built during parsing, indexed by us:track-idx)
+    let mut track_map: std::collections::BTreeMap<usize, Track> = std::collections::BTreeMap::new();
     let mut buf = Vec::new();
     let mut in_spine = false;
     let mut _project_name: Option<String> = None;
@@ -66,60 +67,84 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                     }
                     "spine" => {
                         in_spine = true;
-                        if primary_track.is_none() {
-                            primary_track = Some(Track::new_video("Video 1"));
-                        }
                     }
                     "asset-clip" if in_spine => {
-                        if let Some(track) = primary_track.as_mut() {
-                            if let Some(asset_ref) = attrs.get("ref") {
-                                if let Some(asset) = assets.get(asset_ref) {
-                                    let timeline_start = attrs.get("offset")
-                                        .and_then(|t| parse_fcpxml_time(t))
-                                        .unwrap_or(0);
-                                    let source_in = attrs.get("start")
-                                        .and_then(|t| parse_fcpxml_time(t))
-                                        .unwrap_or(0);
-                                    let duration = attrs.get("duration")
-                                        .and_then(|t| parse_fcpxml_time(t))
-                                        .unwrap_or(asset.duration_ns);
-                                    let label = attrs.get("name")
-                                        .cloned()
-                                        .unwrap_or_else(|| asset.name.clone());
+                        if let Some(asset_ref) = attrs.get("ref") {
+                            if let Some(asset) = assets.get(asset_ref) {
+                                let timeline_start = attrs.get("offset")
+                                    .and_then(|t| parse_fcpxml_time(t))
+                                    .unwrap_or(0);
+                                let source_in = attrs.get("start")
+                                    .and_then(|t| parse_fcpxml_time(t))
+                                    .unwrap_or(0);
+                                let duration = attrs.get("duration")
+                                    .and_then(|t| parse_fcpxml_time(t))
+                                    .unwrap_or(asset.duration_ns);
+                                let label = attrs.get("name")
+                                    .cloned()
+                                    .unwrap_or_else(|| asset.name.clone());
 
-                                    let mut clip = Clip::new(
-                                        &asset.src,
-                                        source_in + duration,
-                                        timeline_start,
-                                        ClipKind::Video,
-                                    );
-                                    clip.source_in = source_in;
-                                    clip.source_out = source_in + duration;
-                                    clip.timeline_start = timeline_start;
-                                    clip.label = label;
-                                    // Restore color/effects from vendor attributes
-                                    if let Some(v) = attrs.get("us:brightness") { clip.brightness = v.parse().unwrap_or(0.0); }
-                                    if let Some(v) = attrs.get("us:contrast")   { clip.contrast   = v.parse().unwrap_or(1.0); }
-                                    if let Some(v) = attrs.get("us:saturation") { clip.saturation = v.parse().unwrap_or(1.0); }
-                                    if let Some(v) = attrs.get("us:denoise")    { clip.denoise    = v.parse().unwrap_or(0.0); }
-                                    if let Some(v) = attrs.get("us:sharpness")  { clip.sharpness  = v.parse().unwrap_or(0.0); }
-                                    if let Some(v) = attrs.get("us:volume")     { clip.volume     = v.parse().unwrap_or(1.0); }
-                                    if let Some(v) = attrs.get("us:pan")        { clip.pan        = v.parse().unwrap_or(0.0); }
-                                    if let Some(v) = attrs.get("us:crop-left")  { clip.crop_left  = v.parse().unwrap_or(0); }
-                                    if let Some(v) = attrs.get("us:crop-right") { clip.crop_right = v.parse().unwrap_or(0); }
-                                    if let Some(v) = attrs.get("us:crop-top")   { clip.crop_top   = v.parse().unwrap_or(0); }
-                                    if let Some(v) = attrs.get("us:crop-bottom"){ clip.crop_bottom= v.parse().unwrap_or(0); }
-                                    if let Some(v) = attrs.get("us:rotate")     { clip.rotate     = v.parse().unwrap_or(0); }
-                                    if let Some(v) = attrs.get("us:flip-h")     { clip.flip_h     = v.parse().unwrap_or(false); }
-                                    if let Some(v) = attrs.get("us:flip-v")     { clip.flip_v     = v.parse().unwrap_or(false); }
-                                    if let Some(v) = attrs.get("us:title-text") { clip.title_text = v.clone(); }
-                                    if let Some(v) = attrs.get("us:title-font") { clip.title_font = v.clone(); }
-                                    if let Some(v) = attrs.get("us:title-color"){ clip.title_color = u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF); }
-                                    if let Some(v) = attrs.get("us:title-x")    { clip.title_x    = v.parse().unwrap_or(0.5); }
-                                    if let Some(v) = attrs.get("us:title-y")    { clip.title_y    = v.parse().unwrap_or(0.9); }
-                                    if let Some(v) = attrs.get("us:speed")      { clip.speed      = v.parse().unwrap_or(1.0); }
-                                    track.add_clip(clip);
-                                }
+                                // Determine track from us:track-idx / us:track-kind / us:track-name.
+                                // Fall back to track 0 (Video 1) for legacy FCPXML without these attrs.
+                                let track_idx: usize = attrs.get("us:track-idx")
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(0);
+                                let track_kind_str = attrs.get("us:track-kind")
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("video");
+                                let track_name = attrs.get("us:track-name")
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        if track_kind_str == "audio" {
+                                            format!("Audio {}", track_idx + 1)
+                                        } else {
+                                            format!("Video {}", track_idx + 1)
+                                        }
+                                    });
+
+                                let clip_kind = if track_kind_str == "audio" { ClipKind::Audio } else { ClipKind::Video };
+
+                                // Get or create the target track
+                                let track = track_map.entry(track_idx).or_insert_with(|| {
+                                    if clip_kind == ClipKind::Audio {
+                                        Track::new_audio(&track_name)
+                                    } else {
+                                        Track::new_video(&track_name)
+                                    }
+                                });
+
+                                let mut clip = Clip::new(
+                                    &asset.src,
+                                    source_in + duration,
+                                    timeline_start,
+                                    clip_kind,
+                                );
+                                clip.source_in = source_in;
+                                clip.source_out = source_in + duration;
+                                clip.timeline_start = timeline_start;
+                                clip.label = label;
+                                // Restore color/effects from vendor attributes
+                                if let Some(v) = attrs.get("us:brightness") { clip.brightness = v.parse().unwrap_or(0.0); }
+                                if let Some(v) = attrs.get("us:contrast")   { clip.contrast   = v.parse().unwrap_or(1.0); }
+                                if let Some(v) = attrs.get("us:saturation") { clip.saturation = v.parse().unwrap_or(1.0); }
+                                if let Some(v) = attrs.get("us:denoise")    { clip.denoise    = v.parse().unwrap_or(0.0); }
+                                if let Some(v) = attrs.get("us:sharpness")  { clip.sharpness  = v.parse().unwrap_or(0.0); }
+                                if let Some(v) = attrs.get("us:volume")     { clip.volume     = v.parse().unwrap_or(1.0); }
+                                if let Some(v) = attrs.get("us:pan")        { clip.pan        = v.parse().unwrap_or(0.0); }
+                                if let Some(v) = attrs.get("us:crop-left")  { clip.crop_left  = v.parse().unwrap_or(0); }
+                                if let Some(v) = attrs.get("us:crop-right") { clip.crop_right = v.parse().unwrap_or(0); }
+                                if let Some(v) = attrs.get("us:crop-top")   { clip.crop_top   = v.parse().unwrap_or(0); }
+                                if let Some(v) = attrs.get("us:crop-bottom"){ clip.crop_bottom= v.parse().unwrap_or(0); }
+                                if let Some(v) = attrs.get("us:rotate")     { clip.rotate     = v.parse().unwrap_or(0); }
+                                if let Some(v) = attrs.get("us:flip-h")     { clip.flip_h     = v.parse().unwrap_or(false); }
+                                if let Some(v) = attrs.get("us:flip-v")     { clip.flip_v     = v.parse().unwrap_or(false); }
+                                if let Some(v) = attrs.get("us:title-text") { clip.title_text = v.clone(); }
+                                if let Some(v) = attrs.get("us:title-font") { clip.title_font = v.clone(); }
+                                if let Some(v) = attrs.get("us:title-color"){ clip.title_color = u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF); }
+                                if let Some(v) = attrs.get("us:title-x")    { clip.title_x    = v.parse().unwrap_or(0.5); }
+                                if let Some(v) = attrs.get("us:title-y")    { clip.title_y    = v.parse().unwrap_or(0.9); }
+                                if let Some(v) = attrs.get("us:speed")      { clip.speed      = v.parse().unwrap_or(1.0); }
+                                track.add_clip(clip);
                             }
                         }
                     }
@@ -154,7 +179,8 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
         buf.clear();
     }
 
-    if let Some(track) = primary_track {
+    // Add tracks in index order
+    for (_idx, track) in track_map {
         if !track.clips.is_empty() {
             project.tracks.push(track);
         }

@@ -14,6 +14,7 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     // <fcpxml version="1.10">
     let mut fcpxml = BytesStart::new("fcpxml");
     fcpxml.push_attribute(("version", "1.10"));
+    fcpxml.push_attribute(("xmlns:us", "urn:ultimateslice"));
     writer.write_event(Event::Start(fcpxml))?;
 
     // <resources>
@@ -41,9 +42,14 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     // <spine>
     writer.write_event(Event::Start(BytesStart::new("spine")))?;
 
-    // Emit clips from the primary video track
-    let video_tracks: Vec<_> = project.video_tracks().collect();
-    if let Some(track) = video_tracks.first() {
+    // Emit all clips from all tracks, tagging each with us:track-idx and us:track-kind
+    // so the parser can reconstruct the full multi-track layout.
+    let all_tracks: Vec<_> = project.tracks.iter().enumerate().collect();
+    for (track_idx, track) in &all_tracks {
+        let track_kind = match track.kind {
+            crate::model::track::TrackKind::Video => "video",
+            crate::model::track::TrackKind::Audio => "audio",
+        };
         for clip in &track.clips {
             let asset_ref = format!("a_{}", sanitize_id(&clip.id));
             let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
@@ -56,6 +62,10 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("duration", duration.as_str()));
             asset_clip.push_attribute(("start", start.as_str()));
             asset_clip.push_attribute(("name", clip.label.as_str()));
+            // Multi-track routing
+            asset_clip.push_attribute(("us:track-idx",  track_idx.to_string().as_str()));
+            asset_clip.push_attribute(("us:track-kind", track_kind));
+            asset_clip.push_attribute(("us:track-name", track.label.as_str()));
             // Store color/effects as custom vendor attributes (us: prefix).
             // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
             asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
@@ -117,20 +127,22 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
     fmt.push_attribute(("height", project.height.to_string().as_str()));
     writer.write_event(Event::Empty(fmt))?;
 
-    // Asset resources for each unique clip
+    // Asset resources for each unique clip (correct hasVideo/hasAudio per clip kind)
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
             let asset_id = format!("a_{}", sanitize_id(&clip.id));
             let uri = crate::media::thumbnail::path_to_uri(&clip.source_path);
             let duration = ns_to_fcpxml_time(clip.source_out, &project.frame_rate);
+            let has_video = if clip.kind == crate::model::clip::ClipKind::Audio { "0" } else { "1" };
+            let has_audio = "1";
 
             let mut asset = BytesStart::new("asset");
             asset.push_attribute(("id", asset_id.as_str()));
             asset.push_attribute(("name", clip.label.as_str()));
             asset.push_attribute(("src", uri.as_str()));
             asset.push_attribute(("duration", duration.as_str()));
-            asset.push_attribute(("hasVideo", "1"));
-            asset.push_attribute(("hasAudio", "1"));
+            asset.push_attribute(("hasVideo", has_video));
+            asset.push_attribute(("hasAudio", has_audio));
             writer.write_event(Event::Empty(asset))?;
         }
     }
