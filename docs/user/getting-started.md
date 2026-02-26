@@ -42,7 +42,7 @@ The application opens with an **Untitled** project containing one Video track an
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Toolbar (New / Open / Save / Settings / Export / Undo / Redo)   │
+│  Toolbar (New / Open / Recent / Save / Settings / Export / Undo / Redo)  │
 ├────────────────┬─────────────────────────────┬────────────────────┤
 │  Media Library │   Source Monitor            │  Inspector         │
 │                │   (source preview)          │  (clip properties) │
@@ -62,6 +62,7 @@ The application opens with an **Untitled** project containing one Video track an
 ## Opening an Existing Project
 
 - Click **Open…** (`Ctrl+O`) and select a `.fcpxml` file.
+- Or click **Recent ▾** to pick from the last 10 opened/saved projects.
 - UltimateSlice reads the FCPXML 1.10 format, including all clip properties, markers, and effects.
 
 ## Keyboard Shortcuts

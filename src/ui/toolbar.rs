@@ -8,6 +8,7 @@ use crate::model::project::{Project, FrameRate};
 use crate::fcpxml;
 use crate::media::export::{export_project, ExportProgress, ExportOptions, VideoCodec, AudioCodec, Container};
 use crate::ui::timeline::{TimelineState, ActiveTool};
+use crate::recent;
 
 /// Build the main `HeaderBar` toolbar.
 pub fn build_toolbar(
@@ -74,6 +75,7 @@ pub fn build_toolbar(
                             Ok(xml) => match fcpxml::parser::parse_fcpxml(&xml) {
                                 Ok(mut new_proj) => {
                                     new_proj.file_path = path.to_str().map(|s| s.to_string());
+                                    if let Some(p) = path.to_str() { recent::push(p); }
                                     *project.borrow_mut() = new_proj;
                                     {
                                         let mut st = timeline_state_cb.borrow_mut();
@@ -96,7 +98,80 @@ pub fn build_toolbar(
     }
     header.pack_start(&btn_open);
 
-    // Save FCPXML
+    // Open Recent — popover with the last 10 projects
+    let btn_recent = gtk::MenuButton::new();
+    btn_recent.set_label("Recent ▾");
+    btn_recent.set_tooltip_text(Some("Open a recently used project"));
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+
+        // Build the popover content lazily each time it opens so it reflects the
+        // current list (which may have grown during the session).
+        btn_recent.connect_activate(move |mb| {
+            let entries = recent::load();
+
+            let pop = gtk::Popover::new();
+            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            vbox.set_margin_start(4); vbox.set_margin_end(4);
+            vbox.set_margin_top(4);   vbox.set_margin_bottom(4);
+
+            if entries.is_empty() {
+                let empty = gtk::Label::new(Some("No recent projects"));
+                empty.add_css_class("dim-label");
+                empty.set_margin_start(8); empty.set_margin_end(8);
+                empty.set_margin_top(4);   empty.set_margin_bottom(4);
+                vbox.append(&empty);
+            } else {
+                for path_str in &entries {
+                    let display = std::path::Path::new(path_str)
+                        .file_name().and_then(|n| n.to_str())
+                        .unwrap_or(path_str)
+                        .to_string();
+                    let row = gtk::Button::with_label(&display);
+                    row.set_tooltip_text(Some(path_str));
+                    row.add_css_class("flat");
+                    row.set_halign(gtk::Align::Fill);
+                    row.set_hexpand(true);
+
+                    let path_owned = path_str.clone();
+                    let project = project.clone();
+                    let timeline_state = timeline_state.clone();
+                    let on_project_changed = on_project_changed.clone();
+                    let pop_weak = pop.downgrade();
+                    row.connect_clicked(move |_| {
+                        if let Some(pop) = pop_weak.upgrade() { pop.popdown(); }
+                        match std::fs::read_to_string(&path_owned) {
+                            Ok(xml) => match fcpxml::parser::parse_fcpxml(&xml) {
+                                Ok(mut new_proj) => {
+                                    new_proj.file_path = Some(path_owned.clone());
+                                    recent::push(&path_owned);
+                                    *project.borrow_mut() = new_proj;
+                                    {
+                                        let mut st = timeline_state.borrow_mut();
+                                        st.playhead_ns = 0;
+                                        st.scroll_offset = 0.0;
+                                        st.pixels_per_second = 100.0;
+                                        st.selected_clip_id = None;
+                                        st.selected_track_id = None;
+                                    }
+                                    on_project_changed();
+                                }
+                                Err(e) => eprintln!("FCPXML parse error: {e}"),
+                            },
+                            Err(e) => eprintln!("Failed to open recent project: {e}"),
+                        }
+                    });
+                    vbox.append(&row);
+                }
+            }
+
+            pop.set_child(Some(&vbox));
+            mb.set_popover(Some(&pop));
+        });
+    }
+    header.pack_start(&btn_recent);
     let btn_save = Button::with_label("Save…");
     btn_save.set_tooltip_text(Some("Save as FCPXML (Ctrl+S)"));
     {
@@ -126,6 +201,7 @@ pub fn build_toolbar(
                                     eprintln!("Save error: {e}");
                                 } else {
                                     println!("Saved to {}", path.display());
+                                    if let Some(p) = path.to_str() { recent::push(p); }
                                 }
                             }
                             Err(e) => eprintln!("FCPXML write error: {e}"),

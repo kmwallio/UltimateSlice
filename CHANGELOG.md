@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Recent projects list**: Last 10 opened/saved projects are persisted in `~/.config/ultimateslice/recent.json`. A new **Recent ▾** button in the toolbar shows a popover with file names; clicking any entry opens that FCPXML immediately.
 - **Per-clip speed change**:
   - New **Speed** section in the Inspector with a slider (0.25×–4.0×) and marks at ½×, 1×, 2×.
   - Changing speed updates `clip.speed` in the model immediately; the slider fires `on_project_changed` so the timeline clip width and program player both update.
