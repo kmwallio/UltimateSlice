@@ -20,10 +20,26 @@ impl Default for ProgramMonitorState {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreferencesState {
+    #[serde(default)]
+    pub hardware_acceleration_enabled: bool,
+}
+
+impl Default for PreferencesState {
+    fn default() -> Self {
+        Self {
+            hardware_acceleration_enabled: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct UiState {
     #[serde(default)]
     program_monitor: ProgramMonitorState,
+    #[serde(default)]
+    preferences: PreferencesState,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -33,21 +49,38 @@ fn config_path() -> Option<PathBuf> {
     Some(base.join("ultimateslice").join("ui-state.json"))
 }
 
-pub fn load_program_monitor_state() -> ProgramMonitorState {
-    let path = match config_path() { Some(p) => p, None => return ProgramMonitorState::default() };
-    let text = match std::fs::read_to_string(path) { Ok(t) => t, Err(_) => return ProgramMonitorState::default() };
-    serde_json::from_str::<UiState>(&text)
-        .map(|s| s.program_monitor)
-        .unwrap_or_default()
+fn load_ui_state() -> UiState {
+    let path = match config_path() { Some(p) => p, None => return UiState::default() };
+    let text = match std::fs::read_to_string(path) { Ok(t) => t, Err(_) => return UiState::default() };
+    serde_json::from_str::<UiState>(&text).unwrap_or_default()
 }
 
-pub fn save_program_monitor_state(state: &ProgramMonitorState) {
+fn save_ui_state(ui: &UiState) {
     let path = match config_path() { Some(p) => p, None => return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let ui = UiState { program_monitor: state.clone() };
-    if let Ok(json) = serde_json::to_string_pretty(&ui) {
+    if let Ok(json) = serde_json::to_string_pretty(ui) {
         let _ = std::fs::write(path, json);
     }
+}
+
+pub fn load_program_monitor_state() -> ProgramMonitorState {
+    load_ui_state().program_monitor
+}
+
+pub fn save_program_monitor_state(state: &ProgramMonitorState) {
+    let mut ui = load_ui_state();
+    ui.program_monitor = state.clone();
+    save_ui_state(&ui);
+}
+
+pub fn load_preferences_state() -> PreferencesState {
+    load_ui_state().preferences
+}
+
+pub fn save_preferences_state(state: &PreferencesState) {
+    let mut ui = load_ui_state();
+    ui.preferences = state.clone();
+    save_ui_state(&ui);
 }

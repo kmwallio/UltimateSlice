@@ -1218,6 +1218,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Delete / Bksp",  "Delete selected clip"),
         ("M",              "Add marker at playhead"),
         ("Right-click ruler", "Remove nearest marker"),
+        ("Ctrl+,",         "Open Preferences"),
         ("Ctrl+Z",         "Undo"),
         ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
         ("Scroll",         "Zoom timeline (vertical scroll)"),

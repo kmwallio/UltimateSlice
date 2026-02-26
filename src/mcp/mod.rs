@@ -12,6 +12,8 @@ pub enum McpCommand {
     GetTimelineSettings { reply: SyncSender<Value> },
     SetMagneticMode { enabled: bool, reply: SyncSender<Value> },
     CloseSourcePreview { reply: SyncSender<Value> },
+    GetPreferences { reply: SyncSender<Value> },
+    SetHardwareAcceleration { enabled: bool, reply: SyncSender<Value> },
     AddClip {
         source_path:       String,
         track_index:       usize,

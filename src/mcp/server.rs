@@ -117,6 +117,22 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_preferences",
+            "description": "Return current application preferences.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "set_hardware_acceleration",
+            "description": "Set hardware acceleration preference (scaffold setting).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "Whether hardware acceleration preference is enabled." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
             "name": "add_clip",
             "description": "Add a new clip to a track. Durations are in nanoseconds (1 s = 1_000_000_000 ns).",
             "inputSchema": {
@@ -265,6 +281,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             reply: tx,
         },
         "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
+        "get_preferences" => McpCommand::GetPreferences { reply: tx },
+        "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
 
         "add_clip" => McpCommand::AddClip {
             source_path:       args["source_path"].as_str().unwrap_or("").to_string(),

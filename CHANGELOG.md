@@ -5,6 +5,12 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Preferences window + `Ctrl+,` shortcut**:
+  - Added a categorized Preferences dialog (General, Playback) opened with **`Ctrl+,`**.
+  - Added an initial **Hardware Acceleration** preference toggle in Preferences.
+  - Preferences are persisted in `~/.config/ultimateslice/ui-state.json`.
+  - Added MCP tools `get_preferences` and `set_hardware_acceleration` for automation.
+  - Current scope is scaffold-only: preference is persisted/exposed, runtime decode/export behavior is unchanged.
 - **Source preview close action**:
   - Added a close (`✕`) button in the Source Monitor header.
   - Clicking close now deselects the active media-library item, hides the source preview panel, stops source playback, and resets source marks/timecode state.

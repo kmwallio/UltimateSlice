@@ -69,3 +69,4 @@ The application opens with an **Untitled** project containing one Video track an
 
 See [shortcuts.md](shortcuts.md) for the full reference.  
 Press **?** or **/** in the timeline to open the in-app shortcut overlay.
+Use **Ctrl+,** to open **Preferences**.

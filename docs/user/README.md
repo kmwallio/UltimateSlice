@@ -13,6 +13,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [source-monitor.md](source-monitor.md) | Previewing clips, setting In/Out points, shuttle controls |
 | [timeline.md](timeline.md) | Arranging clips, trimming, splitting, markers, zoom/pan |
 | [inspector.md](inspector.md) | Color correction, effects, audio, transform, titles, speed |
+| [preferences.md](preferences.md) | Application-level settings and performance preferences |
 | [program-monitor.md](program-monitor.md) | Previewing the assembled timeline |
 | [export.md](export.md) | Advanced export: codecs, resolution, audio options |
 | [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load |

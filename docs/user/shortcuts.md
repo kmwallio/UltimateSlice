@@ -11,6 +11,7 @@
 | `Ctrl+N` | New project |
 | `Ctrl+O` | Open FCPXML project |
 | `Ctrl+S` | Save project as FCPXML |
+| `Ctrl+,` | Open Preferences |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 

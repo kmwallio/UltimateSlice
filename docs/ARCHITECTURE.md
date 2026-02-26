@@ -53,6 +53,7 @@ src/
     media_browser.rs        Media Library panel — import, list, select, Append to Timeline
     preview.rs              Source Monitor — video display, scrubber, in/out marks, transport
     inspector.rs            Right-side clip inspector — shows/edits selected clip properties
+    preferences.rs          Preferences dialog — categorized app-level settings UI
     timeline/
       mod.rs                Re-exports TimelineState and build_timeline()
       widget.rs             Full timeline: Cairo drawing + all gesture/key controllers
@@ -71,6 +72,7 @@ docs/
     source-monitor.md       Source preview, In/Out points, shuttle controls
     timeline.md             Clip arrangement, trimming, tools, markers
     inspector.md            Per-clip color, effects, audio, transform, titles, speed
+    preferences.md          Application-level settings and performance preferences
     program-monitor.md      Assembled timeline playback
     export.md               Advanced export: codecs, resolution, audio
     project-settings.md     Canvas size, frame rate, save/load
@@ -290,6 +292,8 @@ Key design points:
 | `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
 | `close_source_preview` | Deselect current source media and hide the source preview |
+| `get_preferences` | Get persisted application preferences |
+| `set_hardware_acceleration` | Set hardware-acceleration preference (scaffold setting) |
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |

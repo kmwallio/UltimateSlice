@@ -5,3 +5,4 @@ pub mod preview;
 pub mod timeline;
 pub mod inspector;
 pub mod program_monitor;
+pub mod preferences;

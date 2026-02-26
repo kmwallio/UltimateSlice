@@ -10,7 +10,7 @@ use crate::model::track::TrackKind;
 use crate::model::media_library::MediaItem;
 use crate::media::player::Player;
 use crate::media::program_player::{ProgramPlayer, ProgramClip};
-use crate::ui::{media_browser, preview, toolbar, inspector, program_monitor};
+use crate::ui::{media_browser, preview, toolbar, inspector, program_monitor, preferences};
 use crate::ui::timeline::{TimelineState, build_timeline_panel};
 
 /// Build and show the main application window.
@@ -35,6 +35,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
+    let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
@@ -52,6 +53,28 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
         })
     };
+    let open_preferences_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let open_preferences: Rc<dyn Fn()> = {
+        let cb = open_preferences_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
+    *open_preferences_impl.borrow_mut() = Some({
+        let window_weak = window_weak.clone();
+        let preferences_state = preferences_state.clone();
+        Rc::new(move || {
+            if let Some(win) = window_weak.upgrade() {
+                let current = preferences_state.borrow().clone();
+                let preferences_state = preferences_state.clone();
+                let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
+                    *preferences_state.borrow_mut() = new_state.clone();
+                    crate::ui_state::save_preferences_state(&new_state);
+                });
+                preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
+            }
+        })
+    });
 
     // ── Build inspector (after on_project_changed is defined so we can pass it) ──
     let (inspector_box, inspector_view) = inspector::build_inspector(
@@ -628,6 +651,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let project = project.clone();
         let library = library.clone();
         let timeline_state = timeline_state.clone();
+        let preferences_state = preferences_state.clone();
         let on_close_preview = on_close_preview.clone();
         let on_project_changed = on_project_changed.clone();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
@@ -638,6 +662,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     &project,
                     &library,
                     &timeline_state,
+                    &preferences_state,
                     &on_close_preview,
                     &on_project_changed,
                 );
@@ -708,6 +733,21 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
         window.add_controller(key_ctrl);
     }
+    // ── Window-level Ctrl+, key: open Preferences ───────────────────────────
+    {
+        let open_preferences = open_preferences.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |_, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if mods.contains(ModifierType::CONTROL_MASK) && key == Key::comma {
+                open_preferences();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctrl);
+    }
 
     if monitor_state.borrow().popped {
         on_toggle_popout();
@@ -723,6 +763,7 @@ fn handle_mcp_command(
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<Vec<MediaItem>>>,
     timeline_state: &Rc<RefCell<TimelineState>>,
+    preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
     on_close_preview: &Rc<dyn Fn()>,
     on_project_changed: &Rc<dyn Fn()>,
 ) {
@@ -790,6 +831,26 @@ fn handle_mcp_command(
         McpCommand::CloseSourcePreview { reply } => {
             on_close_preview();
             reply.send(json!({"success": true})).ok();
+        }
+
+        McpCommand::GetPreferences { reply } => {
+            let prefs = preferences_state.borrow().clone();
+            reply.send(json!({
+                "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled
+            })).ok();
+        }
+
+        McpCommand::SetHardwareAcceleration { enabled, reply } => {
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.hardware_acceleration_enabled = enabled;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply.send(json!({
+                "success": true,
+                "hardware_acceleration_enabled": enabled
+            })).ok();
         }
 
         McpCommand::AddClip { source_path, track_index, timeline_start_ns, source_in_ns, source_out_ns, reply } => {
