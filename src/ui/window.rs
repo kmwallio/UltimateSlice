@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
 use glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use crate::model::project::Project;
@@ -282,13 +282,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let pp = prog_player.clone();
         let ts = timeline_state.clone();
         let cell = timeline_panel_cell.clone();
+        let last_pos_ns = Rc::new(Cell::new(u64::MAX));
+        let last_pos_ns_c = last_pos_ns.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            pp.borrow_mut().poll();
-            let pos_ns = pp.borrow().timeline_pos_ns;
-            pos_label.set_text(&program_monitor::format_timecode(pos_ns));
-            // Always sync playhead so seek/stop are also reflected
-            ts.borrow_mut().playhead_ns = pos_ns;
-            if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+            let pos_ns = {
+                let mut player = pp.borrow_mut();
+                player.poll();
+                player.timeline_pos_ns
+            };
+            if pos_ns != last_pos_ns_c.get() {
+                pos_label.set_text(&program_monitor::format_timecode(pos_ns));
+                ts.borrow_mut().playhead_ns = pos_ns;
+                if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+                last_pos_ns_c.set(pos_ns);
+            }
             glib::ControlFlow::Continue
         });
     }
