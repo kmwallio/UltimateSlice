@@ -709,12 +709,15 @@ impl ProgramPlayer {
                 while bus.pop().is_some() {}
             }
             let uri = format!("file://{}", clip.source_path);
-            let _ = self.pipeline.set_state(gst::State::Ready);
-            self.pipeline.set_property("uri", &uri);
-            let _ = self.pipeline.set_state(gst::State::Paused);
-            // Avoid blocking transition path during active playback; blocking here
-            // directly contributes to visible stutter at clip boundaries.
-            if self.state != PlayerState::Playing {
+            if self.state == PlayerState::Playing {
+                // In active playback, avoid dropping to READY because it clears
+                // the sink and can flash a black frame between track switches.
+                let _ = self.pipeline.set_state(gst::State::Paused);
+                self.pipeline.set_property("uri", &uri);
+            } else {
+                let _ = self.pipeline.set_state(gst::State::Ready);
+                self.pipeline.set_property("uri", &uri);
+                let _ = self.pipeline.set_state(gst::State::Paused);
                 let _ = self.pipeline.state(gst::ClockTime::from_mseconds(120));
             }
             // Seek with FLUSH and the clip's speed as rate.
