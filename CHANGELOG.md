@@ -90,6 +90,13 @@ All notable project changes and progress should be recorded here.
     is silent.
   - VU meter updates when the playhead is seeked (paused preroll triggers a level message)
     and when the volume slider is adjusted while paused (force re-seek causes a new preroll).
+- **Inspector: disable when empty, context-sensitive sections**:
+  - The inspector panel is now grayed out (insensitive) when no clip is selected,
+    providing a clear visual signal that there is nothing to edit.
+  - Each inspector section is shown or hidden based on the selected clip's type:
+    - **Audio clips**: only Audio (volume, pan) and Speed sections are visible.
+    - **Image clips**: Color, Transform, Title Overlay, Speed, and LUT sections shown; no Audio section.
+    - **Video clips**: all sections visible.
 - **Color-coded audio waveforms on timeline**:
   - Timeline waveform bars are now colored per-amplitude: green (quiet, < −18 dBFS),
     yellow (moderate, −18 to −6 dBFS), red (loud, > −6 dBFS). Zones match the VU meter.

@@ -46,16 +46,29 @@ pub struct InspectorView {
     pub lut_clear_btn: Button,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
+    // Section containers for show/hide per clip kind
+    pub content_box: GBox,
+    pub color_section: GBox,
+    pub audio_section: GBox,
+    pub transform_section: GBox,
+    pub title_section_box: GBox,
+    pub speed_section_box: GBox,
+    pub lut_section_box: GBox,
 }
 
 impl InspectorView {
     /// Refresh all fields to show the given clip, or clear if None.
     pub fn update(&self, project: &Project, clip_id: Option<&str>) {
+        use crate::model::clip::ClipKind;
+
         let clip = clip_id.and_then(|id| {
             project.tracks.iter()
                 .flat_map(|t| t.clips.iter())
                 .find(|c| c.id == id)
         });
+
+        // Gray out all controls when nothing is selected
+        self.content_box.set_sensitive(clip_id.is_some());
 
         // Suppress slider value-changed signals while we set values programmatically
         *self.updating.borrow_mut() = true;
@@ -63,6 +76,17 @@ impl InspectorView {
 
         match clip {
             Some(c) => {
+                // Show/hide sections based on clip kind
+                let is_video = c.kind == ClipKind::Video;
+                let is_audio = c.kind == ClipKind::Audio;
+                let is_image = c.kind == ClipKind::Image;
+                self.color_section.set_visible(is_video || is_image);
+                self.audio_section.set_visible(is_video || is_audio);
+                self.transform_section.set_visible(is_video || is_image);
+                self.title_section_box.set_visible(is_video || is_image);
+                self.speed_section_box.set_visible(true);
+                self.lut_section_box.set_visible(is_video || is_image);
+
                 self.name_entry.set_text(&c.label);
                 self.path_value.set_text(
                     std::path::Path::new(&c.source_path)
@@ -166,203 +190,221 @@ pub fn build_inspector(
     title.add_css_class("browser-header");
     vbox.append(&title);
 
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    // content_box holds everything below the header; grayed out when no clip is selected
+    let content_box = GBox::new(Orientation::Vertical, 8);
+    content_box.set_sensitive(false);
+    vbox.append(&content_box);
+
+    content_box.append(&Separator::new(Orientation::Horizontal));
 
     // Clip name
-    row_label(&vbox, "Name");
+    row_label(&content_box, "Name");
     let name_entry = Entry::new();
     name_entry.set_placeholder_text(Some("Clip name"));
-    vbox.append(&name_entry);
+    content_box.append(&name_entry);
 
     // Source path (read-only)
-    row_label(&vbox, "Source");
+    row_label(&content_box, "Source");
     let path_value = Label::new(Some("—"));
     path_value.set_halign(gtk::Align::Start);
     path_value.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
     path_value.set_max_width_chars(22);
     path_value.add_css_class("clip-path");
-    vbox.append(&path_value);
+    content_box.append(&path_value);
 
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    content_box.append(&Separator::new(Orientation::Horizontal));
 
     // Timecode fields
-    row_label(&vbox, "In");
+    row_label(&content_box, "In");
     let in_value = value_label("—");
-    vbox.append(&in_value);
+    content_box.append(&in_value);
 
-    row_label(&vbox, "Out");
+    row_label(&content_box, "Out");
     let out_value = value_label("—");
-    vbox.append(&out_value);
+    content_box.append(&out_value);
 
-    row_label(&vbox, "Duration");
+    row_label(&content_box, "Duration");
     let dur_value = value_label("—");
-    vbox.append(&dur_value);
+    content_box.append(&dur_value);
 
-    row_label(&vbox, "Timeline Start");
+    row_label(&content_box, "Timeline Start");
     let pos_value = value_label("—");
-    vbox.append(&pos_value);
+    content_box.append(&pos_value);
 
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    // ── Color + Denoise/Sharpness section (Video + Image only) ───────────────
+    let color_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&color_section);
 
-    // Color correction section
+    color_section.append(&Separator::new(Orientation::Horizontal));
+
     let color_title = Label::new(Some("Color"));
     color_title.set_halign(gtk::Align::Start);
     color_title.add_css_class("browser-header");
-    vbox.append(&color_title);
+    color_section.append(&color_title);
 
-    row_label(&vbox, "Brightness");
+    row_label(&color_section, "Brightness");
     let brightness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     brightness_slider.set_value(0.0);
     brightness_slider.set_draw_value(true);
     brightness_slider.set_digits(2);
     brightness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    vbox.append(&brightness_slider);
+    color_section.append(&brightness_slider);
 
-    row_label(&vbox, "Contrast");
+    row_label(&color_section, "Contrast");
     let contrast_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
     contrast_slider.set_value(1.0);
     contrast_slider.set_draw_value(true);
     contrast_slider.set_digits(2);
     contrast_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    vbox.append(&contrast_slider);
+    color_section.append(&contrast_slider);
 
-    row_label(&vbox, "Saturation");
+    row_label(&color_section, "Saturation");
     let saturation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
     saturation_slider.set_value(1.0);
     saturation_slider.set_draw_value(true);
     saturation_slider.set_digits(2);
     saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    vbox.append(&saturation_slider);
+    color_section.append(&saturation_slider);
 
-    // Denoise / Sharpness section
     let ds_title = Label::new(Some("Denoise / Sharpness"));
     ds_title.set_halign(gtk::Align::Start);
     ds_title.add_css_class("browser-header");
-    vbox.append(&ds_title);
+    color_section.append(&ds_title);
 
-    row_label(&vbox, "Denoise");
+    row_label(&color_section, "Denoise");
     let denoise_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     denoise_slider.set_value(0.0);
     denoise_slider.set_draw_value(true);
     denoise_slider.set_digits(2);
     denoise_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    vbox.append(&denoise_slider);
+    color_section.append(&denoise_slider);
 
-    row_label(&vbox, "Sharpness");
+    row_label(&color_section, "Sharpness");
     let sharpness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     sharpness_slider.set_value(0.0);
     sharpness_slider.set_draw_value(true);
     sharpness_slider.set_digits(2);
     sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    vbox.append(&sharpness_slider);
+    color_section.append(&sharpness_slider);
 
-    // Audio section
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    // ── Audio section (Video + Audio only) ───────────────────────────────────
+    let audio_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&audio_section);
+
+    audio_section.append(&Separator::new(Orientation::Horizontal));
     let audio_title = Label::new(Some("Audio"));
     audio_title.set_halign(gtk::Align::Start);
     audio_title.add_css_class("browser-header");
-    vbox.append(&audio_title);
+    audio_section.append(&audio_title);
 
-    row_label(&vbox, "Volume");
+    row_label(&audio_section, "Volume");
     let volume_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
     volume_slider.set_value(1.0);
     volume_slider.set_draw_value(true);
     volume_slider.set_digits(2);
     volume_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    vbox.append(&volume_slider);
+    audio_section.append(&volume_slider);
 
-    row_label(&vbox, "Pan");
+    row_label(&audio_section, "Pan");
     let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     pan_slider.set_value(0.0);
     pan_slider.set_draw_value(true);
     pan_slider.set_digits(2);
     pan_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    vbox.append(&pan_slider);
+    audio_section.append(&pan_slider);
 
-    // Transform section
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    // ── Transform section (Video + Image only) ───────────────────────────────
+    let transform_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&transform_section);
+
+    transform_section.append(&Separator::new(Orientation::Horizontal));
     let transform_title = Label::new(Some("Transform"));
     transform_title.set_halign(gtk::Align::Start);
     transform_title.add_css_class("browser-header");
-    vbox.append(&transform_title);
+    transform_section.append(&transform_title);
 
-    row_label(&vbox, "Crop Left");
+    row_label(&transform_section, "Crop Left");
     let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_left_slider.set_value(0.0);
     crop_left_slider.set_draw_value(true);
     crop_left_slider.set_digits(0);
-    vbox.append(&crop_left_slider);
+    transform_section.append(&crop_left_slider);
 
-    row_label(&vbox, "Crop Right");
+    row_label(&transform_section, "Crop Right");
     let crop_right_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_right_slider.set_value(0.0);
     crop_right_slider.set_draw_value(true);
     crop_right_slider.set_digits(0);
-    vbox.append(&crop_right_slider);
+    transform_section.append(&crop_right_slider);
 
-    row_label(&vbox, "Crop Top");
+    row_label(&transform_section, "Crop Top");
     let crop_top_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_top_slider.set_value(0.0);
     crop_top_slider.set_draw_value(true);
     crop_top_slider.set_digits(0);
-    vbox.append(&crop_top_slider);
+    transform_section.append(&crop_top_slider);
 
-    row_label(&vbox, "Crop Bottom");
+    row_label(&transform_section, "Crop Bottom");
     let crop_bottom_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_bottom_slider.set_value(0.0);
     crop_bottom_slider.set_draw_value(true);
     crop_bottom_slider.set_digits(0);
-    vbox.append(&crop_bottom_slider);
+    transform_section.append(&crop_bottom_slider);
 
-    row_label(&vbox, "Rotate");
+    row_label(&transform_section, "Rotate");
     let rotate_combo = gtk4::ComboBoxText::new();
     rotate_combo.append(Some("0"),   "0°");
     rotate_combo.append(Some("90"),  "90° CW");
     rotate_combo.append(Some("180"), "180°");
     rotate_combo.append(Some("270"), "270° CW");
     rotate_combo.set_active_id(Some("0"));
-    vbox.append(&rotate_combo);
+    transform_section.append(&rotate_combo);
 
-    row_label(&vbox, "Flip");
+    row_label(&transform_section, "Flip");
     let flip_row = GBox::new(Orientation::Horizontal, 8);
     let flip_h_btn = gtk4::ToggleButton::with_label("Flip H");
     let flip_v_btn = gtk4::ToggleButton::with_label("Flip V");
     flip_row.append(&flip_h_btn);
     flip_row.append(&flip_v_btn);
-    vbox.append(&flip_row);
+    transform_section.append(&flip_row);
 
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    // ── Title Overlay section (Video + Image only) ───────────────────────────
+    let title_section_box = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&title_section_box);
 
-    // Title / text overlay section
+    title_section_box.append(&Separator::new(Orientation::Horizontal));
     let title_section_lbl = Label::new(Some("Title Overlay"));
     title_section_lbl.add_css_class("browser-header");
     title_section_lbl.set_halign(gtk4::Align::Start);
-    vbox.append(&title_section_lbl);
+    title_section_box.append(&title_section_lbl);
 
     let title_entry = Entry::new();
     title_entry.set_placeholder_text(Some("Overlay text…"));
-    vbox.append(&title_entry);
+    title_section_box.append(&title_entry);
 
-    row_label(&vbox, "Position X");
+    row_label(&title_section_box, "Position X");
     let title_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     title_x_slider.set_value(0.5);
     title_x_slider.set_hexpand(true);
-    vbox.append(&title_x_slider);
+    title_section_box.append(&title_x_slider);
 
-    row_label(&vbox, "Position Y");
+    row_label(&title_section_box, "Position Y");
     let title_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     title_y_slider.set_value(0.9);
     title_y_slider.set_hexpand(true);
-    vbox.append(&title_y_slider);
+    title_section_box.append(&title_y_slider);
 
-    // ── Speed ─────────────────────────────────────────────────────────────────
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    // ── Speed section (all clip types) ───────────────────────────────────────
+    let speed_section_box = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&speed_section_box);
+
+    speed_section_box.append(&Separator::new(Orientation::Horizontal));
     let speed_hdr = Label::new(Some("Speed"));
     speed_hdr.add_css_class("browser-header");
     speed_hdr.set_halign(gtk4::Align::Start);
-    vbox.append(&speed_hdr);
+    speed_section_box.append(&speed_hdr);
 
-    row_label(&vbox, "Speed Multiplier");
+    row_label(&speed_section_box, "Speed Multiplier");
     let speed_slider = Scale::with_range(Orientation::Horizontal, 0.25, 4.0, 0.05);
     speed_slider.set_value(1.0);
     speed_slider.set_draw_value(true);
@@ -372,22 +414,24 @@ pub fn build_inspector(
     speed_slider.add_mark(2.0,  gtk4::PositionType::Bottom, Some("2×"));
     speed_slider.set_hexpand(true);
     speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
-    vbox.append(&speed_slider);
+    speed_section_box.append(&speed_slider);
 
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    // ── LUT section (Video + Image only) ─────────────────────────────────────
+    let lut_section_box = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&lut_section_box);
 
-    // ── LUT (Color Look-Up Table) ──────────────────────────────────────────────
+    lut_section_box.append(&Separator::new(Orientation::Horizontal));
     let lut_hdr = Label::new(Some("Color LUT"));
     lut_hdr.add_css_class("browser-header");
     lut_hdr.set_halign(gtk4::Align::Start);
-    vbox.append(&lut_hdr);
+    lut_section_box.append(&lut_hdr);
 
     let lut_path_label = Label::new(Some("None"));
     lut_path_label.set_halign(gtk4::Align::Start);
     lut_path_label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
     lut_path_label.set_max_width_chars(22);
     lut_path_label.add_css_class("clip-path");
-    vbox.append(&lut_path_label);
+    lut_section_box.append(&lut_path_label);
 
     let lut_btn_row = GBox::new(Orientation::Horizontal, 8);
     let lut_import_btn = Button::with_label("Import LUT…");
@@ -395,18 +439,17 @@ pub fn build_inspector(
     lut_clear_btn.set_sensitive(false);
     lut_btn_row.append(&lut_import_btn);
     lut_btn_row.append(&lut_clear_btn);
-    vbox.append(&lut_btn_row);
+    lut_section_box.append(&lut_btn_row);
 
     let lut_note = Label::new(Some("Applied on export (.cube)"));
     lut_note.set_halign(gtk4::Align::Start);
     lut_note.add_css_class("clip-path");
-    vbox.append(&lut_note);
-
-    vbox.append(&Separator::new(Orientation::Horizontal));
+    lut_section_box.append(&lut_note);
 
     // Apply name button
+    content_box.append(&Separator::new(Orientation::Horizontal));
     let apply_btn = Button::with_label("Apply Name");
-    vbox.append(&apply_btn);
+    content_box.append(&apply_btn);
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
@@ -985,6 +1028,13 @@ pub fn build_inspector(
         lut_path_label,
         lut_clear_btn,
         updating,
+        content_box,
+        color_section,
+        audio_section,
+        transform_section,
+        title_section_box,
+        speed_section_box,
+        lut_section_box,
     });
 
     (vbox, view)
