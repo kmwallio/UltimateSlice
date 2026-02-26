@@ -22,6 +22,8 @@ All notable project changes and progress should be recorded here.
 - **Media import improvements**:
   - Import dialog now supports selecting and importing multiple files in one action.
   - Media Library now accepts external file drops (drag files from file manager into the pane to import).
+- **Playback control isolation**:
+  - Timeline/program **Play** controls no longer start or pause Source Monitor playback.
 - **Active track highlighting**:
   - Clicking anywhere in a track row (including empty space) selects it as the active track.
   - The active track's label area shows a blue left-edge accent bar and brighter background.

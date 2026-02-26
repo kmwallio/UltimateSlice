@@ -191,15 +191,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         }));
     }
     {
-        let player = player.clone();
         let prog_player = prog_player.clone();
         timeline_state.borrow_mut().on_play_pause = Some(Rc::new(move || {
-            let p = player.borrow();
-            match p.state() {
-                crate::media::player::PlayerState::Playing => { let _ = p.pause(); }
-                _ => { let _ = p.play(); }
-            }
-            drop(p);
             prog_player.borrow_mut().toggle_play_pause();
         }));
     }
@@ -323,14 +316,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         // on_play_pause
         {
             let pp = prog_player.clone();
-            let player = player.clone();
             move || {
-                let p = player.borrow();
-                match p.state() {
-                    crate::media::player::PlayerState::Playing => { let _ = p.pause(); }
-                    _ => { let _ = p.play(); }
-                }
-                drop(p);
                 pp.borrow_mut().toggle_play_pause();
             }
         },
