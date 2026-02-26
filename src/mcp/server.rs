@@ -185,6 +185,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "open_fcpxml",
+            "description": "Load a project from a Final Cut Pro XML (.fcpxml) file, replacing the current project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the .fcpxml file to open." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "export_mp4",
             "description": "Export the current project to MP4/H.264 at the given absolute path.",
             "inputSchema": {
@@ -271,6 +282,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
+            path:  args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "open_fcpxml" => McpCommand::OpenFcpxml {
             path:  args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },

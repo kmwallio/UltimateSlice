@@ -751,6 +751,23 @@ fn handle_mcp_command(
             };
         }
 
+        McpCommand::OpenFcpxml { path, reply } => {
+            match std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|xml| crate::fcpxml::parser::parse_fcpxml(&xml).map_err(|e| e.to_string()))
+            {
+                Ok(mut new_proj) => {
+                    new_proj.file_path = Some(path.clone());
+                    let track_count = new_proj.tracks.len();
+                    let clip_count: usize = new_proj.tracks.iter().map(|t| t.clips.len()).sum();
+                    *project.borrow_mut() = new_proj;
+                    on_project_changed();
+                    reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
+                }
+                Err(e) => { reply.send(json!({"success": false, "error": e})).ok(); }
+            };
+        }
+
         McpCommand::ExportMp4 { path, reply } => {
             let proj = project.borrow().clone();
             std::thread::spawn(move || {
