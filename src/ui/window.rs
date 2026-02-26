@@ -246,6 +246,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     // ── Build program monitor ──────────────────────────────────────────────
     // timeline_panel doesn't exist yet; use a shared cell filled in after build.
     let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+    let prog_monitor_host = gtk::Box::new(Orientation::Vertical, 0);
+    prog_monitor_host.set_hexpand(true);
+    prog_monitor_host.set_vexpand(true);
+    let popout_window_cell: Rc<RefCell<Option<ApplicationWindow>>> = Rc::new(RefCell::new(None));
+    let monitor_popped = Rc::new(Cell::new(false));
+    let on_toggle_popout_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_toggle_popout: Rc<dyn Fn()> = {
+        let cb = on_toggle_popout_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
 
     let (prog_monitor_widget, pos_label) = program_monitor::build_program_monitor(
         prog_player.clone(),
@@ -275,6 +287,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 pp.borrow_mut().toggle_play_pause();
             }
         },
+        {
+            let cb = on_toggle_popout.clone();
+            move || cb()
+        },
     );
 
     // 100 ms poll timer: advance playback, update timecode + timeline playhead
@@ -300,7 +316,53 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
-    top_paned.set_end_child(Some(&prog_monitor_widget));
+    prog_monitor_host.append(&prog_monitor_widget);
+    top_paned.set_end_child(Some(&prog_monitor_host));
+
+    // Program monitor pop-out/dock toggle
+    *on_toggle_popout_impl.borrow_mut() = Some({
+        let app = app.clone();
+        let host = prog_monitor_host.clone();
+        let monitor = prog_monitor_widget.clone();
+        let pop_cell = popout_window_cell.clone();
+        let popped = monitor_popped.clone();
+        Rc::new(move || {
+            if !popped.get() {
+                let pop_win = ApplicationWindow::builder()
+                    .application(&app)
+                    .title("UltimateSlice — Program Monitor")
+                    .default_width(960)
+                    .default_height(540)
+                    .build();
+
+                host.remove(&monitor);
+                pop_win.set_child(Some(&monitor));
+
+                let host_c = host.clone();
+                let monitor_c = monitor.clone();
+                let pop_cell_c = pop_cell.clone();
+                let popped_c = popped.clone();
+                pop_win.connect_close_request(move |w| {
+                    w.set_child(Option::<&gtk::Widget>::None);
+                    if monitor_c.parent().is_none() {
+                        host_c.append(&monitor_c);
+                    }
+                    popped_c.set(false);
+                    *pop_cell_c.borrow_mut() = None;
+                    glib::Propagation::Proceed
+                });
+
+                pop_win.present();
+                popped.set(true);
+                *pop_cell.borrow_mut() = Some(pop_win);
+            } else {
+                let win = pop_cell.borrow().as_ref().cloned();
+                if let Some(w) = win {
+                    w.close();
+                }
+            }
+        })
+    });
 
     // ── on_append: reads source_marks, creates clip, adds to timeline ─────
     *on_append_impl.borrow_mut() = Some({

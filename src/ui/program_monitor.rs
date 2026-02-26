@@ -25,6 +25,7 @@ pub fn build_program_monitor(
     paintable: gdk4::Paintable,
     on_stop: impl Fn() + 'static,
     on_play_pause: impl Fn() + 'static,
+    on_toggle_popout: impl Fn() + 'static,
 ) -> (GBox, Label) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -50,6 +51,10 @@ pub fn build_program_monitor(
     let pos_label = Label::new(Some("00:00:00;00"));
     pos_label.add_css_class("timecode");
     title_bar.append(&pos_label);
+
+    let btn_popout = Button::with_label("Pop Out / Dock");
+    btn_popout.connect_clicked(move |_| on_toggle_popout());
+    title_bar.append(&btn_popout);
 
     root.append(&title_bar);
 
@@ -92,4 +97,3 @@ pub fn format_timecode(ns: u64) -> String {
     let h      = secs / 3600;
     format!("{h:02}:{m:02}:{s:02};{frames:02}")
 }
-

@@ -132,8 +132,8 @@ Tracking docs:
   - Timeline seek (click ruler) also seeks the program monitor
   - Clips reload automatically on every project change
 - [ ] Detachable Program Monitor window (pop-out preview)
-  - [ ] Pop out Program Monitor into a separate top-level window for dual-display workflows
-  - [ ] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
+  - [x] Pop out Program Monitor into a separate top-level window for dual-display workflows
+  - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
   - [ ] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
   - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching
