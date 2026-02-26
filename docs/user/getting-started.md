@@ -23,7 +23,7 @@ sudo apt install \
 ## Building & Running
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/kmwallio/UltimateSlice.git
 cd UltimateSlice
 cargo run
 ```
