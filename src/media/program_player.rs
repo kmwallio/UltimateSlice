@@ -294,6 +294,8 @@ impl ProgramPlayer {
         self.seek_anchor_source_ns = 0;
         self.seek_reports_relative = None;
         let _ = self.pipeline.set_state(gst::State::Ready);
+        let _ = self.audio_pipeline.set_state(gst::State::Null);
+        self.audio_pipeline.set_property("uri", "");
         let _ = self.audio_pipeline.set_state(gst::State::Ready);
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
@@ -360,8 +362,8 @@ impl ProgramPlayer {
                 gst::SeekType::None,
                 gst::ClockTime::NONE,
             );
+            let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
-        let _ = self.audio_pipeline.set_state(gst::State::Playing);
         self.state = PlayerState::Playing;
     }
 
