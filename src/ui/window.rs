@@ -383,7 +383,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         })
     };
 
-    let (prog_monitor_widget, pos_label, picture_a, picture_b, vu_meter, vu_peak_cell) = program_monitor::build_program_monitor(
+    let (prog_monitor_widget, pos_label, speed_label, picture_a, picture_b, vu_meter, vu_peak_cell) = program_monitor::build_program_monitor(
         prog_player.clone(),
         prog_paintable,
         prog_paintable2,
@@ -432,13 +432,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let vu_pc = vu_peak_cell.clone();
         let scopes_rev = scopes_revealer.clone();
         let scopes_st  = scopes_state.clone();
+        let speed_lbl = speed_label.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-            let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame) = {
+            let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
                 let sf = if scopes_rev.reveals_child() { player.try_pull_scope_frame() } else { None };
-                (player.timeline_pos_ns, player.is_playing(), oa, ob, player.audio_peak_db, sf)
+                let rate = player.jkl_rate();
+                (player.timeline_pos_ns, player.is_playing(), oa, ob, player.audio_peak_db, sf, rate)
             };
             // Apply cross-dissolve opacities to the two program monitor pictures.
             picture_a.set_opacity(opacity_a);
@@ -449,6 +451,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             // Update colour scopes with the latest video frame.
             if let Some(frame) = scope_frame {
                 crate::ui::color_scopes::update_scope_frame(&scopes_st, frame);
+            }
+            // Update J/K/L speed label.
+            if jkl_rate == 0.0 || jkl_rate == 1.0 {
+                speed_lbl.set_visible(false);
+            } else {
+                let abs = jkl_rate.abs() as u32;
+                let arrow = if jkl_rate > 0.0 { "▶▶" } else { "◀◀" };
+                speed_lbl.set_text(&format!("{arrow} {abs}×"));
+                speed_lbl.set_visible(true);
             }
             if pos_ns != last_pos_ns_c.get() {
                 pos_label.set_text(&program_monitor::format_timecode(pos_ns));
@@ -1012,6 +1023,57 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
+    // ── Window-level J/K/L: shuttle scrubbing in the program monitor ─────────
+    // L — play forward, each press cycles speed: 1×→2×→4×→8×
+    // K — pause / reset shuttle speed
+    // J — play backward, each press cycles speed: −1×→−2×→−4×→−8×
+    {
+        use std::cell::Cell;
+        let prog_player = prog_player.clone();
+        let jkl_rate_cell: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, _mods| {
+            use gtk4::gdk::Key;
+            if key != Key::j && key != Key::J
+                && key != Key::k && key != Key::K
+                && key != Key::l && key != Key::L {
+                return glib::Propagation::Proceed;
+            }
+            // Don't intercept when a text entry has focus.
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let current = jkl_rate_cell.get();
+            let new_rate = if key == Key::k || key == Key::K {
+                0.0
+            } else if key == Key::l || key == Key::L {
+                // Cycle: stopped/reverse → 1×, then double up to 8×.
+                match current as i64 {
+                    r if r <= 0 => 1.0,
+                    1 => 2.0,
+                    2 => 4.0,
+                    _ => 8.0,
+                }
+            } else {
+                // J: cycle: stopped/forward → −1×, then double up to −8×.
+                match current as i64 {
+                    r if r >= 0 => -1.0,
+                    -1 => -2.0,
+                    -2 => -4.0,
+                    _ => -8.0,
+                }
+            };
+            jkl_rate_cell.set(new_rate);
+            prog_player.borrow_mut().set_jkl_rate(new_rate);
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
     // ── Window-level M key: add marker at current playhead (works regardless of focus) ──
     {
         let project = project.clone();

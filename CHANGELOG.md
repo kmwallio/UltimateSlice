@@ -5,6 +5,14 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **J/K/L shuttle scrubbing**: Global keyboard shortcuts for shuttle control of the
+  program monitor. `L` plays forward and each subsequent press doubles the speed
+  (1×→2×→4×→8×); `J` plays in reverse (−1×→−2×→−4×→−8×); `K` pauses and resets
+  speed. Shuttle rate is shown in the program monitor title bar ("▶▶ 2×" / "◀◀ 4×").
+  Reverse playback uses GStreamer negative-rate seeks (graceful fallback on
+  unsupported formats). Space/Stop always resets the JKL state. No focus needed —
+  J/K/L work from anywhere in the main window (captured at window level, same
+  pattern as the M-key marker shortcut).
 - **Colour scopes panel**: A new collapsible panel below the program monitor provides
   four professional analysis tools — Waveform, Histogram, RGB Parade, and Vectorscope.
   Toggle with the "▾ Scopes" button. Frames are captured from a `tee`-based GStreamer

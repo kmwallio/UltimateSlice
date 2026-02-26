@@ -18,12 +18,13 @@ pub struct ClipTransform {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, picture_a, picture_b, vu_meter, peak_cell)`.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell)`.
 /// `picture_a` displays the primary (outgoing) clip; `picture_b` displays the incoming
 /// transition clip. The caller controls cross-dissolve by setting widget opacity on
 /// each picture each poll tick via `Widget::set_opacity()`.
 /// `peak_cell` is updated by the caller with `[left_db, right_db]` each poll tick;
 /// `vu_meter.queue_draw()` triggers a repaint.
+/// `speed_label` shows the current J/K/L shuttle rate ("◀◀ 2×", "▶▶ 4×") or is hidden.
 pub fn build_program_monitor(
     program_player: Rc<RefCell<ProgramPlayer>>,
     paintable_a: gdk4::Paintable,
@@ -31,7 +32,7 @@ pub fn build_program_monitor(
     on_stop: impl Fn() + 'static,
     on_play_pause: impl Fn() + 'static,
     on_toggle_popout: impl Fn() + 'static,
-) -> (GBox, Label, Picture, Picture, DrawingArea, Rc<Cell<[f64; 2]>>) {
+) -> (GBox, Label, Label, Picture, Picture, DrawingArea, Rc<Cell<[f64; 2]>>) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
     root.set_vexpand(true);
@@ -52,6 +53,12 @@ pub fn build_program_monitor(
     let spacer = gtk::Separator::new(Orientation::Horizontal);
     spacer.set_hexpand(true);
     title_bar.append(&spacer);
+
+    // J/K/L shuttle rate indicator — shown/hidden by window.rs.
+    let speed_label = Label::new(None);
+    speed_label.add_css_class("timecode");
+    speed_label.set_visible(false);
+    title_bar.append(&speed_label);
 
     let pos_label = Label::new(Some("00:00:00;00"));
     pos_label.add_css_class("timecode");
@@ -116,7 +123,7 @@ pub fn build_program_monitor(
     // Place VU meter at the end of the title bar (right-aligned).
     title_bar.append(&vu_bar);
 
-    (root, pos_label, picture_a, picture_b, vu_meter, peak_cell)
+    (root, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell)
 }
 
 /// Build a VU meter DrawingArea showing L/R audio peak levels in dBFS.

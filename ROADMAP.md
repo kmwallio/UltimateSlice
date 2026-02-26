@@ -220,7 +220,7 @@ Tracking docs:
 - [ ] Multicam editing (sync by audio or timecode)
 - [ ] Nested Timelines / Compound Clips
 - [ ] 3-Point and 4-Point editing (Insert/Overwrite from Source)
-- [ ] J/K/L scrubbing with pitch-corrected audio
+- [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio is a future enhancement)
 - [ ] Match Frame (shortcut to find timeline clip in media library)
 - [ ] Proxy Workflow: One-click toggle between original and proxy media
 - [ ] Keyword ranges + favorite/reject ratings in browser

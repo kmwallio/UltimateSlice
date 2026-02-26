@@ -37,6 +37,9 @@
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause program monitor |
+| `J` | Shuttle reverse in program monitor (1× → 2× → 4× → 8×) |
+| `K` | Stop shuttle / Pause program monitor |
+| `L` | Shuttle forward in program monitor (1× → 2× → 4× → 8×) |
 | `B` | Toggle Razor (Blade) tool |
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip |
@@ -57,6 +60,6 @@ All Inspector controls are mouse-driven sliders and text fields — no dedicated
 
 ## Notes
 
-- **J/K/L** shuttle works only when the Source Monitor panel has focus.
+- **J/K/L** shuttle works globally: J/K/L control the **Program Monitor** from anywhere in the window (no focus needed). In the Source Monitor, J/K/L still work as before when the Source Monitor panel has focus.
 - **M** is captured globally so the timeline does not need to be focused.
 - **Space** toggles playback in whichever monitor is contextually active.

@@ -146,6 +146,8 @@ pub struct ProgramPlayer {
     /// Current audio peak level in dBFS per channel [left, right].
     /// Updated each poll tick from `level` element bus messages; decays toward -60 over time.
     pub audio_peak_db: [f64; 2],
+    /// J/K/L shuttle rate: 0.0 = paused, positive = forward N×, negative = reverse N×.
+    jkl_rate: f64,
     /// Latest RGBA frame captured from the scope appsink, updated via GStreamer
     /// callbacks on both preroll (seek/pause) and new-sample (playback).
     /// `Arc<Mutex<>>` because callbacks fire on GStreamer threads.
@@ -440,6 +442,7 @@ impl ProgramPlayer {
                 level_element_audio,
                 audio_peak_db: [-60.0, -60.0],
                 latest_scope_frame,
+                jkl_rate: 0.0,
             },
             paintable,
             paintable2,
@@ -483,6 +486,81 @@ impl ProgramPlayer {
     /// (every seek/pause) and new-sample (every decoded frame during playback).
     pub fn try_pull_scope_frame(&self) -> Option<ScopeFrame> {
         self.latest_scope_frame.lock().ok()?.clone()
+    }
+
+    /// Current J/K/L shuttle rate (0.0 = paused, >0 = forward, <0 = reverse).
+    pub fn jkl_rate(&self) -> f64 {
+        self.jkl_rate
+    }
+
+    /// Set the J/K/L shuttle rate and start/continue playback at that rate.
+    ///
+    /// - `rate == 0.0` — pause.
+    /// - `rate > 0` — forward playback at `rate`× speed.
+    /// - `rate < 0` — reverse playback at `|rate|`× speed via a negative-rate
+    ///   GStreamer seek. Falls back gracefully: if the pipeline rejects the
+    ///   negative seek the player stops at the current position.
+    pub fn set_jkl_rate(&mut self, rate: f64) {
+        self.jkl_rate = rate;
+
+        if rate == 0.0 {
+            self.pause();
+            return;
+        }
+
+        let pos = self.timeline_pos_ns;
+
+        // Ensure a clip is loaded at the current position.
+        if self.current_idx.is_none() {
+            if let Some(idx) = self.clip_at(pos) {
+                self.load_clip_idx(idx, pos);
+            } else {
+                return; // no clip here — nothing to play
+            }
+        }
+
+        if let Some(idx) = self.current_idx {
+            let clip = &self.clips[idx];
+            let source_pos = clip.source_pos_ns(pos);
+            let abs_rate = rate.abs();
+
+            if rate > 0.0 {
+                // Forward: standard positive-rate seek.
+                let _ = self.pipeline.seek(
+                    abs_rate,
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(source_pos),
+                    gst::SeekType::None,
+                    gst::ClockTime::NONE,
+                );
+            } else {
+                // Reverse: negative-rate seek with stop at the clip's in-point.
+                // GStreamer's stop position for reverse is the segment start (nearest
+                // keyframe ≥ start); we use clip source_in_ns as the natural stop.
+                let stop_pos = clip.source_in_ns;
+                let seek_ok = self.pipeline.seek(
+                    -abs_rate,
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(stop_pos),
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(source_pos),
+                ).is_ok();
+                if !seek_ok {
+                    // Format doesn't support reverse — silently stop.
+                    self.jkl_rate = 0.0;
+                    self.pause();
+                    return;
+                }
+            }
+
+            let _ = self.pipeline.set_state(gst::State::Playing);
+            self.state = PlayerState::Playing;
+            self.seek_anchor_timeline_ns = pos;
+            self.seek_anchor_source_ns = source_pos;
+            self.seek_reports_relative = None;
+        }
     }
 
     /// Activate the cross-dissolve transition preview: load the incoming clip into
@@ -636,12 +714,15 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
         self.state = PlayerState::Playing;
+        // Normal play always resets JKL shuttle speed.
+        self.jkl_rate = 0.0;
     }
 
     pub fn pause(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Paused;
+        self.jkl_rate = 0.0;
     }
 
     pub fn toggle_play_pause(&mut self) {
