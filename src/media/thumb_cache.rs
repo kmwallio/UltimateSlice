@@ -50,11 +50,6 @@ impl ThumbnailCache {
             return true;
         }
         if !self.loading.contains(&key) {
-            // Limit concurrent extraction threads to avoid starving the
-            // playback pipeline of GStreamer decode resources.
-            if self.loading.len() >= 2 {
-                return false; // will be re-requested on next draw cycle
-            }
             self.loading.insert(key.clone());
             let tx = self.tx.clone();
             let path = source_path.to_string();
