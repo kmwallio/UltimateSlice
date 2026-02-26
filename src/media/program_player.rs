@@ -641,8 +641,15 @@ impl ProgramPlayer {
         // Apply per-clip title overlay
         self.set_title(&clip.title_text, &clip.title_font, clip.title_color, clip.title_x, clip.title_y);
 
-        if self.current_idx == Some(idx) {
-            // Same clip already loaded — just seek to the new position. No pipeline reset.
+        let same_source_loaded = self.current_idx
+            .and_then(|cur| self.clips.get(cur))
+            .map(|c| c.source_path == clip.source_path)
+            .unwrap_or(false);
+
+        if self.current_idx == Some(idx) || same_source_loaded {
+            // Reuse currently loaded source when possible; just seek.
+            // This avoids a full playbin reset when moving between segments
+            // from the same media file.
             let _ = self.pipeline.seek(
                 speed,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,

@@ -141,7 +141,7 @@ Tracking docs:
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
   - [ ] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
-  - [ ] Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff
+  - [x] Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff
 
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
