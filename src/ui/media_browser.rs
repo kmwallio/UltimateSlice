@@ -94,7 +94,7 @@ pub fn build_media_browser(
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            // Drain completed probe results → update library items.
+            // Drain completed probe results → update library items (lightweight).
             let resolved = probe_cache.borrow_mut().poll();
             if !resolved.is_empty() {
                 let cache = probe_cache.borrow();
@@ -107,11 +107,26 @@ pub fn build_media_browser(
                         }
                     }
                 }
+                // Update drag-source payloads on existing children (avoids full rebuild).
+                let mut child = flow_box.first_child();
+                let mut idx = 0usize;
+                while let Some(w) = child {
+                    if let Some(item) = lib.get(idx) {
+                        let payload = format!("{}|{}", item.source_path, item.duration_ns);
+                        let val = glib::Value::from(&payload);
+                        // Each FlowBoxChild has exactly one DragSource controller.
+                        for ctrl in w.observe_controllers().into_iter().flatten() {
+                            if let Ok(ds) = ctrl.downcast::<gtk::DragSource>() {
+                                ds.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
+                                break;
+                            }
+                        }
+                    }
+                    idx += 1;
+                    child = w.next_sibling();
+                }
                 drop(lib);
                 drop(cache);
-                // Rebuild grid to reflect updated durations.
-                let lib = library.borrow();
-                rebuild_flowbox(&flow_box, &lib, &thumb_cache);
             }
 
             let lib = library.borrow();
