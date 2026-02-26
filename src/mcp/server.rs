@@ -133,6 +133,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_playback_priority",
+            "description": "Set program monitor playback priority ('smooth', 'balanced', or 'accurate').",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "priority": { "type": "string", "enum": ["smooth", "balanced", "accurate"], "description": "Playback priority mode." }
+                },
+                "required": ["priority"]
+            }
+        },
+        {
             "name": "add_clip",
             "description": "Add a new clip to a track. Durations are in nanoseconds (1 s = 1_000_000_000 ns).",
             "inputSchema": {
@@ -310,6 +321,10 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "get_preferences" => McpCommand::GetPreferences { reply: tx },
         "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
             enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "set_playback_priority" => McpCommand::SetPlaybackPriority {
+            priority: args["priority"].as_str().unwrap_or("smooth").to_string(),
             reply: tx,
         },
 

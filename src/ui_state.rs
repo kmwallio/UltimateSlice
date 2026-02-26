@@ -21,15 +21,48 @@ impl Default for ProgramMonitorState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackPriority {
+    Smooth,
+    Balanced,
+    Accurate,
+}
+
+impl Default for PlaybackPriority {
+    fn default() -> Self { Self::Smooth }
+}
+
+impl PlaybackPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Smooth => "smooth",
+            Self::Balanced => "balanced",
+            Self::Accurate => "accurate",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "accurate" => Self::Accurate,
+            "balanced" => Self::Balanced,
+            _ => Self::Smooth,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreferencesState {
     #[serde(default)]
     pub hardware_acceleration_enabled: bool,
+    #[serde(default)]
+    pub playback_priority: PlaybackPriority,
 }
 
 impl Default for PreferencesState {
     fn default() -> Self {
         Self {
             hardware_acceleration_enabled: false,
+            playback_priority: PlaybackPriority::default(),
         }
     }
 }

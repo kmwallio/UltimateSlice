@@ -14,6 +14,7 @@ pub enum McpCommand {
     CloseSourcePreview { reply: SyncSender<Value> },
     GetPreferences { reply: SyncSender<Value> },
     SetHardwareAcceleration { enabled: bool, reply: SyncSender<Value> },
+    SetPlaybackPriority { priority: String, reply: SyncSender<Value> },
     AddClip {
         source_path:       String,
         track_index:       usize,

@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack, StackSidebar};
 use std::rc::Rc;
-use crate::ui_state::PreferencesState;
+use crate::ui_state::{PlaybackPriority, PreferencesState};
 
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
@@ -59,12 +59,24 @@ pub fn show_preferences_dialog(
     let hw_accel = CheckButton::with_label("Enable hardware acceleration");
     hw_accel.set_active(current.hardware_acceleration_enabled);
     hw_accel.set_halign(gtk::Align::Start);
+    let playback_priority = gtk4::ComboBoxText::new();
+    playback_priority.append(Some("smooth"), "Smooth (prioritize playback continuity)");
+    playback_priority.append(Some("balanced"), "Balanced");
+    playback_priority.append(Some("accurate"), "Accurate (prioritize seek/frame precision)");
+    playback_priority.set_active_id(Some(current.playback_priority.as_str()));
+    playback_priority.set_halign(gtk::Align::Start);
     let hint = Label::new(Some("Applies to source preview playback immediately (with non-GL fallback when needed)."));
     hint.set_halign(gtk::Align::Start);
     hint.add_css_class("dim-label");
+    let priority_hint = Label::new(Some("Program monitor playback priority controls smoothness vs frame precision during active playback."));
+    priority_hint.set_halign(gtk::Align::Start);
+    priority_hint.add_css_class("dim-label");
     playback_box.append(&playback_label);
     playback_box.append(&hw_accel);
     playback_box.append(&hint);
+    playback_box.append(&Label::new(Some("Program monitor playback priority")));
+    playback_box.append(&playback_priority);
+    playback_box.append(&priority_hint);
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     body.append(&sidebar);
@@ -75,6 +87,7 @@ pub fn show_preferences_dialog(
         if resp == ResponseType::Accept {
             on_save(PreferencesState {
                 hardware_acceleration_enabled: hw_accel.is_active(),
+                playback_priority: PlaybackPriority::from_str(playback_priority.active_id().as_deref().unwrap_or("smooth")),
             });
         }
         d.close();

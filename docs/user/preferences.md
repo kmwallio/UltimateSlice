@@ -21,6 +21,17 @@ Preferences are grouped by category in a sidebar:
   - affects source preview sink selection (`glsinkbin` path when enabled, `gtk4paintablesink` path when disabled),
   - does not change export behavior.
 
+## Program Monitor Playback Priority
+
+- **Program monitor playback priority** controls how playback trades off smoothness vs precision:
+  - `Smooth` (default): favors continuity and lower stutter during active playback.
+  - `Balanced`: middle ground.
+  - `Accurate`: favors precise seeks/frame placement.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `playback_priority`.
+  - `set_playback_priority` updates the mode.
+
 ## Saving
 
 - Click **Save** to persist changes.

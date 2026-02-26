@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use crate::media::player::PlayerState;
+use crate::ui_state::PlaybackPriority;
 
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
@@ -108,6 +109,7 @@ pub struct ProgramPlayer {
     textoverlay: Option<gst::Element>,
     /// alpha element for transition fade approximation in preview.
     alpha_filter: Option<gst::Element>,
+    playback_priority: PlaybackPriority,
 }
 
 impl ProgramPlayer {
@@ -238,9 +240,25 @@ impl ProgramPlayer {
                 videoflip_flip,
                 textoverlay,
                 alpha_filter,
+                playback_priority: PlaybackPriority::default(),
             },
             paintable,
         ))
+    }
+
+    pub fn set_playback_priority(&mut self, playback_priority: PlaybackPriority) {
+        self.playback_priority = playback_priority;
+    }
+
+    fn should_block_preroll(&self) -> bool {
+        !matches!(self.playback_priority, PlaybackPriority::Smooth)
+    }
+
+    fn clip_seek_flags(&self) -> gst::SeekFlags {
+        match self.playback_priority {
+            PlaybackPriority::Accurate => gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            PlaybackPriority::Balanced | PlaybackPriority::Smooth => gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+        }
     }
 
     /// Update the clip list from the project model. Resets playback.
@@ -289,7 +307,9 @@ impl ProgramPlayer {
             }
         }
         // Block briefly until the pipeline reaches PAUSED so our seek is accepted.
-        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(100));
+        if self.should_block_preroll() {
+            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(100));
+        }
         // Re-seek to make sure we start at the right position with the correct rate.
         if let Some(idx) = self.current_idx {
             let clip = &self.clips[idx];
@@ -297,7 +317,7 @@ impl ProgramPlayer {
             let speed = clip.speed;
             let _ = self.pipeline.seek(
                 speed,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                self.clip_seek_flags(),
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
                 gst::SeekType::None,
@@ -310,7 +330,9 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Playing);
         // Also start the audio pipeline
         self.sync_audio_to(pos);
-        let _ = self.audio_pipeline.state(gst::ClockTime::from_mseconds(100));
+        if self.should_block_preroll() {
+            let _ = self.audio_pipeline.state(gst::ClockTime::from_mseconds(100));
+        }
         if let Some(aidx) = self.audio_current_idx {
             let aclip = &self.audio_clips[aidx];
             let asrc = aclip.source_pos_ns(pos);
@@ -722,7 +744,7 @@ impl ProgramPlayer {
             // from the same media file.
             let _ = self.pipeline.seek(
                 speed,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                self.clip_seek_flags(),
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
                 gst::SeekType::None,
@@ -740,13 +762,13 @@ impl ProgramPlayer {
             let _ = self.pipeline.set_state(gst::State::Paused);
             // Avoid blocking transition path during active playback; blocking here
             // directly contributes to visible stutter at clip boundaries.
-            if self.state != PlayerState::Playing {
+            if self.should_block_preroll() && self.state != PlayerState::Playing {
                 let _ = self.pipeline.state(gst::ClockTime::from_mseconds(120));
             }
             // Seek with FLUSH and the clip's speed as rate.
             let _ = self.pipeline.seek(
                 speed,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                self.clip_seek_flags(),
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
                 gst::SeekType::None,

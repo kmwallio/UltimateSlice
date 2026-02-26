@@ -20,8 +20,9 @@ The **Program Monitor** shows the assembled timeline played back in real time, c
 ## Playback Behaviour
 
 - The program monitor loads clips from the timeline in order and switches between them automatically at clip boundaries.
-- The **timeline playhead** moves in sync with program monitor playback (updated every 100 ms).
+- The **timeline playhead** moves in sync with program monitor playback (polled at ~33 ms, with redraw coalescing during playback).
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, title overlay, speed) are applied during playback.
+- Playback priority can be set in **Preferences → Playback** (`Smooth`, `Balanced`, `Accurate`) to control smoothness vs seek precision.
 
 ## Seeking
 

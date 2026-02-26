@@ -29,11 +29,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
 
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
+    let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
     let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
-    let (prog_player_raw, prog_paintable) = ProgramPlayer::new()
+    let (mut prog_player_raw, prog_paintable) = ProgramPlayer::new()
         .expect("Failed to create program player");
+    prog_player_raw.set_playback_priority(initial_playback_priority);
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
@@ -65,17 +67,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let window_weak = window_weak.clone();
         let preferences_state = preferences_state.clone();
         let player = player.clone();
+        let prog_player = prog_player.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
                 let preferences_state = preferences_state.clone();
                 let player = player.clone();
+                let prog_player = prog_player.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
                     *preferences_state.borrow_mut() = new_state.clone();
                     crate::ui_state::save_preferences_state(&new_state);
                     if let Err(e) = player.borrow().set_hardware_acceleration(new_state.hardware_acceleration_enabled) {
                         eprintln!("Failed to apply hardware acceleration setting: {e}");
                     }
+                    prog_player.borrow_mut().set_playback_priority(new_state.playback_priority.clone());
                 });
                 preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
             }
@@ -333,16 +338,27 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let cell = timeline_panel_cell.clone();
         let last_pos_ns = Rc::new(Cell::new(u64::MAX));
         let last_pos_ns_c = last_pos_ns.clone();
+        let last_draw_ns = Rc::new(Cell::new(u64::MAX));
+        let last_draw_ns_c = last_draw_ns.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-            let pos_ns = {
+            let (pos_ns, playing) = {
                 let mut player = pp.borrow_mut();
                 player.poll();
-                player.timeline_pos_ns
+                (player.timeline_pos_ns, player.is_playing())
             };
             if pos_ns != last_pos_ns_c.get() {
                 pos_label.set_text(&program_monitor::format_timecode(pos_ns));
                 ts.borrow_mut().playhead_ns = pos_ns;
-                if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+                let should_draw = if !playing {
+                    true
+                } else {
+                    let last = last_draw_ns_c.get();
+                    last == u64::MAX || pos_ns.saturating_sub(last) >= 50_000_000
+                };
+                if should_draw {
+                    if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+                    last_draw_ns_c.set(pos_ns);
+                }
                 last_pos_ns_c.set(pos_ns);
             }
             glib::ControlFlow::Continue
@@ -729,6 +745,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let project = project.clone();
         let library = library.clone();
         let player = player.clone();
+        let prog_player = prog_player.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
         let on_close_preview = on_close_preview.clone();
@@ -741,6 +758,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     &project,
                     &library,
                     &player,
+                    &prog_player,
                     &timeline_state,
                     &preferences_state,
                     &on_close_preview,
@@ -843,6 +861,7 @@ fn handle_mcp_command(
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<Vec<MediaItem>>>,
     player: &Rc<RefCell<Player>>,
+    prog_player: &Rc<RefCell<ProgramPlayer>>,
     timeline_state: &Rc<RefCell<TimelineState>>,
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
     on_close_preview: &Rc<dyn Fn()>,
@@ -917,7 +936,8 @@ fn handle_mcp_command(
         McpCommand::GetPreferences { reply } => {
             let prefs = preferences_state.borrow().clone();
             reply.send(json!({
-                "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled
+                "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
+                "playback_priority": prefs.playback_priority.as_str()
             })).ok();
         }
 
@@ -932,17 +952,34 @@ fn handle_mcp_command(
                 Ok(()) => {
                     reply.send(json!({
                         "success": true,
-                        "hardware_acceleration_enabled": enabled
+                        "hardware_acceleration_enabled": enabled,
+                        "playback_priority": new_state.playback_priority.as_str()
                     })).ok();
                 }
                 Err(e) => {
                     reply.send(json!({
                         "success": false,
                         "hardware_acceleration_enabled": enabled,
+                        "playback_priority": new_state.playback_priority.as_str(),
                         "error": e.to_string()
                     })).ok();
                 }
             }
+        }
+
+        McpCommand::SetPlaybackPriority { priority, reply } => {
+            let parsed = crate::ui_state::PlaybackPriority::from_str(&priority);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.playback_priority = parsed.clone();
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            prog_player.borrow_mut().set_playback_priority(parsed);
+            reply.send(json!({
+                "success": true,
+                "playback_priority": new_state.playback_priority.as_str()
+            })).ok();
         }
 
         McpCommand::AddClip { source_path, track_index, timeline_start_ns, source_in_ns, source_out_ns, reply } => {
