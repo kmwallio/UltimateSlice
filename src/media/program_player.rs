@@ -43,6 +43,9 @@ pub struct ProgramClip {
     pub title_y: f64,
     /// Playback speed multiplier (default 1.0). >1 = fast, <1 = slow.
     pub speed: f64,
+    /// True for clips that have no video (audio-track clips). They are routed
+    /// to a dedicated audio-only pipeline instead of the video player.
+    pub is_audio_only: bool,
 }
 
 impl ProgramClip {
@@ -67,7 +70,10 @@ impl ProgramClip {
 pub struct ProgramPlayer {
     pipeline: gst::Element,
     state: PlayerState,
-    pub clips: Vec<ProgramClip>,
+    pub clips: Vec<ProgramClip>,      // video-track clips only
+    audio_clips: Vec<ProgramClip>,    // audio-track clips only
+    audio_pipeline: gst::Element,     // separate playbin for audio-only clips
+    audio_current_idx: Option<usize>,
     current_idx: Option<usize>,
     /// Cached timeline position in nanoseconds (updated by `poll`)
     pub timeline_pos_ns: u64,
@@ -175,11 +181,23 @@ impl ProgramPlayer {
             pipeline.set_property("audio-filter", ap);
         }
 
+        // Dedicated audio-only pipeline: video routed to fakesink so it plays
+        // audio-track clips without interfering with the visual display.
+        let fakevideo = gst::ElementFactory::make("fakesink").build()
+            .unwrap_or_else(|_| gst::ElementFactory::make("autovideosink").build().unwrap());
+        let audio_pipeline = gst::ElementFactory::make("playbin")
+            .property("video-sink", &fakevideo)
+            .build()
+            .unwrap_or_else(|_| gst::ElementFactory::make("playbin").build().unwrap());
+
         Ok((
             Self {
                 pipeline,
                 state: PlayerState::Stopped,
                 clips: Vec::new(),
+                audio_clips: Vec::new(),
+                audio_pipeline,
+                audio_current_idx: None,
                 current_idx: None,
                 timeline_pos_ns: 0,
                 timeline_dur_ns: 0,
@@ -198,10 +216,18 @@ impl ProgramPlayer {
     /// Update the clip list from the project model. Resets playback.
     pub fn load_clips(&mut self, mut clips: Vec<ProgramClip>) {
         clips.sort_by_key(|c| c.timeline_start_ns);
-        self.timeline_dur_ns = clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
-        self.clips = clips;
+        // Separate audio-only clips from video clips
+        let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
+        self.audio_clips = audio;
+        self.clips = video;
+        // Timeline duration is the max across both sets
+        let vdur = self.clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
+        let adur = self.audio_clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
+        self.timeline_dur_ns = vdur.max(adur);
         self.current_idx = None;
+        self.audio_current_idx = None;
         let _ = self.pipeline.set_state(gst::State::Ready);
+        let _ = self.audio_pipeline.set_state(gst::State::Ready);
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
     }
@@ -215,6 +241,8 @@ impl ProgramPlayer {
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.current_idx = None;
         }
+        // Sync audio pipeline
+        self.sync_audio_to(timeline_pos_ns);
     }
 
     pub fn play(&mut self) {
@@ -225,7 +253,6 @@ impl ProgramPlayer {
             }
         }
         // Block briefly until the pipeline reaches PAUSED so our seek is accepted.
-        // The initial seek in load_clip_idx can be dropped if issued during async pre-roll.
         let _ = self.pipeline.state(gst::ClockTime::from_mseconds(100));
         // Re-seek to make sure we start at the right position with the correct rate.
         if let Some(idx) = self.current_idx {
@@ -242,11 +269,28 @@ impl ProgramPlayer {
             );
         }
         let _ = self.pipeline.set_state(gst::State::Playing);
+        // Also start the audio pipeline
+        self.sync_audio_to(pos);
+        let _ = self.audio_pipeline.state(gst::ClockTime::from_mseconds(100));
+        if let Some(aidx) = self.audio_current_idx {
+            let aclip = &self.audio_clips[aidx];
+            let asrc = aclip.source_pos_ns(pos);
+            let _ = self.audio_pipeline.seek(
+                1.0_f64,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(asrc),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
+            );
+        }
+        let _ = self.audio_pipeline.set_state(gst::State::Playing);
         self.state = PlayerState::Playing;
     }
 
     pub fn pause(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Paused);
+        let _ = self.audio_pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Paused;
     }
 
@@ -260,6 +304,7 @@ impl ProgramPlayer {
     /// Stop playback and return to position 0.
     pub fn stop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Paused);
+        let _ = self.audio_pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Paused;
         self.timeline_pos_ns = 0;
         if let Some(idx) = self.clip_at(0) {
@@ -268,6 +313,7 @@ impl ProgramPlayer {
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.current_idx = None;
         }
+        self.sync_audio_to(0);
         self.state = PlayerState::Stopped;
     }
 
@@ -313,17 +359,19 @@ impl ProgramPlayer {
 
         // Detect clip end (GStreamer position may slightly overshoot source_out)
         if src_pos >= clip.source_out_ns || self.is_eos() {
-            // Advance to next clip
+            // Advance to next video clip
             let next_idx = idx + 1;
             if next_idx < self.clips.len() {
                 let next_start = self.clips[next_idx].timeline_start_ns;
                 self.load_clip_idx(next_idx, next_start);
                 let _ = self.pipeline.set_state(gst::State::Playing);
             } else {
-                // End of timeline
+                // End of video timeline
                 let _ = self.pipeline.set_state(gst::State::Ready);
+                let _ = self.audio_pipeline.set_state(gst::State::Ready);
                 self.state = PlayerState::Stopped;
                 self.current_idx = None;
+                self.audio_current_idx = None;
             }
             return true;
         }
@@ -334,6 +382,10 @@ impl ProgramPlayer {
         let new_pos = clip.timeline_start_ns + timeline_offset;
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
+
+        // Advance audio pipeline if needed (audio clip boundary)
+        self.poll_audio(new_pos);
+
         changed
     }
 
@@ -534,10 +586,78 @@ impl ProgramPlayer {
         }
         false
     }
+
+    fn audio_clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
+        self.audio_clips.iter().position(|c| {
+            timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+        })
+    }
+
+    /// Load an audio clip into the audio pipeline and seek to the right source position.
+    fn load_audio_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
+        let clip = &self.audio_clips[idx];
+        let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
+        self.audio_pipeline.set_property("volume", clip.volume.clamp(0.0, 2.0));
+
+        if self.audio_current_idx == Some(idx) {
+            let _ = self.audio_pipeline.seek(
+                1.0_f64,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
+            );
+        } else {
+            let uri = format!("file://{}", clip.source_path);
+            let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.audio_pipeline.set_property("uri", &uri);
+            let _ = self.audio_pipeline.set_state(gst::State::Paused);
+            let _ = self.audio_pipeline.seek(
+                1.0_f64,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
+            );
+        }
+        self.audio_current_idx = Some(idx);
+    }
+
+    /// Seek the audio pipeline to match the given timeline position.
+    fn sync_audio_to(&mut self, timeline_pos_ns: u64) {
+        if let Some(idx) = self.audio_clip_at(timeline_pos_ns) {
+            self.load_audio_clip_idx(idx, timeline_pos_ns);
+        } else {
+            // No audio clip at this position — stop audio pipeline
+            let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.audio_current_idx = None;
+        }
+    }
+
+    /// Called each poll tick to advance the audio pipeline across clip boundaries.
+    fn poll_audio(&mut self, timeline_pos_ns: u64) {
+        let wanted = self.audio_clip_at(timeline_pos_ns);
+        if wanted != self.audio_current_idx {
+            match wanted {
+                Some(idx) => {
+                    self.load_audio_clip_idx(idx, timeline_pos_ns);
+                    let _ = self.audio_pipeline.set_state(gst::State::Playing);
+                }
+                None => {
+                    let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                    self.audio_current_idx = None;
+                }
+            }
+        }
+    }
 }
+
 
 impl Drop for ProgramPlayer {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
+        let _ = self.audio_pipeline.set_state(gst::State::Null);
     }
 }

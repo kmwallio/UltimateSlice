@@ -69,12 +69,21 @@ pub fn export_project(
 ) -> Result<()> {
     let out_w = if options.output_width  == 0 { project.width  } else { options.output_width  };
     let out_h = if options.output_height == 0 { project.height } else { options.output_height };
-    let mut video_clips: Vec<_> = project.video_tracks()
-        .flat_map(|t| t.clips.iter())
-        .collect();
-    video_clips.sort_by_key(|c| c.timeline_start);
 
-    if video_clips.is_empty() {
+    // Primary video track (first video track) — forms the base concat sequence.
+    // Secondary video tracks are composited on top with overlay.
+    let mut video_tracks_iter = project.video_tracks();
+    let primary_clips: Vec<&crate::model::clip::Clip> = video_tracks_iter
+        .next().map(|t| t.clips.iter().collect()).unwrap_or_default();
+
+    // Remaining video tracks: each is a list of (overlay) clips
+    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project.video_tracks()
+        .skip(1)
+        .filter(|t| !t.muted)
+        .map(|t| t.clips.iter().collect())
+        .collect();
+
+    if primary_clips.is_empty() {
         return Err(anyhow!("No video clips to export"));
     }
 
@@ -84,6 +93,9 @@ pub fn export_project(
         .flat_map(|t| t.clips.iter())
         .collect();
     audio_clips.sort_by_key(|c| c.timeline_start);
+
+    // Flatten secondary clips for indexing
+    let secondary_clips_flat: Vec<_> = secondary_track_clips.iter().flatten().copied().collect();
 
     let total_duration_us = project.duration().max(1) / 1_000;
     let _ = tx.send(ExportProgress::Progress(0.0));
@@ -96,17 +108,28 @@ pub fn export_project(
         .arg("-progress").arg("pipe:2")
         .arg("-nostats");
 
-    // Video clip inputs: indices 0..video_clips.len()
-    for clip in &video_clips {
+    // Inputs: primary video clips (0..primary_clips.len())
+    for clip in &primary_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
-        // Read from source file using source material duration (before speed change)
         let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
         cmd.arg("-ss").arg(format!("{in_s:.6}"))
             .arg("-t").arg(format!("{src_dur_s:.6}"))
             .arg("-i").arg(&clip.source_path);
     }
 
-    // Audio-only clip inputs: indices video_clips.len()..
+    // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
+    for clip in &secondary_clips_flat {
+        let in_s = clip.source_in as f64 / 1_000_000_000.0;
+        let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
+        cmd.arg("-ss").arg(format!("{in_s:.6}"))
+            .arg("-t").arg(format!("{src_dur_s:.6}"))
+            .arg("-i").arg(&clip.source_path);
+    }
+
+    let sec_base = primary_clips.len();
+
+    // Audio-only clip inputs
+    let audio_base = sec_base + secondary_clips_flat.len();
     for clip in &audio_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
         let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
@@ -117,76 +140,90 @@ pub fn export_project(
 
     let mut filter = String::new();
 
-    // === Video pipeline: scale/pad each clip, apply color correction, then concatenate ===
-    for (i, clip) in video_clips.iter().enumerate() {
-        // Append eq filter only when values deviate from neutral to avoid no-op overhead.
-        let color_filter = if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
-            format!(
-                ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
-                clip.brightness.clamp(-1.0, 1.0),
-                clip.contrast.clamp(0.0, 2.0),
-                clip.saturation.clamp(0.0, 2.0),
-            )
-        } else {
-            String::new()
-        };
-        // hqdn3d for denoise (luma_spatial, luma_tmp proportional to strength)
-        let denoise_filter = if clip.denoise > 0.0 {
-            let d = clip.denoise.clamp(0.0, 1.0);
-            format!(",hqdn3d={:.4}:{:.4}:{:.4}:{:.4}",
-                d * 4.0, d * 3.0, d * 6.0, d * 4.5)
-        } else {
-            String::new()
-        };
-        // unsharp for sharpness (positive = sharpen, negative = soften/blur)
-        let sharpen_filter = if clip.sharpness != 0.0 {
-            let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
-            format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
-        } else {
-            String::new()
-        };
-        // Speed: setpts adjusts video PTS (PTS/speed → 2x faster video at speed=2.0)
-        let speed_filter = if (clip.speed - 1.0).abs() > 0.001 {
-            format!(",setpts=PTS/{:.6}", clip.speed)
-        } else {
-            String::new()
-        };
+    // === Primary video track: scale/correct each clip then concatenate ===
+    for (i, clip) in primary_clips.iter().enumerate() {
+        let color_filter = build_color_filter(clip);
+        let denoise_filter = build_denoise_filter(clip);
+        let sharpen_filter = build_sharpen_filter(clip);
+        let speed_filter = build_speed_filter(clip);
         filter.push_str(&format!(
-            "[{i}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{speed_filter}[v{i}];",
-            out_w, out_h, out_w, out_h,
+            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{speed_filter}[pv{i}];",
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
-    for i in 0..video_clips.len() {
-        filter.push_str(&format!("[v{i}]"));
+    for i in 0..primary_clips.len() {
+        filter.push_str(&format!("[pv{i}]"));
     }
-    filter.push_str(&format!("concat=n={}:v=1:a=0[vout]", video_clips.len()));
+    filter.push_str(&format!("concat=n={}:v=1:a=0[vbase]", primary_clips.len()));
 
-    // === Audio pipeline: delay each stream to its timeline position then mix ===
+    // === Secondary video tracks: overlay each clip at its timeline position ===
+    // Chain overlays: [vbase] → overlay clip 0 → [vcomp0] → overlay clip 1 → [vcomp1] → ...
+    let mut prev_label = "vbase".to_string();
+    for (k, clip) in secondary_clips_flat.iter().enumerate() {
+        let in_idx = sec_base + k;
+        let color_filter = build_color_filter(clip);
+        let denoise_filter = build_denoise_filter(clip);
+        let sharpen_filter = build_sharpen_filter(clip);
+        let speed_filter = build_speed_filter(clip);
+        // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
+        let ov_label = format!("ov{k}");
+        filter.push_str(&format!(
+            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuva420p{color_filter}{denoise_filter}{sharpen_filter}{speed_filter}[{ov_label}raw]"
+        ));
+        // Delay PTS to timeline position so the overlay lands at the right time
+        let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
+        filter.push_str(&format!(
+            ";[{ov_label}raw]setpts=PTS+{start_s:.6}/TB[{ov_label}]"
+        ));
+        let next_label = format!("vcomp{k}");
+        let end_s = (clip.timeline_start + clip.duration()) as f64 / 1_000_000_000.0;
+        filter.push_str(&format!(
+            ";[{prev_label}][{ov_label}]overlay=x=0:y=0:enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
+        ));
+        prev_label = next_label;
+    }
+    // Final output video label — use the last composited label directly
+    let vout_label = prev_label;
+
+    // === Audio pipeline ===
     let mut audio_labels: Vec<String> = Vec::new();
 
-    // Extract embedded audio from video clips (only ClipKind::Video with an audio stream)
-    for (i, clip) in video_clips.iter().enumerate() {
+    // Embedded audio from primary video clips, with per-clip volume scaling
+    for (i, clip) in primary_clips.iter().enumerate() {
         if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
             let atempo = build_atempo(clip.speed);
-            filter.push_str(&format!(";[{i}:a]{atempo}adelay={delay_ms}:all=1[{label}]"));
+            let vol = clip.volume;
+            filter.push_str(&format!(";[{i}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"));
             audio_labels.push(label);
         }
     }
 
-    // Extract audio from audio-only clips
-    let audio_base = video_clips.len();
+    // Embedded audio from secondary video clips (with their volume)
+    for (k, clip) in secondary_clips_flat.iter().enumerate() {
+        let in_idx = sec_base + k;
+        if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
+            let delay_ms = clip.timeline_start / 1_000_000;
+            let label = format!("sva{k}");
+            let atempo = build_atempo(clip.speed);
+            let vol = clip.volume;
+            filter.push_str(&format!(";[{in_idx}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"));
+            audio_labels.push(label);
+        }
+    }
+
+    // Audio-only track clips
     for (j, clip) in audio_clips.iter().enumerate() {
         let delay_ms = clip.timeline_start / 1_000_000;
         let label = format!("aa{j}");
         let atempo = build_atempo(clip.speed);
-        filter.push_str(&format!(";[{}:a]{atempo}adelay={delay_ms}:all=1[{label}]", audio_base + j));
+        let vol = clip.volume;
+        filter.push_str(&format!(";[{}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]", audio_base + j));
         audio_labels.push(label);
     }
 
-    // Mix all audio streams into one output
+    // Mix all audio streams
     let has_audio = !audio_labels.is_empty();
     if has_audio {
         let n = audio_labels.len();
@@ -198,7 +235,7 @@ pub fn export_project(
     }
 
     cmd.arg("-filter_complex").arg(&filter)
-        .arg("-map").arg("[vout]");
+        .arg("-map").arg(format!("[{vout_label}]"));
 
     if has_audio {
         cmd.arg("-map").arg("[aout]");
@@ -266,6 +303,35 @@ pub fn export_project(
 
     let _ = tx.send(ExportProgress::Done);
     Ok(())
+}
+
+fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
+        format!(",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
+            clip.brightness.clamp(-1.0, 1.0),
+            clip.contrast.clamp(0.0, 2.0),
+            clip.saturation.clamp(0.0, 2.0))
+    } else { String::new() }
+}
+
+fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.denoise > 0.0 {
+        let d = clip.denoise.clamp(0.0, 1.0);
+        format!(",hqdn3d={:.4}:{:.4}:{:.4}:{:.4}", d*4.0, d*3.0, d*6.0, d*4.5)
+    } else { String::new() }
+}
+
+fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.sharpness != 0.0 {
+        let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
+        format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
+    } else { String::new() }
+}
+
+fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
+    if (clip.speed - 1.0).abs() > 0.001 {
+        format!(",setpts=PTS/{:.6}", clip.speed)
+    } else { String::new() }
 }
 
 /// Build atempo filter chain for audio speed change.

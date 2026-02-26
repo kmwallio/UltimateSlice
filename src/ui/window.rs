@@ -406,7 +406,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 inspector_view.update(&proj, selected.as_deref());
 
                 let clips = proj.tracks.iter().flat_map(|t| {
-                    t.clips.iter().map(|c| ProgramClip {
+                    let audio_only = t.kind == TrackKind::Audio;
+                    t.clips.iter().map(move |c| ProgramClip {
                         source_path:       c.source_path.clone(),
                         source_in_ns:      c.source_in,
                         source_out_ns:     c.source_out,
@@ -431,6 +432,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         title_x:           c.title_x,
                         title_y:           c.title_y,
                         speed:             c.speed,
+                        is_audio_only:     audio_only,
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
