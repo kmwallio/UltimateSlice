@@ -1,0 +1,44 @@
+# Project Settings
+
+Click **⚙ Settings** in the toolbar to open the Project Settings dialog.
+
+## Canvas Size (Resolution)
+
+Choose the output frame size for the project:
+
+| Preset | Resolution | Aspect Ratio | Use Case |
+|---|---|---|---|
+| **1920 × 1080 (1080p HD)** | 1920 × 1080 | 16:9 | Standard HD (default) |
+| **3840 × 2160 (4K UHD)** | 3840 × 2160 | 16:9 | 4K delivery |
+| **1280 × 720 (720p HD)** | 1280 × 720 | 16:9 | Web / streaming |
+| **720 × 480 (SD NTSC)** | 720 × 480 | ~4:3 | Standard definition |
+| **1080 × 1920 (9:16 Vertical)** | 1080 × 1920 | 9:16 | Mobile / stories / reels |
+| **1080 × 1080 (1:1 Square)** | 1080 × 1080 | 1:1 | Social media square |
+
+All clips are automatically scaled and letterboxed/pillarboxed to fit the chosen canvas during both preview and export.
+
+## Frame Rate
+
+| Preset | Rate | Common Use |
+|---|---|---|
+| **23.976 fps** | 24000/1001 | Film / cinema (NTSC pulldown) |
+| **24 fps** | 24/1 | True cinema |
+| **25 fps** | 25/1 | PAL broadcast / European TV |
+| **29.97 fps** | 30000/1001 | NTSC broadcast / US TV |
+| **30 fps** | 30/1 | Web video |
+| **60 fps** | 60/1 | High frame rate / gaming |
+
+## Applying Changes
+
+- Click **Apply** to confirm. Changes take effect immediately.
+- The project is marked dirty (unsaved) after applying.
+
+## Saving
+
+Project settings (resolution and frame rate) are saved as the `<format>` element in the FCPXML file.
+
+Use **Save…** (`Ctrl+S`) to write the project to a `.fcpxml` file. Open with **Open…** (`Ctrl+O`) on any future session.
+
+## Auto-Save
+
+UltimateSlice auto-saves every 60 seconds to `/tmp/ultimateslice-autosave.fcpxml` when the project has unsaved changes. This is a safety net — use **Save…** for permanent storage.

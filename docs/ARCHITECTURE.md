@@ -11,7 +11,11 @@ When making changes, update these files as part of the same work:
 
 1. `CHANGELOG.md` — append a concise entry under **Unreleased** describing what changed and why.
 2. `ROADMAP.md` — keep implemented/planned checklists accurate for any affected feature area.
-3. MCP coverage — when adding a new user-facing feature, also add/update an MCP tool for it if one does not already exist and the feature is automatable via MCP. Test each feature using the MCP server.
+3. **`docs/user/`** — update (or create) the relevant feature markdown file(s) in `docs/user/`:
+   - Each feature has its own file (e.g. `timeline.md`, `inspector.md`, `export.md`).
+   - Add or update keyboard shortcuts in both the feature file **and** `docs/user/shortcuts.md`.
+   - Keep `docs/user/README.md` table of contents accurate.
+4. MCP coverage — when adding a new user-facing feature, also add/update an MCP tool for it if one does not already exist and the feature is automatable via MCP. Test each feature using the MCP server.
 
 Do this continuously as work is completed (not only at the end of large efforts).
 
@@ -56,6 +60,20 @@ src/
   mcp/
     mod.rs                  McpCommand enum; start_mcp_server() → mpsc::Receiver<McpCommand>
     server.rs               Stdio JSON-RPC 2.0 loop; dispatches 9 MCP tools to main thread
+
+docs/
+  ARCHITECTURE.md           This file — architecture reference and agent rules
+  user/
+    README.md               User documentation index
+    shortcuts.md            Complete keyboard shortcut reference
+    getting-started.md      Installation, build, window layout
+    media-library.md        Importing and browsing source clips
+    source-monitor.md       Source preview, In/Out points, shuttle controls
+    timeline.md             Clip arrangement, trimming, tools, markers
+    inspector.md            Per-clip color, effects, audio, transform, titles, speed
+    program-monitor.md      Assembled timeline playback
+    export.md               Advanced export: codecs, resolution, audio
+    project-settings.md     Canvas size, frame rate, save/load
 ```
 
 ---
