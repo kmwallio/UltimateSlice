@@ -11,6 +11,7 @@ use glib;
 use crate::media::player::PlayerState;
 use crate::ui_state::PlaybackPriority;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// A single RGBA frame pulled from the scope appsink for colour scope analysis.
 #[derive(Clone)]
@@ -145,9 +146,10 @@ pub struct ProgramPlayer {
     /// Current audio peak level in dBFS per channel [left, right].
     /// Updated each poll tick from `level` element bus messages; decays toward -60 over time.
     pub audio_peak_db: [f64; 2],
-    /// AppSink for colour scope frame analysis (320×180 RGBA, drop=true).
-    /// None if the tee-based sink bin could not be built.
-    scope_appsink: Option<AppSink>,
+    /// Latest RGBA frame captured from the scope appsink, updated via GStreamer
+    /// callbacks on both preroll (seek/pause) and new-sample (playback).
+    /// `Arc<Mutex<>>` because callbacks fire on GStreamer threads.
+    latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>>,
 }
 
 impl ProgramPlayer {
@@ -170,9 +172,14 @@ impl ProgramPlayer {
             Err(_) => paintablesink.clone(),
         };
 
+        // Shared frame store updated by the appsink callbacks (GStreamer threads → Arc<Mutex>).
+        let latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
+
         // Build a tee-based sink bin so frames are delivered to both the display
         // paintable and a small appsink (320×180 RGBA) for colour scope analysis.
-        let scope_result: Option<(gst::Bin, AppSink)> = (|| {
+        // The appsink uses callbacks (new_preroll + new_sample) so every decoded
+        // frame — whether during playback or after a seek/pause preroll — is captured.
+        let video_sink: gst::Element = (|| {
             let tee   = gst::ElementFactory::make("tee").build().ok()?;
             let q1    = gst::ElementFactory::make("queue").build().ok()?;
             let q2    = gst::ElementFactory::make("queue").build().ok()?;
@@ -187,6 +194,50 @@ impl ProgramPlayer {
                 .max_buffers(1u32)
                 .drop(true)
                 .build();
+
+            // Wire callbacks: captures both preroll (seek/pause) and live samples (playback).
+            let lsf_preroll = latest_scope_frame.clone();
+            let lsf_sample  = latest_scope_frame.clone();
+            sink.set_callbacks(
+                gstreamer_app::AppSinkCallbacks::builder()
+                    .new_preroll(move |appsink| {
+                        if let Ok(sample) = appsink.pull_preroll() {
+                            if let Some(buffer) = sample.buffer() {
+                                if let Ok(map) = buffer.map_readable() {
+                                    if map.size() >= 320 * 180 * 4 {
+                                        if let Ok(mut frame) = lsf_preroll.lock() {
+                                            *frame = Some(ScopeFrame {
+                                                data: map.as_slice().to_vec(),
+                                                width: 320,
+                                                height: 180,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .new_sample(move |appsink| {
+                        if let Ok(sample) = appsink.pull_sample() {
+                            if let Some(buffer) = sample.buffer() {
+                                if let Ok(map) = buffer.map_readable() {
+                                    if map.size() >= 320 * 180 * 4 {
+                                        if let Ok(mut frame) = lsf_sample.lock() {
+                                            *frame = Some(ScopeFrame {
+                                                data: map.as_slice().to_vec(),
+                                                width: 320,
+                                                height: 180,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .build()
+            );
 
             let sink_bin = gst::Bin::new();
             sink_bin.add_many([&tee, &q1, &video_sink_inner, &q2, &scale, &conv, sink.upcast_ref::<gst::Element>()]).ok()?;
@@ -205,13 +256,8 @@ impl ProgramPlayer {
             let ghost = gst::GhostPad::with_target(&tee.static_pad("sink")?).ok()?;
             sink_bin.add_pad(&ghost).ok()?;
 
-            Some((sink_bin, sink))
-        })();
-
-        let (video_sink, scope_appsink) = match scope_result {
-            Some((bin, appsink)) => (bin.upcast::<gst::Element>(), Some(appsink)),
-            None => (video_sink_inner, None),
-        };
+            Some(sink_bin.upcast::<gst::Element>())
+        })().unwrap_or(video_sink_inner);
 
         let pipeline = gst::ElementFactory::make("playbin")
             .property("video-sink", &video_sink)
@@ -393,7 +439,7 @@ impl ProgramPlayer {
                 level_element,
                 level_element_audio,
                 audio_peak_db: [-60.0, -60.0],
-                scope_appsink,
+                latest_scope_frame,
             },
             paintable,
             paintable2,
@@ -432,19 +478,11 @@ impl ProgramPlayer {
         (1.0, 0.0)
     }
 
-    /// Try to pull the latest decoded frame from the scope appsink (non-blocking).
-    /// Returns `None` if no new frame is available or if the scope appsink was not built.
-    /// The frame is 320×180 RGBA (4 bytes per pixel).
+    /// Returns the latest decoded scope frame (320×180 RGBA), or `None` if no
+    /// frame has been captured yet. Updated by GStreamer callbacks on both preroll
+    /// (every seek/pause) and new-sample (every decoded frame during playback).
     pub fn try_pull_scope_frame(&self) -> Option<ScopeFrame> {
-        let appsink = self.scope_appsink.as_ref()?;
-        let sample = appsink.try_pull_sample(gst::ClockTime::ZERO)?;
-        let buffer = sample.buffer()?;
-        let map = buffer.map_readable().ok()?;
-        Some(ScopeFrame {
-            data: map.as_slice().to_vec(),
-            width: 320,
-            height: 180,
-        })
+        self.latest_scope_frame.lock().ok()?.clone()
     }
 
     /// Activate the cross-dissolve transition preview: load the incoming clip into
