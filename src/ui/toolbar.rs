@@ -100,7 +100,7 @@ pub fn build_toolbar(
 
     // Open Recent — popover with the last 10 projects
     let btn_recent = gtk::MenuButton::new();
-    btn_recent.set_label("Recent ▾");
+    btn_recent.set_label("Recent");
     btn_recent.set_tooltip_text(Some("Open a recently used project"));
     {
         let project = project.clone();
