@@ -77,6 +77,10 @@ pub struct ProgramPlayer {
     audio_pipeline: gst::Element,     // separate playbin for audio-only clips
     audio_current_idx: Option<usize>,
     current_idx: Option<usize>,
+    /// Anchor pair for converting queried source position back into timeline position.
+    /// Updated on every video seek/load.
+    seek_anchor_timeline_ns: u64,
+    seek_anchor_source_ns: u64,
     /// Cached timeline position in nanoseconds (updated by `poll`)
     pub timeline_pos_ns: u64,
     /// Total timeline duration
@@ -201,6 +205,8 @@ impl ProgramPlayer {
                 audio_pipeline,
                 audio_current_idx: None,
                 current_idx: None,
+                seek_anchor_timeline_ns: 0,
+                seek_anchor_source_ns: 0,
                 timeline_pos_ns: 0,
                 timeline_dur_ns: 0,
                 videobalance,
@@ -228,6 +234,8 @@ impl ProgramPlayer {
         self.timeline_dur_ns = vdur.max(adur);
         self.current_idx = None;
         self.audio_current_idx = None;
+        self.seek_anchor_timeline_ns = 0;
+        self.seek_anchor_source_ns = 0;
         let _ = self.pipeline.set_state(gst::State::Ready);
         let _ = self.audio_pipeline.set_state(gst::State::Ready);
         self.state = PlayerState::Stopped;
@@ -242,6 +250,8 @@ impl ProgramPlayer {
         } else {
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.current_idx = None;
+            self.seek_anchor_timeline_ns = timeline_pos_ns;
+            self.seek_anchor_source_ns = 0;
         }
         // Sync audio pipeline
         self.sync_audio_to(timeline_pos_ns);
@@ -269,6 +279,8 @@ impl ProgramPlayer {
                 gst::SeekType::None,
                 gst::ClockTime::NONE,
             );
+            self.seek_anchor_timeline_ns = pos;
+            self.seek_anchor_source_ns = source_seek_ns;
         }
         let _ = self.pipeline.set_state(gst::State::Playing);
         // Also start the audio pipeline
@@ -314,6 +326,8 @@ impl ProgramPlayer {
         } else {
             let _ = self.pipeline.set_state(gst::State::Ready);
             self.current_idx = None;
+            self.seek_anchor_timeline_ns = 0;
+            self.seek_anchor_source_ns = 0;
         }
         self.sync_audio_to(0);
         self.state = PlayerState::Stopped;
@@ -400,10 +414,21 @@ impl ProgramPlayer {
             .unwrap_or(0);
         let eos = self.is_eos();
 
-        // Update timeline_pos from source position, accounting for speed
-        let offset_ns = src_pos.saturating_sub(clip.source_in_ns);
-        let timeline_offset = if clip.speed > 0.0 { (offset_ns as f64 / clip.speed) as u64 } else { offset_ns };
-        let mut new_pos = clip.timeline_start_ns + timeline_offset;
+        // Update timeline_pos from source position, accounting for speed.
+        // Handle both absolute and segment-relative query_position behaviors:
+        // - absolute: src_pos ~= seek_anchor_source_ns + elapsed
+        // - relative: src_pos ~= elapsed
+        let delta_src_ns = if src_pos.saturating_add(200_000_000) >= self.seek_anchor_source_ns {
+            src_pos.saturating_sub(self.seek_anchor_source_ns)
+        } else {
+            src_pos
+        };
+        let timeline_offset = if clip.speed > 0.0 {
+            (delta_src_ns as f64 / clip.speed) as u64
+        } else {
+            delta_src_ns
+        };
+        let mut new_pos = self.seek_anchor_timeline_ns + timeline_offset;
         // Prevent tiny decoder/keyframe backsteps from rewinding timeline state.
         if new_pos < self.timeline_pos_ns {
             new_pos = self.timeline_pos_ns;
@@ -681,6 +706,8 @@ impl ProgramPlayer {
         }
 
         self.current_idx = Some(idx);
+        self.seek_anchor_timeline_ns = timeline_pos_ns;
+        self.seek_anchor_source_ns = source_seek_ns;
         self.timeline_pos_ns = timeline_pos_ns;
     }
 
