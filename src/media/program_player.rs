@@ -359,12 +359,7 @@ impl ProgramPlayer {
             .query_position::<gst::ClockTime>()
             .map(|t| t.nseconds())
             .unwrap_or(0);
-
-        // If GStreamer reports position 0 but we know we're past the clip start
-        // (pipeline is still pre-rolling after a clip switch), skip this tick.
-        if src_pos == 0 && self.timeline_pos_ns > clip.timeline_start_ns {
-            return false;
-        }
+        let eos = self.is_eos();
 
         // Update timeline_pos from source position, accounting for speed
         let offset_ns = src_pos.saturating_sub(clip.source_in_ns);
@@ -379,7 +374,8 @@ impl ProgramPlayer {
         // Only trust EOS when we're already near the end to avoid stale EOS
         // messages from a previous clip forcing a false stop/restart.
         let near_end = src_pos.saturating_add(50_000_000) >= clip.source_out_ns; // 50ms
-        if src_pos >= clip.source_out_ns || (near_end && self.is_eos()) {
+        let near_timeline_end = new_pos.saturating_add(50_000_000) >= clip.timeline_end_ns();
+        if src_pos >= clip.source_out_ns || ((near_end || near_timeline_end) && eos) {
             // Find what should play at the current timeline position using track-priority logic.
             // This handles B-roll ending and resuming the primary clip underneath.
             let at_end_pos = clip.timeline_end_ns();
