@@ -583,6 +583,10 @@ pub fn build_toolbar(
     btn_razor.set_tooltip_text(Some("Razor/blade tool (B)"));
     btn_razor.set_group(Some(&btn_select));
 
+    let btn_ripple = ToggleButton::with_label("⇤ Ripple");
+    btn_ripple.set_tooltip_text(Some("Ripple edit tool (R)"));
+    btn_ripple.set_group(Some(&btn_select));
+
     {
         let timeline_state = timeline_state.clone();
         btn_select.connect_toggled(move |btn| {
@@ -596,6 +600,14 @@ pub fn build_toolbar(
         btn_razor.connect_toggled(move |btn| {
             if btn.is_active() {
                 timeline_state.borrow_mut().active_tool = ActiveTool::Razor;
+            }
+        });
+    }
+    {
+        let timeline_state = timeline_state.clone();
+        btn_ripple.connect_toggled(move |btn| {
+            if btn.is_active() {
+                timeline_state.borrow_mut().active_tool = ActiveTool::Ripple;
             }
         });
     }
@@ -613,6 +625,7 @@ pub fn build_toolbar(
 
     header.pack_start(&btn_select);
     header.pack_start(&btn_razor);
+    header.pack_start(&btn_ripple);
     header.pack_start(&btn_magnetic);
 
     header

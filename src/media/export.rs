@@ -151,16 +151,20 @@ pub fn export_project(
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
+    // Check for xfade and tpad support
+    let has_xfade = check_filter_support(&ffmpeg, "xfade");
+    let has_tpad = check_filter_support(&ffmpeg, "tpad");
+
     // Build primary-track sequence:
-    // - If transitions exist, chain xfade filters and compensate output length
-    //   with trailing tpad so timeline timing stays aligned with audio.
+    // - If transitions exist AND filters are supported, chain xfade filters
     // - Otherwise use concat (original behavior).
     let has_primary_transitions = primary_clips.iter()
         .take(primary_clips.len().saturating_sub(1))
         .any(|c| c.transition_after == "cross_dissolve" && c.transition_after_ns > 0);
+    
     if primary_clips.len() == 1 {
         filter.push_str("[pv0]copy[vbase]");
-    } else if has_primary_transitions {
+    } else if has_primary_transitions && has_xfade && has_tpad {
         let mut prev_label = "pv0".to_string();
         let mut running_s = primary_clips[0].duration() as f64 / 1_000_000_000.0;
         let mut total_overlap_s = 0.0_f64;
@@ -396,6 +400,22 @@ fn build_atempo(speed: f64) -> String {
     filters
 }
 
+
+fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
+    let output = Command::new(ffmpeg)
+        .arg("-filters")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    output.lines().any(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            parts[1] == filter_name
+        } else {
+            false
+        }
+    })
+}
 
 fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
     // Derive ffprobe path from ffmpeg path (they live side-by-side)

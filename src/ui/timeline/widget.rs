@@ -20,6 +20,7 @@ const TRIM_HANDLE_PX: f64 = 10.0;
 pub enum ActiveTool {
     Select,
     Razor,
+    Ripple,
 }
 
 /// What a drag gesture is currently doing
@@ -343,7 +344,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         if let Some(cb) = seek_cb { cb(ns); }
                         if let Some(cb) = proj_cb { cb(); }
                     }
-                    ActiveTool::Select => {
+                    ActiveTool::Select | ActiveTool::Ripple => {
                         // Select clip
                         let hit = st.hit_test(x, y);
                         match hit {
@@ -454,7 +455,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     if let Some(cb) = seek_cb { cb(ns); }
                     return;
                 }
-                if st.active_tool != ActiveTool::Select { return; }
+                if !matches!(st.active_tool, ActiveTool::Select | ActiveTool::Ripple) { return; }
 
                 let hit = st.hit_test(x, y);
                 if let Some(h) = hit {
@@ -661,7 +662,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
-                    DragOp::TrimOut { ref clip_id, ref track_id, .. } => {
+                    DragOp::TrimOut { ref clip_id, ref track_id, original_source_out: _, ref original_track_clips } => {
                         // Snap the out-point to nearby clip edges
                         let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
                         let snapped_ns = {
@@ -678,10 +679,46 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         };
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                if snapped_ns > clip.source_in + 1_000_000 {
-                                    let offset = snapped_ns.saturating_sub(clip.timeline_start);
-                                    clip.source_out = clip.source_in + offset;
+                            // Find original clip data to compute stable delta
+                            if let Some(orig_clip) = original_track_clips.iter().find(|c| &c.id == clip_id) {
+                                // Calculate new source_out based on original start
+                                let new_timeline_end = snapped_ns;
+                                let tl_start = orig_clip.timeline_start;
+                                
+                                if new_timeline_end > tl_start + 1_000_000 {
+                                    let new_dur = new_timeline_end - tl_start;
+                                    let new_source_out = orig_clip.source_in + new_dur;
+                                    
+                                    // Update target clip
+                                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                        clip.source_out = new_source_out;
+                                    }
+                                    
+                                    // Ripple Logic
+                                    if st.active_tool == ActiveTool::Ripple {
+                                        let old_dur = orig_clip.duration();
+                                        let delta = new_dur as i64 - old_dur as i64;
+                                        let threshold = orig_clip.timeline_end(); // Original end
+                                        
+                                        // Update subsequent clips
+                                        for clip in &mut track.clips {
+                                            // Find this clip in original_track_clips to get its base start
+                                            if let Some(orig_other) = original_track_clips.iter().find(|c| c.id == clip.id) {
+                                                if orig_other.timeline_start >= threshold {
+                                                    let new_start = (orig_other.timeline_start as i64 + delta).max(0) as u64;
+                                                    clip.timeline_start = new_start;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Fallback if original not found (shouldn't happen)
+                                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                    if snapped_ns > clip.source_in + 1_000_000 {
+                                        let offset = snapped_ns.saturating_sub(clip.timeline_start);
+                                        clip.source_out = clip.source_in + offset;
+                                    }
                                 }
                             }
                         }
@@ -830,8 +867,37 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
-                    DragOp::TrimOut { ref clip_id, ref track_id, original_source_out, original_track_clips } => {
-                        if magnetic_mode {
+                    DragOp::TrimOut { ref clip_id, ref track_id, original_source_out, ref original_track_clips } => {
+                        if st.active_tool == ActiveTool::Ripple {
+                            let new_source_out = {
+                                let proj = st.project.borrow();
+                                proj.tracks.iter()
+                                    .find(|t| &t.id == track_id)
+                                    .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
+                                    .map(|c| c.source_out)
+                            };
+                            if let Some(new_out) = new_source_out {
+                                if new_out != original_source_out {
+                                    let delta = if let Some(orig) = original_track_clips.iter().find(|c| &c.id == clip_id) {
+                                        let old_dur = orig.duration();
+                                        // New duration using original source_in
+                                        let new_dur = new_out - orig.source_in;
+                                        new_dur as i64 - old_dur as i64
+                                    } else { 0 };
+
+                                    let cmd = crate::undo::RippleTrimOutCommand {
+                                        clip_id: clip_id.clone(),
+                                        track_id: track_id.clone(),
+                                        old_source_out: original_source_out,
+                                        new_source_out: new_out,
+                                        delta,
+                                    };
+                                    st.history.undo_stack.push(Box::new(cmd));
+                                    st.history.redo_stack.clear();
+                                    st.project.borrow_mut().dirty = true;
+                                }
+                            }
+                        } else if magnetic_mode {
                             let mut new_clips = {
                                 let proj = st.project.borrow();
                                 proj.tracks.iter()
@@ -840,10 +906,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                     .unwrap_or_default()
                             };
                             compact_gap_free_clips(&mut new_clips);
-                            if new_clips != original_track_clips {
+                            if new_clips != *original_track_clips {
                                 let cmd = SetTrackClipsCommand {
                                     track_id: track_id.clone(),
-                                    old_clips: original_track_clips,
+                                    old_clips: original_track_clips.clone(),
                                     new_clips,
                                     label: "Trim out-point (magnetic)".to_string(),
                                 };
@@ -930,6 +996,15 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         ActiveTool::Select
                     } else {
                         ActiveTool::Razor
+                    };
+                    true
+                }
+                Key::r | Key::R => {
+                    // R = Ripple Edit
+                    st.active_tool = if st.active_tool == ActiveTool::Ripple {
+                        ActiveTool::Select
+                    } else {
+                        ActiveTool::Ripple
                     };
                     true
                 }

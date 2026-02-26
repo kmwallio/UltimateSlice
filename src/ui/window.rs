@@ -186,7 +186,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let player = player.clone();
         let prog_player = prog_player.clone();
         timeline_state.borrow_mut().on_seek = Some(Rc::new(move |ns| {
-            let _ = player.borrow().seek(ns);
             prog_player.borrow_mut().seek(ns);
         }));
     }

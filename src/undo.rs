@@ -87,6 +87,65 @@ impl EditCommand for TrimOutCommand {
     fn description(&self) -> &str { "Trim clip out-point" }
 }
 
+/// Ripple trim the out-point of a clip (shifting subsequent clips)
+pub struct RippleTrimOutCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_source_out: u64,
+    pub new_source_out: u64,
+    /// The delta applied to subsequent clips (can be positive or negative)
+    pub delta: i64,
+}
+
+impl EditCommand for RippleTrimOutCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            let mut original_end = None;
+            // 1. Find the clip, get its ORIGINAL end (before modification), then apply change
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                original_end = Some(clip.timeline_end());
+                clip.source_out = self.new_source_out;
+            }
+            
+            // 2. Shift subsequent clips based on ORIGINAL end threshold
+            if let Some(threshold) = original_end {
+                for clip in &mut track.clips {
+                    // Skip the clip itself (by ID) if needed, but here we filter by position.
+                    // The clip itself starts BEFORE the threshold (obviously).
+                    // Subsequent clips start >= threshold.
+                    if clip.timeline_start >= threshold {
+                        let new_start = (clip.timeline_start as i64 + self.delta).max(0) as u64;
+                        clip.timeline_start = new_start;
+                    }
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            let mut current_end = None;
+            // 1. Find clip, get CURRENT end (which is the 'new' state we are undoing), then restore
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                current_end = Some(clip.timeline_end());
+                clip.source_out = self.old_source_out;
+            }
+            
+            // 2. Shift clips back using the CURRENT end as threshold
+            if let Some(threshold) = current_end {
+                for clip in &mut track.clips {
+                    if clip.timeline_start >= threshold {
+                        let new_start = (clip.timeline_start as i64 - self.delta).max(0) as u64;
+                        clip.timeline_start = new_start;
+                    }
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Ripple trim" }
+}
+
 /// Delete a clip from a track
 pub struct DeleteClipCommand {
     pub clip: Clip,
@@ -365,5 +424,113 @@ fn move_clip(project: &mut Project, clip_id: &str, from_track_id: &str, to_track
             to_track.add_clip(clip);
         }
         project.dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::project::Project;
+    use crate::model::track::{Track, TrackKind};
+    use crate::model::clip::{Clip, ClipKind};
+
+    #[test]
+    fn test_ripple_trim_out() {
+        let mut project = Project::new("Test Project");
+        let mut track = Track::new_video("Video Track");
+        let track_id = track.id.clone();
+        
+        // Clip A: 0..10
+        let mut clip_a = Clip::new("file1", 10, 0, ClipKind::Video);
+        clip_a.id = "A".to_string();
+        track.add_clip(clip_a);
+
+        // Clip B: 15..25
+        let mut clip_b = Clip::new("file2", 10, 15, ClipKind::Video);
+        clip_b.id = "B".to_string();
+        track.add_clip(clip_b);
+
+        project.tracks.push(track);
+
+        // Ripple Trim Out: Shorten A by 2 (10 -> 8). Delta = -2.
+        // B should shift by -2 (15 -> 13).
+        let cmd = RippleTrimOutCommand {
+            clip_id: "A".to_string(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 8,
+            delta: -2,
+        };
+        
+        cmd.execute(&mut project);
+        
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let a = track.clips.iter().find(|c| c.id == "A").unwrap();
+        let b = track.clips.iter().find(|c| c.id == "B").unwrap();
+        
+        assert_eq!(a.source_out, 8);
+        assert_eq!(a.timeline_end(), 8);
+        assert_eq!(b.timeline_start, 13);
+        
+        // Undo
+        cmd.undo(&mut project);
+        
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let a = track.clips.iter().find(|c| c.id == "A").unwrap();
+        let b = track.clips.iter().find(|c| c.id == "B").unwrap();
+        
+        assert_eq!(a.source_out, 10);
+        assert_eq!(a.timeline_end(), 10);
+        assert_eq!(b.timeline_start, 15);
+    }
+
+    #[test]
+    fn test_ripple_trim_out_extend() {
+        let mut project = Project::new("Test Project");
+        let mut track = Track::new_video("Video Track");
+        let track_id = track.id.clone();
+
+        // Clip A: 0..10
+        let mut clip_a = Clip::new("file1", 10, 0, ClipKind::Video);
+        clip_a.id = "A".to_string();
+        track.add_clip(clip_a);
+
+        // Clip B: 11..21 (gap of 1)
+        let mut clip_b = Clip::new("file2", 10, 11, ClipKind::Video);
+        clip_b.id = "B".to_string();
+        track.add_clip(clip_b);
+
+        project.tracks.push(track);
+
+        // Ripple Trim Out: Extend A by 2 (10 -> 12). Delta = +2.
+        // B should shift by +2 (11 -> 13).
+        let cmd = RippleTrimOutCommand {
+            clip_id: "A".to_string(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 12,
+            delta: 2,
+        };
+        
+        cmd.execute(&mut project);
+        
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let a = track.clips.iter().find(|c| c.id == "A").unwrap();
+        let b = track.clips.iter().find(|c| c.id == "B").unwrap();
+        
+        assert_eq!(a.source_out, 12);
+        assert_eq!(a.timeline_end(), 12);
+        assert_eq!(b.timeline_start, 13);
+        
+        // Undo
+        cmd.undo(&mut project);
+        
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let a = track.clips.iter().find(|c| c.id == "A").unwrap();
+        let b = track.clips.iter().find(|c| c.id == "B").unwrap();
+        
+        assert_eq!(a.source_out, 10);
+        assert_eq!(a.timeline_end(), 10);
+        assert_eq!(b.timeline_start, 11);
     }
 }
