@@ -1,0 +1,212 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background -->
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1c1c2e"/>
+      <stop offset="100%" stop-color="#06060f"/>
+    </radialGradient>
+
+    <!-- Metallic blade -->
+    <linearGradient id="blade" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#e4e4e4"/>
+      <stop offset="18%"  stop-color="#ffffff"/>
+      <stop offset="55%"  stop-color="#c8c8c8"/>
+      <stop offset="100%" stop-color="#848484"/>
+    </linearGradient>
+
+    <!-- Dark wood handle -->
+    <linearGradient id="handle" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#3e1c0c"/>
+      <stop offset="100%" stop-color="#160804"/>
+    </linearGradient>
+
+    <!-- Golden center glow -->
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#d4a020" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#d4a020" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Camera body -->
+    <linearGradient id="camBody" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#404040"/>
+      <stop offset="100%" stop-color="#181818"/>
+    </linearGradient>
+
+    <!-- Camera magazine -->
+    <linearGradient id="camMag" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#282828"/>
+      <stop offset="100%" stop-color="#101010"/>
+    </linearGradient>
+
+    <!-- Lens glass — deep blue -->
+    <radialGradient id="lens" cx="33%" cy="33%" r="67%">
+      <stop offset="0%"   stop-color="#5080c8"/>
+      <stop offset="45%"  stop-color="#142060"/>
+      <stop offset="100%" stop-color="#030810"/>
+    </radialGradient>
+
+    <!-- Drop shadow for all major elements -->
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="9" flood-color="#000" flood-opacity="0.85"/>
+    </filter>
+  </defs>
+
+  <!-- ── Background ── -->
+  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
+
+  <!-- Center glow halo -->
+  <ellipse cx="256" cy="256" rx="155" ry="155" fill="url(#glow)"/>
+
+  <!-- Decorative gold rings -->
+  <circle cx="256" cy="256" r="230" fill="none" stroke="#c8a020" stroke-width="1"   opacity="0.13"/>
+  <circle cx="256" cy="256" r="212" fill="none" stroke="#c8a020" stroke-width="0.6" opacity="0.08"/>
+
+  <!-- ══════════════════════════════════════════════
+       KATANA 2  — rotate 135°
+       Tip → upper-right (~458, 54)
+       Pommel → lower-left (~55, 457)
+       ══════════════════════════════════════════════ -->
+  <g transform="translate(256,256) rotate(135)" filter="url(#shadow)">
+    <!-- Blade: tapered from tip (x=−285) to guard (x=110) -->
+    <path d="M -285,0 L -240,-0.8 L -80,-2.5 L 60,-4 L 100,-5 L 110,-5
+             L 110,5 L 100,5 L 60,4 L -80,2.5 L -240,0.8 Z"
+          fill="url(#blade)"/>
+    <!-- Edge highlight -->
+    <line x1="-282" y1="-0.5" x2="108" y2="-4.8" stroke="#fff" stroke-width="0.7" opacity="0.4"/>
+    <!-- Blood groove (hi) -->
+    <line x1="-220" y1="-1.8" x2="92" y2="-3.6" stroke="#ccc" stroke-width="0.6" opacity="0.25"/>
+
+    <!-- Tsuba (guard) — oval disc -->
+    <ellipse cx="116" cy="0" rx="16" ry="22" fill="#1c1c1c" stroke="#797979" stroke-width="2"/>
+    <ellipse cx="116" cy="0" rx="10" ry="15" fill="#252525" stroke="#555" stroke-width="1"/>
+    <circle  cx="116" cy="0" r="3.5" fill="#888"/>
+
+    <!-- Handle (tsuka) -->
+    <rect x="133" y="-9" width="150" height="18" fill="url(#handle)" rx="5"/>
+    <!-- Ito wrapping — two diagonal directions create diamond pattern -->
+    <g stroke="#7e3c1e" stroke-width="1.4" opacity="0.65">
+      <!-- ↘ diagonals -->
+      <line x1="133" y1="-9" x2="146" y2="9"/>  <line x1="146" y1="-9" x2="159" y2="9"/>
+      <line x1="159" y1="-9" x2="172" y2="9"/>  <line x1="172" y1="-9" x2="185" y2="9"/>
+      <line x1="185" y1="-9" x2="198" y2="9"/>  <line x1="198" y1="-9" x2="211" y2="9"/>
+      <line x1="211" y1="-9" x2="224" y2="9"/>  <line x1="224" y1="-9" x2="237" y2="9"/>
+      <line x1="237" y1="-9" x2="250" y2="9"/>  <line x1="250" y1="-9" x2="263" y2="9"/>
+      <line x1="263" y1="-9" x2="276" y2="9"/>  <line x1="276" y1="-9" x2="283" y2="9"/>
+      <!-- ↙ diagonals -->
+      <line x1="146" y1="-9" x2="133" y2="9"/>  <line x1="159" y1="-9" x2="146" y2="9"/>
+      <line x1="172" y1="-9" x2="159" y2="9"/>  <line x1="185" y1="-9" x2="172" y2="9"/>
+      <line x1="198" y1="-9" x2="185" y2="9"/>  <line x1="211" y1="-9" x2="198" y2="9"/>
+      <line x1="224" y1="-9" x2="211" y2="9"/>  <line x1="237" y1="-9" x2="224" y2="9"/>
+      <line x1="250" y1="-9" x2="237" y2="9"/>  <line x1="263" y1="-9" x2="250" y2="9"/>
+      <line x1="276" y1="-9" x2="263" y2="9"/>  <line x1="283" y1="-9" x2="276" y2="9"/>
+    </g>
+
+    <!-- Pommel (kashira) -->
+    <ellipse cx="286" cy="0" rx="13" ry="10" fill="#1e1e1e" stroke="#888" stroke-width="1.5"/>
+    <ellipse cx="286" cy="0" rx="8"  ry="6"  fill="#2c2c2c" stroke="#555" stroke-width="0.8"/>
+  </g>
+
+  <!-- ══════════════════════════════════════════════
+       KATANA 1  — rotate 45°
+       Tip → upper-left  (~54, 54)
+       Pommel → lower-right (~457, 457)
+       ══════════════════════════════════════════════ -->
+  <g transform="translate(256,256) rotate(45)" filter="url(#shadow)">
+    <path d="M -285,0 L -240,-0.8 L -80,-2.5 L 60,-4 L 100,-5 L 110,-5
+             L 110,5 L 100,5 L 60,4 L -80,2.5 L -240,0.8 Z"
+          fill="url(#blade)"/>
+    <line x1="-282" y1="-0.5" x2="108" y2="-4.8" stroke="#fff" stroke-width="0.7" opacity="0.5"/>
+    <line x1="-220" y1="-1.8" x2="92"  y2="-3.6" stroke="#ccc" stroke-width="0.6" opacity="0.25"/>
+
+    <ellipse cx="116" cy="0" rx="16" ry="22" fill="#1c1c1c" stroke="#888" stroke-width="2"/>
+    <ellipse cx="116" cy="0" rx="10" ry="15" fill="#262626" stroke="#555" stroke-width="1"/>
+    <circle  cx="116" cy="0" r="3.5" fill="#909090"/>
+
+    <rect x="133" y="-9" width="150" height="18" fill="url(#handle)" rx="5"/>
+    <g stroke="#7e3c1e" stroke-width="1.4" opacity="0.65">
+      <line x1="133" y1="-9" x2="146" y2="9"/>  <line x1="146" y1="-9" x2="159" y2="9"/>
+      <line x1="159" y1="-9" x2="172" y2="9"/>  <line x1="172" y1="-9" x2="185" y2="9"/>
+      <line x1="185" y1="-9" x2="198" y2="9"/>  <line x1="198" y1="-9" x2="211" y2="9"/>
+      <line x1="211" y1="-9" x2="224" y2="9"/>  <line x1="224" y1="-9" x2="237" y2="9"/>
+      <line x1="237" y1="-9" x2="250" y2="9"/>  <line x1="250" y1="-9" x2="263" y2="9"/>
+      <line x1="263" y1="-9" x2="276" y2="9"/>  <line x1="276" y1="-9" x2="283" y2="9"/>
+      <line x1="146" y1="-9" x2="133" y2="9"/>  <line x1="159" y1="-9" x2="146" y2="9"/>
+      <line x1="172" y1="-9" x2="159" y2="9"/>  <line x1="185" y1="-9" x2="172" y2="9"/>
+      <line x1="198" y1="-9" x2="185" y2="9"/>  <line x1="211" y1="-9" x2="198" y2="9"/>
+      <line x1="224" y1="-9" x2="211" y2="9"/>  <line x1="237" y1="-9" x2="224" y2="9"/>
+      <line x1="250" y1="-9" x2="237" y2="9"/>  <line x1="263" y1="-9" x2="250" y2="9"/>
+      <line x1="276" y1="-9" x2="263" y2="9"/>  <line x1="283" y1="-9" x2="276" y2="9"/>
+    </g>
+
+    <ellipse cx="286" cy="0" rx="13" ry="10" fill="#1e1e1e" stroke="#888" stroke-width="1.5"/>
+    <ellipse cx="286" cy="0" rx="8"  ry="6"  fill="#2c2c2c" stroke="#555" stroke-width="0.8"/>
+  </g>
+
+  <!-- ══════════════════════════════════════════════
+       CINEMA CAMERA  (in front of the intersection)
+       Body center ≈ (257, 259)
+       ══════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+
+    <!-- Top grip/handle -->
+    <rect x="226" y="145" width="64" height="22" fill="#2c2c2c" rx="5" stroke="#4c4c4c" stroke-width="1.5"/>
+    <g stroke="#3a3a3a" stroke-width="1.1" opacity="0.7">
+      <line x1="234" y1="145" x2="234" y2="167"/> <line x1="242" y1="145" x2="242" y2="167"/>
+      <line x1="250" y1="145" x2="250" y2="167"/> <line x1="258" y1="145" x2="258" y2="167"/>
+      <line x1="266" y1="145" x2="266" y2="167"/> <line x1="274" y1="145" x2="274" y2="167"/>
+      <line x1="282" y1="145" x2="282" y2="167"/>
+    </g>
+
+    <!-- Film magazine -->
+    <rect x="201" y="167" width="112" height="48" fill="url(#camMag)" rx="6" stroke="#424242" stroke-width="1.5"/>
+    <!-- Magazine horizontal seam -->
+    <line x1="201" y1="185" x2="313" y2="185" stroke="#2c2c2c" stroke-width="0.8"/>
+    <!-- Latches -->
+    <rect x="208" y="170" width="14" height="9" fill="#2e2e2e" rx="2" stroke="#525252" stroke-width="1"/>
+    <rect x="291" y="170" width="14" height="9" fill="#2e2e2e" rx="2" stroke="#525252" stroke-width="1"/>
+    <!-- Magazine label window -->
+    <rect x="228" y="174" width="58" height="20" fill="#161616" rx="2" stroke="#303030" stroke-width="0.5"/>
+
+    <!-- Main camera body -->
+    <rect x="171" y="213" width="172" height="92" fill="url(#camBody)" rx="7" stroke="#4a4a4a" stroke-width="1.5"/>
+    <!-- Body horizontal panel line -->
+    <line x1="171" y1="257" x2="343" y2="257" stroke="#2c2c2c" stroke-width="0.8" opacity="0.6"/>
+
+    <!-- Record button (top-right of body) -->
+    <circle cx="331" cy="222" r="8.5" fill="#c01616" stroke="#801010" stroke-width="1.5"/>
+    <circle cx="331" cy="222" r="5.5" fill="#e83030"/>
+    <circle cx="329" cy="220" r="2"   fill="#ff7070" opacity="0.55"/>
+
+    <!-- Lens barrel (extends left from body) -->
+    <rect x="117" y="233" width="58" height="58" fill="#181818" rx="5" stroke="#383838" stroke-width="1.5"/>
+    <!-- Focus ring tick marks on barrel left edge -->
+    <g stroke="#565656" stroke-width="1">
+      <line x1="117" y1="244" x2="120" y2="244"/> <line x1="117" y1="252" x2="120" y2="252"/>
+      <line x1="117" y1="260" x2="120" y2="260"/> <line x1="117" y1="268" x2="120" y2="268"/>
+      <line x1="117" y1="276" x2="120" y2="276"/> <line x1="117" y1="284" x2="120" y2="284"/>
+    </g>
+
+    <!-- Lens assembly (concentric rings) -->
+    <circle cx="146" cy="262" r="24" fill="#0e0e0e" stroke="#464646" stroke-width="2.5"/>
+    <circle cx="146" cy="262" r="19" fill="#0a0a0a" stroke="#343434" stroke-width="1.5"/>
+    <circle cx="146" cy="262" r="14" fill="url(#lens)"/>
+    <circle cx="146" cy="262" r="9"  fill="#040810" stroke="#1c2848" stroke-width="0.8"/>
+    <!-- Lens reflections -->
+    <ellipse cx="140" cy="256" rx="4"   ry="3"   fill="#fff" opacity="0.18"/>
+    <ellipse cx="150" cy="267" rx="2.5" ry="2"   fill="#fff" opacity="0.07"/>
+
+    <!-- Viewfinder (right side) -->
+    <rect x="341" y="226" width="30" height="22" fill="#181818" rx="3" stroke="#404040" stroke-width="1.5"/>
+    <rect x="368" y="231" width="15" height="12" fill="#0e0e0e" rx="2" stroke="#323232" stroke-width="1"/>
+    <ellipse cx="374" cy="237" rx="5" ry="4.5" fill="#080808" stroke="#222" stroke-width="0.8"/>
+
+    <!-- Body label / front plate area -->
+    <rect x="184" y="226" width="118" height="26" fill="#1c1c1c" rx="3" stroke="#303030" stroke-width="0.5"/>
+
+    <!-- Right-side body vents -->
+    <g stroke="#303030" stroke-width="1" opacity="0.55">
+      <line x1="335" y1="238" x2="335" y2="246"/> <line x1="338" y1="238" x2="338" y2="246"/>
+      <line x1="335" y1="267" x2="335" y2="275"/> <line x1="338" y1="267" x2="338" y2="275"/>
+    </g>
+  </g>
+</svg>
