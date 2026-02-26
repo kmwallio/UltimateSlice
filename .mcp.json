@@ -133,6 +133,19 @@
             },
             "required": ["path"]
           }
+        },
+        {
+          "name": "create_project",
+          "description": "Create a new empty project, discarding the current one. Resets the timeline to a blank state.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "description": "Title for the new project (default: 'Untitled')."
+              }
+            }
+          }
         }
       ]
     }

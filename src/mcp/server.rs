@@ -1,23 +1,28 @@
+use crate::mcp::McpCommand;
+use serde_json::{json, Value};
 /// MCP stdio transport — reads newline-delimited JSON-RPC from stdin,
 /// dispatches tool calls to the GTK main thread via `sender`, and
 /// writes JSON-RPC responses to stdout.
 use std::io::{BufRead, Write};
-use serde_json::{json, Value};
-use crate::mcp::McpCommand;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
-    let stdin  = std::io::stdin();
+    let stdin = std::io::stdin();
     let mut out = std::io::stdout();
 
     for line in stdin.lock().lines() {
-        let line = match line { Ok(l) => l, Err(_) => break };
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
         let line = line.trim().to_owned();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let msg: Value = match serde_json::from_str(&line) {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(e) => {
                 let r = err(Value::Null, -32700, &format!("Parse error: {e}"));
                 let _ = writeln!(out, "{r}");
@@ -29,19 +34,19 @@ pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
         // MCP notifications carry no "id" — do not respond.
         let id = match msg.get("id") {
             Some(id) => id.clone(),
-            None     => continue,
+            None => continue,
         };
 
         let method = msg["method"].as_str().unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(json!({}));
 
         let response = match method {
-            "initialize"     => ok(&id, initialize_result()),
-            "ping"           => ok(&id, json!({})),
-            "tools/list"     => ok(&id, tools_list()),
+            "initialize" => ok(&id, initialize_result()),
+            "ping" => ok(&id, json!({})),
+            "tools/list" => ok(&id, tools_list()),
             "resources/list" => ok(&id, json!({"resources": []})),
-            "tools/call"     => call_tool(&id, &params, &sender),
-            _                => err(id, -32601, "Method not found"),
+            "tools/call" => call_tool(&id, &params, &sender),
+            _ => err(id, -32601, "Method not found"),
         };
 
         let _ = writeln!(out, "{response}");
@@ -332,6 +337,16 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_id"]
             }
+        },
+        {
+            "name": "create_project",
+            "description": "Create a new empty project, discarding the current one. Resets the timeline to a blank state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Title for the new project (default: 'Untitled')." }
+                }
+            }
         }
     ]})
 }
@@ -347,8 +362,8 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
     let cmd = match name {
         "get_project" => McpCommand::GetProject { reply: tx },
-        "list_tracks" => McpCommand::ListTracks  { reply: tx },
-        "list_clips"  => McpCommand::ListClips   { reply: tx },
+        "list_tracks" => McpCommand::ListTracks { reply: tx },
+        "list_clips" => McpCommand::ListClips { reply: tx },
         "get_timeline_settings" => McpCommand::GetTimelineSettings { reply: tx },
         "set_magnetic_mode" => McpCommand::SetMagneticMode {
             enabled: args["enabled"].as_bool().unwrap_or(false),
@@ -366,11 +381,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "add_clip" => McpCommand::AddClip {
-            source_path:       args["source_path"].as_str().unwrap_or("").to_string(),
-            track_index:       args["track_index"].as_u64().unwrap_or(0) as usize,
+            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
+            track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
             timeline_start_ns: args["timeline_start_ns"].as_u64().unwrap_or(0),
-            source_in_ns:      args["source_in_ns"].as_u64().unwrap_or(0),
-            source_out_ns:     args["source_out_ns"].as_u64().unwrap_or(0),
+            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
+            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
             reply: tx,
         },
 
@@ -380,25 +395,25 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "move_clip" => McpCommand::MoveClip {
-            clip_id:      args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             new_start_ns: args["new_start_ns"].as_u64().unwrap_or(0),
             reply: tx,
         },
 
         "trim_clip" => McpCommand::TrimClip {
-            clip_id:       args["clip_id"].as_str().unwrap_or("").to_string(),
-            source_in_ns:  args["source_in_ns"].as_u64().unwrap_or(0),
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
             source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
             reply: tx,
         },
 
         "set_clip_color" => McpCommand::SetClipColor {
-            clip_id:    args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             brightness: args["brightness"].as_f64().unwrap_or(0.0),
-            contrast:   args["contrast"].as_f64().unwrap_or(1.0),
+            contrast: args["contrast"].as_f64().unwrap_or(1.0),
             saturation: args["saturation"].as_f64().unwrap_or(1.0),
-            denoise:    args["denoise"].as_f64().unwrap_or(0.0),
-            sharpness:  args["sharpness"].as_f64().unwrap_or(0.0),
+            denoise: args["denoise"].as_f64().unwrap_or(0.0),
+            sharpness: args["sharpness"].as_f64().unwrap_or(0.0),
             reply: tx,
         },
 
@@ -408,36 +423,36 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
-            path:  args["path"].as_str().unwrap_or("").to_string(),
+            path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 
         "open_fcpxml" => McpCommand::OpenFcpxml {
-            path:  args["path"].as_str().unwrap_or("").to_string(),
+            path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 
         "export_mp4" => McpCommand::ExportMp4 {
-            path:  args["path"].as_str().unwrap_or("").to_string(),
+            path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 
         "list_library" => McpCommand::ListLibrary { reply: tx },
 
         "import_media" => McpCommand::ImportMedia {
-            path:  args["path"].as_str().unwrap_or("").to_string(),
+            path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 
         "reorder_track" => McpCommand::ReorderTrack {
             from_index: args["from_index"].as_u64().unwrap_or(0) as usize,
-            to_index:   args["to_index"].as_u64().unwrap_or(0) as usize,
+            to_index: args["to_index"].as_u64().unwrap_or(0) as usize,
             reply: tx,
         },
         "set_transition" => McpCommand::SetTransition {
             track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
-            clip_index:  args["clip_index"].as_u64().unwrap_or(0) as usize,
-            kind:        args["kind"].as_str().unwrap_or("").to_string(),
+            clip_index: args["clip_index"].as_u64().unwrap_or(0) as usize,
+            kind: args["kind"].as_str().unwrap_or("").to_string(),
             duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
             reply: tx,
         },
@@ -446,18 +461,27 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             reply: tx,
         },
         "set_clip_lut" => McpCommand::SetClipLut {
-            clip_id:  args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             lut_path: match &args["lut_path"] {
                 Value::String(s) => Some(s.clone()),
-                Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => None,
+                Value::Null
+                | Value::Bool(_)
+                | Value::Number(_)
+                | Value::Array(_)
+                | Value::Object(_) => None,
             },
             reply: tx,
         },
         "set_clip_transform" => McpCommand::SetClipTransform {
-            clip_id:    args["clip_id"].as_str().unwrap_or("").to_string(),
-            scale:      args["scale"].as_f64().unwrap_or(1.0),
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            scale: args["scale"].as_f64().unwrap_or(1.0),
             position_x: args["position_x"].as_f64().unwrap_or(0.0),
             position_y: args["position_y"].as_f64().unwrap_or(0.0),
+            reply: tx,
+        },
+
+        "create_project" => McpCommand::CreateProject {
+            title: args["title"].as_str().unwrap_or("Untitled").to_string(),
             reply: tx,
         },
 
@@ -470,6 +494,6 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
     match rx.recv() {
         Ok(result) => ok(id, text_content(result)),
-        Err(_)     => err(id.clone(), -32603, "No reply from app"),
+        Err(_) => err(id.clone(), -32603, "No reply from app"),
     }
 }

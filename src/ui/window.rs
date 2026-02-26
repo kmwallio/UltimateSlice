@@ -1612,5 +1612,20 @@ fn handle_mcp_command(
             })).ok();
             on_project_changed();
         }
+
+        McpCommand::CreateProject { title, reply } => {
+            *project.borrow_mut() = crate::model::project::Project::new(title.clone());
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.playhead_ns = 0;
+                st.scroll_offset = 0.0;
+                st.pixels_per_second = 100.0;
+                st.selected_clip_id = None;
+                st.selected_track_id = None;
+                st.history = crate::undo::EditHistory::new();
+            }
+            reply.send(json!({"success": true, "title": title})).ok();
+            on_project_changed();
+        }
     }
 }

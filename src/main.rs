@@ -33,23 +33,29 @@ fn ensure_single_mcp_instance() {
         if let Ok(pid) = content.trim().parse::<u32>() {
             if process_exists(pid) {
                 eprintln!("[MCP] Terminating existing instance (PID {pid})…");
-                let _ = std::process::Command::new("kill")
+                let killed = std::process::Command::new("kill")
                     .args(["-15", &pid.to_string()])
-                    .status();
-                // Wait up to 3 s for graceful exit
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-                while std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    if !process_exists(pid) { break; }
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if killed {
+                    // Wait up to 3 s for graceful exit
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if !process_exists(pid) { break; }
+                    }
+                    // Force-kill if still alive
+                    if process_exists(pid) {
+                        eprintln!("[MCP] Sending SIGKILL to PID {pid}");
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &pid.to_string()])
+                            .status();
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
                 }
-                // Force-kill if still alive
-                if process_exists(pid) {
-                    eprintln!("[MCP] Sending SIGKILL to PID {pid}");
-                    let _ = std::process::Command::new("kill")
-                        .args(["-9", &pid.to_string()])
-                        .status();
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                }
+                // If kill failed (e.g., stale PID belonging to a system process),
+                // just remove the stale file and continue.
             }
         }
         let _ = std::fs::remove_file(MCP_PID_FILE);
