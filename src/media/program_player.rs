@@ -46,6 +46,8 @@ pub struct ProgramClip {
     /// True for clips that have no video (audio-track clips). They are routed
     /// to a dedicated audio-only pipeline instead of the video player.
     pub is_audio_only: bool,
+    /// Track index — higher index clips (B-roll, overlays) take priority in preview.
+    pub track_index: usize,
 }
 
 impl ProgramClip {
@@ -357,34 +359,61 @@ impl ProgramPlayer {
             .map(|t| t.nseconds())
             .unwrap_or(0);
 
-        // Detect clip end (GStreamer position may slightly overshoot source_out)
-        if src_pos >= clip.source_out_ns || self.is_eos() {
-            // Advance to next video clip
-            let next_idx = idx + 1;
-            if next_idx < self.clips.len() {
-                let next_start = self.clips[next_idx].timeline_start_ns;
-                self.load_clip_idx(next_idx, next_start);
-                let _ = self.pipeline.set_state(gst::State::Playing);
-            } else {
-                // End of video timeline
-                let _ = self.pipeline.set_state(gst::State::Ready);
-                let _ = self.audio_pipeline.set_state(gst::State::Ready);
-                self.state = PlayerState::Stopped;
-                self.current_idx = None;
-                self.audio_current_idx = None;
-            }
-            return true;
-        }
-
         // Update timeline_pos from source position, accounting for speed
         let offset_ns = src_pos.saturating_sub(clip.source_in_ns);
         let timeline_offset = if clip.speed > 0.0 { (offset_ns as f64 / clip.speed) as u64 } else { offset_ns };
         let new_pos = clip.timeline_start_ns + timeline_offset;
+
+        // Detect clip end (GStreamer position may slightly overshoot source_out)
+        if src_pos >= clip.source_out_ns || self.is_eos() {
+            // Find what should play at the current timeline position using track-priority logic.
+            // This handles B-roll ending and resuming the primary clip underneath.
+            let at_end_pos = clip.timeline_end_ns();
+            match self.clip_at(at_end_pos) {
+                Some(next_idx) if next_idx != idx => {
+                    self.load_clip_idx(next_idx, at_end_pos);
+                    let _ = self.pipeline.set_state(gst::State::Playing);
+                }
+                Some(_) => {
+                    // Same clip selected — try advancing past it to avoid infinite loop
+                    let past = at_end_pos + 1;
+                    if let Some(next_idx) = self.clip_at(past) {
+                        let next_start = self.clips[next_idx].timeline_start_ns;
+                        self.load_clip_idx(next_idx, next_start);
+                        let _ = self.pipeline.set_state(gst::State::Playing);
+                    } else {
+                        let _ = self.pipeline.set_state(gst::State::Ready);
+                        let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                        self.state = PlayerState::Stopped;
+                        self.current_idx = None;
+                        self.audio_current_idx = None;
+                    }
+                }
+                None => {
+                    // No clip active at this timeline position — end of timeline
+                    let _ = self.pipeline.set_state(gst::State::Ready);
+                    let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                    self.state = PlayerState::Stopped;
+                    self.current_idx = None;
+                    self.audio_current_idx = None;
+                }
+            }
+            return true;
+        }
+
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
 
         // Advance audio pipeline if needed (audio clip boundary)
         self.poll_audio(new_pos);
+
+        // If the desired clip changed (e.g. B-roll became active mid-playback), switch to it
+        if let Some(wanted) = self.clip_at(new_pos) {
+            if wanted != idx {
+                self.load_clip_idx(wanted, new_pos);
+                let _ = self.pipeline.set_state(gst::State::Playing);
+            }
+        }
 
         changed
     }
@@ -517,9 +546,11 @@ impl ProgramPlayer {
     // ── Private helpers ────────────────────────────────────────────────────
 
     fn clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
-        self.clips.iter().position(|c| {
-            timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
-        })
+        // Return the highest-track-index clip active at this position (B-roll beats primary).
+        self.clips.iter().enumerate()
+            .filter(|(_, c)| timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns())
+            .max_by_key(|(_, c)| c.track_index)
+            .map(|(i, _)| i)
     }
 
     fn load_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
