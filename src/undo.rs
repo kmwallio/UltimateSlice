@@ -202,6 +202,38 @@ impl EditCommand for SetClipColorCommand {
     fn description(&self) -> &str { "Set clip color" }
 }
 
+/// Set transition metadata on a clip boundary (clip -> next clip).
+pub struct SetClipTransitionCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_transition: String,
+    pub old_transition_ns: u64,
+    pub new_transition: String,
+    pub new_transition_ns: u64,
+}
+
+impl EditCommand for SetClipTransitionCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.transition_after = self.new_transition.clone();
+                clip.transition_after_ns = self.new_transition_ns;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.transition_after = self.old_transition.clone();
+                clip.transition_after_ns = self.old_transition_ns;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Set clip transition" }
+}
+
 /// Delete a track (stores full track + index for undo).
 pub struct DeleteTrackCommand {
     pub track: crate::model::track::Track,

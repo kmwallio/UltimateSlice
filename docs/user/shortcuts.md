@@ -42,6 +42,7 @@
 | `Delete` / `Backspace` | Delete selected clip |
 | `M` | Add chapter marker at playhead |
 | `Right-click ruler` | Remove nearest marker |
+| `Right-click transition marker` | Remove transition at clip boundary |
 | `Scroll (vertical)` | Zoom timeline in/out |
 | `Scroll (horizontal)` | Pan timeline left/right |
 | `?` / `/` | Show keyboard shortcut reference |

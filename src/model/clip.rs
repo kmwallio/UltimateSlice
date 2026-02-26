@@ -85,6 +85,12 @@ pub struct Clip {
     pub title_x: f64,       // 0.0–1.0 relative horizontal position
     #[serde(default = "default_title_y")]
     pub title_y: f64,       // 0.0–1.0 relative vertical position
+    /// Transition to the next clip on the same track (e.g. "cross_dissolve").
+    #[serde(default)]
+    pub transition_after: String,
+    /// Transition duration in nanoseconds for `transition_after` (0 = none).
+    #[serde(default)]
+    pub transition_after_ns: u64,
 }
 
 impl Clip {
@@ -123,6 +129,8 @@ impl Clip {
             title_color: default_title_color(),
             title_x: default_title_x(),
             title_y: default_title_y(),
+            transition_after: String::new(),
+            transition_after_ns: 0,
         }
     }
 

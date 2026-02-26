@@ -118,6 +118,7 @@ Tracking docs:
 - [x] Reorder tracks in the timeline (drag track labels)
 - [x] Active track highlighting (click empty area to select, visual accent bar)
 - [x] Smart Append (auto-detects audio/video, targets active or first matching track)
+- [x] Transitions pane with drag-and-drop transition application to timeline boundaries
 - [ ] Cross-dissolve transitions between clips
 - [ ] Ripple/roll/slip/slide edit modes
 

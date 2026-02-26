@@ -5,6 +5,11 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Transitions pane (v1)**:
+  - Added a right-sidebar **Transitions** pane below the Inspector with a hide/show toggle.
+  - Added a draggable **Cross-dissolve** transition item so future transitions can be added to the same pane.
+  - Dragging the transition onto a clip boundary in the timeline applies a transition marker (undoable).
+  - Right-clicking a transition marker now removes that transition (undoable).
 - **Undoable track add/remove**:
   - Adding and removing tracks now goes through the undo system (`Ctrl+Z` restores a deleted track with all its clips).
 - **Active track highlighting**:

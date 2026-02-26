@@ -367,14 +367,60 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                 }
             } else if button == 3 {
-                // Right-click → context actions (for now: delete selected)
-                let hit = st.hit_test(x, y);
-                if let Some(h) = hit {
-                    st.selected_clip_id = Some(h.clip_id);
-                    st.selected_track_id = Some(h.track_id);
+                // Right-click on transition marker → remove transition.
+                let track_idx = if y > RULER_HEIGHT {
+                    ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
+                } else {
+                    usize::MAX
+                };
+                let ns = st.x_to_ns(x);
+                let threshold_ns = ((12.0 / st.pixels_per_second) * NS_PER_SECOND as f64) as u64;
+                let transition_hit = {
+                    let proj = st.project.borrow();
+                    proj.tracks.get(track_idx).and_then(|track| {
+                        track.clips.iter()
+                            .filter(|c| !c.transition_after.is_empty() && c.transition_after_ns > 0)
+                            .filter_map(|c| {
+                                let diff = c.timeline_end().abs_diff(ns);
+                                if diff <= threshold_ns {
+                                    Some((c.id.clone(), track.id.clone(), c.transition_after.clone(), c.transition_after_ns, diff))
+                                } else {
+                                    None
+                                }
+                            })
+                            .min_by_key(|(_, _, _, _, diff)| *diff)
+                            .map(|(clip_id, track_id, old_transition, old_transition_ns, _)| {
+                                (clip_id, track_id, old_transition, old_transition_ns)
+                            })
+                    })
+                };
+
+                if let Some((clip_id, track_id, old_transition, old_transition_ns)) = transition_hit {
+                    let cmd = crate::undo::SetClipTransitionCommand {
+                        clip_id,
+                        track_id,
+                        old_transition,
+                        old_transition_ns,
+                        new_transition: String::new(),
+                        new_transition_ns: 0,
+                    };
+                    let project_rc = st.project.clone();
+                    let mut proj = project_rc.borrow_mut();
+                    st.history.execute(Box::new(cmd), &mut proj);
+                    let proj_cb = st.on_project_changed.clone();
+                    drop(proj);
+                    drop(st);
+                    if let Some(cb) = proj_cb { cb(); }
+                } else {
+                    // Right-click → context actions (for now: select clip for Delete key)
+                    let hit = st.hit_test(x, y);
+                    if let Some(h) = hit {
+                        st.selected_clip_id = Some(h.clip_id);
+                        st.selected_track_id = Some(h.track_id);
+                    }
+                    drop(st);
+                    // delete_selected called via keyboard (Delete key)
                 }
-                drop(st);
-                // delete_selected called via keyboard (Delete key)
             } else {
                 drop(st);
             }
@@ -945,36 +991,90 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     // ── Drop target: accept clips dragged from media browser ────────────────
     {
         use gtk4::DropTarget;
-        let drop = DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
+        let drop_target = DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
         let state = state.clone();
         let area_weak = area.downgrade();
-        drop.connect_drop(move |_target, value, x, y| {
+        drop_target.connect_drop(move |_target, value, x, y| {
             let payload = match value.get::<String>() {
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            // Payload format: "{source_path}|{duration_ns}"
-            let mut parts = payload.splitn(2, '|');
-            let source_path = match parts.next() { Some(p) => p.to_string(), None => return false };
-            let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-
-            let (track_idx, timeline_start_ns) = {
-                let st = state.borrow();
-                let track_row_idx = if y > RULER_HEIGHT {
+            if let Some(transition_kind) = payload.strip_prefix("transition:") {
+                let mut st = state.borrow_mut();
+                let track_idx = if y > RULER_HEIGHT {
                     ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
                 } else { 0 };
                 let tns = st.x_to_ns(x);
-                (track_row_idx, tns)
-            };
+                let threshold_ns = ((12.0 / st.pixels_per_second) * NS_PER_SECOND as f64) as u64;
+                let candidate = {
+                    let proj = st.project.borrow();
+                    let track = match proj.tracks.get(track_idx) {
+                        Some(t) => t,
+                        None => return false,
+                    };
+                    let mut best: Option<(String, String, String, u64)> = None;
+                    let mut best_diff = u64::MAX;
+                    for (i, clip) in track.clips.iter().enumerate() {
+                        if i + 1 >= track.clips.len() {
+                            continue;
+                        }
+                        let end = clip.timeline_end();
+                        let diff = end.abs_diff(tns);
+                        if diff <= threshold_ns && diff < best_diff {
+                            best = Some((
+                                track.id.clone(),
+                                clip.id.clone(),
+                                clip.transition_after.clone(),
+                                clip.transition_after_ns,
+                            ));
+                            best_diff = diff;
+                        }
+                    }
+                    best
+                };
+                if let Some((track_id, clip_id, old_transition, old_transition_ns)) = candidate {
+                    let cmd = crate::undo::SetClipTransitionCommand {
+                        clip_id,
+                        track_id,
+                        old_transition,
+                        old_transition_ns,
+                        new_transition: transition_kind.to_string(),
+                        new_transition_ns: 500_000_000,
+                    };
+                    let project_rc = st.project.clone();
+                    let mut proj = project_rc.borrow_mut();
+                    st.history.execute(Box::new(cmd), &mut proj);
+                    let cb = st.on_project_changed.clone();
+                    drop(proj);
+                    drop(st);
+                    if let Some(cb) = cb { cb(); }
+                } else {
+                    drop(st);
+                }
+            } else {
+                // Payload format: "{source_path}|{duration_ns}"
+                let mut parts = payload.splitn(2, '|');
+                let source_path = match parts.next() { Some(p) => p.to_string(), None => return false };
+                let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
-            let cb = state.borrow().on_drop_clip.clone();
-            if let Some(cb) = cb {
-                cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                let (track_idx, timeline_start_ns) = {
+                    let st = state.borrow();
+                    let track_row_idx = if y > RULER_HEIGHT {
+                        ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
+                    } else { 0 };
+                    let tns = st.x_to_ns(x);
+                    (track_row_idx, tns)
+                };
+
+                let cb = state.borrow().on_drop_clip.clone();
+                if let Some(cb) = cb {
+                    cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                }
             }
             if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
             true
         });
-        area.add_controller(drop);
+        area.add_controller(drop_target);
     }
 
     area
@@ -1153,6 +1253,17 @@ fn draw_track_row(
     // Draw clips first (they may overlap into label column before clipping)
     for clip in &track.clips {
         draw_clip(cr, y, clip, track, st, cache, wcache);
+    }
+
+    // Draw transition markers (clip -> next clip) after clip bodies.
+    for clip in &track.clips {
+        if clip.transition_after_ns > 0 && !clip.transition_after.is_empty() {
+            let ex = st.ns_to_x(clip.timeline_end());
+            let marker_w = 10.0;
+            cr.set_source_rgba(0.85, 0.85, 1.0, 0.75);
+            cr.rectangle(ex - marker_w / 2.0, y + 4.0, marker_w, TRACK_HEIGHT - 8.0);
+            cr.fill().ok();
+        }
     }
 
     // Draw label column on top so it stays visible when timeline is scrolled
@@ -1386,6 +1497,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Delete / Bksp",  "Delete selected clip"),
         ("M",              "Add marker at playhead"),
         ("Right-click ruler", "Remove nearest marker"),
+        ("Right-click transition", "Remove transition at boundary"),
         ("Ctrl+,",         "Open Preferences"),
         ("Ctrl+Z",         "Undo"),
         ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),

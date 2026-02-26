@@ -51,6 +51,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Delete` / `Backspace` | Delete selected clip |
 | `M` | Add chapter marker at current playhead position |
 | `Right-click ruler` | Remove the nearest marker |
+| `Right-click transition marker` | Remove transition at clip boundary |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 | `Scroll (vertical)` | Zoom timeline |
@@ -73,9 +74,17 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Muting an audio track excludes it from both preview and export.
 
+## Transitions
+
+- Use the **Transitions** pane on the right (below Inspector) to browse available transitions.
+- Use the pane's button to **hide/show** the transition list.
+- Drag **Cross-dissolve** from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
+- **Remove a transition** by right-clicking its boundary marker in the timeline.
+- Transitions are designed to be extensible: future transition types will appear in the same pane.
+
 ## Undo / Redo
 
-All clip moves, trims, splits, deletions, and track add/remove operations are undoable.
+All clip moves, trims, splits, deletions, track add/remove operations, and transition application are undoable.
 
 - `Ctrl+Z` — Undo
 - `Ctrl+Y` or `Ctrl+Shift+Z` — Redo

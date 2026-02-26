@@ -663,11 +663,71 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     root_hpaned.set_start_child(Some(&root_vpaned));
 
-    // Inspector on the right
+    // Right sidebar: inspector + transitions pane
+    let right_sidebar = gtk::Box::new(Orientation::Vertical, 6);
+    right_sidebar.set_margin_start(6);
+    right_sidebar.set_margin_end(6);
+    right_sidebar.set_margin_top(6);
+    right_sidebar.set_margin_bottom(6);
+
     let inspector_scroll = ScrolledWindow::new();
+    inspector_scroll.set_vexpand(true);
     inspector_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     inspector_scroll.set_child(Some(&inspector_box));
-    root_hpaned.set_end_child(Some(&inspector_scroll));
+    right_sidebar.append(&inspector_scroll);
+
+    let transitions_header = gtk::Box::new(Orientation::Horizontal, 6);
+    let transitions_title = gtk::Label::new(Some("Transitions"));
+    transitions_title.set_halign(gtk::Align::Start);
+    transitions_title.set_hexpand(true);
+    let transitions_toggle = gtk::Button::with_label("Hide Transitions");
+    transitions_toggle.add_css_class("small-btn");
+    transitions_header.append(&transitions_title);
+    transitions_header.append(&transitions_toggle);
+    right_sidebar.append(&transitions_header);
+
+    let transitions_revealer = gtk::Revealer::new();
+    transitions_revealer.set_reveal_child(true);
+    let transitions_list = gtk::ListBox::new();
+    transitions_list.add_css_class("boxed-list");
+    transitions_list.set_selection_mode(gtk::SelectionMode::None);
+
+    let transition_row = gtk::ListBoxRow::new();
+    let transition_box = gtk::Box::new(Orientation::Horizontal, 6);
+    transition_box.set_margin_start(8);
+    transition_box.set_margin_end(8);
+    transition_box.set_margin_top(6);
+    transition_box.set_margin_bottom(6);
+    let transition_name = gtk::Label::new(Some("Cross-dissolve"));
+    transition_name.set_halign(gtk::Align::Start);
+    transition_name.set_hexpand(true);
+    let transition_hint = gtk::Label::new(Some("Drag to clip boundary"));
+    transition_hint.add_css_class("dim-label");
+    transition_box.append(&transition_name);
+    transition_box.append(&transition_hint);
+    transition_row.set_child(Some(&transition_box));
+    let drag_src = gtk::DragSource::new();
+    drag_src.set_actions(gdk4::DragAction::COPY);
+    drag_src.set_exclusive(false);
+    let payload = String::from("transition:cross_dissolve");
+    let val = glib::Value::from(&payload);
+    drag_src.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
+    transition_row.add_controller(drag_src);
+    transitions_list.append(&transition_row);
+
+    transitions_revealer.set_child(Some(&transitions_list));
+    right_sidebar.append(&transitions_revealer);
+
+    {
+        let revealer = transitions_revealer.clone();
+        transitions_toggle.connect_clicked(move |btn| {
+            let show = !revealer.reveals_child();
+            revealer.set_reveal_child(show);
+            btn.set_label(if show { "Hide Transitions" } else { "Show Transitions" });
+        });
+    }
+
+    root_hpaned.set_end_child(Some(&right_sidebar));
 
     window.set_child(Some(&root_hpaned));
 
