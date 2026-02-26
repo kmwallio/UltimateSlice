@@ -599,9 +599,21 @@ pub fn build_toolbar(
             }
         });
     }
+    let btn_magnetic = ToggleButton::with_label("Magnetic");
+    btn_magnetic.set_tooltip_text(Some("Gap-free timeline mode (edited track)"));
+    btn_magnetic.set_active(timeline_state.borrow().magnetic_mode);
+    {
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        btn_magnetic.connect_toggled(move |btn| {
+            timeline_state.borrow_mut().magnetic_mode = btn.is_active();
+            on_project_changed();
+        });
+    }
 
     header.pack_start(&btn_select);
     header.pack_start(&btn_razor);
+    header.pack_start(&btn_magnetic);
 
     header
 }

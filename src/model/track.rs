@@ -48,6 +48,16 @@ impl Track {
         self.clips.sort_by_key(|c| c.timeline_start);
     }
 
+    /// Remove timeline gaps by packing clips back-to-back in timeline order.
+    pub fn compact_gap_free(&mut self) {
+        self.clips.sort_by_key(|c| c.timeline_start);
+        let mut cursor = 0_u64;
+        for clip in &mut self.clips {
+            clip.timeline_start = cursor;
+            cursor = clip.timeline_end();
+        }
+    }
+
     pub fn remove_clip(&mut self, clip_id: &str) {
         self.clips.retain(|c| c.id != clip_id);
     }

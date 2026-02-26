@@ -9,6 +9,9 @@ pub enum McpCommand {
     GetProject { reply: SyncSender<Value> },
     ListTracks  { reply: SyncSender<Value> },
     ListClips   { reply: SyncSender<Value> },
+    GetTimelineSettings { reply: SyncSender<Value> },
+    SetMagneticMode { enabled: bool, reply: SyncSender<Value> },
+    CloseSourcePreview { reply: SyncSender<Value> },
     AddClip {
         source_path:       String,
         track_index:       usize,

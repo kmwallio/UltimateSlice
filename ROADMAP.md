@@ -101,6 +101,7 @@ Tracking docs:
 
 ### Source Monitor Improvements
 - [x] Clip name shown in source monitor header
+- [x] Close button to hide source preview and clear current source selection
 - [x] Frame-accurate jog/shuttle control
 - [x] Mark-in / Mark-out visible as timecodes in a dedicated bar
 
@@ -111,8 +112,8 @@ Tracking docs:
 - [x] Audio waveform rendering in audio track rows (background GStreamer decode, normalized peaks)
 - [x] Drag-and-drop from media browser onto a specific timeline track/position
 - [x] Snap-to-clip-edge when trimming (TrimIn and TrimOut snap to nearby edges)
-- [ ] Timeline markers / chapter points ✅
-- [ ] Magnetic timeline mode (gap-free)
+- [x] Timeline markers / chapter points
+- [x] Magnetic timeline mode (gap-free)
 - [ ] Cross-dissolve transitions between clips
 - [ ] Ripple/roll/slip/slide edit modes
 - [ ] Reorder tracks in the timeline

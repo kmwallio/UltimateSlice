@@ -11,6 +11,7 @@ The **Source Monitor** previews individual library clips before they are added t
 | Timecode label | Current position / total duration |
 | In/Out timecode bar | Shows the selected range (In → Out) |
 | Play / Pause / Stop | Transport buttons |
+| Close (`✕`) | Deselect current media item and hide the Source Monitor |
 
 ## Keyboard Shortcuts
 
@@ -44,3 +45,9 @@ The selected region is highlighted in the scrubber bar.
 ## Appending to Timeline
 
 After setting In/Out points, click **Append to Timeline** to add the marked range to the end of the first Video track.
+
+## Closing the Source Monitor
+
+- Click the **✕** button in the Source Monitor header to close it.
+- Closing clears the current media-library selection, hides the panel, stops source playback, and resets source in/out state.
+- Select any media item again to reopen and load the Source Monitor.

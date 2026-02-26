@@ -34,6 +34,13 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Click on a clip body to **split** it at the playhead position.
 - Press **B** or **Escape** to toggle back to Select tool.
 
+### Magnetic Mode (Toolbar Toggle)
+
+- Use the **Magnetic** toggle in the main toolbar to enable/disable gap-free editing.
+- When enabled, the edited track is compacted after clip edits so gaps are removed.
+- In v1, magnetic behavior is **track-local** (it does not ripple other tracks).
+- Magnetic mode affects timeline edits from UI and MCP clip-edit tools.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |

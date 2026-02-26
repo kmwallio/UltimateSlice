@@ -205,7 +205,19 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             if let Some(f) = cb.borrow().as_ref() { f(); }
         })
     };
-    let (preview_widget, source_marks, clip_name_label) = preview::build_preview(player.clone(), paintable, on_append.clone());
+    let on_close_preview_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_close_preview: Rc<dyn Fn()> = {
+        let cb = on_close_preview_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
+    let (preview_widget, source_marks, clip_name_label) = preview::build_preview(
+        player.clone(),
+        paintable,
+        on_append.clone(),
+        on_close_preview.clone(),
+    );
 
     // Wire on_drop_clip — placed here so it can read source_marks to honour
     // the in/out selection set in the source monitor.
@@ -213,7 +225,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
         let source_marks = source_marks.clone();
+        let timeline_state_for_drop = timeline_state.clone();
         timeline_state.borrow_mut().on_drop_clip = Some(Rc::new(move |source_path, duration_ns, track_idx, timeline_start_ns| {
+            let magnetic_mode = timeline_state_for_drop.borrow().magnetic_mode;
             let mut proj = project.borrow_mut();
             if let Some(track) = proj.tracks.get_mut(track_idx) {
                 use crate::model::clip::ClipKind;
@@ -236,6 +250,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 clip.source_in = src_in;
                 clip.source_out = src_out;
                 track.add_clip(clip);
+                if magnetic_mode {
+                    track.compact_gap_free();
+                }
                 proj.dirty = true;
                 drop(proj);
                 on_project_changed();
@@ -384,6 +401,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let project = project.clone();
         let source_marks = source_marks.clone();
         let on_project_changed = on_project_changed.clone();
+        let timeline_state = timeline_state.clone();
         Rc::new(move || {
             let marks = source_marks.borrow();
             if marks.path.is_empty() { return; }
@@ -391,6 +409,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
             drop(marks);
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
 
             {
                 let mut proj = project.borrow_mut();
@@ -400,6 +419,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     clip.source_in = in_ns;
                     clip.source_out = out_ns;
                     track.add_clip(clip);
+                    if magnetic_mode {
+                        track.compact_gap_free();
+                    }
                     proj.dirty = true;
                 }
             }
@@ -412,6 +434,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let player = player.clone();
         let source_marks = source_marks.clone();
         let preview_widget = preview_widget.clone();
+        let clip_name_label = clip_name_label.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
             preview_widget.set_visible(true);
@@ -434,10 +457,28 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     };
 
     // ── Media browser ─────────────────────────────────────────────────────
-    let browser = media_browser::build_media_browser(
+    let (browser, clear_media_selection) = media_browser::build_media_browser(
         library.clone(),
         on_source_selected.clone(),
     );
+    // ── on_close_preview: deselect media + hide preview + reset source state ──
+    *on_close_preview_impl.borrow_mut() = Some({
+        let clear_media_selection = clear_media_selection.clone();
+        let preview_widget = preview_widget.clone();
+        let clip_name_label = clip_name_label.clone();
+        let source_marks = source_marks.clone();
+        let player = player.clone();
+        Rc::new(move || {
+            clear_media_selection();
+            preview_widget.set_visible(false);
+            clip_name_label.set_text("No source loaded");
+            {
+                let mut m = source_marks.borrow_mut();
+                *m = crate::model::media_library::SourceMarks::default();
+            }
+            let _ = player.borrow().stop();
+        })
+    });
     // Left panel: vertical Paned — browser (top) + source preview (bottom, hidden until selection)
     // The Paned lets the user resize the split after a source is selected.
     preview_widget.set_visible(false);
@@ -586,11 +627,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let mcp_receiver = crate::mcp::start_mcp_server();
         let project = project.clone();
         let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_close_preview = on_close_preview.clone();
         let on_project_changed = on_project_changed.clone();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
         glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
             while let Ok(cmd) = mcp_receiver.try_recv() {
-                handle_mcp_command(cmd, &project, &library, &on_project_changed);
+                handle_mcp_command(
+                    cmd,
+                    &project,
+                    &library,
+                    &timeline_state,
+                    &on_close_preview,
+                    &on_project_changed,
+                );
             }
             glib::ControlFlow::Continue
         });
@@ -672,6 +722,8 @@ fn handle_mcp_command(
     cmd: crate::mcp::McpCommand,
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<Vec<MediaItem>>>,
+    timeline_state: &Rc<RefCell<TimelineState>>,
+    on_close_preview: &Rc<dyn Fn()>,
     on_project_changed: &Rc<dyn Fn()>,
 ) {
     use crate::mcp::McpCommand;
@@ -722,7 +774,26 @@ fn handle_mcp_command(
             reply.send(json!(clips)).ok();
         }
 
+        McpCommand::GetTimelineSettings { reply } => {
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
+            reply.send(json!({
+                "magnetic_mode": magnetic_mode
+            })).ok();
+        }
+
+        McpCommand::SetMagneticMode { enabled, reply } => {
+            timeline_state.borrow_mut().magnetic_mode = enabled;
+            reply.send(json!({"success": true, "magnetic_mode": enabled})).ok();
+            on_project_changed();
+        }
+
+        McpCommand::CloseSourcePreview { reply } => {
+            on_close_preview();
+            reply.send(json!({"success": true})).ok();
+        }
+
         McpCommand::AddClip { source_path, track_index, timeline_start_ns, source_in_ns, source_out_ns, reply } => {
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let clip_id = {
                 let mut proj = project.borrow_mut();
                 if let Some(track) = proj.tracks.get_mut(track_index) {
@@ -731,6 +802,9 @@ fn handle_mcp_command(
                     clip.source_out = source_out_ns;
                     let id = clip.id.clone();
                     track.add_clip(clip);
+                    if magnetic_mode {
+                        track.compact_gap_free();
+                    }
                     proj.dirty = true;
                     Ok(id)
                 } else {
@@ -747,11 +821,15 @@ fn handle_mcp_command(
         }
 
         McpCommand::RemoveClip { clip_id, reply } => {
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let mut proj = project.borrow_mut();
             let mut found = false;
             for track in proj.tracks.iter_mut() {
                 if let Some(pos) = track.clips.iter().position(|c| c.id == clip_id) {
                     track.clips.remove(pos);
+                    if magnetic_mode {
+                        track.compact_gap_free();
+                    }
                     proj.dirty = true;
                     found = true;
                     break;
@@ -763,16 +841,18 @@ fn handle_mcp_command(
         }
 
         McpCommand::MoveClip { clip_id, new_start_ns, reply } => {
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let mut proj = project.borrow_mut();
             let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.timeline_start = new_start_ns;
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
+            for track in proj.tracks.iter_mut() {
+                if let Some(idx) = track.clips.iter().position(|c| c.id == clip_id) {
+                    track.clips[idx].timeline_start = new_start_ns;
+                    if magnetic_mode {
+                        track.compact_gap_free();
                     }
+                    proj.dirty = true;
+                    found = true;
+                    break;
                 }
             }
             drop(proj);
@@ -781,17 +861,19 @@ fn handle_mcp_command(
         }
 
         McpCommand::TrimClip { clip_id, source_in_ns, source_out_ns, reply } => {
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let mut proj = project.borrow_mut();
             let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.source_in  = source_in_ns;
-                        clip.source_out = source_out_ns;
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
+            for track in proj.tracks.iter_mut() {
+                if let Some(idx) = track.clips.iter().position(|c| c.id == clip_id) {
+                    track.clips[idx].source_in  = source_in_ns;
+                    track.clips[idx].source_out = source_out_ns;
+                    if magnetic_mode {
+                        track.compact_gap_free();
                     }
+                    proj.dirty = true;
+                    found = true;
+                    break;
                 }
             }
             drop(proj);

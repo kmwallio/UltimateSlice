@@ -19,7 +19,7 @@ fn default_title_x() -> f64 { 0.5 }
 fn default_title_y() -> f64 { 0.9 }
 
 /// A single clip placed on the timeline
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     /// Unique identifier
     pub id: String,

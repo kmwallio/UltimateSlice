@@ -59,7 +59,7 @@ src/
 
   mcp/
     mod.rs                  McpCommand enum; start_mcp_server() → mpsc::Receiver<McpCommand>
-    server.rs               Stdio JSON-RPC 2.0 loop; dispatches 9 MCP tools to main thread
+    server.rs               Stdio JSON-RPC 2.0 loop; dispatches MCP tools to main thread
 
 docs/
   ARCHITECTURE.md           This file — architecture reference and agent rules
@@ -89,6 +89,7 @@ pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
     pub history: EditHistory,
     pub active_tool: ActiveTool,       // Select | Razor
+    pub magnetic_mode: bool,           // gap-free edits on edited track when enabled
     pub pixels_per_second: f64,        // zoom level
     pub scroll_offset: f64,            // horizontal pan (pixels)
     pub playhead_ns: u64,              // current playhead in nanoseconds
@@ -98,6 +99,7 @@ pub struct TimelineState {
     pub on_seek: Option<Rc<dyn Fn(u64)>>,
     pub on_project_changed: Option<Rc<dyn Fn()>>,
     pub on_play_pause: Option<Rc<dyn Fn()>>,
+    pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
 }
 ```
 
@@ -285,6 +287,9 @@ Key design points:
 | `get_project` | Full project JSON (title, tracks, clips) |
 | `list_tracks` | Track index, id, kind, clip count |
 | `list_clips` | All clips with id, path, track\_index, ns positions |
+| `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
+| `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
+| `close_source_preview` | Deselect current source media and hide the source preview |
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |

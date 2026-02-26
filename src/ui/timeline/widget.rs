@@ -3,9 +3,10 @@ use gtk4::{self as gtk, DrawingArea, GestureClick, GestureDrag, EventControllerK
 use glib;
 use std::cell::RefCell;
 use std::rc::Rc;
+use crate::model::clip::Clip;
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
-use crate::undo::{EditHistory, DeleteClipCommand, MoveClipCommand, SplitClipCommand, TrimClipCommand, TrimOutCommand};
+use crate::undo::{EditHistory, DeleteClipCommand, MoveClipCommand, SetTrackClipsCommand, SplitClipCommand, TrimClipCommand, TrimOutCommand};
 
 const TRACK_HEIGHT: f64 = 60.0;
 const TRACK_LABEL_WIDTH: f64 = 80.0;
@@ -31,6 +32,7 @@ enum DragOp {
         track_id: String,
         original_start: u64,
         clip_offset_ns: u64,
+        original_track_clips: Vec<Clip>,
     },
     /// Trimming the in-point of a clip
     TrimIn {
@@ -38,12 +40,14 @@ enum DragOp {
         track_id: String,
         original_source_in: u64,
         original_timeline_start: u64,
+        original_track_clips: Vec<Clip>,
     },
     /// Trimming the out-point of a clip
     TrimOut {
         clip_id: String,
         track_id: String,
         original_source_out: u64,
+        original_track_clips: Vec<Clip>,
     },
 }
 
@@ -68,6 +72,8 @@ pub struct TimelineState {
     pub on_play_pause: Option<Rc<dyn Fn()>>,
     /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
     pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
+    /// Gap-free timeline behavior toggle (track-local ripple).
+    pub magnetic_mode: bool,
 }
 
 impl TimelineState {
@@ -87,6 +93,7 @@ impl TimelineState {
             on_project_changed: None,
             on_play_pause: None,
             on_drop_clip: None,
+            magnetic_mode: false,
         }
     }
 
@@ -111,21 +118,32 @@ impl TimelineState {
 
     /// Delete the currently selected clip
     pub fn delete_selected(&mut self) {
-        let Some(ref clip_id) = self.selected_clip_id.clone() else { return };
-        let (found_clip, found_track_id) = {
+        let Some(clip_id) = self.selected_clip_id.clone() else { return };
+        let found_track = {
             let proj = self.project.borrow();
-            let mut found = None;
-            for track in &proj.tracks {
-                if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
-                    found = Some((clip.clone(), track.id.clone()));
-                    break;
-                }
-            }
-            found.unzip()
+            proj.tracks.iter()
+                .find(|t| t.clips.iter().any(|c| c.id == clip_id))
+                .map(|t| (t.id.clone(), t.clips.clone()))
         };
-        if let (Some(clip), Some(track_id)) = (found_clip, found_track_id) {
-            let mut proj = self.project.borrow_mut();
-            self.history.execute(Box::new(DeleteClipCommand { clip, track_id }), &mut proj);
+        if let Some((track_id, old_clips)) = found_track {
+            if self.magnetic_mode {
+                let mut new_clips = old_clips.clone();
+                new_clips.retain(|c| c.id != clip_id);
+                compact_gap_free_clips(&mut new_clips);
+                if new_clips != old_clips {
+                    let cmd = SetTrackClipsCommand {
+                        track_id,
+                        old_clips,
+                        new_clips,
+                        label: "Delete clip (magnetic)".to_string(),
+                    };
+                    let mut proj = self.project.borrow_mut();
+                    self.history.execute(Box::new(cmd), &mut proj);
+                }
+            } else if let Some(clip) = old_clips.iter().find(|c| c.id == clip_id).cloned() {
+                let mut proj = self.project.borrow_mut();
+                self.history.execute(Box::new(DeleteClipCommand { clip, track_id }), &mut proj);
+            }
         }
         self.selected_clip_id = None;
         self.selected_track_id = None;
@@ -376,12 +394,17 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let hit = st.hit_test(x, y);
                 if let Some(h) = hit {
                     // Extract clip data before mutating st (avoids borrow conflict)
-                    let clip_data = {
+                    let (clip_data, track_snapshot) = {
                         let proj = st.project.borrow();
-                        proj.tracks.iter()
+                        let clip_data = proj.tracks.iter()
                             .flat_map(|t| t.clips.iter())
                             .find(|c| c.id == h.clip_id)
-                            .map(|c| (c.timeline_start, c.source_in, c.source_out))
+                            .map(|c| (c.timeline_start, c.source_in, c.source_out));
+                        let track_snapshot = proj.tracks.iter()
+                            .find(|t| t.id == h.track_id)
+                            .map(|t| t.clips.clone())
+                            .unwrap_or_default();
+                        (clip_data, track_snapshot)
                     };
                     if let Some((tl_start, src_in, src_out)) = clip_data {
                         let offset_ns = st.x_to_ns(x).saturating_sub(tl_start);
@@ -391,17 +414,20 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 track_id: h.track_id.clone(),
                                 original_start: tl_start,
                                 clip_offset_ns: offset_ns,
+                                original_track_clips: track_snapshot.clone(),
                             },
                             HitZone::TrimIn => DragOp::TrimIn {
                                 clip_id: h.clip_id.clone(),
                                 track_id: h.track_id.clone(),
                                 original_source_in: src_in,
                                 original_timeline_start: tl_start,
+                                original_track_clips: track_snapshot.clone(),
                             },
                             HitZone::TrimOut => DragOp::TrimOut {
                                 clip_id: h.clip_id.clone(),
                                 track_id: h.track_id.clone(),
                                 original_source_out: src_out,
+                                original_track_clips: track_snapshot,
                             },
                         };
                         st.selected_clip_id = Some(h.clip_id);
@@ -487,7 +513,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
-                    DragOp::TrimIn { ref clip_id, ref track_id, original_source_in, original_timeline_start } => {
+                    DragOp::TrimIn { ref clip_id, ref track_id, original_source_in, original_timeline_start, .. } => {
                         let drag_ns = current_ns.saturating_sub(original_timeline_start);
                         // Snap the new timeline_start to nearby clip edges
                         let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
@@ -553,75 +579,142 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             move |_, _, _| {
                 let mut st = state.borrow_mut();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
+                let magnetic_mode = st.magnetic_mode;
 
                 // Commit drag to undo history
                 match drag_op {
-                    DragOp::MoveClip { ref clip_id, ref track_id, original_start, .. } => {
-                        let new_start = {
-                            let proj = st.project.borrow();
-                            proj.tracks.iter()
-                                .find(|t| &t.id == track_id)
-                                .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
-                                .map(|c| c.timeline_start)
-                        };
-                        if let Some(new_start) = new_start {
-                            if new_start != original_start {
-                                let cmd = MoveClipCommand {
-                                    clip_id: clip_id.clone(),
-                                    from_track_id: track_id.clone(),
-                                    to_track_id: track_id.clone(),
-                                    old_timeline_start: original_start,
-                                    new_timeline_start: new_start,
+                    DragOp::MoveClip { ref clip_id, ref track_id, original_start, original_track_clips, .. } => {
+                        if magnetic_mode {
+                            let mut new_clips = {
+                                let proj = st.project.borrow();
+                                proj.tracks.iter()
+                                    .find(|t| &t.id == track_id)
+                                    .map(|t| t.clips.clone())
+                                    .unwrap_or_default()
+                            };
+                            compact_gap_free_clips(&mut new_clips);
+                            if new_clips != original_track_clips {
+                                let cmd = SetTrackClipsCommand {
+                                    track_id: track_id.clone(),
+                                    old_clips: original_track_clips,
+                                    new_clips,
+                                    label: "Move clip (magnetic)".to_string(),
                                 };
-                                // Don't re-execute (already applied live), just push to history
+                                let project = st.project.clone();
+                                let mut proj = project.borrow_mut();
+                                st.history.execute(Box::new(cmd), &mut proj);
+                            }
+                        } else {
+                            let new_start = {
+                                let proj = st.project.borrow();
+                                proj.tracks.iter()
+                                    .find(|t| &t.id == track_id)
+                                    .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
+                                    .map(|c| c.timeline_start)
+                            };
+                            if let Some(new_start) = new_start {
+                                if new_start != original_start {
+                                    let cmd = MoveClipCommand {
+                                        clip_id: clip_id.clone(),
+                                        from_track_id: track_id.clone(),
+                                        to_track_id: track_id.clone(),
+                                        old_timeline_start: original_start,
+                                        new_timeline_start: new_start,
+                                    };
+                                    // Don't re-execute (already applied live), just push to history
+                                    st.history.undo_stack.push(Box::new(cmd));
+                                    st.history.redo_stack.clear();
+                                    st.project.borrow_mut().dirty = true;
+                                }
+                            }
+                        }
+                    }
+                    DragOp::TrimIn { ref clip_id, ref track_id, original_source_in, original_timeline_start, original_track_clips } => {
+                        if magnetic_mode {
+                            let mut new_clips = {
+                                let proj = st.project.borrow();
+                                proj.tracks.iter()
+                                    .find(|t| &t.id == track_id)
+                                    .map(|t| t.clips.clone())
+                                    .unwrap_or_default()
+                            };
+                            compact_gap_free_clips(&mut new_clips);
+                            if new_clips != original_track_clips {
+                                let cmd = SetTrackClipsCommand {
+                                    track_id: track_id.clone(),
+                                    old_clips: original_track_clips,
+                                    new_clips,
+                                    label: "Trim clip (magnetic)".to_string(),
+                                };
+                                let project = st.project.clone();
+                                let mut proj = project.borrow_mut();
+                                st.history.execute(Box::new(cmd), &mut proj);
+                            }
+                        } else {
+                            let (new_si, new_ts) = {
+                                let proj = st.project.borrow();
+                                proj.tracks.iter()
+                                    .find(|t| &t.id == track_id)
+                                    .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
+                                    .map(|c| (c.source_in, c.timeline_start))
+                                    .unwrap_or((original_source_in, original_timeline_start))
+                            };
+                            if new_si != original_source_in {
+                                let cmd = TrimClipCommand {
+                                    clip_id: clip_id.clone(),
+                                    track_id: track_id.clone(),
+                                    old_source_in: original_source_in,
+                                    new_source_in: new_si,
+                                    old_timeline_start: original_timeline_start,
+                                    new_timeline_start: new_ts,
+                                };
                                 st.history.undo_stack.push(Box::new(cmd));
                                 st.history.redo_stack.clear();
                                 st.project.borrow_mut().dirty = true;
                             }
                         }
                     }
-                    DragOp::TrimIn { ref clip_id, ref track_id, original_source_in, original_timeline_start } => {
-                        let (new_si, new_ts) = {
-                            let proj = st.project.borrow();
-                            proj.tracks.iter()
-                                .find(|t| &t.id == track_id)
-                                .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
-                                .map(|c| (c.source_in, c.timeline_start))
-                                .unwrap_or((original_source_in, original_timeline_start))
-                        };
-                        if new_si != original_source_in {
-                            let cmd = TrimClipCommand {
-                                clip_id: clip_id.clone(),
-                                track_id: track_id.clone(),
-                                old_source_in: original_source_in,
-                                new_source_in: new_si,
-                                old_timeline_start: original_timeline_start,
-                                new_timeline_start: new_ts,
+                    DragOp::TrimOut { ref clip_id, ref track_id, original_source_out, original_track_clips } => {
+                        if magnetic_mode {
+                            let mut new_clips = {
+                                let proj = st.project.borrow();
+                                proj.tracks.iter()
+                                    .find(|t| &t.id == track_id)
+                                    .map(|t| t.clips.clone())
+                                    .unwrap_or_default()
                             };
-                            st.history.undo_stack.push(Box::new(cmd));
-                            st.history.redo_stack.clear();
-                            st.project.borrow_mut().dirty = true;
-                        }
-                    }
-                    DragOp::TrimOut { ref clip_id, ref track_id, original_source_out } => {
-                        let new_so = {
-                            let proj = st.project.borrow();
-                            proj.tracks.iter()
-                                .find(|t| &t.id == track_id)
-                                .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
-                                .map(|c| c.source_out)
-                                .unwrap_or(original_source_out)
-                        };
-                        if new_so != original_source_out {
-                            let cmd = TrimOutCommand {
-                                clip_id: clip_id.clone(),
-                                track_id: track_id.clone(),
-                                old_source_out: original_source_out,
-                                new_source_out: new_so,
+                            compact_gap_free_clips(&mut new_clips);
+                            if new_clips != original_track_clips {
+                                let cmd = SetTrackClipsCommand {
+                                    track_id: track_id.clone(),
+                                    old_clips: original_track_clips,
+                                    new_clips,
+                                    label: "Trim out-point (magnetic)".to_string(),
+                                };
+                                let project = st.project.clone();
+                                let mut proj = project.borrow_mut();
+                                st.history.execute(Box::new(cmd), &mut proj);
+                            }
+                        } else {
+                            let new_so = {
+                                let proj = st.project.borrow();
+                                proj.tracks.iter()
+                                    .find(|t| &t.id == track_id)
+                                    .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
+                                    .map(|c| c.source_out)
+                                    .unwrap_or(original_source_out)
                             };
-                            st.history.undo_stack.push(Box::new(cmd));
-                            st.history.redo_stack.clear();
-                            st.project.borrow_mut().dirty = true;
+                            if new_so != original_source_out {
+                                let cmd = TrimOutCommand {
+                                    clip_id: clip_id.clone(),
+                                    track_id: track_id.clone(),
+                                    old_source_out: original_source_out,
+                                    new_source_out: new_so,
+                                };
+                                st.history.undo_stack.push(Box::new(cmd));
+                                st.history.redo_stack.clear();
+                                st.project.borrow_mut().dirty = true;
+                            }
                         }
                     }
                     DragOp::None => {}
@@ -819,6 +912,26 @@ fn draw_timeline(
         cr.set_font_size(12.0);
         let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, RULER_HEIGHT + 16.0);
         let _ = cr.show_text("✂ Razor (B to toggle)");
+    }
+    if st.magnetic_mode {
+        cr.set_source_rgb(0.55, 0.95, 0.65);
+        cr.set_font_size(12.0);
+        let y = if st.active_tool == ActiveTool::Razor {
+            RULER_HEIGHT + 32.0
+        } else {
+            RULER_HEIGHT + 16.0
+        };
+        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, y);
+        let _ = cr.show_text("[Magnetic]");
+    }
+}
+
+fn compact_gap_free_clips(clips: &mut Vec<Clip>) {
+    clips.sort_by_key(|c| c.timeline_start);
+    let mut cursor = 0_u64;
+    for clip in clips.iter_mut() {
+        clip.timeline_start = cursor;
+        cursor = clip.timeline_end();
     }
 }
 

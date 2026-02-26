@@ -96,6 +96,27 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_timeline_settings",
+            "description": "Return timeline behavior settings, including magnetic mode state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "set_magnetic_mode",
+            "description": "Enable or disable magnetic timeline mode (gap-free edits on the edited track).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "Whether magnetic mode should be enabled." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "close_source_preview",
+            "description": "Hide the source preview and clear current source selection.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "add_clip",
             "description": "Add a new clip to a track. Durations are in nanoseconds (1 s = 1_000_000_000 ns).",
             "inputSchema": {
@@ -238,6 +259,12 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "get_project" => McpCommand::GetProject { reply: tx },
         "list_tracks" => McpCommand::ListTracks  { reply: tx },
         "list_clips"  => McpCommand::ListClips   { reply: tx },
+        "get_timeline_settings" => McpCommand::GetTimelineSettings { reply: tx },
+        "set_magnetic_mode" => McpCommand::SetMagneticMode {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
 
         "add_clip" => McpCommand::AddClip {
             source_path:       args["source_path"].as_str().unwrap_or("").to_string(),

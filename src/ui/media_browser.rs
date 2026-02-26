@@ -18,7 +18,7 @@ const THUMB_H: i32 = 90;
 pub fn build_media_browser(
     library: Rc<RefCell<Vec<MediaItem>>>,
     on_source_selected: Rc<dyn Fn(String, u64)>,
-) -> GBox {
+) -> (GBox, Rc<dyn Fn()>) {
     let vbox = GBox::new(Orientation::Vertical, 4);
     vbox.set_width_request(190);
 
@@ -157,7 +157,14 @@ pub fn build_media_browser(
         });
     }
 
-    vbox
+    let clear_selection: Rc<dyn Fn()> = {
+        let flow_box = flow_box.clone();
+        Rc::new(move || {
+            flow_box.unselect_all();
+        })
+    };
+
+    (vbox, clear_selection)
 }
 
 /// Build a single thumbnail grid cell.
@@ -259,4 +266,3 @@ fn rebuild_flowbox(fb: &FlowBox, lib: &[MediaItem], thumb_cache: &Rc<RefCell<Thu
         fb.insert(&child, -1);
     }
 }
-

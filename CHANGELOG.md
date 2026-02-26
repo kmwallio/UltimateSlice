@@ -5,6 +5,15 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Source preview close action**:
+  - Added a close (`✕`) button in the Source Monitor header.
+  - Clicking close now deselects the active media-library item, hides the source preview panel, stops source playback, and resets source marks/timecode state.
+  - Added MCP tool `close_source_preview` for automating the same behavior.
+- **Magnetic timeline mode (gap-free, track-local)**:
+  - Added a **Magnetic** toggle in the toolbar to enable/disable gap-free timeline behavior.
+  - When enabled, edits compact the affected track so clips remain contiguous after delete/move/trim and timeline insertions (append/drop/MCP clip edits).
+  - Timeline overlay now shows a magnetic-mode indicator when active.
+  - Added MCP tools `set_magnetic_mode` and `get_timeline_settings` for automation and verification.
 - **Recent projects list**: Last 10 opened/saved projects are persisted in `~/.config/ultimateslice/recent.json`. A new **Recent ▾** button in the toolbar shows a popover with file names; clicking any entry opens that FCPXML immediately.
 - **Per-clip speed change**:
   - New **Speed** section in the Inspector with a slider (0.25×–4.0×) and marks at ½×, 1×, 2×.

@@ -109,6 +109,30 @@ impl EditCommand for DeleteClipCommand {
     fn description(&self) -> &str { "Delete clip" }
 }
 
+/// Replace a track's full clip list (used for grouped magnetic timeline edits).
+pub struct SetTrackClipsCommand {
+    pub track_id: String,
+    pub old_clips: Vec<Clip>,
+    pub new_clips: Vec<Clip>,
+    pub label: String,
+}
+
+impl EditCommand for SetTrackClipsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.clips = self.new_clips.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.clips = self.old_clips.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { &self.label }
+}
+
 /// Split a clip at a given position (razor cut)
 pub struct SplitClipCommand {
     pub original_clip: Clip,

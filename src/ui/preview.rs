@@ -19,6 +19,7 @@ pub fn build_preview(
     player: Rc<RefCell<Player>>,
     paintable: gdk4::Paintable,
     on_append: Rc<dyn Fn()>,
+    on_close_preview: Rc<dyn Fn()>,
 ) -> (GBox, Rc<RefCell<SourceMarks>>, Label) {
     let source_marks = Rc::new(RefCell::new(SourceMarks::default()));
 
@@ -27,14 +28,32 @@ pub fn build_preview(
     vbox.set_vexpand(true);
     vbox.set_focusable(true);
 
-    // Clip name header
+    // Clip name header + close button
+    let header_row = GBox::new(Orientation::Horizontal, 4);
+    header_row.set_margin_start(8);
+    header_row.set_margin_end(8);
+    header_row.set_margin_top(4);
+    header_row.set_margin_bottom(2);
+
     let clip_name_label = Label::new(Some("No source loaded"));
     clip_name_label.set_halign(gtk::Align::Start);
-    clip_name_label.set_margin_start(8);
-    clip_name_label.set_margin_top(4);
-    clip_name_label.set_margin_bottom(2);
+    clip_name_label.set_hexpand(true);
+    clip_name_label.set_xalign(0.0);
     clip_name_label.add_css_class("clip-name");
-    vbox.append(&clip_name_label);
+    header_row.append(&clip_name_label);
+
+    let btn_close_preview = Button::with_label("✕");
+    btn_close_preview.set_tooltip_text(Some("Close source preview"));
+    btn_close_preview.add_css_class("flat");
+    btn_close_preview.set_sensitive(false);
+    {
+        let on_close_preview = on_close_preview.clone();
+        btn_close_preview.connect_clicked(move |_| {
+            on_close_preview();
+        });
+    }
+    header_row.append(&btn_close_preview);
+    vbox.append(&header_row);
 
     // Video display
     let picture = Picture::new();
@@ -493,6 +512,7 @@ pub fn build_preview(
         let frame_ns = frame_ns.clone();
         let update_marks_bar = update_marks_bar.clone();
         let btn_append = btn_append.clone();
+        let btn_close_preview = btn_close_preview.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
             let pos = p.position();
@@ -545,6 +565,7 @@ pub fn build_preview(
                 let m = source_marks.borrow();
                 // Enable append once a source is loaded
                 btn_append.set_sensitive(!m.path.is_empty());
+                btn_close_preview.set_sensitive(!m.path.is_empty());
                 update_marks_bar(&m);
             }
             drop(p);
