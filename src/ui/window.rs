@@ -34,7 +34,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
-    let (mut prog_player_raw, prog_paintable) = ProgramPlayer::new()
+    let (mut prog_player_raw, prog_paintable, prog_paintable2) = ProgramPlayer::new()
         .expect("Failed to create program player");
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
@@ -374,9 +374,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         })
     };
 
-    let (prog_monitor_widget, pos_label) = program_monitor::build_program_monitor(
+    let (prog_monitor_widget, pos_label, picture_a, picture_b) = program_monitor::build_program_monitor(
         prog_player.clone(),
         prog_paintable,
+        prog_paintable2,
         // on_stop
         {
             let pp = prog_player.clone();
@@ -412,11 +413,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let last_draw_ns = Rc::new(Cell::new(u64::MAX));
         let last_draw_ns_c = last_draw_ns.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-            let (pos_ns, playing) = {
+            let (pos_ns, playing, opacity_a, opacity_b) = {
                 let mut player = pp.borrow_mut();
                 player.poll();
-                (player.timeline_pos_ns, player.is_playing())
+                let (oa, ob) = player.transition_opacities();
+                (player.timeline_pos_ns, player.is_playing(), oa, ob)
             };
+            // Apply cross-dissolve opacities to the two program monitor pictures.
+            picture_a.set_opacity(opacity_a);
+            picture_b.set_opacity(opacity_b);
             if pos_ns != last_pos_ns_c.get() {
                 pos_label.set_text(&program_monitor::format_timecode(pos_ns));
                 ts.borrow_mut().playhead_ns = pos_ns;

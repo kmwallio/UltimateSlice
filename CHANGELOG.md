@@ -17,7 +17,39 @@ All notable project changes and progress should be recorded here.
   - Because the LUT is baked into the proxy file during ffmpeg transcode, the above fix
     also restores LUT visibility: once the correct LUT-baked proxy is used, the LUT is
     visible in the program monitor preview.
-- **Playhead seek shows wrong frame in program monitor preview**:
+- **Playback stops on second (or later) cross-dissolve when clips have a 1-frame gap**:
+  - `ns_to_fcpxml_time` uses integer frame-count division (floor), so clip positions
+    can be off by 1 frame (≈41 ms at 24 fps) after an FCPXML save/load round-trip.
+    `clip_at()` used exact `[start, end)` bounds, so a gap of even 1 ns between clip B
+    and clip C caused the handoff to return `None` → the player treated it as
+    end-of-timeline and stopped.
+  - `activate_transition()` used `c.timeline_start_ns == clip_timeline_end_ns` (exact
+    equality) to find the incoming clip — also broken by sub-frame gaps.
+  - Fix: `clip_at()` now has a fallback that bridges gaps up to 100 ms ahead (≥2 frames
+    at 24 fps) by finding the next-earliest clip starting in that window. This is safe
+    for all existing call-sites (scrubbing, seeking, handoff detection).
+  - `activate_transition()` incoming-clip search changed to a range check:
+    `start_ns ∈ [clip_end_ns, clip_end_ns + 100 ms]`.
+  - `transition_opacities()` now gates on `transition_active` so picture_b is never
+    made partially visible when pipeline2 is not actually running.
+- **Choppy playback around transitions**:
+  - `activate_transition()` previously called `pipeline2.state(120ms)` — a blocking
+    wait on the GTK UI thread. Because `poll()` runs from a 33ms GTK timeout, one
+    120ms block dropped ~4 frames and caused a visible stutter at the start of every
+    cross-dissolve.
+  - Fix: removed the blocking wait. `activate_transition` now sets pipeline2 directly
+    to `Playing` and records `pipeline2_pending_seek_ns`. The `seek_simple()` to
+    `source_in_ns` is issued on the very next `poll()` tick (33ms later) by which
+    point the pipeline is ready — zero UI thread blocking.
+- **Cross-dissolve reverts to previous clip after transition**:
+  - `load_clip_idx` applied `transition_alpha()` to the GStreamer `alpha` filter when
+    the incoming clip loaded. At the clip boundary `timeline_pos = clip_B.timeline_start_ns`,
+    `t = 0` → `alpha = 0.0`. GStreamer pipeline1 became fully transparent; GTK4 Picture
+    retained clip A's last frame, appearing as if playback rewound.
+  - Fix: `load_clip_idx` now always sets `alpha_filter.alpha = 1.0`. Cross-dissolve
+    blending is handled entirely by `picture_a.set_opacity()` / `picture_b.set_opacity()`
+    in the 33ms poll timer.
+
   - The seek flags used during scrubbing/paused seeks were `KEY_UNIT` (Smooth/Balanced
     priority), which snaps to the nearest keyframe before the playhead. For H.264 media
     with long GOP intervals this could display a frame seconds away from the actual
@@ -37,6 +69,15 @@ All notable project changes and progress should be recorded here.
     always re-decoded with the new filter values applied.
 
 ### Added
+- **True cross-dissolve preview in program monitor**:
+  - The program monitor now uses a dual-pipeline architecture: a second lightweight
+    `playbin` (pipeline2) feeds an independent `gtk4paintablesink`. Both pipelines are
+    composited by a `GtkOverlay` with two `Picture` widgets whose `opacity` is updated
+    every 33 ms to produce a genuine cross-dissolve (picture_a fades out, picture_b
+    fades in) rather than the previous "dip to black" approximation.
+  - During the transition window (final `d` ns of the outgoing clip), pipeline2 loads
+    the incoming clip, seeks to its `source_in_ns`, and plays. After the window closes,
+    pipeline2 is stopped and opacities reset to (1.0, 0.0).
 - **LUT import / apply (per clip)**:
   - Added `lut_path: Option<String>` field to the `Clip` model for storing the path to a `.cube` LUT file.
   - Inspector panel now has a **Color LUT** section with an **Import LUT…** file chooser (filtered to `.cube`) and a **Clear** button. The assigned LUT filename is displayed; a note clarifies "Applied on export (.cube)".

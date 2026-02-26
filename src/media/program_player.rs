@@ -117,10 +117,21 @@ pub struct ProgramPlayer {
     proxy_enabled: bool,
     /// Map from original source path → proxy file path.
     proxy_paths: HashMap<String, String>,
+    /// Second pipeline for cross-dissolve preview: plays the incoming clip while
+    /// pipeline1 fades out the outgoing clip.
+    pipeline2: gst::Element,
+    /// Whether pipeline2 is currently active (playing the incoming transition clip).
+    transition_active: bool,
+    /// Index into `clips` of the incoming clip currently loaded in pipeline2.
+    transition_incoming_idx: Option<usize>,
+    /// Deferred seek position for pipeline2: set when activating a transition and
+    /// cleared on the next poll() tick after the seek is issued. Avoids any blocking
+    /// wait for pipeline2 preroll on the GTK UI thread.
+    pipeline2_pending_seek_ns: Option<u64>,
 }
 
 impl ProgramPlayer {
-    pub fn new() -> Result<(Self, gdk4::Paintable)> {
+    pub fn new() -> Result<(Self, gdk4::Paintable, gdk4::Paintable)> {
         let paintablesink = gst::ElementFactory::make("gtk4paintablesink")
             .build()
             .map_err(|_| anyhow!("gtk4paintablesink not available"))?;
@@ -225,6 +236,35 @@ impl ProgramPlayer {
             .build()
             .unwrap_or_else(|_| gst::ElementFactory::make("playbin").build().unwrap());
 
+        // Second pipeline for cross-dissolve transition preview.
+        // It is a bare playbin (no color-correction filters) used only to feed the
+        // incoming clip to a second gtk4paintablesink during the transition window.
+        // Audio is suppressed so only pipeline1 emits sound.
+        let paintablesink2 = gst::ElementFactory::make("gtk4paintablesink")
+            .build()
+            .map_err(|_| anyhow!("gtk4paintablesink not available for transition pipeline"))?;
+        let paintable2 = {
+            let obj = paintablesink2.property::<glib::Object>("paintable");
+            obj.dynamic_cast::<gdk4::Paintable>()
+                .expect("gtk4paintablesink paintable must implement Paintable")
+        };
+        let video_sink2 = match gst::ElementFactory::make("glsinkbin")
+            .property("sink", &paintablesink2)
+            .build()
+        {
+            Ok(s) => s,
+            Err(_) => paintablesink2.clone(),
+        };
+        let fakevideo2 = gst::ElementFactory::make("fakesink").build()
+            .unwrap_or_else(|_| gst::ElementFactory::make("autovideosink").build().unwrap());
+        let pipeline2 = gst::ElementFactory::make("playbin")
+            .property("video-sink", &video_sink2)
+            .property("audio-sink", &fakevideo2)
+            .build()
+            .unwrap_or_else(|_| {
+                gst::ElementFactory::make("playbin").build().unwrap()
+            });
+
         Ok((
             Self {
                 pipeline,
@@ -250,8 +290,13 @@ impl ProgramPlayer {
                 playback_priority: PlaybackPriority::default(),
                 proxy_enabled: false,
                 proxy_paths: HashMap::new(),
+                pipeline2,
+                transition_active: false,
+                transition_incoming_idx: None,
+                pipeline2_pending_seek_ns: None,
             },
             paintable,
+            paintable2,
         ))
     }
 
@@ -266,6 +311,68 @@ impl ProgramPlayer {
     /// Update the proxy path mapping. Called when new proxy transcodes complete.
     pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
         self.proxy_paths = paths;
+    }
+
+    /// Returns (opacity_a, opacity_b) for the two program monitor pictures.
+    /// Outside transition windows: (1.0, 0.0). During a cross-dissolve: complementary values.
+    pub fn transition_opacities(&self) -> (f64, f64) {
+        // If pipeline2 is not actually running, always show only picture_a.
+        if !self.transition_active { return (1.0, 0.0); }
+        let Some(idx) = self.current_idx else { return (1.0, 0.0) };
+        let clip = &self.clips[idx];
+        if clip.transition_after != "cross_dissolve" || clip.transition_after_ns == 0 {
+            return (1.0, 0.0);
+        }
+        let d = clip.transition_after_ns.min(clip.duration_ns());
+        let start = clip.timeline_end_ns().saturating_sub(d);
+        if self.timeline_pos_ns >= start && self.timeline_pos_ns < clip.timeline_end_ns() && d > 0 {
+            let t = ((self.timeline_pos_ns - start) as f64 / d as f64).clamp(0.0, 1.0);
+            return (1.0 - t, t);
+        }
+        (1.0, 0.0)
+    }
+
+    /// Activate the cross-dissolve transition preview: load the incoming clip into
+    /// pipeline2 and begin playing it. Called when entering the transition window.
+    /// Non-blocking: pipeline2 is set to Playing immediately and the seek to
+    /// `source_in_ns` is deferred to the next `poll()` tick via `pipeline2_pending_seek_ns`.
+    fn activate_transition(&mut self, incoming_idx: usize) {
+        if self.transition_incoming_idx == Some(incoming_idx) {
+            return; // already active for this clip
+        }
+        let clip = &self.clips[incoming_idx];
+        let source_path = if self.proxy_enabled {
+            let key = crate::media::proxy_cache::proxy_key(
+                &clip.source_path,
+                clip.lut_path.as_deref(),
+            );
+            self.proxy_paths.get(&key)
+                .cloned()
+                .unwrap_or_else(|| clip.source_path.clone())
+        } else {
+            clip.source_path.clone()
+        };
+        let source_ns = clip.source_in_ns;
+        let uri = format!("file://{source_path}");
+        // Go directly to Playing with no blocking preroll wait. GStreamer will buffer
+        // asynchronously. The seek to source_in_ns is deferred: poll() will issue it
+        // on the next tick, by which point the pipeline is usually ready to accept it.
+        let _ = self.pipeline2.set_state(gst::State::Ready);
+        self.pipeline2.set_property("uri", &uri);
+        let _ = self.pipeline2.set_state(gst::State::Playing);
+        self.pipeline2_pending_seek_ns = Some(source_ns);
+        self.transition_active = true;
+        self.transition_incoming_idx = Some(incoming_idx);
+    }
+
+    /// Deactivate the cross-dissolve transition preview: stop pipeline2.
+    fn deactivate_transition(&mut self) {
+        if self.transition_active {
+            let _ = self.pipeline2.set_state(gst::State::Ready);
+            self.transition_active = false;
+            self.transition_incoming_idx = None;
+        }
+        self.pipeline2_pending_seek_ns = None;
     }
 
     fn should_block_preroll(&self) -> bool {
@@ -307,6 +414,7 @@ impl ProgramPlayer {
         let _ = self.audio_pipeline.set_state(gst::State::Null);
         self.audio_pipeline.set_property("uri", "");
         let _ = self.audio_pipeline.set_state(gst::State::Ready);
+        self.deactivate_transition();
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
     }
@@ -394,6 +502,7 @@ impl ProgramPlayer {
     pub fn stop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
+        self.deactivate_transition();
         self.state = PlayerState::Paused;
         self.timeline_pos_ns = 0;
         if let Some(idx) = self.clip_at(0) {
@@ -481,11 +590,47 @@ impl ProgramPlayer {
             }
             return false;
         };
-        let clip = &self.clips[idx];
-        let cur_track_idx = clip.track_index;
-        if let Some(ref a) = self.alpha_filter {
-            let alpha = self.transition_alpha(idx, self.timeline_pos_ns);
-            a.set_property("alpha", alpha.clamp(0.0, 1.0));
+        // Extract clip data before any mutable operations.
+        let (cur_track_idx, clip_speed, clip_source_out_ns, clip_timeline_end_ns,
+             clip_transition_kind, clip_transition_ns) = {
+            let clip = &self.clips[idx];
+            (clip.track_index, clip.speed, clip.source_out_ns, clip.timeline_end_ns(),
+             clip.transition_after.clone(), clip.transition_after_ns)
+        };
+
+        // Issue the deferred pipeline2 seek (set during activate_transition to avoid
+        // blocking on the UI thread). By the time the next poll() tick runs, the
+        // pipeline has usually advanced far enough to accept the seek.
+        if let Some(seek_ns) = self.pipeline2_pending_seek_ns.take() {
+            let _ = self.pipeline2.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_nseconds(seek_ns),
+            );
+        }
+
+        // Cross-dissolve transition management: activate pipeline2 when entering the
+        // last `transition_after_ns` ns of an outgoing clip, deactivate on exit.
+        if clip_transition_kind == "cross_dissolve" && clip_transition_ns > 0 {
+            let d = clip_transition_ns.min(clip_timeline_end_ns.saturating_sub(
+                self.clips[idx].timeline_start_ns)); // same as duration_ns() approx
+            let window_start = clip_timeline_end_ns.saturating_sub(d);
+            if self.timeline_pos_ns >= window_start {
+                // Find the adjacent incoming clip on the same track (tolerance for
+                // 1-frame FCPXML rounding gaps).
+                const GAP_NS: u64 = 100_000_000;
+                let incoming_idx = self.clips.iter().position(|c|
+                    c.track_index == cur_track_idx
+                        && c.timeline_start_ns >= clip_timeline_end_ns
+                        && c.timeline_start_ns <= clip_timeline_end_ns + GAP_NS
+                );
+                if let Some(bidx) = incoming_idx {
+                    self.activate_transition(bidx);
+                }
+            } else {
+                self.deactivate_transition();
+            }
+        } else {
+            self.deactivate_transition();
         }
 
         let src_pos = self.pipeline
@@ -511,8 +656,8 @@ impl ProgramPlayer {
         } else {
             src_pos.saturating_sub(self.seek_anchor_source_ns)
         };
-        let timeline_offset = if clip.speed > 0.0 {
-            (delta_src_ns as f64 / clip.speed) as u64
+        let timeline_offset = if clip_speed > 0.0 {
+            (delta_src_ns as f64 / clip_speed) as u64
         } else {
             delta_src_ns
         };
@@ -525,13 +670,15 @@ impl ProgramPlayer {
         // Detect clip end (GStreamer position may slightly overshoot source_out).
         // Only trust EOS when we're already near the end to avoid stale EOS
         // messages from a previous clip forcing a false stop/restart.
-        let near_end = src_pos.saturating_add(50_000_000) >= clip.source_out_ns; // 50ms
-        let near_timeline_end = new_pos.saturating_add(50_000_000) >= clip.timeline_end_ns();
-        let at_end_pos = clip.timeline_end_ns();
+        let near_end = src_pos.saturating_add(50_000_000) >= clip_source_out_ns; // 50ms
+        let near_timeline_end = new_pos.saturating_add(50_000_000) >= clip_timeline_end_ns;
+        let at_end_pos = clip_timeline_end_ns;
         let has_next_at_boundary = self.clip_at(at_end_pos).map(|n| n != idx).unwrap_or(false);
         // Pre-emptive handoff shortly before boundary when a next clip exists.
-        let early_handoff = has_next_at_boundary && src_pos.saturating_add(80_000_000) >= clip.source_out_ns; // 80ms
-        if src_pos >= clip.source_out_ns || ((near_end || near_timeline_end) && eos) || early_handoff {
+        let early_handoff = has_next_at_boundary && src_pos.saturating_add(80_000_000) >= clip_source_out_ns; // 80ms
+        if src_pos >= clip_source_out_ns || ((near_end || near_timeline_end) && eos) || early_handoff {
+            // Transition is complete when the outgoing clip ends.
+            self.deactivate_transition();
             // Find what should play at the current timeline position using track-priority logic.
             // This handles B-roll ending and resuming the primary clip underneath.
             match self.clip_at(at_end_pos) {
@@ -567,10 +714,6 @@ impl ProgramPlayer {
 
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
-        if let Some(ref a) = self.alpha_filter {
-            let alpha = self.transition_alpha(idx, new_pos);
-            a.set_property("alpha", alpha.clamp(0.0, 1.0));
-        }
         if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
             let _ = self.pipeline.set_state(gst::State::Ready);
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
@@ -729,8 +872,23 @@ impl ProgramPlayer {
 
     fn clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
         // Return the highest-track-index clip active at this position (B-roll beats primary).
-        self.clips.iter().enumerate()
+        let exact = self.clips.iter().enumerate()
             .filter(|(_, c)| timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns())
+            .max_by_key(|(_, c)| c.track_index)
+            .map(|(i, _)| i);
+        if exact.is_some() { return exact; }
+        // Fallback: bridge small rounding gaps that arise from integer frame-count
+        // conversion in the FCPXML round-trip (e.g. 1 frame ≈ 41 ms at 24 fps).
+        // If no clip contains the exact position, find the earliest clip that starts
+        // within 100 ms ahead, then among those ties pick the highest track index.
+        const GAP_NS: u64 = 100_000_000; // 100 ms
+        let next_start = self.clips.iter()
+            .filter(|c| c.timeline_start_ns > timeline_pos_ns
+                     && c.timeline_start_ns <= timeline_pos_ns + GAP_NS)
+            .map(|c| c.timeline_start_ns)
+            .min()?;
+        self.clips.iter().enumerate()
+            .filter(|(_, c)| c.timeline_start_ns == next_start)
             .max_by_key(|(_, c)| c.track_index)
             .map(|(i, _)| i)
     }
@@ -844,9 +1002,11 @@ impl ProgramPlayer {
         self.seek_anchor_source_ns = source_seek_ns;
         self.seek_reports_relative = None;
         self.timeline_pos_ns = timeline_pos_ns;
+        // Cross-dissolve opacity is now handled by the dual-pipeline GTK overlay
+        // (picture_a / picture_b set_opacity). The GStreamer alpha filter must stay
+        // at 1.0 so pipeline1 is always opaque — the GTK layer blends both pictures.
         if let Some(ref a) = self.alpha_filter {
-            let alpha = self.transition_alpha(idx, timeline_pos_ns);
-            a.set_property("alpha", alpha.clamp(0.0, 1.0));
+            a.set_property("alpha", 1.0_f64);
         }
     }
 

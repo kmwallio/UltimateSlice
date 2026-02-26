@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, Label, Orientation, Picture};
+use gtk4::{self as gtk, Box as GBox, Button, Label, Orientation, Overlay, Picture};
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::media::program_player::ProgramPlayer;
@@ -18,15 +18,18 @@ pub struct ClipTransform {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label)`. The caller should set up the poll timer
-/// and wire the stop button using the returned references.
+/// Returns `(widget, pos_label, picture_a, picture_b)`.
+/// `picture_a` displays the primary (outgoing) clip; `picture_b` displays the incoming
+/// transition clip. The caller controls cross-dissolve by setting widget opacity on
+/// each picture each poll tick via `Widget::set_opacity()`.
 pub fn build_program_monitor(
     program_player: Rc<RefCell<ProgramPlayer>>,
-    paintable: gdk4::Paintable,
+    paintable_a: gdk4::Paintable,
+    paintable_b: gdk4::Paintable,
     on_stop: impl Fn() + 'static,
     on_play_pause: impl Fn() + 'static,
     on_toggle_popout: impl Fn() + 'static,
-) -> (GBox, Label) {
+) -> (GBox, Label, Picture, Picture) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
     root.set_vexpand(true);
@@ -58,15 +61,30 @@ pub fn build_program_monitor(
 
     root.append(&title_bar);
 
-    // Video display
-    let picture = Picture::new();
-    picture.set_paintable(Some(&paintable));
-    picture.set_hexpand(true);
-    picture.set_vexpand(true);
-    picture.set_content_fit(gtk::ContentFit::Contain);
-    picture.add_css_class("preview-video");
+    // Video display: GtkOverlay composites picture_a (primary) with picture_b
+    // (incoming transition clip) on top. Opacities are updated each poll tick to
+    // create a true cross-dissolve (complementary alpha blend).
+    let picture_a = Picture::new();
+    picture_a.set_paintable(Some(&paintable_a));
+    picture_a.set_hexpand(true);
+    picture_a.set_vexpand(true);
+    picture_a.set_content_fit(gtk::ContentFit::Contain);
+    picture_a.add_css_class("preview-video");
 
-    root.append(&picture);
+    let picture_b = Picture::new();
+    picture_b.set_paintable(Some(&paintable_b));
+    picture_b.set_hexpand(true);
+    picture_b.set_vexpand(true);
+    picture_b.set_content_fit(gtk::ContentFit::Contain);
+    picture_b.set_opacity(0.0); // hidden until a transition is active
+
+    let overlay = Overlay::new();
+    overlay.set_child(Some(&picture_a));
+    overlay.add_overlay(&picture_b);
+    overlay.set_hexpand(true);
+    overlay.set_vexpand(true);
+
+    root.append(&overlay);
 
     // Transport controls
     let controls = GBox::new(Orientation::Horizontal, 8);
@@ -85,7 +103,7 @@ pub fn build_program_monitor(
 
     root.append(&controls);
 
-    (root, pos_label)
+    (root, pos_label, picture_a, picture_b)
 }
 
 pub fn format_timecode(ns: u64) -> String {
