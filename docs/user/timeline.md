@@ -67,7 +67,9 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 ## Tracks
 
 - **Add Track** buttons below the timeline add a new Video or Audio track.
+- **Remove Track** removes the currently active (highlighted) track, or the last track if none is selected. At least one track is always kept.
 - **Reorder tracks** by dragging a track's label vertically; a blue indicator line shows the drop target. Release to confirm.
+- **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a blue accent bar on its label. The active track is used as the target for the Append button and the Remove Track button.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Muting an audio track excludes it from both preview and export.
 

@@ -350,7 +350,17 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                             None => {
                                 st.selected_clip_id = None;
-                                st.selected_track_id = None;
+                                // Click on empty track area still selects the track
+                                if y > RULER_HEIGHT {
+                                    let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
+                                    let tid = {
+                                        let proj = st.project.borrow();
+                                        proj.tracks.get(track_idx).map(|t| t.id.clone())
+                                    };
+                                    st.selected_track_id = tid;
+                                } else {
+                                    st.selected_track_id = None;
+                                }
                             }
                         }
                         drop(st);
@@ -1146,9 +1156,21 @@ fn draw_track_row(
     }
 
     // Draw label column on top so it stays visible when timeline is scrolled
-    cr.set_source_rgb(0.22, 0.22, 0.25);
+    let is_active = st.selected_track_id.as_deref() == Some(&track.id);
+    if is_active {
+        cr.set_source_rgb(0.28, 0.28, 0.32);
+    } else {
+        cr.set_source_rgb(0.22, 0.22, 0.25);
+    }
     cr.rectangle(0.0, y, TRACK_LABEL_WIDTH, TRACK_HEIGHT);
     cr.fill().ok();
+
+    // Active track accent bar
+    if is_active {
+        cr.set_source_rgb(0.3, 0.55, 0.95);
+        cr.rectangle(0.0, y, 3.0, TRACK_HEIGHT);
+        cr.fill().ok();
+    }
 
     cr.set_source_rgb(0.8, 0.8, 0.8);
     cr.set_font_size(11.0);

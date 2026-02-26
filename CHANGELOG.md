@@ -5,6 +5,15 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Active track highlighting**:
+  - Clicking anywhere in a track row (including empty space) selects it as the active track.
+  - The active track's label area shows a blue left-edge accent bar and brighter background.
+- **Smart Append**:
+  - The Append button now detects whether the source media is audio-only (via GStreamer Discoverer).
+  - Audio files append to the active audio track (or first audio track); video files to the active video track (or first video track).
+- **Remove Track targets active track**:
+  - The Remove Track button removes the currently highlighted active track instead of always the last one.
+  - Selection is cleared after removal to prevent stale references.
 - **Cross-track clip dragging**:
   - Clips can now be dragged vertically between tracks of the same kind (video → video, audio → audio).
   - Undo/redo fully supported for cross-track moves (including magnetic mode).

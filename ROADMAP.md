@@ -116,6 +116,8 @@ Tracking docs:
 - [x] Magnetic timeline mode (gap-free)
 - [x] Cross-track clip dragging (same-kind restriction)
 - [x] Reorder tracks in the timeline (drag track labels)
+- [x] Active track highlighting (click empty area to select, visual accent bar)
+- [x] Smart Append (auto-detects audio/video, targets active or first matching track)
 - [ ] Cross-dissolve transitions between clips
 - [ ] Ripple/roll/slip/slide edit modes
 

@@ -437,14 +437,32 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let path = marks.path.clone();
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
+            let is_audio = marks.is_audio_only;
             drop(marks);
-            let magnetic_mode = timeline_state.borrow().magnetic_mode;
+
+            let ts = timeline_state.borrow();
+            let magnetic_mode = ts.magnetic_mode;
+            let active_tid = ts.selected_track_id.clone();
+            drop(ts);
+
+            let target_kind = if is_audio { TrackKind::Audio } else { TrackKind::Video };
+            let clip_kind = if is_audio { ClipKind::Audio } else { ClipKind::Video };
 
             {
                 let mut proj = project.borrow_mut();
-                if let Some(track) = proj.tracks.iter_mut().find(|t| t.kind == TrackKind::Video) {
+                // Prefer the active track if its kind matches, else first matching track
+                let track = if let Some(ref tid) = active_tid {
+                    if proj.tracks.iter().any(|t| &t.id == tid && t.kind == target_kind) {
+                        proj.tracks.iter_mut().find(|t| &t.id == tid)
+                    } else {
+                        proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                    }
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                };
+                if let Some(track) = track {
                     let timeline_start = track.duration();
-                    let mut clip = Clip::new(path, out_ns, timeline_start, ClipKind::Video);
+                    let mut clip = Clip::new(path, out_ns, timeline_start, clip_kind);
                     clip.source_in = in_ns;
                     clip.source_out = out_ns;
                     track.add_clip(clip);
@@ -475,6 +493,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 .to_string();
             clip_name_label.set_text(&name);
             let uri = format!("file://{path}");
+            let audio_only = crate::ui::media_browser::probe_is_audio_only(&uri);
             let _ = player.borrow().load(&uri);
             let mut m = source_marks.borrow_mut();
             m.path = path;
@@ -482,6 +501,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             m.in_ns = 0;
             m.out_ns = duration_ns;
             m.display_pos_ns = 0;
+            m.is_audio_only = audio_only;
         })
     };
 

@@ -247,6 +247,16 @@ pub fn probe_duration(uri: &str) -> Option<u64> {
     info.duration().map(|d| d.nseconds())
 }
 
+/// Returns `true` if the media file has no video streams (audio-only).
+pub fn probe_is_audio_only(uri: &str) -> bool {
+    use gstreamer_pbutils::prelude::*;
+    use gstreamer_pbutils::Discoverer;
+    let Ok(()) = gstreamer::init() else { return false };
+    let Ok(discoverer) = Discoverer::new(gstreamer::ClockTime::from_seconds(5)) else { return false };
+    let Ok(info) = discoverer.discover_uri(uri) else { return false };
+    info.video_streams().is_empty()
+}
+
 fn flowbox_child_count(fb: &FlowBox) -> usize {
     let mut count = 0usize;
     let mut child = fb.first_child();

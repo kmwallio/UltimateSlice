@@ -43,6 +43,8 @@ pub struct SourceMarks {
     /// Frame duration in nanoseconds (default 24 fps ≈ 41_666_667 ns).
     /// Used for frame-accurate jog/shuttle stepping.
     pub frame_ns: u64,
+    /// True when the loaded source has no video streams (audio file).
+    pub is_audio_only: bool,
 }
 
 impl Default for SourceMarks {
@@ -54,6 +56,7 @@ impl Default for SourceMarks {
             out_ns: 0,
             display_pos_ns: 0,
             frame_ns: 41_666_667, // 24 fps default
+            is_audio_only: false,
         }
     }
 }

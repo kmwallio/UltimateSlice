@@ -89,6 +89,9 @@ pub fn build_timeline_panel(
                     proj.dirty = true;
                 }
             }
+            // Clear stale selection after removal
+            state.borrow_mut().selected_track_id = None;
+            state.borrow_mut().selected_clip_id = None;
             let n = state.borrow().project.borrow().tracks.len();
             area.set_content_height((24.0 + 60.0 * n as f64) as i32);
             on_project_changed();

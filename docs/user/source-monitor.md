@@ -44,7 +44,7 @@ The selected region is highlighted in the scrubber bar.
 
 ## Appending to Timeline
 
-After setting In/Out points, click **Append to Timeline** to add the marked range to the end of the first Video track.
+After setting In/Out points, click **Append to Timeline** to add the marked range to the timeline.  The button auto-detects whether the source is audio-only or contains video.  If an active track of the matching kind is highlighted in the timeline, the clip is appended there; otherwise it goes to the first track of that kind.
 
 ## Closing the Source Monitor
 
