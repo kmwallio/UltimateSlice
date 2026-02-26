@@ -59,7 +59,7 @@ pub fn show_preferences_dialog(
     let hw_accel = CheckButton::with_label("Enable hardware acceleration");
     hw_accel.set_active(current.hardware_acceleration_enabled);
     hw_accel.set_halign(gtk::Align::Start);
-    let hint = Label::new(Some("Scaffold setting: stored and exposed to automation, runtime wiring comes later."));
+    let hint = Label::new(Some("Applies to source preview playback immediately (with non-GL fallback when needed)."));
     hint.set_halign(gtk::Align::Start);
     hint.add_css_class("dim-label");
     playback_box.append(&playback_label);

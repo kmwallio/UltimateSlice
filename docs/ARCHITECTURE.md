@@ -293,7 +293,7 @@ Key design points:
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
 | `close_source_preview` | Deselect current source media and hide the source preview |
 | `get_preferences` | Get persisted application preferences |
-| `set_hardware_acceleration` | Set hardware-acceleration preference (scaffold setting) |
+| `set_hardware_acceleration` | Set hardware-acceleration preference and apply to source preview playback |
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |

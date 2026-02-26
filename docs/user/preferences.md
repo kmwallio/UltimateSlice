@@ -15,11 +15,11 @@ Preferences are grouped by category in a sidebar:
 
 ## Hardware Acceleration (Playback)
 
-- **Enable hardware acceleration** toggles the saved preference value.
-- This setting is currently a **scaffold preference**:
-  - it is persisted across launches,
-  - it is available via MCP automation,
-  - it does **not yet** change playback/export runtime pipelines.
+- **Enable hardware acceleration** toggles the saved preference value and applies immediately to **source preview playback**.
+- The setting is persisted across launches and available via MCP automation.
+- Scope today:
+  - affects source preview sink selection (`glsinkbin` path when enabled, `gtk4paintablesink` path when disabled),
+  - does not change export behavior.
 
 ## Saving
 

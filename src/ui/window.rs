@@ -26,8 +26,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     // Shared media library (items visible in the browser, not yet on timeline)
     let library: Rc<RefCell<Vec<MediaItem>>> = Rc::new(RefCell::new(Vec::new()));
+    let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
 
-    let (player, paintable) = Player::new().expect("Failed to create GStreamer player");
+    let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
+    let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
     let (prog_player_raw, prog_paintable) = ProgramPlayer::new()
@@ -35,7 +37,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
-    let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
@@ -63,13 +64,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     *open_preferences_impl.borrow_mut() = Some({
         let window_weak = window_weak.clone();
         let preferences_state = preferences_state.clone();
+        let player = player.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
                 let preferences_state = preferences_state.clone();
+                let player = player.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
                     *preferences_state.borrow_mut() = new_state.clone();
                     crate::ui_state::save_preferences_state(&new_state);
+                    if let Err(e) = player.borrow().set_hardware_acceleration(new_state.hardware_acceleration_enabled) {
+                        eprintln!("Failed to apply hardware acceleration setting: {e}");
+                    }
                 });
                 preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
             }
@@ -650,6 +656,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let mcp_receiver = crate::mcp::start_mcp_server();
         let project = project.clone();
         let library = library.clone();
+        let player = player.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
         let on_close_preview = on_close_preview.clone();
@@ -661,6 +668,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     cmd,
                     &project,
                     &library,
+                    &player,
                     &timeline_state,
                     &preferences_state,
                     &on_close_preview,
@@ -762,6 +770,7 @@ fn handle_mcp_command(
     cmd: crate::mcp::McpCommand,
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<Vec<MediaItem>>>,
+    player: &Rc<RefCell<Player>>,
     timeline_state: &Rc<RefCell<TimelineState>>,
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
     on_close_preview: &Rc<dyn Fn()>,
@@ -847,10 +856,21 @@ fn handle_mcp_command(
                 prefs.clone()
             };
             crate::ui_state::save_preferences_state(&new_state);
-            reply.send(json!({
-                "success": true,
-                "hardware_acceleration_enabled": enabled
-            })).ok();
+            match player.borrow().set_hardware_acceleration(enabled) {
+                Ok(()) => {
+                    reply.send(json!({
+                        "success": true,
+                        "hardware_acceleration_enabled": enabled
+                    })).ok();
+                }
+                Err(e) => {
+                    reply.send(json!({
+                        "success": false,
+                        "hardware_acceleration_enabled": enabled,
+                        "error": e.to_string()
+                    })).ok();
+                }
+            }
         }
 
         McpCommand::AddClip { source_path, track_index, timeline_start_ns, source_in_ns, source_out_ns, reply } => {

@@ -123,7 +123,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_hardware_acceleration",
-            "description": "Set hardware acceleration preference (scaffold setting).",
+            "description": "Set hardware acceleration preference and apply it to source preview playback.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

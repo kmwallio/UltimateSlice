@@ -198,7 +198,7 @@ Tracking docs:
 
 ### Polish
 - [x] Keyboard shortcut reference overlay (? or / key opens a modal dialog)
-- [x] Preferences dialog with categorized sections + hardware acceleration preference toggle
+- [x] Preferences dialog with categorized sections + hardware acceleration toggle wired to source preview playback
 - [ ] Accessibility: keyboard navigation in all panels
 - [ ] Welcome window for choosing recent project or new one
 - [ ] Help documentation and tutorials

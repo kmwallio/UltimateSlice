@@ -17,6 +17,9 @@ pub enum PlayerState {
 pub struct Player {
     pipeline: gst::Element,
     state: Arc<Mutex<PlayerState>>,
+    paintablesink: gst::Element,
+    gl_video_sink: Option<gst::Element>,
+    hardware_acceleration_enabled: Arc<Mutex<bool>>,
     /// videobalance element for color correction (brightness/contrast/saturation)
     videobalance: Option<gst::Element>,
     /// gaussianblur element for denoise (positive sigma) / sharpness (negative sigma)
@@ -32,7 +35,7 @@ pub struct Player {
 impl Player {
     /// Create a new player. Returns `(player, paintable)` — attach `paintable`
     /// to a `gtk4::Picture` to display video.
-    pub fn new() -> Result<(Self, gdk4::Paintable)> {
+    pub fn new(hardware_acceleration_enabled: bool) -> Result<(Self, gdk4::Paintable)> {
         gst::init()?;
 
         let paintablesink = gst::ElementFactory::make("gtk4paintablesink")
@@ -45,20 +48,22 @@ impl Player {
                 .expect("gtk4paintablesink 'paintable' property must implement gdk4::Paintable")
         };
 
-        // Use glsinkbin to wrap the paintablesink for GPU-accelerated upload
-        let video_sink = match gst::ElementFactory::make("glsinkbin")
+        // Optional GL sink path for hardware-accelerated upload.
+        let gl_video_sink = match gst::ElementFactory::make("glsinkbin")
             .property("sink", &paintablesink)
             .build()
         {
-            Ok(s) => s,
-            Err(_) => {
-                // Fallback: use paintablesink directly
-                paintablesink.clone()
-            }
+            Ok(s) => Some(s),
+            Err(_) => None,
+        };
+        let video_sink = if hardware_acceleration_enabled {
+            gl_video_sink.as_ref().unwrap_or(&paintablesink)
+        } else {
+            &paintablesink
         };
 
         let pipeline = gst::ElementFactory::make("playbin")
-            .property("video-sink", &video_sink)
+            .property("video-sink", video_sink)
             .build()?;
 
         // Build a filter bin:
@@ -116,8 +121,20 @@ impl Player {
         }
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
+        let hardware_acceleration_enabled = Arc::new(Mutex::new(hardware_acceleration_enabled));
 
-        Ok((Self { pipeline, state, videobalance, gaussianblur, videocrop, videoflip_rotate, videoflip_flip }, paintable))
+        Ok((Self {
+            pipeline,
+            state,
+            paintablesink,
+            gl_video_sink,
+            hardware_acceleration_enabled,
+            videobalance,
+            gaussianblur,
+            videocrop,
+            videoflip_rotate,
+            videoflip_flip,
+        }, paintable))
     }
 
     /// Load a URI (e.g. `file:///path/to/video.mp4`)
@@ -210,6 +227,44 @@ impl Player {
 
     pub fn state(&self) -> PlayerState {
         self.state.lock().unwrap().clone()
+    }
+
+    pub fn set_hardware_acceleration(&self, enabled: bool) -> Result<()> {
+        let current_enabled = *self.hardware_acceleration_enabled.lock().unwrap();
+        if current_enabled == enabled {
+            return Ok(());
+        }
+
+        let target_sink = if enabled {
+            self.gl_video_sink.as_ref().unwrap_or(&self.paintablesink)
+        } else {
+            &self.paintablesink
+        };
+
+        let state_before = self.state();
+        let pos_before = self.position();
+        self.pipeline.set_state(gst::State::Ready)?;
+        self.pipeline.set_property("video-sink", target_sink);
+
+        match state_before {
+            PlayerState::Playing => {
+                self.pipeline.set_state(gst::State::Paused)?;
+                let _ = self.seek(pos_before);
+                self.pipeline.set_state(gst::State::Playing)?;
+                *self.state.lock().unwrap() = PlayerState::Playing;
+            }
+            PlayerState::Paused => {
+                self.pipeline.set_state(gst::State::Paused)?;
+                let _ = self.seek(pos_before);
+                *self.state.lock().unwrap() = PlayerState::Paused;
+            }
+            PlayerState::Stopped => {
+                *self.state.lock().unwrap() = PlayerState::Stopped;
+            }
+        }
+
+        *self.hardware_acceleration_enabled.lock().unwrap() = enabled;
+        Ok(())
     }
 
     /// Apply color correction and denoise/sharpness to the video filter elements.
