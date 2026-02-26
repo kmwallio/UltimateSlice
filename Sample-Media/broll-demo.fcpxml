@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10" xmlns:us="urn:ultimateslice">
+    <resources>
+        <format id="r1" name="FFVideoFormat1080p24" frameDuration="1/24" width="1920" height="1080"/>
+        <asset id="a_23a99f29_4ef4_413a_8770_7e04937d2337" name="GX010429" src="file:///home/kmwallio/Projects/UltimateSlice/Sample-Media/GX010429.MP4" duration="759/24s" hasVideo="1" hasAudio="1"/>
+        <asset id="a_b7edb165_646b_429b_87ee_c77385138ab7" name="GX010430" src="file:///home/kmwallio/Projects/UltimateSlice/Sample-Media/GX010430.MP4" duration="254/24s" hasVideo="1" hasAudio="1"/>
+        <asset id="a_9a6eaf56_e19f_440b_822d_25cfb07e296f" name="Everything is Beautiful" src="file:///home/kmwallio/Projects/UltimateSlice/Sample-Media/Audiio_Josh-Alan_Everything-is-Beautiful_Everything-is-Beautiful--Feat--RIGBIE-.wav" duration="759/24s" hasVideo="0" hasAudio="1"/>
+    </resources>
+    <library>
+        <event>
+            <project name="B-Roll Demo">
+                <sequence duration="759/24s" format="r1">
+                    <spine>
+                        <!-- Video 1: main footage (track 0) -->
+                        <asset-clip ref="a_23a99f29_4ef4_413a_8770_7e04937d2337" offset="0/24s" duration="759/24s" start="0/24s" name="GX010429"
+                            us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                            us:brightness="0" us:contrast="1" us:saturation="1" us:denoise="0" us:sharpness="0"
+                            us:volume="0.2" us:pan="0" us:crop-left="0" us:crop-right="0" us:crop-top="0" us:crop-bottom="0"
+                            us:rotate="0" us:flip-h="false" us:flip-v="false"
+                            us:title-text="" us:title-font="Sans Bold 36" us:title-color="FFFFFFFF" us:title-x="0.5" us:title-y="0.9"
+                            us:speed="1"/>
+                        <!-- Video 2: b-roll overlay starting at 5s (track 1) -->
+                        <asset-clip ref="a_b7edb165_646b_429b_87ee_c77385138ab7" offset="120/24s" duration="254/24s" start="0/24s" name="GX010430"
+                            us:track-idx="1" us:track-kind="video" us:track-name="Video 2 (B-Roll)"
+                            us:brightness="0" us:contrast="1" us:saturation="1" us:denoise="0" us:sharpness="0"
+                            us:volume="0" us:pan="0" us:crop-left="0" us:crop-right="0" us:crop-top="0" us:crop-bottom="0"
+                            us:rotate="0" us:flip-h="false" us:flip-v="false"
+                            us:title-text="" us:title-font="Sans Bold 36" us:title-color="FFFFFFFF" us:title-x="0.5" us:title-y="0.9"
+                            us:speed="1"/>
+                        <!-- Audio 1: background music for full duration (track 2) -->
+                        <asset-clip ref="a_9a6eaf56_e19f_440b_822d_25cfb07e296f" offset="0/24s" duration="759/24s" start="0/24s" name="Everything is Beautiful"
+                            us:track-idx="2" us:track-kind="audio" us:track-name="Audio 1 (Music)"
+                            us:brightness="0" us:contrast="1" us:saturation="1" us:denoise="0" us:sharpness="0"
+                            us:volume="1" us:pan="0" us:crop-left="0" us:crop-right="0" us:crop-top="0" us:crop-bottom="0"
+                            us:rotate="0" us:flip-h="false" us:flip-v="false"
+                            us:title-text="" us:title-font="Sans Bold 36" us:title-color="FFFFFFFF" us:title-x="0.5" us:title-y="0.9"
+                            us:speed="1"/>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </library>
+</fcpxml>
