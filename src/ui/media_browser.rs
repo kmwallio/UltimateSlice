@@ -107,7 +107,18 @@ pub fn build_media_browser(
                         }
                     }
                 }
+                drop(lib);
+                // Now that probes are done, start thumbnail extraction for newly-probed
+                // files (one at a time as probes complete, avoiding the burst of threads
+                // that occurred when all thumbnails started simultaneously on import).
+                {
+                    let mut tc = thumb_cache.borrow_mut();
+                    for path in &resolved {
+                        tc.request(path, 0);
+                    }
+                }
                 // Update drag-source payloads on existing children (avoids full rebuild).
+                let lib = library.borrow();
                 let mut child = flow_box.first_child();
                 let mut idx = 0usize;
                 while let Some(w) = child {
@@ -252,8 +263,12 @@ fn make_grid_item(
     duration_ns: u64,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
 ) -> FlowBoxChild {
-    // Kick off thumbnail loading immediately — don't wait for the draw func to run.
-    thumb_cache.borrow_mut().request(path, 0);
+    // Kick off thumbnail loading — but only after the media has been probed
+    // (duration_ns > 0) so we don't flood GStreamer with many concurrent
+    // pipelines when bulk-importing files.
+    if duration_ns > 0 {
+        thumb_cache.borrow_mut().request(path, 0);
+    }
 
     let cell = GBox::new(Orientation::Vertical, 2);
     cell.set_margin_start(2);
@@ -269,16 +284,14 @@ fn make_grid_item(
         let path_owned = path.to_string();
         let thumb_cache = thumb_cache.clone();
         thumb_area.set_draw_func(move |_, cr, w, h| {
-            let mut cache = thumb_cache.borrow_mut();
-            if cache.request(&path_owned, 0) {
-                if let Some(surf) = cache.get(&path_owned, 0) {
-                    let sx = w as f64 / THUMB_W as f64;
-                    let sy = h as f64 / THUMB_H as f64;
-                    cr.scale(sx, sy);
-                    let _ = cr.set_source_surface(surf, 0.0, 0.0);
-                    cr.paint().ok();
-                    return;
-                }
+            let cache = thumb_cache.borrow();
+            if let Some(surf) = cache.get(&path_owned, 0) {
+                let sx = w as f64 / THUMB_W as f64;
+                let sy = h as f64 / THUMB_H as f64;
+                cr.scale(sx, sy);
+                let _ = cr.set_source_surface(surf, 0.0, 0.0);
+                cr.paint().ok();
+                return;
             }
             // Placeholder while loading.
             cr.set_source_rgb(0.15, 0.15, 0.20);
