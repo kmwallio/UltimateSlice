@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, Entry, Label, Orientation, Scale, Separator};
+use gtk4::{self as gtk, Box as GBox, Button, Entry, Expander, Label, Orientation, Scale, Separator};
 use std::cell::RefCell;
 use std::rc::Rc;
 use gio;
@@ -236,175 +236,179 @@ pub fn build_inspector(
     content_box.append(&color_section);
 
     color_section.append(&Separator::new(Orientation::Horizontal));
+    let color_expander = Expander::new(Some("Color & Denoise"));
+    color_expander.set_expanded(true);
+    color_section.append(&color_expander);
+    let color_inner = GBox::new(Orientation::Vertical, 8);
+    color_expander.set_child(Some(&color_inner));
 
-    let color_title = Label::new(Some("Color"));
-    color_title.set_halign(gtk::Align::Start);
-    color_title.add_css_class("browser-header");
-    color_section.append(&color_title);
-
-    row_label(&color_section, "Brightness");
+    row_label(&color_inner, "Brightness");
     let brightness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     brightness_slider.set_value(0.0);
     brightness_slider.set_draw_value(true);
     brightness_slider.set_digits(2);
     brightness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_section.append(&brightness_slider);
+    color_inner.append(&brightness_slider);
 
-    row_label(&color_section, "Contrast");
+    row_label(&color_inner, "Contrast");
     let contrast_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
     contrast_slider.set_value(1.0);
     contrast_slider.set_draw_value(true);
     contrast_slider.set_digits(2);
     contrast_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    color_section.append(&contrast_slider);
+    color_inner.append(&contrast_slider);
 
-    row_label(&color_section, "Saturation");
+    row_label(&color_inner, "Saturation");
     let saturation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
     saturation_slider.set_value(1.0);
     saturation_slider.set_draw_value(true);
     saturation_slider.set_digits(2);
     saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    color_section.append(&saturation_slider);
+    color_inner.append(&saturation_slider);
 
     let ds_title = Label::new(Some("Denoise / Sharpness"));
     ds_title.set_halign(gtk::Align::Start);
     ds_title.add_css_class("browser-header");
-    color_section.append(&ds_title);
+    color_inner.append(&ds_title);
 
-    row_label(&color_section, "Denoise");
+    row_label(&color_inner, "Denoise");
     let denoise_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     denoise_slider.set_value(0.0);
     denoise_slider.set_draw_value(true);
     denoise_slider.set_digits(2);
     denoise_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_section.append(&denoise_slider);
+    color_inner.append(&denoise_slider);
 
-    row_label(&color_section, "Sharpness");
+    row_label(&color_inner, "Sharpness");
     let sharpness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     sharpness_slider.set_value(0.0);
     sharpness_slider.set_draw_value(true);
     sharpness_slider.set_digits(2);
     sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_section.append(&sharpness_slider);
+    color_inner.append(&sharpness_slider);
 
     // ── Audio section (Video + Audio only) ───────────────────────────────────
     let audio_section = GBox::new(Orientation::Vertical, 8);
     content_box.append(&audio_section);
 
     audio_section.append(&Separator::new(Orientation::Horizontal));
-    let audio_title = Label::new(Some("Audio"));
-    audio_title.set_halign(gtk::Align::Start);
-    audio_title.add_css_class("browser-header");
-    audio_section.append(&audio_title);
+    let audio_expander = Expander::new(Some("Audio"));
+    audio_expander.set_expanded(true);
+    audio_section.append(&audio_expander);
+    let audio_inner = GBox::new(Orientation::Vertical, 8);
+    audio_expander.set_child(Some(&audio_inner));
 
-    row_label(&audio_section, "Volume");
+    row_label(&audio_inner, "Volume");
     let volume_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
     volume_slider.set_value(1.0);
     volume_slider.set_draw_value(true);
     volume_slider.set_digits(2);
     volume_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    audio_section.append(&volume_slider);
+    audio_inner.append(&volume_slider);
 
-    row_label(&audio_section, "Pan");
+    row_label(&audio_inner, "Pan");
     let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     pan_slider.set_value(0.0);
     pan_slider.set_draw_value(true);
     pan_slider.set_digits(2);
     pan_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    audio_section.append(&pan_slider);
+    audio_inner.append(&pan_slider);
 
     // ── Transform section (Video + Image only) ───────────────────────────────
     let transform_section = GBox::new(Orientation::Vertical, 8);
     content_box.append(&transform_section);
 
     transform_section.append(&Separator::new(Orientation::Horizontal));
-    let transform_title = Label::new(Some("Transform"));
-    transform_title.set_halign(gtk::Align::Start);
-    transform_title.add_css_class("browser-header");
-    transform_section.append(&transform_title);
+    let transform_expander = Expander::new(Some("Transform"));
+    transform_expander.set_expanded(true);
+    transform_section.append(&transform_expander);
+    let transform_inner = GBox::new(Orientation::Vertical, 8);
+    transform_expander.set_child(Some(&transform_inner));
 
-    row_label(&transform_section, "Crop Left");
+    row_label(&transform_inner, "Crop Left");
     let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_left_slider.set_value(0.0);
     crop_left_slider.set_draw_value(true);
     crop_left_slider.set_digits(0);
-    transform_section.append(&crop_left_slider);
+    transform_inner.append(&crop_left_slider);
 
-    row_label(&transform_section, "Crop Right");
+    row_label(&transform_inner, "Crop Right");
     let crop_right_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_right_slider.set_value(0.0);
     crop_right_slider.set_draw_value(true);
     crop_right_slider.set_digits(0);
-    transform_section.append(&crop_right_slider);
+    transform_inner.append(&crop_right_slider);
 
-    row_label(&transform_section, "Crop Top");
+    row_label(&transform_inner, "Crop Top");
     let crop_top_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_top_slider.set_value(0.0);
     crop_top_slider.set_draw_value(true);
     crop_top_slider.set_digits(0);
-    transform_section.append(&crop_top_slider);
+    transform_inner.append(&crop_top_slider);
 
-    row_label(&transform_section, "Crop Bottom");
+    row_label(&transform_inner, "Crop Bottom");
     let crop_bottom_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
     crop_bottom_slider.set_value(0.0);
     crop_bottom_slider.set_draw_value(true);
     crop_bottom_slider.set_digits(0);
-    transform_section.append(&crop_bottom_slider);
+    transform_inner.append(&crop_bottom_slider);
 
-    row_label(&transform_section, "Rotate");
+    row_label(&transform_inner, "Rotate");
     let rotate_combo = gtk4::ComboBoxText::new();
     rotate_combo.append(Some("0"),   "0°");
     rotate_combo.append(Some("90"),  "90° CW");
     rotate_combo.append(Some("180"), "180°");
     rotate_combo.append(Some("270"), "270° CW");
     rotate_combo.set_active_id(Some("0"));
-    transform_section.append(&rotate_combo);
+    transform_inner.append(&rotate_combo);
 
-    row_label(&transform_section, "Flip");
+    row_label(&transform_inner, "Flip");
     let flip_row = GBox::new(Orientation::Horizontal, 8);
     let flip_h_btn = gtk4::ToggleButton::with_label("Flip H");
     let flip_v_btn = gtk4::ToggleButton::with_label("Flip V");
     flip_row.append(&flip_h_btn);
     flip_row.append(&flip_v_btn);
-    transform_section.append(&flip_row);
+    transform_inner.append(&flip_row);
 
     // ── Title Overlay section (Video + Image only) ───────────────────────────
     let title_section_box = GBox::new(Orientation::Vertical, 8);
     content_box.append(&title_section_box);
 
     title_section_box.append(&Separator::new(Orientation::Horizontal));
-    let title_section_lbl = Label::new(Some("Title Overlay"));
-    title_section_lbl.add_css_class("browser-header");
-    title_section_lbl.set_halign(gtk4::Align::Start);
-    title_section_box.append(&title_section_lbl);
+    let title_expander = Expander::new(Some("Title Overlay"));
+    title_expander.set_expanded(false);
+    title_section_box.append(&title_expander);
+    let title_inner = GBox::new(Orientation::Vertical, 8);
+    title_expander.set_child(Some(&title_inner));
 
     let title_entry = Entry::new();
     title_entry.set_placeholder_text(Some("Overlay text…"));
-    title_section_box.append(&title_entry);
+    title_inner.append(&title_entry);
 
-    row_label(&title_section_box, "Position X");
+    row_label(&title_inner, "Position X");
     let title_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     title_x_slider.set_value(0.5);
     title_x_slider.set_hexpand(true);
-    title_section_box.append(&title_x_slider);
+    title_inner.append(&title_x_slider);
 
-    row_label(&title_section_box, "Position Y");
+    row_label(&title_inner, "Position Y");
     let title_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     title_y_slider.set_value(0.9);
     title_y_slider.set_hexpand(true);
-    title_section_box.append(&title_y_slider);
+    title_inner.append(&title_y_slider);
 
     // ── Speed section (all clip types) ───────────────────────────────────────
     let speed_section_box = GBox::new(Orientation::Vertical, 8);
     content_box.append(&speed_section_box);
 
     speed_section_box.append(&Separator::new(Orientation::Horizontal));
-    let speed_hdr = Label::new(Some("Speed"));
-    speed_hdr.add_css_class("browser-header");
-    speed_hdr.set_halign(gtk4::Align::Start);
-    speed_section_box.append(&speed_hdr);
+    let speed_expander = Expander::new(Some("Speed"));
+    speed_expander.set_expanded(true);
+    speed_section_box.append(&speed_expander);
+    let speed_inner = GBox::new(Orientation::Vertical, 8);
+    speed_expander.set_child(Some(&speed_inner));
 
-    row_label(&speed_section_box, "Speed Multiplier");
+    row_label(&speed_inner, "Speed Multiplier");
     let speed_slider = Scale::with_range(Orientation::Horizontal, 0.25, 4.0, 0.05);
     speed_slider.set_value(1.0);
     speed_slider.set_draw_value(true);
@@ -414,24 +418,25 @@ pub fn build_inspector(
     speed_slider.add_mark(2.0,  gtk4::PositionType::Bottom, Some("2×"));
     speed_slider.set_hexpand(true);
     speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
-    speed_section_box.append(&speed_slider);
+    speed_inner.append(&speed_slider);
 
     // ── LUT section (Video + Image only) ─────────────────────────────────────
     let lut_section_box = GBox::new(Orientation::Vertical, 8);
     content_box.append(&lut_section_box);
 
     lut_section_box.append(&Separator::new(Orientation::Horizontal));
-    let lut_hdr = Label::new(Some("Color LUT"));
-    lut_hdr.add_css_class("browser-header");
-    lut_hdr.set_halign(gtk4::Align::Start);
-    lut_section_box.append(&lut_hdr);
+    let lut_expander = Expander::new(Some("Color LUT"));
+    lut_expander.set_expanded(false);
+    lut_section_box.append(&lut_expander);
+    let lut_inner = GBox::new(Orientation::Vertical, 8);
+    lut_expander.set_child(Some(&lut_inner));
 
     let lut_path_label = Label::new(Some("None"));
     lut_path_label.set_halign(gtk4::Align::Start);
     lut_path_label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
     lut_path_label.set_max_width_chars(22);
     lut_path_label.add_css_class("clip-path");
-    lut_section_box.append(&lut_path_label);
+    lut_inner.append(&lut_path_label);
 
     let lut_btn_row = GBox::new(Orientation::Horizontal, 8);
     let lut_import_btn = Button::with_label("Import LUT…");
@@ -439,12 +444,12 @@ pub fn build_inspector(
     lut_clear_btn.set_sensitive(false);
     lut_btn_row.append(&lut_import_btn);
     lut_btn_row.append(&lut_clear_btn);
-    lut_section_box.append(&lut_btn_row);
+    lut_inner.append(&lut_btn_row);
 
     let lut_note = Label::new(Some("Applied on export (.cube)"));
     lut_note.set_halign(gtk4::Align::Start);
     lut_note.add_css_class("clip-path");
-    lut_section_box.append(&lut_note);
+    lut_inner.append(&lut_note);
 
     // Apply name button
     content_box.append(&Separator::new(Orientation::Horizontal));

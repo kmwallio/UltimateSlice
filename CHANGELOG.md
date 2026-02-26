@@ -90,6 +90,10 @@ All notable project changes and progress should be recorded here.
     is silent.
   - VU meter updates when the playhead is seeked (paused preroll triggers a level message)
     and when the volume slider is adjusted while paused (force re-seek causes a new preroll).
+- **Collapsible inspector sections**:
+  - Each inspector section (Color & Denoise, Audio, Transform, Title Overlay, Speed, Color LUT) now has a `gtk4::Expander` disclosure triangle that collapses or expands its content.
+  - Color, Audio, Transform, and Speed sections default to expanded; Title Overlay and Color LUT default to collapsed to reduce visual noise.
+  - Metadata (clip name, source, timecodes) remains always visible.
 - **Inspector: disable when empty, context-sensitive sections**:
   - The inspector panel is now grayed out (insensitive) when no clip is selected,
     providing a clear visual signal that there is nothing to edit.
