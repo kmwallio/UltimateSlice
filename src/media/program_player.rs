@@ -279,6 +279,14 @@ impl ProgramPlayer {
         }
     }
 
+    /// Seek flags used when the player is paused/stopped (scrubbing).
+    /// Always ACCURATE so the displayed frame matches the exact playhead position,
+    /// regardless of keyframe boundaries. KEY_UNIT is only appropriate during
+    /// active playback where smoothness beats frame precision.
+    fn paused_seek_flags() -> gst::SeekFlags {
+        gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+    }
+
     /// Update the clip list from the project model. Resets playback.
     pub fn load_clips(&mut self, mut clips: Vec<ProgramClip>) {
         clips.sort_by_key(|c| c.timeline_start_ns);
@@ -618,7 +626,7 @@ impl ProgramPlayer {
                 let source_ns = clip.source_pos_ns(pos);
                 let speed = clip.speed;
                 let _ = self.pipeline.seek(speed,
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    Self::paused_seek_flags(),
                     gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
                     gst::SeekType::None, gst::ClockTime::NONE);
             }
@@ -693,7 +701,7 @@ impl ProgramPlayer {
                 let source_ns = clip.source_pos_ns(pos);
                 let speed = clip.speed;
                 let _ = self.pipeline.seek(speed,
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    Self::paused_seek_flags(),
                     gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
                     gst::SeekType::None, gst::ClockTime::NONE);
             }
@@ -710,7 +718,7 @@ impl ProgramPlayer {
                 let source_ns = clip.source_pos_ns(pos);
                 let speed = clip.speed;
                 let _ = self.pipeline.seek(speed,
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    Self::paused_seek_flags(),
                     gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
                     gst::SeekType::None, gst::ClockTime::NONE);
             }
@@ -762,9 +770,14 @@ impl ProgramPlayer {
             // Reuse currently loaded source when possible; just seek.
             // This avoids a full playbin reset when moving between segments
             // from the same media file.
+            let seek_flags = if self.state == PlayerState::Playing {
+                self.clip_seek_flags()
+            } else {
+                Self::paused_seek_flags()
+            };
             let _ = self.pipeline.seek(
                 speed,
-                self.clip_seek_flags(),
+                seek_flags,
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
                 gst::SeekType::None,
@@ -802,14 +815,23 @@ impl ProgramPlayer {
                 let _ = self.pipeline.set_state(gst::State::Ready);
                 self.pipeline.set_property("uri", &uri);
                 let _ = self.pipeline.set_state(gst::State::Paused);
-                if self.should_block_preroll() {
-                    let _ = self.pipeline.state(gst::ClockTime::from_mseconds(120));
-                }
+                // Always wait for preroll when not playing so the seek is accepted.
+                // GStreamer requires PAUSED state before it can process a seek; without
+                // this wait (previously gated on should_block_preroll), Smooth mode
+                // would issue the seek before PAUSED was reached and the seek would be
+                // silently ignored, leaving the display at frame 0 of the new clip.
+                let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
             }
-            // Seek with FLUSH and the clip's speed as rate.
+            // When not playing, use ACCURATE so the exact playhead frame is decoded.
+            // During playback, use the priority-based flags for smooth transitions.
+            let seek_flags = if self.state == PlayerState::Playing {
+                self.clip_seek_flags()
+            } else {
+                Self::paused_seek_flags()
+            };
             let _ = self.pipeline.seek(
                 speed,
-                self.clip_seek_flags(),
+                seek_flags,
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_seek_ns),
                 gst::SeekType::None,

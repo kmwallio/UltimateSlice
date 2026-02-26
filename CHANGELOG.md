@@ -4,6 +4,38 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Fixed
+- **Proxy media not used on startup / LUT invisible in preview**:
+  - `on_project_changed` called `cache.request()` (which synchronously adds disk-cached
+    proxies to the in-memory map) but never pushed the result to the player.
+    The player's `proxy_paths` map stayed empty so every clip fell back to its source
+    file. Proxy paths are now forwarded to the player immediately after the request loop.
+  - The 500 ms proxy poll timer only called `update_proxy_paths` when a background
+    transcode completed (`resolved` non-empty). Synchronously-cached disk proxies were
+    never reflected in `resolved`, so the player never learned about them. The timer now
+    syncs proxy paths whenever the cache is non-empty and proxy mode is enabled.
+  - Because the LUT is baked into the proxy file during ffmpeg transcode, the above fix
+    also restores LUT visibility: once the correct LUT-baked proxy is used, the LUT is
+    visible in the program monitor preview.
+- **Playhead seek shows wrong frame in program monitor preview**:
+  - The seek flags used during scrubbing/paused seeks were `KEY_UNIT` (Smooth/Balanced
+    priority), which snaps to the nearest keyframe before the playhead. For H.264 media
+    with long GOP intervals this could display a frame seconds away from the actual
+    playhead. Paused seeks now always use `ACCURATE` flags so the exact frame is decoded.
+  - In **Smooth** playback priority mode, the preroll wait before seeking to a different
+    source file was skipped. This caused the seek to be issued before the pipeline reached
+    PAUSED, which GStreamer silently ignores, leaving the preview at frame 0 of the new
+    clip. The preroll wait is now unconditional when not playing (150 ms cap).
+  - The same `KEY_UNIT` bug also affected the Inspector's crop/rotation/flip controls
+    and the title overlay position—adjusting these while paused would seek to the wrong
+    frame. Fixed to use `ACCURATE` seeks in all non-playing seeks.
+  - Inspector color/effects sliders (brightness, contrast, saturation, denoise,
+    sharpness) did not visually update the preview when adjusted while paused. The
+    GStreamer pipeline filter properties were updated correctly but the `KEY_UNIT` seek
+    used to force a frame redraw could be a no-op when already at a keyframe boundary,
+    leaving the preview stale. Fixed to use `ACCURATE` seeks so the current frame is
+    always re-decoded with the new filter values applied.
+
 ### Added
 - **LUT import / apply (per clip)**:
   - Added `lut_path: Option<String>` field to the `Clip` model for storing the path to a `.cube` LUT file.

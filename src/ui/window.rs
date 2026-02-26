@@ -742,10 +742,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             .map(|c| (c.source_path.clone(), c.lut_path.clone()))
                             .collect()
                     };
-                    let mut cache = proxy_cache.borrow_mut();
-                    for (path, lut) in &clip_sources {
-                        cache.request(path, scale, lut.as_deref());
+                    {
+                        let mut cache = proxy_cache.borrow_mut();
+                        for (path, lut) in &clip_sources {
+                            cache.request(path, scale, lut.as_deref());
+                        }
                     }
+                    // Disk-cached proxies are added to self.proxies synchronously by
+                    // request() above. Push them to the player immediately so the seek
+                    // that follows can use them rather than falling back to source files.
+                    let paths = proxy_cache.borrow().proxies.clone();
+                    prog_player.borrow_mut().update_proxy_paths(paths);
                 }
             }
 
@@ -867,11 +874,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let status_progress = status_progress.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
-            if !resolved.is_empty() {
+            // Always sync proxy paths when proxy mode is enabled — disk-cached proxies
+            // are added synchronously by request() and never appear in `resolved`.
+            {
                 let prefs = preferences_state.borrow();
                 if prefs.proxy_mode.is_enabled() {
-                    let paths = proxy_cache.borrow().proxies.clone();
-                    prog_player.borrow_mut().update_proxy_paths(paths);
+                    if !resolved.is_empty() || !proxy_cache.borrow().proxies.is_empty() {
+                        let paths = proxy_cache.borrow().proxies.clone();
+                        prog_player.borrow_mut().update_proxy_paths(paths);
+                    }
                 }
             }
             let progress = proxy_cache.borrow().progress();
