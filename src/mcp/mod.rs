@@ -50,6 +50,7 @@ pub enum McpCommand {
         duration_ns: u64,
         reply: SyncSender<Value>,
     },
+    CreateProject { title: String, reply: SyncSender<Value> },
     SetClipLut {
         clip_id:  String,
         lut_path: Option<String>,

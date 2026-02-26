@@ -245,7 +245,13 @@ cargo run
 GST_DEBUG=2 cargo run
 # With MCP server enabled (stdio JSON-RPC):
 cargo run -- --mcp
+# Via installed Flatpak (used by .mcp.json / AI agents):
+flatpak run io.github.ultimateslice --mcp
 ```
+
+> **Flatpak build:** Run `python3 flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json`
+> then `flatpak-builder --user --install --force-clean flatpak-build io.github.ultimateslice.yml`
+> after any dependency changes (Cargo.lock update) to regenerate `cargo-sources.json`.
 
 > **Single-instance enforcement for `--mcp`:** Only one MCP-enabled instance may
 > run at a time. On startup with `--mcp`, the binary reads
@@ -309,6 +315,7 @@ Key design points:
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
 | `reorder_track` | Move a track from one index to another (undoable) |
 | `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
+| `create_project` | Discard the current project and start a new empty one (optional title) |
 
 ### Example session
 
