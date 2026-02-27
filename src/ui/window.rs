@@ -386,7 +386,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         })
     };
 
-    let (prog_monitor_widget, pos_label, speed_label, picture_a, picture_b, vu_meter, vu_peak_cell) = {
+    let (prog_monitor_widget, pos_label, speed_label, picture_a, picture_b, vu_meter, vu_peak_cell, prog_canvas_frame) = {
         // Build the interactive transform overlay and wire its drag callback.
         let transform_overlay = Rc::new(crate::ui::transform_overlay::TransformOverlay::new({
             let inspector_view  = inspector_view.clone();
@@ -448,6 +448,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             prog_player.clone(),
             prog_paintable,
             prog_paintable2,
+            {
+                let p = project.borrow();
+                p.width
+            },
+            {
+                let p = project.borrow();
+                p.height
+            },
             // on_stop
             {
                 let pp = prog_player.clone();
@@ -768,6 +776,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
         let transform_overlay_cell = transform_overlay_cell.clone();
+        let prog_canvas_frame = prog_canvas_frame.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Update window title
@@ -786,6 +795,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 // Sync transform overlay: show handles when a clip is selected
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
                     to.set_project_dimensions(proj.width, proj.height);
+                    // Keep canvas frame aspect ratio in sync with project dimensions.
+                    if proj.height > 0 {
+                        prog_canvas_frame.set_ratio(proj.width as f32 / proj.height as f32);
+                    }
                     if let Some(ref cid) = selected {
                         let clip_opt = proj.tracks.iter()
                             .flat_map(|t| t.clips.iter())

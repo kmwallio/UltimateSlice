@@ -2,6 +2,22 @@
 
 The **Program Monitor** shows the assembled timeline played back in real time, clip by clip.
 
+## Canvas Aspect Ratio
+
+The program monitor constrains its video display area to the **project canvas ratio**
+(e.g. 16:9 for a 1920×1080 project). This means:
+
+- If a source clip has a **different aspect ratio** than the canvas (e.g. a 21:9 wide-screen
+  clip on a 16:9 canvas), the program monitor will show **black letterbox bars** above and
+  below the clip — exactly matching what the exported video will look like.
+- If the canvas is wider than the clip (e.g. a 4:3 clip on a 16:9 canvas), black **pillarbox
+  bars** appear on the sides.
+- The canvas ratio updates automatically when you change the project resolution in
+  **Project Settings**.
+
+This makes it much easier to judge clip placement, scale, and whether content is inside
+or outside the export frame.
+
 ## Controls
 
 | Element | Description |

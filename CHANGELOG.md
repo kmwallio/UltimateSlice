@@ -4,6 +4,15 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Fixed
+- **Accurate canvas preview**: The Program Monitor now constrains the video display
+  area to the project's canvas aspect ratio (e.g. 16:9). Previously, clips whose
+  native resolution differed from the canvas (e.g. a 21:9 source on a 16:9 canvas)
+  filled the preview without letterbox bars, making it hard to judge placement and
+  scale. Now the preview matches the export output: a 21:9 clip on a 16:9 canvas
+  will show black bars in the program monitor, exactly as it appears in the exported
+  video. The canvas ratio updates automatically when project settings change.
+
 ### Added
 - **Zoomable program monitor**: Preview can now be zoomed in/out independently of
   clip scale. Use the **−/+** buttons or **Fit** in the program monitor title bar,

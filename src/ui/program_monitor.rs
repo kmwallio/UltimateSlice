@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerScroll,
+use gtk4::{self as gtk, AspectFrame, Box as GBox, Button, DrawingArea, EventControllerScroll,
            EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -19,22 +19,26 @@ pub struct ClipTransform {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell)`.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame)`.
 /// `picture_a` displays the primary (outgoing) clip; `picture_b` displays the incoming
 /// transition clip. The caller controls cross-dissolve by setting widget opacity on
 /// each picture each poll tick via `Widget::set_opacity()`.
 /// `peak_cell` is updated by the caller with `[left_db, right_db]` each poll tick;
 /// `vu_meter.queue_draw()` triggers a repaint.
 /// `speed_label` shows the current J/K/L shuttle rate ("◀◀ 2×", "▶▶ 4×") or is hidden.
+/// `canvas_frame` is an `AspectFrame` locked to the canvas ratio — update its ratio
+/// via `canvas_frame.set_ratio(w as f32 / h as f32)` when project settings change.
 pub fn build_program_monitor(
     program_player: Rc<RefCell<ProgramPlayer>>,
     paintable_a: gdk4::Paintable,
     paintable_b: gdk4::Paintable,
+    canvas_width: u32,
+    canvas_height: u32,
     on_stop: impl Fn() + 'static,
     on_play_pause: impl Fn() + 'static,
     on_toggle_popout: impl Fn() + 'static,
     transform_overlay_da: Option<DrawingArea>,
-) -> (GBox, Label, Label, Picture, Picture, DrawingArea, Rc<Cell<[f64; 2]>>) {
+) -> (GBox, Label, Label, Picture, Picture, DrawingArea, Rc<Cell<[f64; 2]>>, AspectFrame) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
     root.set_vexpand(true);
@@ -119,24 +123,37 @@ pub fn build_program_monitor(
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 
+    // AspectFrame constrains the video display area to the canvas ratio (e.g. 16:9).
+    // This makes ContentFit::Contain on picture_a/b letterbox/pillarbox clips whose
+    // native aspect ratio differs from the canvas (e.g. a 21:9 clip on a 16:9 canvas).
+    let canvas_ratio = if canvas_height > 0 {
+        canvas_width as f32 / canvas_height as f32
+    } else {
+        16.0 / 9.0
+    };
+    let canvas_frame = AspectFrame::new(0.5, 0.5, canvas_ratio, false);
+    canvas_frame.set_child(Some(&overlay));
+    canvas_frame.set_hexpand(true);
+    canvas_frame.set_vexpand(true);
+
     let zoom_level: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
-    // Natural (fit) size of the overlay recorded the moment we first leave zoom=1.0.
-    // At zoom=1.0 with hexpand=true the overlay fills the scroll viewport exactly,
-    // so overlay.width()/height() at that instant is the correct "100%" baseline.
+    // Natural (fit) size of the canvas_frame recorded the moment we first leave zoom=1.0.
+    // At zoom=1.0 with hexpand=true the canvas_frame fills the scroll viewport exactly,
+    // so canvas_frame.width()/height() at that instant is the correct "100%" baseline.
     let fit_w: Rc<Cell<i32>> = Rc::new(Cell::new(0));
     let fit_h: Rc<Cell<i32>> = Rc::new(Cell::new(0));
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scroll.set_child(Some(&overlay));
+    scroll.set_child(Some(&canvas_frame));
     scroll.set_hexpand(true);
     scroll.set_vexpand(true);
 
-    // apply_zoom: when leaving zoom=1.0, records the natural overlay size as baseline.
-    // At non-1.0 zoom, disables hexpand/vexpand so the overlay can grow beyond viewport.
+    // apply_zoom: when leaving zoom=1.0, records the natural canvas_frame size as baseline.
+    // At non-1.0 zoom, disables hexpand/vexpand so the frame can grow beyond viewport.
     let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let apply_zoom = {
-        let overlay    = overlay.clone();
+        let canvas_frame = canvas_frame.clone();
         let zoom_level = zoom_level.clone();
         let fit_w      = fit_w.clone();
         let fit_h      = fit_h.clone();
@@ -148,35 +165,35 @@ pub fn build_program_monitor(
                 })
                 .clamp(0.25, 4.0);
 
-            // When transitioning away from 1.0, snapshot the natural overlay size.
+            // When transitioning away from 1.0, snapshot the natural canvas_frame size.
             if (zoom_level.get() - 1.0).abs() < 0.01 && (z - 1.0).abs() > 0.01 {
-                fit_w.set(overlay.width());
-                fit_h.set(overlay.height());
+                fit_w.set(canvas_frame.width());
+                fit_h.set(canvas_frame.height());
             }
             zoom_level.set(z);
 
             if (z - 1.0).abs() < 0.01 {
-                // Fit: let the overlay expand naturally to fill the scroll viewport.
-                overlay.set_hexpand(true);
-                overlay.set_vexpand(true);
-                overlay.set_halign(gtk::Align::Fill);
-                overlay.set_valign(gtk::Align::Fill);
-                overlay.set_size_request(-1, -1);
+                // Fit: let the canvas_frame expand naturally to fill the scroll viewport.
+                canvas_frame.set_hexpand(true);
+                canvas_frame.set_vexpand(true);
+                canvas_frame.set_halign(gtk::Align::Fill);
+                canvas_frame.set_valign(gtk::Align::Fill);
+                canvas_frame.set_size_request(-1, -1);
             } else {
                 let fw = fit_w.get();
                 let fh = fit_h.get();
                 if fw > 0 && fh > 0 {
-                    overlay.set_hexpand(false);
-                    overlay.set_vexpand(false);
-                    overlay.set_size_request((fw as f64 * z) as i32, (fh as f64 * z) as i32);
+                    canvas_frame.set_hexpand(false);
+                    canvas_frame.set_vexpand(false);
+                    canvas_frame.set_size_request((fw as f64 * z) as i32, (fh as f64 * z) as i32);
                     if z < 1.0 {
                         // Center the smaller canvas in the scroll viewport (no scrollbars).
-                        overlay.set_halign(gtk::Align::Center);
-                        overlay.set_valign(gtk::Align::Center);
+                        canvas_frame.set_halign(gtk::Align::Center);
+                        canvas_frame.set_valign(gtk::Align::Center);
                     } else {
                         // Allow content to overflow so ScrolledWindow can scroll.
-                        overlay.set_halign(gtk::Align::Fill);
-                        overlay.set_valign(gtk::Align::Fill);
+                        canvas_frame.set_halign(gtk::Align::Fill);
+                        canvas_frame.set_valign(gtk::Align::Fill);
                     }
                 }
             }
@@ -281,7 +298,7 @@ pub fn build_program_monitor(
     // Place VU meter at the end of the title bar (right-aligned).
     title_bar.append(&vu_bar);
 
-    (root, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell)
+    (root, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame)
 }
 
 /// Build a VU meter DrawingArea showing L/R audio peak levels in dBFS.
