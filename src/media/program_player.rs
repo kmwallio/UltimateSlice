@@ -314,7 +314,10 @@ impl ProgramPlayer {
         }
 
         let default_proj_caps = gst::Caps::builder("video/x-raw")
-            .field("width", 1920i32).field("height", 1080i32).build();
+            .field("width", 1920i32)
+            .field("height", 1080i32)
+            .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+            .build();
         if let Some(ref cf) = capsfilter_proj {
             cf.set_property("caps", &default_proj_caps);
         }
@@ -322,12 +325,16 @@ impl ProgramPlayer {
             cf.set_property("caps", &default_proj_caps.copy());
         }
 
+        let color_stage = videobalance.clone().or_else(|| {
+            log::warn!("ProgramPlayer: videobalance unavailable; using identity filter so transform chain remains active");
+            gst::ElementFactory::make("identity").build().ok()
+        });
         let blur_stage = gaussianblur.clone().or_else(|| {
             log::warn!("ProgramPlayer: gaussianblur unavailable; using identity filter so transform chain remains active");
             gst::ElementFactory::make("identity").build().ok()
         });
 
-        if let (Some(ref vb), Some(ref gb)) = (&videobalance, &blur_stage) {
+        if let (Some(ref vb), Some(ref gb)) = (&color_stage, &blur_stage) {
             if gaussianblur.is_some() {
                 gb.set_property("sigma", 0.0_f64);
             }
@@ -396,7 +403,7 @@ impl ProgramPlayer {
             bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
 
             pipeline.set_property("video-filter", &bin);
-        } else if let Some(ref vb) = videobalance {
+        } else if let Some(ref vb) = color_stage {
             pipeline.set_property("video-filter", vb);
         }
 
@@ -543,6 +550,7 @@ impl ProgramPlayer {
             let caps = gst::Caps::builder("video/x-raw")
                 .field("width", width as i32)
                 .field("height", height as i32)
+                .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                 .build();
             cf.set_property("caps", &caps);
         }
@@ -1193,6 +1201,7 @@ impl ProgramPlayer {
             let caps = gst::Caps::builder("video/x-raw")
                 .field("width", sw)
                 .field("height", sh)
+                .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                 .build();
             cf.set_property("caps", &caps);
         }

@@ -9,7 +9,11 @@ All notable project changes and progress should be recorded here.
   active preview clip by syncing ProgramPlayer's cached clip transform state and
   forcing an immediate in-place re-seek of the current segment. This prevents stale
   framing where black bars could remain visible in preview/playback even though the
-  transform overlay and inspector values were updated.
+  transform overlay and inspector values were updated. Program Monitor now also keeps
+  the scale/position chain active when `gaussianblur` is unavailable by inserting an
+  identity stage instead of dropping back to a color-only filter, and enforces
+  square-pixel (`pixel-aspect-ratio=1/1`) caps in the zoom chain so wide-source clips
+  don't retain display-aspect letterboxing after scaling.
 - **Accurate canvas preview**: The Program Monitor now constrains the video display
   area to the project's canvas aspect ratio (e.g. 16:9). Previously, clips whose
   native resolution differed from the canvas (e.g. a 21:9 source on a 16:9 canvas)

@@ -184,6 +184,8 @@ Tracking docs:
 - [x] Flip horizontal / flip vertical via GStreamer `videoflip`
 - [x] Position offset (X / Y translation within the output frame) via GStreamer `videobox`
 - [x] Transform edits (Scale/Position) now refresh immediately in Program Monitor preview/playback without stale black-bar framing
+- [x] Program Monitor transform chain now stays active even when optional `gaussianblur` is unavailable (uses identity fallback)
+- [x] Program Monitor zoom chain enforces square-pixel output (`pixel-aspect-ratio=1/1`) to prevent persistent display-aspect black bars on wide-source media
 - [x] Persist transform settings in FCPXML (`us:crop-*`, `us:rotate`, `us:flip-h/v`, `us:scale`, `us:position-x/y` attributes)
 - [x] Interactive transform overlay in program monitor — when a clip is selected, show drag handles on the preview frame so the user can:
   - **Move**: drag the frame to adjust Position X/Y
@@ -269,6 +271,10 @@ Tracking docs:
 - [ ] Background rendering for complex effect stacks
 - [ ] OpenTimelineIO (OTIO) import/export
 - [ ] Shared Project/Library support for collaborative editing
+
+### Known Bugs
+
+- [ ] Black bars when media aspect ratio does not match project aspect ratio, even after scaling to fill
 
 ---
 
