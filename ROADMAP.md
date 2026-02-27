@@ -186,7 +186,10 @@ Tracking docs:
   - **Move**: drag the frame to adjust Position X/Y
   - **Scale**: drag corner handles to zoom in/out
   - Overlay updates Inspector sliders in real time and vice-versa
-  - Visual feedback: semi-transparent bounding box with 4 corner handles + center dot drawn with GTK4 `GtkDrawingArea` over the `GtkPicture` program monitor widget
+  - Visual feedback: export-frame border (yellow accent + white corner L-marks + dark shadow), white dashed clip bounding box, blue-ringed corner handles, center dot, scale label
+- [ ] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
+- [ ] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
+- [ ] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)

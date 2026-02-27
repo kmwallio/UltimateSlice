@@ -78,6 +78,7 @@ impl TransformOverlay {
             da.set_draw_func(move |_da, cr, ww, wh| {
                 if !selected.get() { return; }
                 let (vx, vy, vw, vh) = video_rect(ww, wh, proj_w.get(), proj_h.get());
+                draw_frame_border(cr, vx, vy, vw, vh);
                 draw_overlay(cr, vx, vy, vw, vh,
                              scale.get(), position_x.get(), position_y.get());
             });
@@ -251,7 +252,51 @@ fn video_rect(ww: i32, wh: i32, pw: u32, ph: u32) -> (f64, f64, f64, f64) {
     (vx, vy, vw, vh)
 }
 
-/// Draw the bounding box, corner handles, and scale label.
+/// Draw the export frame border — a prominent solid rectangle showing exactly
+/// what will be included in the exported video.  Drawn with a dark shadow line
+/// and a bright accent line so it reads on both light and dark backgrounds.
+fn draw_frame_border(cr: &gtk4::cairo::Context, vx: f64, vy: f64, vw: f64, vh: f64) {
+    // Shadow (1 px outset, semi-transparent black)
+    cr.save().ok();
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.7);
+    cr.set_line_width(3.0);
+    cr.rectangle(vx - 0.5, vy - 0.5, vw + 1.0, vh + 1.0);
+    cr.stroke().ok();
+    cr.restore().ok();
+
+    // Bright accent border
+    cr.save().ok();
+    cr.set_source_rgba(1.0, 0.95, 0.3, 0.95);
+    cr.set_line_width(1.5);
+    cr.rectangle(vx, vy, vw, vh);
+    cr.stroke().ok();
+    cr.restore().ok();
+
+    // Corner tick marks (small L-shapes at each corner, 10 px long)
+    let tick = 10.0_f64;
+    let corners = [
+        (vx, vy, tick, 0.0, 0.0, tick),          // top-left
+        (vx + vw, vy, -tick, 0.0, 0.0, tick),    // top-right
+        (vx, vy + vh, tick, 0.0, 0.0, -tick),    // bottom-left
+        (vx + vw, vy + vh, -tick, 0.0, 0.0, -tick), // bottom-right
+    ];
+    cr.save().ok();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+    cr.set_line_width(2.5);
+    for (cx, cy, hx, _, _, vy_off) in &corners {
+        // Horizontal arm
+        cr.move_to(*cx, *cy);
+        cr.line_to(cx + hx, *cy);
+        cr.stroke().ok();
+        // Vertical arm
+        cr.move_to(*cx, *cy);
+        cr.line_to(*cx, cy + vy_off);
+        cr.stroke().ok();
+    }
+    cr.restore().ok();
+}
+
+/// Draw the clip bounding box, corner scale handles, center pan dot, and scale label.
 fn draw_overlay(
     cr: &gtk4::cairo::Context,
     vx: f64, vy: f64, vw: f64, vh: f64,
@@ -268,24 +313,16 @@ fn draw_overlay(
     let top    = cy - hh;
     let bottom = cy + hh;
 
-    // Output-frame border (yellow, thin) so the user can see where the frame edge is.
+    // Clip bounding box (white dashed)
     cr.save().ok();
-    cr.set_source_rgba(1.0, 0.9, 0.1, 0.55);
-    cr.set_line_width(1.0);
-    cr.rectangle(vx, vy, vw, vh);
-    cr.stroke().ok();
-    cr.restore().ok();
-
-    // Clip bounding box (white dashed line)
-    cr.save().ok();
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.80);
     cr.set_line_width(1.5);
     cr.set_dash(&[6.0, 4.0], 0.0);
     cr.rectangle(left, top, right - left, bottom - top);
     cr.stroke().ok();
     cr.restore().ok();
 
-    // Corner handles
+    // Corner scale handles
     for (hx, hy) in &[(left, top), (right, top), (left, bottom), (right, bottom)] {
         cr.save().ok();
         cr.arc(*hx, *hy, HANDLE_R, 0.0, std::f64::consts::TAU);
@@ -297,17 +334,17 @@ fn draw_overlay(
         cr.restore().ok();
     }
 
-    // Centre dot (pan indicator)
+    // Centre pan dot
     cr.save().ok();
     cr.arc(cx, cy, 4.5, 0.0, std::f64::consts::TAU);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.90);
     cr.fill_preserve().ok();
     cr.set_source_rgba(0.25, 0.55, 1.0, 1.0);
     cr.set_line_width(1.0);
     cr.stroke().ok();
     cr.restore().ok();
 
-    // Scale label ("1.50×") — shown near top-right of the video frame.
+    // Scale label near top-right of the video frame
     cr.save().ok();
     cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
     cr.set_font_size(11.0);
@@ -316,13 +353,13 @@ fn draw_overlay(
         Ok(te) => te,
         Err(_) => return,
     };
-    // Background pill for readability
-    let tx = vx + vw - te.width() - 10.0;
-    let ty = vy + 6.0;
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
-    cr.rectangle(tx - 3.0, ty, te.width() + 6.0, te.height() + 4.0);
+    let tx = vx + vw - te.width() - 12.0;
+    let ty = vy + 8.0;
+    // Dark pill background
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.60);
+    cr.rectangle(tx - 4.0, ty - 1.0, te.width() + 8.0, te.height() + 4.0);
     cr.fill().ok();
-    cr.set_source_rgba(1.0, 0.9, 0.1, 1.0);
+    cr.set_source_rgba(1.0, 0.95, 0.3, 1.0);
     cr.move_to(tx, ty + te.height() + 1.0);
     cr.show_text(&label).ok();
     cr.restore().ok();

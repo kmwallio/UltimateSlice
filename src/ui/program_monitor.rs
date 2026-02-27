@@ -94,6 +94,8 @@ pub fn build_program_monitor(
     if let Some(da) = transform_overlay_da {
         da.set_hexpand(true);
         da.set_vexpand(true);
+        da.set_halign(gtk::Align::Fill);
+        da.set_valign(gtk::Align::Fill);
         overlay.add_overlay(&da);
     }
     overlay.set_hexpand(true);
