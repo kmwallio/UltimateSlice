@@ -12,6 +12,7 @@ All notable project changes and progress should be recorded here.
 - **Export compositing parity**: Secondary-track overlays now use transparent zoom-out padding (`pad ... black@0`) and apply per-clip opacity via ffmpeg `colorchannelmixer=aa=...`, improving preview/export consistency for layered shots.
 
 ### Fixed
+- **Program Monitor PiP live preview**: Made the top Program Monitor layer background transparent so per-pixel alpha from scale/position transforms can reveal the lower active video track during live preview.
 - **Program Monitor regression fixes**: Restored +/-/Fit zoom behavior when baseline canvas size is not yet available by falling back to scroll-viewport/project dimensions, and improved PiP preview reveal by forcing transparent `videobox` borders in the zoom/position chain so lower-track underlay video can show through uncovered regions.
 - **Program Monitor layered zoom alignment**: Both monitor layer pictures now force `halign/valign=Fill` and share the same preview CSS class, so B-roll/underlay content follows the same +/-/Fit zoom geometry as the primary layer while clips are moved.
 - **Program Monitor underlay zoom-out floor**: Enabled `GtkPicture::set_can_shrink(true)` on both monitor layers so the underlay/B-roll layer can scale below 100% together with the main layer.

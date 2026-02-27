@@ -105,6 +105,7 @@ pub fn build_program_monitor(
     picture_a.set_size_request(1, 1);
     picture_a.set_content_fit(gtk::ContentFit::Contain);
     picture_a.add_css_class("preview-video");
+    picture_a.add_css_class("preview-video-overlay");
 
     let picture_b = Picture::new();
     picture_b.set_paintable(Some(&paintable_b));
