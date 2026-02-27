@@ -895,7 +895,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
-                let media = proj.tracks.iter().flat_map(|t| t.clips.iter())
+                // Collect only unique source paths to avoid redundant work.
+                let mut media_seen = HashSet::new();
+                let media: Vec<(String, u64)> = proj.tracks.iter().flat_map(|t| t.clips.iter())
+                    .filter(|c| media_seen.insert(c.source_path.as_str() as *const str))
                     .map(|c| (c.source_path.clone(), c.source_out))
                     .collect();
                 (clips, media)
@@ -903,11 +906,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
             {
                 let mut lib = library.borrow_mut();
-                let mut seen: HashSet<String> = lib.iter().map(|i| i.source_path.clone()).collect();
-                for (path, dur) in media_from_project {
-                    if seen.insert(path.clone()) {
-                        lib.push(MediaItem::new(path, dur));
-                    }
+                let seen: HashSet<&str> = lib.iter().map(|i| i.source_path.as_str()).collect();
+                let new_items: Vec<_> = media_from_project.into_iter()
+                    .filter(|(path, _)| !seen.contains(path.as_str()))
+                    .collect();
+                for (path, dur) in new_items {
+                    lib.push(MediaItem::new(path, dur));
                 }
             }
 
