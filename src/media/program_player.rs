@@ -1171,13 +1171,24 @@ impl ProgramPlayer {
     // ── Pipeline rebuild ───────────────────────────────────────────────────
 
     /// Tear down all active decoder slots (decoders, effects, pads).
+    ///
+    /// Order is critical to avoid deadlock:
+    /// 1. Release compositor/audiomixer request pads — disconnects the data
+    ///    flow path so the compositor's aggregation thread stops waiting for
+    ///    data from these slots.
+    /// 2. Remove elements from the pipeline — unlinks remaining pad peers.
+    /// 3. Set elements to Null — now safe because streaming is disconnected;
+    ///    pad deactivation won't block on locks held by the compositor.
     fn teardown_slots(&mut self) {
         for slot in self.slots.drain(..) {
-            let _ = slot.decoder.set_state(gst::State::Null);
-            let _ = slot.effects_bin.set_state(gst::State::Null);
-            if let Some(ref ac) = slot.audio_conv {
-                let _ = ac.set_state(gst::State::Null);
+            // 1. Release aggregator pads first to unblock streaming threads.
+            if let Some(ref pad) = slot.compositor_pad {
+                self.compositor.release_request_pad(pad);
             }
+            if let Some(ref pad) = slot.audio_mixer_pad {
+                self.audiomixer.release_request_pad(pad);
+            }
+            // 2. Remove elements from the pipeline (unlinks pads).
             self.pipeline.remove(&slot.decoder).ok();
             self.pipeline
                 .remove(slot.effects_bin.upcast_ref::<gst::Element>())
@@ -1185,11 +1196,11 @@ impl ProgramPlayer {
             if let Some(ref ac) = slot.audio_conv {
                 self.pipeline.remove(ac).ok();
             }
-            if let Some(ref pad) = slot.compositor_pad {
-                self.compositor.release_request_pad(pad);
-            }
-            if let Some(ref pad) = slot.audio_mixer_pad {
-                self.audiomixer.release_request_pad(pad);
+            // 3. Now set to Null — safe because elements are disconnected.
+            let _ = slot.decoder.set_state(gst::State::Null);
+            let _ = slot.effects_bin.set_state(gst::State::Null);
+            if let Some(ref ac) = slot.audio_conv {
+                let _ = ac.set_state(gst::State::Null);
             }
         }
     }
