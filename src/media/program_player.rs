@@ -1172,23 +1172,20 @@ impl ProgramPlayer {
 
     /// Tear down all active decoder slots (decoders, effects, pads).
     ///
-    /// Order is critical to avoid deadlock:
-    /// 1. Release compositor/audiomixer request pads — disconnects the data
-    ///    flow path so the compositor's aggregation thread stops waiting for
-    ///    data from these slots.
-    /// 2. Remove elements from the pipeline — unlinks remaining pad peers.
-    /// 3. Set elements to Null — now safe because streaming is disconnected;
-    ///    pad deactivation won't block on locks held by the compositor.
+    /// Order is critical to avoid both deadlock and pipeline errors:
+    /// 1. Remove elements from the pipeline — `gst_bin_remove` unlinks
+    ///    pads using only the pad *object* lock (not the stream lock),
+    ///    so it doesn't deadlock with the compositor's streaming thread.
+    ///    Once removed, FLOW_NOT_LINKED errors from the decoder's
+    ///    still-running streaming thread can't reach the pipeline bus.
+    /// 2. Release compositor/audiomixer request pads — the pads are
+    ///    already unlinked (step 1) so this just removes them from
+    ///    the aggregator and wakes up its aggregation thread.
+    /// 3. Set elements to Null — pad deactivation is fast because pads
+    ///    were already unlinked in step 1.
     fn teardown_slots(&mut self) {
         for slot in self.slots.drain(..) {
-            // 1. Release aggregator pads first to unblock streaming threads.
-            if let Some(ref pad) = slot.compositor_pad {
-                self.compositor.release_request_pad(pad);
-            }
-            if let Some(ref pad) = slot.audio_mixer_pad {
-                self.audiomixer.release_request_pad(pad);
-            }
-            // 2. Remove elements from the pipeline (unlinks pads).
+            // 1. Remove elements from pipeline (unlinks pads safely).
             self.pipeline.remove(&slot.decoder).ok();
             self.pipeline
                 .remove(slot.effects_bin.upcast_ref::<gst::Element>())
@@ -1196,7 +1193,14 @@ impl ProgramPlayer {
             if let Some(ref ac) = slot.audio_conv {
                 self.pipeline.remove(ac).ok();
             }
-            // 3. Now set to Null — safe because elements are disconnected.
+            // 2. Release aggregator pads (now unlinked, won't deadlock).
+            if let Some(ref pad) = slot.compositor_pad {
+                self.compositor.release_request_pad(pad);
+            }
+            if let Some(ref pad) = slot.audio_mixer_pad {
+                self.audiomixer.release_request_pad(pad);
+            }
+            // 3. Set to Null — pads already unlinked, deactivation is fast.
             let _ = slot.decoder.set_state(gst::State::Null);
             let _ = slot.effects_bin.set_state(gst::State::Null);
             if let Some(ref ac) = slot.audio_conv {
