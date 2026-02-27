@@ -1,3 +1,5 @@
+use crate::media::player::PlayerState;
+use crate::ui_state::PlaybackPriority;
 /// A "program monitor" player that composites the assembled timeline.
 ///
 /// Uses a GStreamer pipeline built around `compositor` (video) and `audiomixer`
@@ -6,12 +8,10 @@
 /// Timeline position derives from a single pipeline running time — no per-clip
 /// anchor heuristics needed.
 use anyhow::{anyhow, Result};
+use glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
-use glib;
-use crate::media::player::PlayerState;
-use crate::ui_state::PlaybackPriority;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -88,7 +88,11 @@ impl ProgramClip {
     /// Timeline duration accounting for speed.
     pub fn duration_ns(&self) -> u64 {
         let src = self.source_duration_ns();
-        if self.speed > 0.0 { (src as f64 / self.speed) as u64 } else { src }
+        if self.speed > 0.0 {
+            (src as f64 / self.speed) as u64
+        } else {
+            src
+        }
     }
     pub fn timeline_end_ns(&self) -> u64 {
         self.timeline_start_ns + self.duration_ns()
@@ -195,23 +199,25 @@ impl ProgramPlayer {
 
         // Build tee-based sink bin: display + scope appsink (320x180 RGBA).
         let video_sink_bin: gst::Element = (|| {
-            let tee   = gst::ElementFactory::make("tee").build().ok()?;
-            let q1    = gst::ElementFactory::make("queue").build().ok()?;
-            let q2    = gst::ElementFactory::make("queue").build().ok()?;
+            let tee = gst::ElementFactory::make("tee").build().ok()?;
+            let q1 = gst::ElementFactory::make("queue").build().ok()?;
+            let q2 = gst::ElementFactory::make("queue").build().ok()?;
             let scale = gst::ElementFactory::make("videoscale").build().ok()?;
-            let conv  = gst::ElementFactory::make("videoconvert").build().ok()?;
-            let sink  = AppSink::builder()
-                .caps(&gst::Caps::builder("video/x-raw")
-                    .field("format", "RGBA")
-                    .field("width",  320i32)
-                    .field("height", 180i32)
-                    .build())
+            let conv = gst::ElementFactory::make("videoconvert").build().ok()?;
+            let sink = AppSink::builder()
+                .caps(
+                    &gst::Caps::builder("video/x-raw")
+                        .field("format", "RGBA")
+                        .field("width", 320i32)
+                        .field("height", 180i32)
+                        .build(),
+                )
                 .max_buffers(1u32)
                 .drop(true)
                 .build();
 
             let lsf_preroll = latest_scope_frame.clone();
-            let lsf_sample  = latest_scope_frame.clone();
+            let lsf_sample = latest_scope_frame.clone();
             sink.set_callbacks(
                 gstreamer_app::AppSinkCallbacks::builder()
                     .new_preroll(move |appsink| {
@@ -250,21 +256,32 @@ impl ProgramPlayer {
                         }
                         Ok(gst::FlowSuccess::Ok)
                     })
-                    .build()
+                    .build(),
             );
 
             let bin = gst::Bin::new();
-            bin.add_many([&tee, &q1, &video_sink_inner, &q2, &scale, &conv, sink.upcast_ref::<gst::Element>()]).ok()?;
+            bin.add_many([
+                &tee,
+                &q1,
+                &video_sink_inner,
+                &q2,
+                &scale,
+                &conv,
+                sink.upcast_ref::<gst::Element>(),
+            ])
+            .ok()?;
             let tee_src0 = tee.request_pad_simple("src_%u")?;
             tee_src0.link(&q1.static_pad("sink")?).ok()?;
             gst::Element::link_many([&q1, &video_sink_inner]).ok()?;
             let tee_src1 = tee.request_pad_simple("src_%u")?;
             tee_src1.link(&q2.static_pad("sink")?).ok()?;
-            gst::Element::link_many([&q2, &scale, &conv, sink.upcast_ref::<gst::Element>()]).ok()?;
+            gst::Element::link_many([&q2, &scale, &conv, sink.upcast_ref::<gst::Element>()])
+                .ok()?;
             let ghost = gst::GhostPad::with_target(&tee.static_pad("sink")?).ok()?;
             bin.add_pad(&ghost).ok()?;
             Some(bin.upcast::<gst::Element>())
-        })().unwrap_or(video_sink_inner);
+        })()
+        .unwrap_or(video_sink_inner);
 
         // -- Compositor pipeline ------------------------------------------------
         let pipeline = gst::Pipeline::new();
@@ -275,16 +292,20 @@ impl ProgramPlayer {
             .map_err(|_| anyhow!("compositor element not available"))?;
 
         let comp_capsfilter = gst::ElementFactory::make("capsfilter")
-            .property("caps", &gst::Caps::builder("video/x-raw")
-                .field("format", "RGBA")
-                .field("width",  1920i32)
-                .field("height", 1080i32)
-                .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
-                .build())
+            .property(
+                "caps",
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", "RGBA")
+                    .field("width", 1920i32)
+                    .field("height", 1080i32)
+                    .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+                    .build(),
+            )
             .build()
             .map_err(|_| anyhow!("capsfilter not available"))?;
 
-        let videoconvert_out = gst::ElementFactory::make("videoconvert").build()
+        let videoconvert_out = gst::ElementFactory::make("videoconvert")
+            .build()
             .map_err(|_| anyhow!("videoconvert not available"))?;
 
         // Always-on black background so compositor has at least one input.
@@ -293,12 +314,15 @@ impl ProgramPlayer {
             .build()
             .map_err(|_| anyhow!("videotestsrc not available"))?;
         let black_caps = gst::ElementFactory::make("capsfilter")
-            .property("caps", &gst::Caps::builder("video/x-raw")
-                .field("format", "RGBA")
-                .field("width",  1920i32)
-                .field("height", 1080i32)
-                .field("framerate", gst::Fraction::new(30, 1))
-                .build())
+            .property(
+                "caps",
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", "RGBA")
+                    .field("width", 1920i32)
+                    .field("height", 1080i32)
+                    .field("framerate", gst::Fraction::new(30, 1))
+                    .build(),
+            )
             .build()?;
 
         // -- Audio mixer --------------------------------------------------------
@@ -312,10 +336,13 @@ impl ProgramPlayer {
             .build()
             .map_err(|_| anyhow!("audiotestsrc not available"))?;
         let silence_caps = gst::ElementFactory::make("capsfilter")
-            .property("caps", &gst::Caps::builder("audio/x-raw")
-                .field("rate", 48000i32)
-                .field("channels", 2i32)
-                .build())
+            .property(
+                "caps",
+                &gst::Caps::builder("audio/x-raw")
+                    .field("rate", 48000i32)
+                    .field("channels", 2i32)
+                    .build(),
+            )
             .build()?;
 
         let audio_conv_out = gst::ElementFactory::make("audioconvert").build()?;
@@ -328,12 +355,19 @@ impl ProgramPlayer {
 
         // -- Add everything to the pipeline ------------------------------------
         pipeline.add_many([
-            &black_src, &black_caps,
-            &compositor, &comp_capsfilter, &videoconvert_out, &video_sink_bin,
+            &black_src,
+            &black_caps,
+            &compositor,
+            &comp_capsfilter,
+            &videoconvert_out,
+            &video_sink_bin,
         ])?;
         pipeline.add_many([
-            &silence_src, &silence_caps,
-            &audiomixer, &audio_conv_out, &audio_sink,
+            &silence_src,
+            &silence_caps,
+            &audiomixer,
+            &audio_conv_out,
+            &audio_sink,
         ])?;
         if let Some(ref lv) = level_element {
             pipeline.add(lv)?;
@@ -341,17 +375,24 @@ impl ProgramPlayer {
 
         // Link black source → compositor background pad
         gst::Element::link_many([&black_src, &black_caps])?;
-        let comp_bg_pad = compositor.request_pad_simple("sink_%u")
+        let comp_bg_pad = compositor
+            .request_pad_simple("sink_%u")
             .ok_or_else(|| anyhow!("failed to request compositor background pad"))?;
         comp_bg_pad.set_property("zorder", 0u32);
         black_caps.static_pad("src").unwrap().link(&comp_bg_pad)?;
 
         // Link compositor → capsfilter → videoconvert → display/scope
-        gst::Element::link_many([&compositor, &comp_capsfilter, &videoconvert_out, &video_sink_bin])?;
+        gst::Element::link_many([
+            &compositor,
+            &comp_capsfilter,
+            &videoconvert_out,
+            &video_sink_bin,
+        ])?;
 
         // Link silence → audiomixer background pad
         gst::Element::link_many([&silence_src, &silence_caps])?;
-        let amix_bg_pad = audiomixer.request_pad_simple("sink_%u")
+        let amix_bg_pad = audiomixer
+            .request_pad_simple("sink_%u")
             .ok_or_else(|| anyhow!("failed to request audiomixer background pad"))?;
         amix_bg_pad.set_property("volume", 1.0_f64);
         silence_caps.static_pad("src").unwrap().link(&amix_bg_pad)?;
@@ -364,7 +405,8 @@ impl ProgramPlayer {
         }
 
         // -- Audio-only pipeline (playbin, unchanged) --------------------------
-        let fakevideo = gst::ElementFactory::make("fakesink").build()
+        let fakevideo = gst::ElementFactory::make("fakesink")
+            .build()
             .unwrap_or_else(|_| gst::ElementFactory::make("autovideosink").build().unwrap());
         let audio_pipeline = gst::ElementFactory::make("playbin")
             .property("video-sink", &fakevideo)
@@ -470,13 +512,13 @@ impl ProgramPlayer {
     pub fn current_clip_transform(&self) -> Option<crate::ui::program_monitor::ClipTransform> {
         let c = self.clips.get(self.current_idx?)?;
         Some(crate::ui::program_monitor::ClipTransform {
-            crop_left:   c.crop_left,
-            crop_right:  c.crop_right,
-            crop_top:    c.crop_top,
+            crop_left: c.crop_left,
+            crop_right: c.crop_right,
+            crop_top: c.crop_top,
             crop_bottom: c.crop_bottom,
-            rotate:      c.rotate,
-            flip_h:      c.flip_h,
-            flip_v:      c.flip_v,
+            rotate: c.rotate,
+            flip_h: c.flip_h,
+            flip_v: c.flip_v,
         })
     }
 
@@ -495,8 +537,18 @@ impl ProgramPlayer {
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
         self.clips = video;
-        let vdur = self.clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
-        let adur = self.audio_clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
+        let vdur = self
+            .clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
+        let adur = self
+            .audio_clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
         self.timeline_dur_ns = vdur.max(adur);
         self.current_idx = None;
         self.audio_current_idx = None;
@@ -517,6 +569,9 @@ impl ProgramPlayer {
         self.timeline_pos_ns = timeline_pos_ns;
         self.base_timeline_ns = timeline_pos_ns;
         self.play_start = None;
+        if self.clips.is_empty() && self.audio_clips.is_empty() {
+            return;
+        }
         self.rebuild_pipeline_at(timeline_pos_ns);
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
@@ -526,6 +581,9 @@ impl ProgramPlayer {
     }
 
     pub fn play(&mut self) {
+        if self.clips.is_empty() && self.audio_clips.is_empty() {
+            return;
+        }
         let pos = self.timeline_pos_ns;
         if self.slots.is_empty() {
             self.rebuild_pipeline_at(pos);
@@ -555,9 +613,13 @@ impl ProgramPlayer {
         // Capture final position before stopping the clock.
         if let Some(start) = self.play_start.take() {
             let elapsed = start.elapsed().as_nanos() as u64;
-            let speed = if self.jkl_rate != 0.0 { self.jkl_rate.abs() } else { 1.0 };
-            self.timeline_pos_ns = (self.base_timeline_ns + (elapsed as f64 * speed) as u64)
-                .min(self.timeline_dur_ns);
+            let speed = if self.jkl_rate != 0.0 {
+                self.jkl_rate.abs()
+            } else {
+                1.0
+            };
+            self.timeline_pos_ns =
+                (self.base_timeline_ns + (elapsed as f64 * speed) as u64).min(self.timeline_dur_ns);
         }
         let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
@@ -582,6 +644,9 @@ impl ProgramPlayer {
         self.play_start = None;
         self.current_idx = None;
         self.audio_current_idx = None;
+        if self.clips.is_empty() && self.audio_clips.is_empty() {
+            return;
+        }
         self.sync_audio_to(0);
         // Rebuild at 0 so a paused frame is visible.
         self.rebuild_pipeline_at(0);
@@ -641,11 +706,14 @@ impl ProgramPlayer {
         }
 
         // Advance timeline position from wall clock.
-        let speed = if self.jkl_rate != 0.0 { self.jkl_rate.abs() } else { 1.0 };
+        let speed = if self.jkl_rate != 0.0 {
+            self.jkl_rate.abs()
+        } else {
+            1.0
+        };
         let new_pos = if let Some(start) = self.play_start {
             let elapsed = start.elapsed().as_nanos() as u64;
-            (self.base_timeline_ns + (elapsed as f64 * speed) as u64)
-                .min(self.timeline_dur_ns)
+            (self.base_timeline_ns + (elapsed as f64 * speed) as u64).min(self.timeline_dur_ns)
         } else {
             self.timeline_pos_ns
         };
@@ -692,11 +760,18 @@ impl ProgramPlayer {
         self.update_current_effects(brightness, contrast, saturation, 0.0, 0.0);
     }
 
-    pub fn update_current_effects(&mut self, brightness: f64, contrast: f64, saturation: f64, denoise: f64, sharpness: f64) {
+    pub fn update_current_effects(
+        &mut self,
+        brightness: f64,
+        contrast: f64,
+        saturation: f64,
+        denoise: f64,
+        sharpness: f64,
+    ) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             if let Some(ref vb) = slot.videobalance {
                 vb.set_property("brightness", brightness.clamp(-1.0, 1.0));
-                vb.set_property("contrast",   contrast.clamp(0.0, 2.0));
+                vb.set_property("contrast", contrast.clamp(0.0, 2.0));
                 vb.set_property("saturation", saturation.clamp(0.0, 2.0));
             }
             if let Some(ref gb) = slot.gaussianblur {
@@ -719,12 +794,30 @@ impl ProgramPlayer {
         }
     }
 
-    pub fn set_transform(&self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32,
-                         rotate: i32, flip_h: bool, flip_v: bool,
-                         _scale: f64, _position_x: f64, _position_y: f64) {
+    pub fn set_transform(
+        &self,
+        crop_left: i32,
+        crop_right: i32,
+        crop_top: i32,
+        crop_bottom: i32,
+        rotate: i32,
+        flip_h: bool,
+        flip_v: bool,
+        _scale: f64,
+        _position_x: f64,
+        _position_y: f64,
+    ) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
-            Self::apply_transform_to_slot(slot, crop_left, crop_right, crop_top, crop_bottom,
-                                          rotate, flip_h, flip_v);
+            Self::apply_transform_to_slot(
+                slot,
+                crop_left,
+                crop_right,
+                crop_top,
+                crop_bottom,
+                rotate,
+                flip_h,
+                flip_v,
+            );
         }
     }
 
@@ -734,16 +827,33 @@ impl ProgramPlayer {
         }
     }
 
-    pub fn update_current_title(&mut self, text: &str, font: &str, color_rgba: u32, rel_x: f64, rel_y: f64) {
+    pub fn update_current_title(
+        &mut self,
+        text: &str,
+        font: &str,
+        color_rgba: u32,
+        rel_x: f64,
+        rel_y: f64,
+    ) {
         self.set_title(text, font, color_rgba, rel_x, rel_y);
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
             self.reseek_slot_for_current();
         }
     }
 
-    pub fn update_current_transform(&mut self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32,
-                                    rotate: i32, flip_h: bool, flip_v: bool,
-                                    scale: f64, position_x: f64, position_y: f64) {
+    pub fn update_current_transform(
+        &mut self,
+        crop_left: i32,
+        crop_right: i32,
+        crop_top: i32,
+        crop_bottom: i32,
+        rotate: i32,
+        flip_h: bool,
+        flip_v: bool,
+        scale: f64,
+        position_x: f64,
+        position_y: f64,
+    ) {
         if let Some(idx) = self.current_idx {
             if let Some(clip) = self.clips.get_mut(idx) {
                 clip.crop_left = crop_left;
@@ -758,16 +868,37 @@ impl ProgramPlayer {
                 clip.position_y = position_y;
             }
         }
-        self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v, scale, position_x, position_y);
+        self.set_transform(
+            crop_left,
+            crop_right,
+            crop_top,
+            crop_bottom,
+            rotate,
+            flip_h,
+            flip_v,
+            scale,
+            position_x,
+            position_y,
+        );
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
             self.reseek_slot_for_current();
         }
     }
 
-    pub fn update_transform_for_clip(&mut self, clip_id: &str,
-                                     crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32,
-                                     rotate: i32, flip_h: bool, flip_v: bool,
-                                     scale: f64, position_x: f64, position_y: f64) {
+    pub fn update_transform_for_clip(
+        &mut self,
+        clip_id: &str,
+        crop_left: i32,
+        crop_right: i32,
+        crop_top: i32,
+        crop_bottom: i32,
+        rotate: i32,
+        flip_h: bool,
+        flip_v: bool,
+        scale: f64,
+        position_x: f64,
+        position_y: f64,
+    ) {
         let idx = self.clips.iter().position(|c| c.id == clip_id);
         if let Some(i) = idx {
             if let Some(clip) = self.clips.get_mut(i) {
@@ -783,7 +914,18 @@ impl ProgramPlayer {
                 clip.position_y = position_y;
             }
             if self.current_idx == Some(i) {
-                self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v, scale, position_x, position_y);
+                self.set_transform(
+                    crop_left,
+                    crop_right,
+                    crop_top,
+                    crop_bottom,
+                    rotate,
+                    flip_h,
+                    flip_v,
+                    scale,
+                    position_x,
+                    position_y,
+                );
                 if self.state != PlayerState::Playing {
                     self.reseek_slot_for_current();
                 }
@@ -830,18 +972,31 @@ impl ProgramPlayer {
 
     /// Return the highest-track-index clip active at this position.
     fn clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
-        let exact = self.clips.iter().enumerate()
-            .filter(|(_, c)| timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns())
+        let exact = self
+            .clips
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+            })
             .max_by_key(|(_, c)| c.track_index)
             .map(|(i, _)| i);
-        if exact.is_some() { return exact; }
+        if exact.is_some() {
+            return exact;
+        }
         const GAP_NS: u64 = 100_000_000;
-        let next_start = self.clips.iter()
-            .filter(|c| c.timeline_start_ns > timeline_pos_ns
-                     && c.timeline_start_ns <= timeline_pos_ns + GAP_NS)
+        let next_start = self
+            .clips
+            .iter()
+            .filter(|c| {
+                c.timeline_start_ns > timeline_pos_ns
+                    && c.timeline_start_ns <= timeline_pos_ns + GAP_NS
+            })
             .map(|c| c.timeline_start_ns)
             .min()?;
-        self.clips.iter().enumerate()
+        self.clips
+            .iter()
+            .enumerate()
             .filter(|(_, c)| c.timeline_start_ns == next_start)
             .max_by_key(|(_, c)| c.track_index)
             .map(|(i, _)| i)
@@ -849,8 +1004,13 @@ impl ProgramPlayer {
 
     /// Return ALL clip indices active at the given timeline position, sorted by track_index.
     fn clips_active_at(&self, timeline_pos_ns: u64) -> Vec<usize> {
-        let mut active: Vec<usize> = self.clips.iter().enumerate()
-            .filter(|(_, c)| timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns())
+        let mut active: Vec<usize> = self
+            .clips
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+            })
             .map(|(i, _)| i)
             .collect();
         active.sort_by_key(|&i| self.clips[i].track_index);
@@ -869,7 +1029,9 @@ impl ProgramPlayer {
     fn clip_seek_flags(&self) -> gst::SeekFlags {
         match self.playback_priority {
             PlaybackPriority::Accurate => gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-            PlaybackPriority::Balanced | PlaybackPriority::Smooth => gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            PlaybackPriority::Balanced | PlaybackPriority::Smooth => {
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+            }
         }
     }
 
@@ -880,21 +1042,32 @@ impl ProgramPlayer {
     /// Force a re-seek on the current clip's slot so a paused frame refreshes.
     fn reseek_slot_for_current(&self) {
         let Some(idx) = self.current_idx else { return };
-        let Some(slot) = self.slot_for_clip(idx) else { return };
+        let Some(slot) = self.slot_for_clip(idx) else {
+            return;
+        };
         let clip = &self.clips[idx];
         let source_ns = clip.source_pos_ns(self.timeline_pos_ns);
         let speed = clip.speed;
         let _ = slot.decoder.seek(
             speed,
             Self::paused_seek_flags(),
-            gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
-            gst::SeekType::Set, gst::ClockTime::from_nseconds(clip.source_out_ns),
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(source_ns),
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(clip.source_out_ns),
         );
     }
 
-    fn apply_transform_to_slot(slot: &VideoSlot, crop_left: i32, crop_right: i32,
-                               crop_top: i32, crop_bottom: i32,
-                               rotate: i32, flip_h: bool, flip_v: bool) {
+    fn apply_transform_to_slot(
+        slot: &VideoSlot,
+        crop_left: i32,
+        crop_right: i32,
+        crop_top: i32,
+        crop_bottom: i32,
+        rotate: i32,
+        flip_h: bool,
+        flip_v: bool,
+    ) {
         if let Some(ref vc) = slot.videocrop {
             vc.set_property("left", crop_left.max(0));
             vc.set_property("right", crop_right.max(0));
@@ -903,26 +1076,32 @@ impl ProgramPlayer {
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
             let method = match rotate {
-                90  => "clockwise",
+                90 => "clockwise",
                 180 => "rotate-180",
                 270 => "counterclockwise",
-                _   => "none",
+                _ => "none",
             };
             vfr.set_property_from_str("method", method);
         }
         if let Some(ref vff) = slot.videoflip_flip {
             let method = match (flip_h, flip_v) {
-                (true, true)   => "rotate-180",
-                (true, false)  => "horizontal-flip",
-                (false, true)  => "vertical-flip",
+                (true, true) => "rotate-180",
+                (true, false) => "horizontal-flip",
+                (false, true) => "vertical-flip",
                 (false, false) => "none",
             };
             vff.set_property_from_str("method", method);
         }
     }
 
-    fn apply_title_to_slot(slot: &VideoSlot, text: &str, font: &str,
-                           color_rgba: u32, rel_x: f64, rel_y: f64) {
+    fn apply_title_to_slot(
+        slot: &VideoSlot,
+        text: &str,
+        font: &str,
+        color_rgba: u32,
+        rel_x: f64,
+        rel_y: f64,
+    ) {
         if let Some(ref to) = slot.textoverlay {
             let silent = text.is_empty();
             to.set_property("silent", silent);
@@ -935,7 +1114,7 @@ impl ProgramPlayer {
                 to.set_property("ypos", rel_y);
                 let r = (color_rgba >> 24) & 0xFF;
                 let g = (color_rgba >> 16) & 0xFF;
-                let b = (color_rgba >> 8)  & 0xFF;
+                let b = (color_rgba >> 8) & 0xFF;
                 let a = color_rgba & 0xFF;
                 let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
                 to.set_property("color", argb);
@@ -944,9 +1123,15 @@ impl ProgramPlayer {
     }
 
     /// Apply per-slot zoom / scale / position via compositor pad properties.
-    fn apply_zoom_to_slot(slot: &VideoSlot, pad: &gst::Pad,
-                          scale: f64, position_x: f64, position_y: f64,
-                          project_width: u32, project_height: u32) {
+    fn apply_zoom_to_slot(
+        slot: &VideoSlot,
+        pad: &gst::Pad,
+        scale: f64,
+        position_x: f64,
+        position_y: f64,
+        project_width: u32,
+        project_height: u32,
+    ) {
         let scale = scale.clamp(0.1, 4.0);
         let pw = project_width as f64;
         let ph = project_height as f64;
@@ -967,15 +1152,15 @@ impl ProgramPlayer {
         let pos_y = position_y.clamp(-1.0, 1.0);
         let total_x = pw * (scale - 1.0);
         let total_y = ph * (scale - 1.0);
-        let box_left   = (total_x * (1.0 + pos_x) / 2.0) as i32;
-        let box_right  = (total_x * (1.0 - pos_x) / 2.0) as i32;
-        let box_top    = (total_y * (1.0 + pos_y) / 2.0) as i32;
+        let box_left = (total_x * (1.0 + pos_x) / 2.0) as i32;
+        let box_right = (total_x * (1.0 - pos_x) / 2.0) as i32;
+        let box_top = (total_y * (1.0 + pos_y) / 2.0) as i32;
         let box_bottom = (total_y * (1.0 - pos_y) / 2.0) as i32;
 
         if let Some(ref vb) = slot.videobox_zoom {
-            vb.set_property("left",   box_left);
-            vb.set_property("right",  box_right);
-            vb.set_property("top",    box_top);
+            vb.set_property("left", box_left);
+            vb.set_property("right", box_right);
+            vb.set_property("top", box_top);
             vb.set_property("bottom", box_bottom);
             vb.set_property("border-alpha", 0.0_f64);
         }
@@ -994,7 +1179,9 @@ impl ProgramPlayer {
                 let _ = ac.set_state(gst::State::Null);
             }
             self.pipeline.remove(&slot.decoder).ok();
-            self.pipeline.remove(slot.effects_bin.upcast_ref::<gst::Element>()).ok();
+            self.pipeline
+                .remove(slot.effects_bin.upcast_ref::<gst::Element>())
+                .ok();
             if let Some(ref ac) = slot.audio_conv {
                 self.pipeline.remove(ac).ok();
             }
@@ -1008,17 +1195,22 @@ impl ProgramPlayer {
     }
 
     /// Build a per-slot video effects bin and return it along with effect element refs.
-    fn build_effects_bin(clip: &ProgramClip, project_width: u32, project_height: u32)
-        -> (gst::Bin,
-            Option<gst::Element>, // videobalance
-            Option<gst::Element>, // gaussianblur
-            Option<gst::Element>, // videocrop
-            Option<gst::Element>, // videoflip_rotate
-            Option<gst::Element>, // videoflip_flip
-            Option<gst::Element>, // textoverlay
-            Option<gst::Element>, // alpha_filter
-            Option<gst::Element>, // capsfilter_zoom
-            Option<gst::Element>) // videobox_zoom
+    fn build_effects_bin(
+        clip: &ProgramClip,
+        project_width: u32,
+        project_height: u32,
+    ) -> (
+        gst::Bin,
+        Option<gst::Element>, // videobalance
+        Option<gst::Element>, // gaussianblur
+        Option<gst::Element>, // videocrop
+        Option<gst::Element>, // videoflip_rotate
+        Option<gst::Element>, // videoflip_flip
+        Option<gst::Element>, // textoverlay
+        Option<gst::Element>, // alpha_filter
+        Option<gst::Element>, // capsfilter_zoom
+        Option<gst::Element>,
+    ) // videobox_zoom
     {
         let bin = gst::Bin::new();
 
@@ -1032,14 +1224,16 @@ impl ProgramPlayer {
         let conv4 = gst::ElementFactory::make("videoconvert").build().ok();
         let videoflip_flip = gst::ElementFactory::make("videoflip")
             .name("videoflip_flip")
-            .build().ok();
+            .build()
+            .ok();
         let alpha_filter = gst::ElementFactory::make("alpha").build().ok();
         let textoverlay = gst::ElementFactory::make("textoverlay").build().ok();
 
         let conv_zoom = gst::ElementFactory::make("videoconvert").build().ok();
         let videoscale_norm = gst::ElementFactory::make("videoscale")
             .property("add-borders", true)
-            .build().ok();
+            .build()
+            .ok();
         let capsfilter_proj = gst::ElementFactory::make("capsfilter").build().ok();
         let videoscale_zoom = gst::ElementFactory::make("videoscale").build().ok();
         let capsfilter_zoom = gst::ElementFactory::make("capsfilter").build().ok();
@@ -1048,7 +1242,7 @@ impl ProgramPlayer {
         // Set initial values from clip data.
         if let Some(ref vb) = videobalance {
             vb.set_property("brightness", clip.brightness.clamp(-1.0, 1.0));
-            vb.set_property("contrast",   clip.contrast.clamp(0.0, 2.0));
+            vb.set_property("contrast", clip.contrast.clamp(0.0, 2.0));
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
         }
         if let Some(ref gb) = gaussianblur {
@@ -1076,7 +1270,7 @@ impl ProgramPlayer {
         // Set project resolution capsfilters.
         let proj_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width",  project_width as i32)
+            .field("width", project_width as i32)
             .field("height", project_height as i32)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
@@ -1089,59 +1283,113 @@ impl ProgramPlayer {
 
         // Build chain: collect all available elements in order.
         let mut chain: Vec<gst::Element> = Vec::new();
-        if let Some(ref e) = videocrop       { chain.push(e.clone()); }
-        if let Some(ref e) = conv1           { chain.push(e.clone()); }
-        if let Some(ref e) = videobalance    { chain.push(e.clone()); }
-        if let Some(ref e) = conv2           { chain.push(e.clone()); }
-        if let Some(ref e) = gaussianblur    { chain.push(e.clone()); }
-        if let Some(ref e) = conv3           { chain.push(e.clone()); }
-        if let Some(ref e) = videoflip_rotate { chain.push(e.clone()); }
-        if let Some(ref e) = conv4           { chain.push(e.clone()); }
-        if let Some(ref e) = videoflip_flip  { chain.push(e.clone()); }
-        if let Some(ref e) = alpha_filter    { chain.push(e.clone()); }
-        if let Some(ref e) = textoverlay     { chain.push(e.clone()); }
-        if let Some(ref e) = conv_zoom       { chain.push(e.clone()); }
-        if let Some(ref e) = videoscale_norm { chain.push(e.clone()); }
-        if let Some(ref e) = capsfilter_proj { chain.push(e.clone()); }
-        if let Some(ref e) = videoscale_zoom { chain.push(e.clone()); }
-        if let Some(ref e) = capsfilter_zoom { chain.push(e.clone()); }
-        if let Some(ref e) = videobox_zoom   { chain.push(e.clone()); }
+        if let Some(ref e) = videocrop {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = conv1 {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videobalance {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = conv2 {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = gaussianblur {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = conv3 {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videoflip_rotate {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = conv4 {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videoflip_flip {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = alpha_filter {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = textoverlay {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = conv_zoom {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videoscale_norm {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = capsfilter_proj {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videoscale_zoom {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = capsfilter_zoom {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videobox_zoom {
+            chain.push(e.clone());
+        }
 
         if chain.is_empty() {
             // Fallback: just a videoconvert
             let vc = gst::ElementFactory::make("videoconvert").build().unwrap();
             bin.add(&vc).ok();
             let sink_pad = vc.static_pad("sink").unwrap();
-            let src_pad  = vc.static_pad("src").unwrap();
-            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+            let src_pad = vc.static_pad("src").unwrap();
+            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                .ok();
+            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
+                .ok();
         } else {
             let refs: Vec<&gst::Element> = chain.iter().collect();
             bin.add_many(&refs).ok();
             gst::Element::link_many(&refs).ok();
             let sink_pad = chain.first().unwrap().static_pad("sink").unwrap();
-            let src_pad  = chain.last().unwrap().static_pad("src").unwrap();
-            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+            let src_pad = chain.last().unwrap().static_pad("src").unwrap();
+            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                .ok();
+            bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
+                .ok();
         }
 
-        (bin, videobalance, gaussianblur, videocrop, videoflip_rotate, videoflip_flip,
-         textoverlay, alpha_filter, capsfilter_zoom, videobox_zoom)
+        (
+            bin,
+            videobalance,
+            gaussianblur,
+            videocrop,
+            videoflip_rotate,
+            videoflip_flip,
+            textoverlay,
+            alpha_filter,
+            capsfilter_zoom,
+            videobox_zoom,
+        )
     }
 
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         let was_playing = self.state == PlayerState::Playing;
 
+        // Tear down existing slots FIRST — each decoder is set to Null
+        // individually, which avoids a pipeline-wide state change on
+        // elements that may be mid-transition (causing a main-thread
+        // deadlock when gtk4paintablesink needs the main loop to complete
+        // its transition).
+        self.teardown_slots();
+
         // Go through Ready to reset the pipeline's base-time / running-time.
         // Without this, the always-on videotestsrc accumulates running-time
         // while newly-created decoders start at running-time 0 after their
         // flush seek.  The compositor waits for the decoders to catch up,
         // deadlocking the pipeline and freezing the playhead.
+        // Now that slots are torn down, only the lightweight background
+        // sources (videotestsrc, audiotestsrc) remain — this is fast and safe.
         let _ = self.pipeline.set_state(gst::State::Ready);
-
-        // Tear down existing slots.
-        self.teardown_slots();
 
         let active = self.clips_active_at(timeline_pos);
         if active.is_empty() {
@@ -1169,7 +1417,8 @@ impl ProgramPlayer {
                     &clip.source_path,
                     clip.lut_path.as_deref(),
                 );
-                self.proxy_paths.get(&key)
+                self.proxy_paths
+                    .get(&key)
                     .cloned()
                     .unwrap_or_else(|| clip.source_path.clone())
             } else {
@@ -1178,10 +1427,18 @@ impl ProgramPlayer {
             let uri = format!("file://{}", effective_path);
 
             // Build per-slot effects bin.
-            let (effects_bin, videobalance, gaussianblur, videocrop,
-                 videoflip_rotate, videoflip_flip, textoverlay,
-                 alpha_filter, capsfilter_zoom, videobox_zoom) =
-                Self::build_effects_bin(&clip, self.project_width, self.project_height);
+            let (
+                effects_bin,
+                videobalance,
+                gaussianblur,
+                videocrop,
+                videoflip_rotate,
+                videoflip_flip,
+                textoverlay,
+                alpha_filter,
+                capsfilter_zoom,
+                videobox_zoom,
+            ) = Self::build_effects_bin(&clip, self.project_width, self.project_height);
 
             // Create uridecodebin for this clip.
             let decoder = match gst::ElementFactory::make("uridecodebin")
@@ -1190,7 +1447,11 @@ impl ProgramPlayer {
             {
                 Ok(d) => d,
                 Err(e) => {
-                    log::warn!("ProgramPlayer: failed to create uridecodebin for {}: {}", uri, e);
+                    log::warn!(
+                        "ProgramPlayer: failed to create uridecodebin for {}: {}",
+                        uri,
+                        e
+                    );
                     continue;
                 }
             };
@@ -1200,7 +1461,11 @@ impl ProgramPlayer {
                 log::warn!("ProgramPlayer: failed to add decoder to pipeline");
                 continue;
             }
-            if self.pipeline.add(effects_bin.upcast_ref::<gst::Element>()).is_err() {
+            if self
+                .pipeline
+                .add(effects_bin.upcast_ref::<gst::Element>())
+                .is_err()
+            {
                 self.pipeline.remove(&decoder).ok();
                 log::warn!("ProgramPlayer: failed to add effects_bin to pipeline");
                 continue;
@@ -1211,7 +1476,9 @@ impl ProgramPlayer {
                 Some(p) => p,
                 None => {
                     self.pipeline.remove(&decoder).ok();
-                    self.pipeline.remove(effects_bin.upcast_ref::<gst::Element>()).ok();
+                    self.pipeline
+                        .remove(effects_bin.upcast_ref::<gst::Element>())
+                        .ok();
                     continue;
                 }
             };
@@ -1233,9 +1500,15 @@ impl ProgramPlayer {
                             let _ = ac_src.link(&mp);
                         }
                         Some(mp)
-                    } else { None }
-                } else { None }
-            } else { None };
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             // Connect uridecodebin pad-added for dynamic linking.
             let effects_sink = effects_bin.static_pad("sink");
@@ -1283,15 +1556,33 @@ impl ProgramPlayer {
                 capsfilter_zoom: capsfilter_zoom.clone(),
                 videobox_zoom: videobox_zoom.clone(),
             };
-            Self::apply_transform_to_slot(&slot_ref_for_transform,
-                clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom,
-                clip.rotate, clip.flip_h, clip.flip_v);
-            Self::apply_title_to_slot(&slot_ref_for_transform,
-                &clip.title_text, &clip.title_font, clip.title_color,
-                clip.title_x, clip.title_y);
-            Self::apply_zoom_to_slot(&slot_ref_for_transform, &comp_pad,
-                clip.scale, clip.position_x, clip.position_y,
-                self.project_width, self.project_height);
+            Self::apply_transform_to_slot(
+                &slot_ref_for_transform,
+                clip.crop_left,
+                clip.crop_right,
+                clip.crop_top,
+                clip.crop_bottom,
+                clip.rotate,
+                clip.flip_h,
+                clip.flip_v,
+            );
+            Self::apply_title_to_slot(
+                &slot_ref_for_transform,
+                &clip.title_text,
+                &clip.title_font,
+                clip.title_color,
+                clip.title_x,
+                clip.title_y,
+            );
+            Self::apply_zoom_to_slot(
+                &slot_ref_for_transform,
+                &comp_pad,
+                clip.scale,
+                clip.position_x,
+                clip.position_y,
+                self.project_width,
+                self.project_height,
+            );
 
             self.slots.push(VideoSlot {
                 clip_idx,
@@ -1356,8 +1647,12 @@ impl ProgramPlayer {
                             if s.name() == "level" {
                                 if let Ok(peak) = s.get::<glib::ValueArray>("peak") {
                                     let vals = peak.as_slice();
-                                    let l = vals.first().and_then(|v| v.get::<f64>().ok()).unwrap_or(-60.0);
-                                    let r = vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
+                                    let l = vals
+                                        .first()
+                                        .and_then(|v| v.get::<f64>().ok())
+                                        .unwrap_or(-60.0);
+                                    let r =
+                                        vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
                                     self.audio_peak_db[0] = self.audio_peak_db[0].max(l);
                                     self.audio_peak_db[1] = self.audio_peak_db[1].max(r);
                                 }
@@ -1375,7 +1670,10 @@ impl ProgramPlayer {
                         if s.name() == "level" {
                             if let Ok(peak) = s.get::<glib::ValueArray>("peak") {
                                 let vals = peak.as_slice();
-                                let l = vals.first().and_then(|v| v.get::<f64>().ok()).unwrap_or(-60.0);
+                                let l = vals
+                                    .first()
+                                    .and_then(|v| v.get::<f64>().ok())
+                                    .unwrap_or(-60.0);
                                 let r = vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
                                 self.audio_peak_db[0] = self.audio_peak_db[0].max(l);
                                 self.audio_peak_db[1] = self.audio_peak_db[1].max(r);
@@ -1399,7 +1697,8 @@ impl ProgramPlayer {
     fn load_audio_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
         let clip = &self.audio_clips[idx];
         let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
-        self.audio_pipeline.set_property("volume", clip.volume.clamp(0.0, 2.0));
+        self.audio_pipeline
+            .set_property("volume", clip.volume.clamp(0.0, 2.0));
         if self.audio_current_idx == Some(idx) {
             let _ = self.audio_pipeline.seek(
                 1.0_f64,
@@ -1451,7 +1750,6 @@ impl ProgramPlayer {
         }
     }
 }
-
 
 impl Drop for ProgramPlayer {
     fn drop(&mut self) {
