@@ -1184,17 +1184,23 @@ impl ProgramPlayer {
         }
 
         // Compute videobox borders.
-        // For zoom-in (scale > 1.0): frame is larger than project res → negative box values (crop).
-        // For zoom-out (scale < 1.0): frame is smaller than project res → positive box values (pad).
-        // pos_x/pos_y in [−1, 1]: positive = shift viewport right/down.
+        // GStreamer videobox sign convention:
+        //   POSITIVE value = CROP (remove pixels from that edge)
+        //   NEGATIVE value = PAD (add fill pixels to that edge)
+        //
+        // total_x = pw*(scale-1):
+        //   scale > 1 → positive → crop needed (frame is larger than project res)
+        //   scale < 1 → negative → pad needed (frame is smaller than project res)
+        //
+        // pos_x in [−1, 1]: positive = shift clip RIGHT (more pad/less crop on left).
         let pos_x = position_x.clamp(-1.0, 1.0);
         let pos_y = position_y.clamp(-1.0, 1.0);
-        let total_x = pw * (scale - 1.0); // positive = need to crop; negative = need to pad
+        let total_x = pw * (scale - 1.0);
         let total_y = ph * (scale - 1.0);
-        let box_left   = -(total_x * (1.0 + pos_x) / 2.0) as i32;
-        let box_right  = -(total_x * (1.0 - pos_x) / 2.0) as i32;
-        let box_top    = -(total_y * (1.0 + pos_y) / 2.0) as i32;
-        let box_bottom = -(total_y * (1.0 - pos_y) / 2.0) as i32;
+        let box_left   = (total_x * (1.0 + pos_x) / 2.0) as i32;
+        let box_right  = (total_x * (1.0 - pos_x) / 2.0) as i32;
+        let box_top    = (total_y * (1.0 + pos_y) / 2.0) as i32;
+        let box_bottom = (total_y * (1.0 - pos_y) / 2.0) as i32;
 
         if let Some(ref vb) = self.videobox_zoom {
             vb.set_property("left",   box_left);
