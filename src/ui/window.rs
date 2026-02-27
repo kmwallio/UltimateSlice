@@ -1402,7 +1402,8 @@ fn handle_mcp_command(
             reply.send(json!({
                 "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
                 "playback_priority": prefs.playback_priority.as_str(),
-                "proxy_mode": prefs.proxy_mode.as_str()
+                "proxy_mode": prefs.proxy_mode.as_str(),
+                "gsk_renderer": prefs.gsk_renderer.as_str()
             })).ok();
         }
 
@@ -1482,6 +1483,21 @@ fn handle_mcp_command(
             reply.send(json!({
                 "success": true,
                 "proxy_mode": new_state.proxy_mode.as_str()
+            })).ok();
+        }
+
+        McpCommand::SetGskRenderer { renderer, reply } => {
+            let parsed = crate::ui_state::GskRenderer::from_str(&renderer);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.gsk_renderer = parsed;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply.send(json!({
+                "success": true,
+                "gsk_renderer": new_state.gsk_renderer.as_str(),
+                "note": "Restart the application for the new renderer to take effect."
             })).ok();
         }
 

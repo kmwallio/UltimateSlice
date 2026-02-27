@@ -446,6 +446,17 @@ fn tools_list() -> Value {
                     "title": { "type": "string", "description": "Title for the new project (default: 'Untitled')." }
                 }
             }
+        },
+        {
+            "name": "set_gsk_renderer",
+            "description": "Set the GTK renderer backend. Use 'cairo' on devices with limited GPU memory to avoid Vulkan out-of-memory errors. Requires application restart to take effect.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "renderer": { "type": "string", "enum": ["auto", "cairo", "opengl", "vulkan"], "description": "GTK renderer backend." }
+                },
+                "required": ["renderer"]
+            }
         }
     ]})
 }
@@ -586,6 +597,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "create_project" => McpCommand::CreateProject {
             title: args["title"].as_str().unwrap_or("Untitled").to_string(),
+            reply: tx,
+        },
+
+        "set_gsk_renderer" => McpCommand::SetGskRenderer {
+            renderer: args["renderer"].as_str().unwrap_or("auto").to_string(),
             reply: tx,
         },
 

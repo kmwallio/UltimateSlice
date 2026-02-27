@@ -53,6 +53,20 @@ Preferences are grouped by category in a sidebar:
 - Click **Save** to persist changes.
 - Click **Cancel** to discard changes.
 
+## GTK Renderer (Playback)
+
+- **GTK renderer** controls which graphics backend GTK uses to draw the application window:
+  - `Auto` (default): let GTK decide (usually Vulkan on supported systems).
+  - `Cairo (Software)`: CPU-based rendering — uses no GPU memory at all. Best for devices with limited GPU memory that see `VK_ERROR_OUT_OF_DEVICE_MEMORY` errors.
+  - `OpenGL`: moderate GPU memory usage — a good middle ground.
+  - `Vulkan`: explicit Vulkan rendering — highest quality, highest GPU memory usage.
+- **Requires a restart** to take effect (the renderer is selected before GTK initializes).
+- Export is unaffected — it always uses ffmpeg regardless of the renderer setting.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `gsk_renderer`.
+  - `set_gsk_renderer` updates the mode (restart required to apply).
+
 ## MCP Socket Server (Integration)
 
 - **Enable MCP socket server** allows AI agents to connect to this running instance via a Unix domain socket.

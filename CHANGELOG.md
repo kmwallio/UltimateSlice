@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **GTK Renderer preference**: New "GTK renderer" setting in Preferences → Playback lets users choose between Auto, Cairo (Software), OpenGL, and Vulkan backends. Cairo mode uses zero GPU memory, resolving `VK_ERROR_OUT_OF_DEVICE_MEMORY` errors on devices with limited GPU memory. Requires application restart. Also exposed via `set_gsk_renderer` MCP tool and included in `get_preferences` response.
 - **MCP socket transport**: UltimateSlice can now listen on a Unix domain socket (`$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`) so AI agents can connect to an already-running instance. Enabled via Preferences → Integration → Enable MCP socket server. The toggle takes effect immediately without restarting.
 - **`--mcp-attach` CLI flag**: A built-in stdio-to-socket proxy that bridges stdin/stdout to the running instance's MCP socket, letting standard MCP clients (which expect stdio) connect via `.mcp.json` `ultimate-slice-attach` entry.
 

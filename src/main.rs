@@ -23,6 +23,12 @@ fn main() {
         std::process::exit(run_mcp_attach());
     }
 
+    // Apply GSK renderer preference before GTK initializes.
+    let prefs = ui_state::load_preferences_state();
+    if let Some(renderer) = prefs.gsk_renderer.env_value() {
+        std::env::set_var("GSK_RENDERER", renderer);
+    }
+
     if mcp_enabled {
         ensure_single_mcp_instance();
     }

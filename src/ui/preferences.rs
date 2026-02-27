@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack, StackSidebar};
 use std::rc::Rc;
-use crate::ui_state::{PlaybackPriority, ProxyMode, PreferencesState};
+use crate::ui_state::{GskRenderer, PlaybackPriority, ProxyMode, PreferencesState};
 
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
@@ -94,6 +94,25 @@ pub fn show_preferences_dialog(
     playback_box.append(&proxy_label);
     playback_box.append(&proxy_mode);
     playback_box.append(&proxy_hint);
+
+    let renderer_label = Label::new(Some("GTK renderer"));
+    renderer_label.set_halign(gtk::Align::Start);
+    let gsk_renderer = gtk4::ComboBoxText::new();
+    gsk_renderer.append(Some("auto"), "Auto (let GTK decide)");
+    gsk_renderer.append(Some("cairo"), "Cairo (Software — no GPU memory)");
+    gsk_renderer.append(Some("opengl"), "OpenGL (moderate GPU memory)");
+    gsk_renderer.append(Some("vulkan"), "Vulkan (highest quality)");
+    gsk_renderer.set_active_id(Some(current.gsk_renderer.as_str()));
+    gsk_renderer.set_halign(gtk::Align::Start);
+    let renderer_hint = Label::new(Some("Choose Cairo on devices with limited GPU memory to avoid Vulkan out-of-memory errors. Requires restart."));
+    renderer_hint.set_halign(gtk::Align::Start);
+    renderer_hint.add_css_class("dim-label");
+    renderer_hint.set_wrap(true);
+    renderer_hint.set_max_width_chars(60);
+    playback_box.append(&renderer_label);
+    playback_box.append(&gsk_renderer);
+    playback_box.append(&renderer_hint);
+
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     // ── Timeline section ──────────────────────────────────────────────────
@@ -153,6 +172,7 @@ pub fn show_preferences_dialog(
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 mcp_socket_enabled: mcp_socket_check.is_active(),
+                gsk_renderer: GskRenderer::from_str(gsk_renderer.active_id().as_deref().unwrap_or("auto")),
             });
         }
         d.close();

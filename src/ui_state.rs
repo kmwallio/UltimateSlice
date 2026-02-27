@@ -52,6 +52,49 @@ impl PlaybackPriority {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum GskRenderer {
+    Auto,
+    Cairo,
+    Opengl,
+    Vulkan,
+}
+
+impl Default for GskRenderer {
+    fn default() -> Self { Self::Auto }
+}
+
+impl GskRenderer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cairo => "cairo",
+            Self::Opengl => "opengl",
+            Self::Vulkan => "vulkan",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "cairo" => Self::Cairo,
+            "opengl" => Self::Opengl,
+            "vulkan" => Self::Vulkan,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Returns the value to set for the `GSK_RENDERER` env var, or `None` for Auto.
+    pub fn env_value(&self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Cairo => Some("cairo"),
+            Self::Opengl => Some("ngl"),
+            Self::Vulkan => Some("vulkan"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
     Off,
     HalfRes,
@@ -98,6 +141,9 @@ pub struct PreferencesState {
     /// Enable the MCP Unix-domain-socket server so agents can connect to this instance.
     #[serde(default)]
     pub mcp_socket_enabled: bool,
+    /// GTK renderer backend (requires restart to take effect).
+    #[serde(default)]
+    pub gsk_renderer: GskRenderer,
 }
 
 impl Default for PreferencesState {
@@ -108,6 +154,7 @@ impl Default for PreferencesState {
             proxy_mode: ProxyMode::default(),
             show_waveform_on_video: false,
             mcp_socket_enabled: false,
+            gsk_renderer: GskRenderer::default(),
         }
     }
 }
