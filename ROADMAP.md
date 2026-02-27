@@ -145,7 +145,7 @@ Tracking docs:
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
   - [x] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
-  - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching — see Picture-in-Picture section under Video Transform
+  - [x] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching — see Picture-in-Picture section under Video Transform
   - [x] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
   - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
@@ -204,9 +204,9 @@ Tracking docs:
   - [x] Program Monitor now composites the top active video clip over the nearest active lower track at the playhead, so uncovered regions from scale/position transforms reveal lower-track video.
   - [x] Per-clip opacity control (0.0–1.0) in Inspector and MCP (`set_clip_opacity`), persisted in FCPXML (`us:opacity`).
   - [x] Export overlays now preserve transparency for zoom-out padding and apply per-clip opacity in the ffmpeg overlay chain.
-  - Compositor-based preview pipeline using GStreamer `compositor` element to layer all active video tracks simultaneously (replaces the current clip-switching approach for multi-track compositing)
-  - Upper tracks render on top; alpha from the per-clip scale/position transform (black borders become transparent so lower tracks show through)
-  - Lower tracks fill any canvas area not covered by upper tracks (true compositing, not just B-roll switching)
+  - [x] Compositor-based preview pipeline using GStreamer `compositor` element to layer all active video tracks simultaneously (replaces the clip-switching approach for multi-track compositing)
+  - [x] Upper tracks render on top; alpha from the per-clip scale/position transform (black borders become transparent so lower tracks show through)
+  - [x] Lower tracks fill any canvas area not covered by upper tracks (true compositing, not just B-roll switching)
   - [x] Export pipeline updated similarly — all concurrent clips composited via ffmpeg `overlay` filter chain before final output
   - Inspector shows which track layer a clip is on; layer order controls composite z-order
   - [x] Per-clip opacity control so tracks can blend softly over each other

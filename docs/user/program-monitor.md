@@ -35,11 +35,13 @@ or outside the export frame.
 
 ## Playback Behaviour
 
-- The program monitor loads clips from the timeline in order and switches between them automatically at clip boundaries.
-- When multiple video tracks overlap, the top active clip is composited over the nearest active lower track so uncovered areas (from scale/position transforms) reveal underlying video.
-- The top preview layer uses transparent background compositing so PiP uncover regions show the lower track live (matching export behavior).
-- The **timeline playhead** moves in sync with program monitor playback (polled at ~33 ms, with redraw coalescing during playback).
-- All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied during playback.
+- The program monitor uses a GStreamer **compositor** pipeline that layers all active video tracks simultaneously at the playhead position.
+- Each active clip gets its own decoder branch with per-clip effects, connected to the compositor with correct z-ordering (higher tracks render on top).
+- Audio from all active video clips is mixed through an **audiomixer** element; audio-only tracks use a separate playbin.
+- Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
+- Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
+- When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
+- All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
 - Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.
 - If optional denoise filters are unavailable in your GStreamer runtime, Program Monitor still applies crop/scale/position transforms.
 - Program Monitor normalizes preview output to square pixels (`PAR 1:1`) so 21:9/ultra-wide sources don't keep aspect-ratio bars after zoom scaling.
