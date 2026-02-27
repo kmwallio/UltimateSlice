@@ -159,15 +159,25 @@ pub fn build_program_monitor(
                 // Fit: let the overlay expand naturally to fill the scroll viewport.
                 overlay.set_hexpand(true);
                 overlay.set_vexpand(true);
+                overlay.set_halign(gtk::Align::Fill);
+                overlay.set_valign(gtk::Align::Fill);
                 overlay.set_size_request(-1, -1);
             } else {
                 let fw = fit_w.get();
                 let fh = fit_h.get();
                 if fw > 0 && fh > 0 {
-                    // Fix size so ScrolledWindow can scroll beyond it.
                     overlay.set_hexpand(false);
                     overlay.set_vexpand(false);
                     overlay.set_size_request((fw as f64 * z) as i32, (fh as f64 * z) as i32);
+                    if z < 1.0 {
+                        // Center the smaller canvas in the scroll viewport (no scrollbars).
+                        overlay.set_halign(gtk::Align::Center);
+                        overlay.set_valign(gtk::Align::Center);
+                    } else {
+                        // Allow content to overflow so ScrolledWindow can scroll.
+                        overlay.set_halign(gtk::Align::Fill);
+                        overlay.set_valign(gtk::Align::Fill);
+                    }
                 }
             }
         }
