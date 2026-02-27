@@ -1139,7 +1139,7 @@ impl ProgramPlayer {
         // Also suppress near_end/EOS early exit during an active transition so the
         // outgoing clip keeps playing through the full transition window.
         let allow_early_end = !self.transition_active;
-        if src_pos >= clip_source_out_ns || ((near_end || near_timeline_end) && eos && allow_early_end) || early_handoff {
+        if src_pos >= clip_source_out_ns || new_pos >= clip_timeline_end_ns || ((near_end || near_timeline_end) && eos && allow_early_end) || early_handoff {
             // Transition is complete when the outgoing clip ends.
             self.deactivate_transition();
             // Find what should play at the current timeline position using track-priority logic.
@@ -1593,6 +1593,12 @@ impl ProgramPlayer {
                 let _ = self.pipeline.set_state(gst::State::Ready);
                 self.pipeline.set_property("uri", &uri);
                 let _ = self.pipeline.set_state(gst::State::Playing);
+                // Wait for at least PAUSED so the seek below is accepted.
+                // Without this, the seek is silently rejected when switching
+                // from a higher-priority clip to a lower-priority one that
+                // requires seeking to a non-zero source position (e.g. B-roll
+                // ending mid-timeline and resuming the clip underneath).
+                let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
             } else {
                 let _ = self.pipeline.set_state(gst::State::Ready);
                 self.pipeline.set_property("uri", &uri);

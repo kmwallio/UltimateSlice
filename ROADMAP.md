@@ -157,6 +157,7 @@ Tracking docs:
   - [x] Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff
   - [x] Reduce boundary stutter with pre-emptive clip handoff and non-blocking switch path during active playback
   - [x] Reduce black flash on track switches by avoiding `Ready` sink reset during active source handoff
+  - [x] Fix preview halting with 3+ video tracks — ensure preroll before seek during mid-playback clip switches, plus timeline-position safety check
 
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
