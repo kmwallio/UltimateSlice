@@ -80,8 +80,10 @@ impl TransformOverlay {
 
             da.set_draw_func(move |_da, cr, ww, wh| {
                 if !selected.get() { return; }
-                let (pw, ph) = paintable_dims(&picture, proj_w.get(), proj_h.get());
-                let (vx, vy, vw, vh) = video_rect(ww, wh, pw, ph);
+                // Always use project dimensions for the canvas boundary.
+                // The canvas border represents what will be exported, not the clip's native size.
+                let _ = &picture; // kept for potential future use
+                let (vx, vy, vw, vh) = video_rect(ww, wh, proj_w.get(), proj_h.get());
                 // Always draw: dark vignette + canvas border
                 draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
@@ -118,8 +120,8 @@ impl TransformOverlay {
                 if !selected.get() { return; }
                 let ww = da_ref.width();
                 let wh = da_ref.height();
-                let (pw, ph) = paintable_dims(&picture, proj_w.get(), proj_h.get());
-                let (vx, vy, vw, vh) = video_rect(ww, wh, pw, ph);
+                let _ = &picture; // kept for potential future use
+                let (vx, vy, vw, vh) = video_rect(ww, wh, proj_w.get(), proj_h.get());
                 let s  = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
@@ -252,9 +254,8 @@ impl TransformOverlay {
 // ── Helper functions ──────────────────────────────────────────────────────────
 
 /// Query the actual paintable intrinsic dimensions from the GtkPicture.
-/// Falls back to project dims if no paintable is available yet (before first frame).
-/// This ensures `video_rect()` uses the same aspect ratio that GtkPicture
-/// (ContentFit::Contain) uses, keeping handles pixel-perfectly aligned.
+/// Kept for future use if re-alignment with the paintable is needed.
+#[allow(dead_code)]
 fn paintable_dims(picture: &Rc<RefCell<Option<gtk4::Picture>>>, proj_w: u32, proj_h: u32) -> (u32, u32) {
     if let Some(ref p) = *picture.borrow() {
         if let Some(paintable) = p.paintable() {

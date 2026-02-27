@@ -120,6 +120,11 @@ pub fn build_program_monitor(
     overlay.set_vexpand(true);
 
     let zoom_level: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
+    // Natural (fit) size of the overlay recorded the moment we first leave zoom=1.0.
+    // At zoom=1.0 with hexpand=true the overlay fills the scroll viewport exactly,
+    // so overlay.width()/height() at that instant is the correct "100%" baseline.
+    let fit_w: Rc<Cell<i32>> = Rc::new(Cell::new(0));
+    let fit_h: Rc<Cell<i32>> = Rc::new(Cell::new(0));
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
@@ -127,13 +132,14 @@ pub fn build_program_monitor(
     scroll.set_hexpand(true);
     scroll.set_vexpand(true);
 
-    // apply_zoom: reads the scroll window's current allocated size directly,
-    // then sets the overlay's size_request to viewport × zoom.
+    // apply_zoom: when leaving zoom=1.0, records the natural overlay size as baseline.
+    // At non-1.0 zoom, disables hexpand/vexpand so the overlay can grow beyond viewport.
     let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let apply_zoom = {
         let overlay    = overlay.clone();
         let zoom_level = zoom_level.clone();
-        let scroll_ref = scroll.clone();
+        let fit_w      = fit_w.clone();
+        let fit_h      = fit_h.clone();
         move |new_z: f64| {
             let z = zoom_levels.iter()
                 .cloned()
@@ -141,14 +147,27 @@ pub fn build_program_monitor(
                     if (z - new_z).abs() < (best - new_z).abs() { z } else { best }
                 })
                 .clamp(0.25, 4.0);
+
+            // When transitioning away from 1.0, snapshot the natural overlay size.
+            if (zoom_level.get() - 1.0).abs() < 0.01 && (z - 1.0).abs() > 0.01 {
+                fit_w.set(overlay.width());
+                fit_h.set(overlay.height());
+            }
             zoom_level.set(z);
-            let vw = scroll_ref.width();
-            let vh = scroll_ref.height();
-            if vw > 0 && vh > 0 {
-                if (z - 1.0).abs() < 0.01 {
-                    overlay.set_size_request(-1, -1);
-                } else {
-                    overlay.set_size_request((vw as f64 * z) as i32, (vh as f64 * z) as i32);
+
+            if (z - 1.0).abs() < 0.01 {
+                // Fit: let the overlay expand naturally to fill the scroll viewport.
+                overlay.set_hexpand(true);
+                overlay.set_vexpand(true);
+                overlay.set_size_request(-1, -1);
+            } else {
+                let fw = fit_w.get();
+                let fh = fit_h.get();
+                if fw > 0 && fh > 0 {
+                    // Fix size so ScrolledWindow can scroll beyond it.
+                    overlay.set_hexpand(false);
+                    overlay.set_vexpand(false);
+                    overlay.set_size_request((fw as f64 * z) as i32, (fh as f64 * z) as i32);
                 }
             }
         }
