@@ -182,13 +182,11 @@ Tracking docs:
 - [x] Flip horizontal / flip vertical via GStreamer `videoflip`
 - [x] Position offset (X / Y translation within the output frame) via GStreamer `videobox`
 - [x] Persist transform settings in FCPXML (`us:crop-*`, `us:rotate`, `us:flip-h/v`, `us:scale`, `us:position-x/y` attributes)
-- [ ] Interactive transform overlay in program monitor — when a clip is selected, show drag handles on the preview frame so the user can:
+- [x] Interactive transform overlay in program monitor — when a clip is selected, show drag handles on the preview frame so the user can:
   - **Move**: drag the frame to adjust Position X/Y
   - **Scale**: drag corner handles to zoom in/out
-  - **Crop**: drag edge handles to crop left/right/top/bottom
   - Overlay updates Inspector sliders in real time and vice-versa
-  - Visual feedback: semi-transparent bounding box with 8 handles (4 corners + 4 edges) drawn with GTK4 `GtkDrawingArea` over the `GtkPicture` program monitor widget
-  - Modifier key: hold Shift to constrain aspect ratio while scaling
+  - Visual feedback: semi-transparent bounding box with 4 corner handles + center dot drawn with GTK4 `GtkDrawingArea` over the `GtkPicture` program monitor widget
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)

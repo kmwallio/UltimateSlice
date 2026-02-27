@@ -5,6 +5,13 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Interactive transform overlay**: When a clip is selected on the timeline, a
+  transparent overlay appears on the program monitor showing the clip's bounding box
+  and corner handles. Drag a **corner handle** to change the clip's zoom scale; drag
+  **inside the video frame** to pan the position X/Y. Inspector sliders update in real
+  time during the drag without triggering a full pipeline reload. Visual elements:
+  yellow output-frame outline, white dashed clip bounding box, blue-ringed corner
+  handles, center dot, and a scale label (e.g. "1.50×") with a dark background pill.
 - **Scale / Position per clip**: Inspector Transform section now has Scale (0.1–4.0),
   Position X (−1 to 1), and Position Y (−1 to 1) sliders. Scale > 1 zooms into the
   clip (crops the frame); scale < 1 shrinks the clip with black letterbox/pillarbox.
