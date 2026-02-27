@@ -47,6 +47,7 @@ pub struct TransformOverlay {
     selected:   Rc<Cell<bool>>,
     proj_w:     Rc<Cell<u32>>,
     proj_h:     Rc<Cell<u32>>,
+    picture:    Rc<RefCell<Option<gtk4::Picture>>>,
 }
 
 impl TransformOverlay {
@@ -59,6 +60,7 @@ impl TransformOverlay {
         let selected   = Rc::new(Cell::new(false));
         let proj_w     = Rc::new(Cell::new(1920_u32));
         let proj_h     = Rc::new(Cell::new(1080_u32));
+        let picture: Rc<RefCell<Option<gtk4::Picture>>> = Rc::new(RefCell::new(None));
 
         let da = DrawingArea::new();
         da.set_hexpand(true);
@@ -74,10 +76,12 @@ impl TransformOverlay {
             let selected   = selected.clone();
             let proj_w     = proj_w.clone();
             let proj_h     = proj_h.clone();
+            let picture    = picture.clone();
 
             da.set_draw_func(move |_da, cr, ww, wh| {
                 if !selected.get() { return; }
-                let (vx, vy, vw, vh) = video_rect(ww, wh, proj_w.get(), proj_h.get());
+                let (pw, ph) = paintable_dims(&picture, proj_w.get(), proj_h.get());
+                let (vx, vy, vw, vh) = video_rect(ww, wh, pw, ph);
                 draw_frame_border(cr, vx, vy, vw, vh);
                 draw_overlay(cr, vx, vy, vw, vh,
                              scale.get(), position_x.get(), position_y.get());
@@ -99,6 +103,7 @@ impl TransformOverlay {
             let selected   = selected.clone();
             let proj_w     = proj_w.clone();
             let proj_h     = proj_h.clone();
+            let picture    = picture.clone();
             let drag_state = drag_state.clone();
             let da_ref     = da.clone();
 
@@ -106,7 +111,8 @@ impl TransformOverlay {
                 if !selected.get() { return; }
                 let ww = da_ref.width();
                 let wh = da_ref.height();
-                let (vx, vy, vw, vh) = video_rect(ww, wh, proj_w.get(), proj_h.get());
+                let (pw, ph) = paintable_dims(&picture, proj_w.get(), proj_h.get());
+                let (vx, vy, vw, vh) = video_rect(ww, wh, pw, ph);
                 let s  = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
@@ -206,7 +212,13 @@ impl TransformOverlay {
 
         da.add_controller(gesture);
 
-        TransformOverlay { drawing_area: da, scale, position_x, position_y, selected, proj_w, proj_h }
+        TransformOverlay { drawing_area: da, scale, position_x, position_y, selected, proj_w, proj_h, picture }
+    }
+
+    /// Give the overlay access to the GtkPicture so it can query the actual
+    /// paintable dimensions (used by ContentFit::Contain) for pixel-perfect alignment.
+    pub fn set_picture(&self, p: gtk4::Picture) {
+        *self.picture.borrow_mut() = Some(p);
     }
 
     /// Update the displayed transform values (e.g. when inspector sliders change).
@@ -231,6 +243,23 @@ impl TransformOverlay {
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
+
+/// Query the actual paintable intrinsic dimensions from the GtkPicture.
+/// Falls back to project dims if no paintable is available yet (before first frame).
+/// This ensures `video_rect()` uses the same aspect ratio that GtkPicture
+/// (ContentFit::Contain) uses, keeping handles pixel-perfectly aligned.
+fn paintable_dims(picture: &Rc<RefCell<Option<gtk4::Picture>>>, proj_w: u32, proj_h: u32) -> (u32, u32) {
+    if let Some(ref p) = *picture.borrow() {
+        if let Some(paintable) = p.paintable() {
+            let iw = paintable.intrinsic_width();
+            let ih = paintable.intrinsic_height();
+            if iw > 0 && ih > 0 {
+                return (iw as u32, ih as u32);
+            }
+        }
+    }
+    (proj_w, proj_h)
+}
 
 /// Compute the video letterbox rect `(x, y, w, h)` inside a widget of size
 /// `(ww × wh)` for a project of resolution `pw × ph` (ContentFit::Contain).

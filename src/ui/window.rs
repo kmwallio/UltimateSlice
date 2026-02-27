@@ -472,6 +472,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         )
     };
 
+    // Give the transform overlay access to picture_a so it can query the actual
+    // paintable intrinsic dimensions for pixel-perfect frame rect alignment.
+    if let Some(ref to) = *transform_overlay_cell.borrow() {
+        to.set_picture(picture_a.clone());
+    }
+
     // ── Build colour scopes panel (hidden by default) ──────────────────────
     let (scopes_widget, scopes_state) = crate::ui::color_scopes::build_color_scopes();
     let scopes_revealer = gtk::Revealer::new();

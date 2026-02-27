@@ -296,7 +296,9 @@ impl ProgramPlayer {
         // Added at the END of the video filter bin so scale and position are
         // applied AFTER all other per-clip effects (color, crop, flip, title).
         let conv_zoom       = gst::ElementFactory::make("videoconvert").build().ok();
-        let videoscale_norm = gst::ElementFactory::make("videoscale").build().ok();
+        let videoscale_norm = gst::ElementFactory::make("videoscale")
+            .property("add-borders", true)
+            .build().ok();
         let capsfilter_proj = gst::ElementFactory::make("capsfilter").build().ok();
         let videoscale_zoom = gst::ElementFactory::make("videoscale").build().ok();
         let capsfilter_zoom = gst::ElementFactory::make("capsfilter").build().ok();
