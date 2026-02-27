@@ -272,10 +272,6 @@ Tracking docs:
 - [ ] OpenTimelineIO (OTIO) import/export
 - [ ] Shared Project/Library support for collaborative editing
 
-### Known Bugs
-
-- [ ] Black bars when media aspect ratio does not match project aspect ratio, even after scaling to fill
-
 ---
 
 ## Architecture Notes
