@@ -1515,7 +1515,7 @@ impl ProgramPlayer {
 
     fn load_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
         let clip = &self.clips[idx];
-        let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
+        let mut source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
         let speed = clip.speed;
 
         // Apply per-clip color correction (always, before seek so new frame uses it)
@@ -1586,24 +1586,18 @@ impl ProgramPlayer {
                 &clip.source_path
             };
             let uri = format!("file://{}", effective_path);
-            if self.state == PlayerState::Playing {
-                // During active playback, go through Ready quickly to change
-                // the URI (playbin requires Ready/Null for URI changes) but
-                // transition directly to Playing to minimise the visible gap.
-                let _ = self.pipeline.set_state(gst::State::Ready);
-                self.pipeline.set_property("uri", &uri);
-                let _ = self.pipeline.set_state(gst::State::Playing);
-            } else {
-                let _ = self.pipeline.set_state(gst::State::Ready);
-                self.pipeline.set_property("uri", &uri);
-                let _ = self.pipeline.set_state(gst::State::Paused);
-                // Always wait for preroll when not playing so the seek is accepted.
-                // GStreamer requires PAUSED state before it can process a seek; without
-                // this wait (previously gated on should_block_preroll), Smooth mode
-                // would issue the seek before PAUSED was reached and the seek would be
-                // silently ignored, leaving the display at frame 0 of the new clip.
-                let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
-            }
+            // Always go through PAUSED first so the seek below is guaranteed
+            // to be accepted.  GStreamer requires at least PAUSED state before
+            // it can process a seek.  Going directly to Playing (as before)
+            // meant the seek was silently rejected when it arrived before the
+            // pipeline had prerolled, which broke position tracking for clips
+            // that needed a non-zero source seek (e.g. B-roll ending
+            // mid-timeline and resuming the clip underneath at 8 s into its
+            // source).
+            let _ = self.pipeline.set_state(gst::State::Ready);
+            self.pipeline.set_property("uri", &uri);
+            let _ = self.pipeline.set_state(gst::State::Paused);
+            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
             // When not playing, use ACCURATE so the exact playhead frame is decoded.
             // During playback, use the priority-based flags for smooth transitions.
             let seek_flags = if self.state == PlayerState::Playing {
@@ -1619,6 +1613,20 @@ impl ProgramPlayer {
                 gst::SeekType::None,
                 gst::ClockTime::NONE,
             );
+            // Wait briefly for the seek to settle so query_position reflects
+            // the new segment.  Then anchor to the *actual* post-seek position
+            // instead of the requested one, preventing a stale position from
+            // the previous clip from corrupting timeline tracking (the
+            // backward clamp in poll() would lock the playhead at the stale
+            // value otherwise).
+            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(50));
+            if let Some(pos) = self.pipeline.query_position::<gst::ClockTime>() {
+                source_seek_ns = pos.nseconds();
+            }
+            // Resume playback after the seek has been accepted.
+            if self.state == PlayerState::Playing {
+                let _ = self.pipeline.set_state(gst::State::Playing);
+            }
         }
 
         self.current_idx = Some(idx);
