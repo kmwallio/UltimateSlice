@@ -1,5 +1,6 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, Label, Orientation, Overlay, Picture};
+use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerScroll,
+           EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use crate::media::program_player::ProgramPlayer;
@@ -69,6 +70,23 @@ pub fn build_program_monitor(
     btn_popout.connect_clicked(move |_| on_toggle_popout());
     title_bar.append(&btn_popout);
 
+    // Zoom controls: − / zoom% label / + / Fit
+    // These are appended to the title bar AFTER we build apply_zoom (below), so we
+    // defer the connections and store the label in a variable.
+    let zoom_out_btn = Button::with_label("−");
+    zoom_out_btn.set_tooltip_text(Some("Zoom out preview (Ctrl+Scroll)"));
+    let zoom_label = Label::new(Some("100%"));
+    zoom_label.set_width_chars(5);
+    zoom_label.add_css_class("timecode");
+    let zoom_in_btn = Button::with_label("+");
+    zoom_in_btn.set_tooltip_text(Some("Zoom in preview (Ctrl+Scroll)"));
+    let zoom_fit_btn = Button::with_label("Fit");
+    zoom_fit_btn.set_tooltip_text(Some("Reset zoom to fit"));
+    title_bar.append(&zoom_out_btn);
+    title_bar.append(&zoom_label);
+    title_bar.append(&zoom_in_btn);
+    title_bar.append(&zoom_fit_btn);
+
     root.append(&title_bar);
 
     // Video display: GtkOverlay composites picture_a (primary) with picture_b
@@ -101,7 +119,110 @@ pub fn build_program_monitor(
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 
-    root.append(&overlay);
+    let zoom_level: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroll.set_child(Some(&overlay));
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+
+    // apply_zoom: reads the scroll window's current allocated size directly,
+    // then sets the overlay's size_request to viewport × zoom.
+    let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+    let apply_zoom = {
+        let overlay    = overlay.clone();
+        let zoom_level = zoom_level.clone();
+        let scroll_ref = scroll.clone();
+        move |new_z: f64| {
+            let z = zoom_levels.iter()
+                .cloned()
+                .fold(f64::INFINITY, |best, z| {
+                    if (z - new_z).abs() < (best - new_z).abs() { z } else { best }
+                })
+                .clamp(0.25, 4.0);
+            zoom_level.set(z);
+            let vw = scroll_ref.width();
+            let vh = scroll_ref.height();
+            if vw > 0 && vh > 0 {
+                if (z - 1.0).abs() < 0.01 {
+                    overlay.set_size_request(-1, -1);
+                } else {
+                    overlay.set_size_request((vw as f64 * z) as i32, (vh as f64 * z) as i32);
+                }
+            }
+        }
+    };
+    let apply_zoom = Rc::new(apply_zoom);
+
+    // Ctrl+Scroll adjusts zoom
+    {
+        let az = apply_zoom.clone();
+        let zoom_level = zoom_level.clone();
+        let lbl = zoom_label.clone();
+        let ctrl_scroll = EventControllerScroll::new(
+            EventControllerScrollFlags::VERTICAL | EventControllerScrollFlags::DISCRETE,
+        );
+        ctrl_scroll.connect_scroll(move |ec, _dx, dy| {
+            let mods = ec.current_event_state();
+            if mods.contains(gdk4::ModifierType::CONTROL_MASK) {
+                let step = if dy < 0.0 { 1_isize } else { -1_isize };
+                let z = zoom_level.get();
+                let idx = zoom_levels.iter().position(|&l| (l - z).abs() < 0.01).unwrap_or(3);
+                let new_idx = (idx as isize + step).clamp(0, zoom_levels.len() as isize - 1) as usize;
+                let new_z = zoom_levels[new_idx];
+                az(new_z);
+                lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
+                return gtk4::glib::Propagation::Stop;
+            }
+            gtk4::glib::Propagation::Proceed
+        });
+        scroll.add_controller(ctrl_scroll);
+    }
+
+    root.append(&scroll);
+
+    // Wire zoom buttons now that apply_zoom is defined
+    {
+        let az = apply_zoom.clone();
+        let zl = zoom_level.clone();
+        let lbl = zoom_label.clone();
+        let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+        zoom_out_btn.connect_clicked(move |_| {
+            let z = zl.get();
+            let idx = zoom_levels_v.iter().position(|&l| (l - z).abs() < 0.01).unwrap_or(3);
+            let new_idx = idx.saturating_sub(1);
+            let new_z = zoom_levels_v[new_idx];
+            az(new_z);
+            lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
+        });
+    }
+    {
+        let az = apply_zoom.clone();
+        let zl = zoom_level.clone();
+        let lbl = zoom_label.clone();
+        let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+        zoom_in_btn.connect_clicked(move |_| {
+            let z = zl.get();
+            let idx = zoom_levels_v.iter().position(|&l| (l - z).abs() < 0.01).unwrap_or(3);
+            let new_idx = (idx + 1).min(zoom_levels_v.len() - 1);
+            let new_z = zoom_levels_v[new_idx];
+            az(new_z);
+            lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
+        });
+    }
+    {
+        let az = apply_zoom.clone();
+        let lbl = zoom_label.clone();
+        zoom_fit_btn.connect_clicked(move |_| {
+            az(1.0);
+            lbl.set_label("100%");
+        });
+    }
+    // Update zoom label from Ctrl+Scroll via zoom_level cell poll in size-allocate
+    // is not needed — buttons update it directly. For Ctrl+Scroll we update in the
+    // scroll handler above by re-reading zoom_level in the label callbacks below.
+
 
     // Transport controls
     let controls = GBox::new(Orientation::Horizontal, 8);

@@ -5,6 +5,18 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Zoomable program monitor**: Preview can now be zoomed in/out independently of
+  clip scale. Use the **−/+** buttons or **Fit** in the program monitor title bar,
+  or **Ctrl+Scroll** on the preview. Zoom levels: 25%–400%. When zoomed > 100%,
+  scrollbars appear so you can pan to see content outside the canvas boundary (useful
+  when working with clips scaled > 1× in the transform overlay).
+- **Canvas border vignette**: A dark semi-transparent overlay now fills the areas
+  outside the canvas boundary in the program monitor, making it immediately clear
+  what will be included in the exported video. The yellow canvas border (shadow +
+  accent + corner L-marks) is always drawn when a clip is selected; the white dashed
+  clip bounding box only appears when the clip doesn't fill the canvas exactly
+  (scale ≠ 1 or position ≠ 0), eliminating the visual confusion where both rects
+  appeared identical.
 - **Interactive transform overlay**: When a clip is selected on the timeline, a
   transparent overlay appears on the program monitor showing the clip's bounding box
   and corner handles. Drag a **corner handle** to change the clip's zoom scale; drag

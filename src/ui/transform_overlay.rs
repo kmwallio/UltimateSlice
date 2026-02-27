@@ -82,9 +82,16 @@ impl TransformOverlay {
                 if !selected.get() { return; }
                 let (pw, ph) = paintable_dims(&picture, proj_w.get(), proj_h.get());
                 let (vx, vy, vw, vh) = video_rect(ww, wh, pw, ph);
+                // Always draw: dark vignette + canvas border
+                draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
-                draw_overlay(cr, vx, vy, vw, vh,
-                             scale.get(), position_x.get(), position_y.get());
+                // Only draw clip handles when clip doesn't fill the canvas exactly
+                let s  = scale.get();
+                let px = position_x.get();
+                let py = position_y.get();
+                if (s - 1.0).abs() > 0.02 || px.abs() > 0.02 || py.abs() > 0.02 {
+                    draw_overlay(cr, vx, vy, vw, vh, s, px, py);
+                }
             });
         }
 
@@ -279,6 +286,35 @@ fn video_rect(ww: i32, wh: i32, pw: u32, ph: u32) -> (f64, f64, f64, f64) {
     let vx = (ww - vw) / 2.0;
     let vy = (wh - vh) / 2.0;
     (vx, vy, vw, vh)
+}
+
+/// Darken the areas outside the canvas rect so it's immediately obvious what
+/// is in-frame (will be exported) vs. out-of-frame.
+fn draw_outside_vignette(cr: &gtk4::cairo::Context, ww: f64, wh: f64, vx: f64, vy: f64, vw: f64, vh: f64) {
+    cr.save().ok();
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
+    // Fill the four rects surrounding the canvas rect
+    // Top strip
+    if vy > 0.0 {
+        cr.rectangle(0.0, 0.0, ww, vy);
+        cr.fill().ok();
+    }
+    // Bottom strip
+    if vy + vh < wh {
+        cr.rectangle(0.0, vy + vh, ww, wh - (vy + vh));
+        cr.fill().ok();
+    }
+    // Left strip (between top/bottom strips)
+    if vx > 0.0 {
+        cr.rectangle(0.0, vy, vx, vh);
+        cr.fill().ok();
+    }
+    // Right strip
+    if vx + vw < ww {
+        cr.rectangle(vx + vw, vy, ww - (vx + vw), vh);
+        cr.fill().ok();
+    }
+    cr.restore().ok();
 }
 
 /// Draw the export frame border — a prominent solid rectangle showing exactly

@@ -186,7 +186,14 @@ Tracking docs:
   - **Move**: drag the frame to adjust Position X/Y
   - **Scale**: drag corner handles to zoom in/out
   - Overlay updates Inspector sliders in real time and vice-versa
-  - Visual feedback: export-frame border (yellow accent + white corner L-marks + dark shadow), white dashed clip bounding box, blue-ringed corner handles, center dot, scale label
+  - Visual feedback: dark vignette outside canvas, yellow canvas border (shadow + accent + corner L-marks), white dashed clip bounding box (only when scale≠1 or pos≠0), blue-ringed corner handles, center dot, scale label
+  - Canvas border is always drawn at the exact canvas/export boundary; clip bbox only shows when it differs from the canvas
+- [x] Zoomable program monitor preview — zoom in/out to work on fine-grained transforms:
+  - **–/+ buttons** in program monitor title bar; zoom levels: 25%, 50%, 75%, 100%, 150%, 200%, 300%, 400%
+  - **Fit button** resets to 100% (video fills the monitor)
+  - **Ctrl+Scroll** on the preview also adjusts zoom
+  - Scrollbars appear automatically when zoomed > 100%; panning by scrolling shows content outside the canvas boundary
+  - Transform overlay handles scale correctly at all zoom levels
 - [ ] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
 - [ ] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
 - [ ] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
