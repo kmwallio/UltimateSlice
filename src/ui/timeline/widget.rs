@@ -95,6 +95,8 @@ pub struct TimelineState {
     hover_transition_pair: Option<(String, String)>,
     /// Show audio waveforms overlaid on video clips in the timeline.
     pub show_waveform_on_video: bool,
+    /// When true, the timeline is loading a project and interaction is suppressed.
+    pub loading: bool,
 }
 
 impl TimelineState {
@@ -117,6 +119,7 @@ impl TimelineState {
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
+            loading: false,
         }
     }
 
@@ -342,6 +345,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         click.connect_pressed(move |gesture, _n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() { a.grab_focus(); }
+            // Ignore clicks while a project is loading to prevent freezes.
+            if state.borrow().loading { return; }
             let button = gesture.current_button();
             let mut st = state.borrow_mut();
 
@@ -483,6 +488,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         drag.connect_drag_begin({
             let state = state.clone();
             move |_gesture, x, y| {
+                if state.borrow().loading { return; }
                 let mut st = state.borrow_mut();
                 if y < RULER_HEIGHT {
                     // On drag-begin in ruler: record start offset for panning;
@@ -1576,7 +1582,7 @@ fn draw_track_row(
 
     // Draw clips first (they may overlap into label column before clipping)
     for clip in &track.clips {
-        draw_clip(cr, y, clip, track, st, cache, wcache);
+        draw_clip(cr, width, y, clip, track, st, cache, wcache);
     }
 
     // Draw transition markers (clip -> next clip) after clip bodies.
@@ -1621,6 +1627,7 @@ fn draw_track_row(
 
 fn draw_clip(
     cr: &gtk::cairo::Context,
+    view_width: f64,
     track_y: f64,
     clip: &crate::model::clip::Clip,
     track: &crate::model::track::Track,
@@ -1633,7 +1640,7 @@ fn draw_clip(
     let cy = track_y + 2.0;
     let ch = TRACK_HEIGHT - 4.0;
 
-    if cx + cw < TRACK_LABEL_WIDTH || cx > 4000.0 { return; }
+    if cx + cw < TRACK_LABEL_WIDTH || cx > view_width { return; }
 
     let is_selected = st.selected_clip_id.as_deref() == Some(&clip.id);
     let is_transition_hover = st.hover_transition_pair.as_ref().map(|(l, r)| {
@@ -1717,16 +1724,7 @@ fn draw_clip(
             let mid = cy + ch / 2.0;
             cr.set_line_width(1.0);
             let vol = (clip.volume as f64).max(0.0);
-            for (i, &peak) in peaks.iter().enumerate() {
-                let px = cx + i as f64;
-                let scaled = (peak as f64 * vol).clamp(0.0, 1.0);
-                let half_h = (scaled * (ch / 2.0 - 2.0)).max(1.0);
-                let (wr, wg, wb) = waveform_color(scaled);
-                cr.set_source_rgba(wr, wg, wb, 0.85);
-                cr.move_to(px + 0.5, mid - half_h);
-                cr.line_to(px + 0.5, mid + half_h);
-                cr.stroke().ok();
-            }
+            draw_waveform_batched(cr, &peaks, cx, mid, ch / 2.0 - 2.0, vol, 0.85);
             cr.restore().ok();
         }
     }
@@ -1736,28 +1734,17 @@ fn draw_clip(
         wcache.request(&clip.source_path);
         let px_count = cw as usize;
         if let Some(peaks) = wcache.get_peaks(&clip.source_path, clip.source_in, clip.source_out, px_count) {
-            // Draw on the lower 40% of the clip so thumbnails stay visible.
             let wave_h = (ch * 0.40).max(6.0);
             let wave_y = cy + ch - wave_h - 1.0;
             cr.save().ok();
             rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
             cr.clip();
-            // Semi-transparent dark backing so waveform is readable over thumbnails.
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
             cr.paint().ok();
             cr.set_line_width(1.0);
             let wave_mid = wave_y + wave_h / 2.0;
             let vol = (clip.volume as f64).max(0.0);
-            for (i, &peak) in peaks.iter().enumerate() {
-                let px = cx + i as f64;
-                let scaled = (peak as f64 * vol).clamp(0.0, 1.0);
-                let half_h = (scaled * (wave_h / 2.0 - 1.0)).max(1.0);
-                let (wr, wg, wb) = waveform_color(scaled);
-                cr.set_source_rgba(wr, wg, wb, 0.9);
-                cr.move_to(px + 0.5, wave_mid - half_h);
-                cr.line_to(px + 0.5, wave_mid + half_h);
-                cr.stroke().ok();
-            }
+            draw_waveform_batched(cr, &peaks, cx, wave_mid, wave_h / 2.0 - 1.0, vol, 0.9);
             cr.restore().ok();
         }
     }
@@ -1839,6 +1826,61 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
 
 /// Map a normalized peak amplitude (0.0–1.0) to an RGB color for waveform display.
 /// Zones mirror the VU meter: green (quiet), yellow (moderate), red (loud).
+/// Draw a waveform using batched strokes grouped by color band.
+///
+/// Instead of issuing one `stroke()` per pixel (thousands of calls), this groups
+/// consecutive lines by their color band (green / yellow / red) and draws each
+/// band as a single Cairo path.  Reduces per-clip waveform draw from O(n)
+/// stroke ops to exactly 3.
+fn draw_waveform_batched(
+    cr: &gtk::cairo::Context,
+    peaks: &[f32],
+    cx: f64,
+    mid_y: f64,
+    half_range: f64,
+    vol: f64,
+    alpha: f64,
+) {
+    // Color bands: (threshold, r, g, b)
+    const BANDS: [(f64, f64, f64, f64); 3] = [
+        (0.0,   0.30, 0.90, 0.40), // green  — quiet  (< −18 dBFS)
+        (0.126, 0.95, 0.85, 0.15), // yellow — moderate
+        (0.5,   0.95, 0.25, 0.15), // red    — loud   (≥ −6 dBFS)
+    ];
+
+    // Classify each peak into a band and compute its geometry.
+    // We build paths per-band to minimize stroke() calls.
+    struct Line { x: f64, y1: f64, y2: f64 }
+    let mut green: Vec<Line>  = Vec::new();
+    let mut yellow: Vec<Line> = Vec::new();
+    let mut red: Vec<Line>    = Vec::new();
+
+    for (i, &peak) in peaks.iter().enumerate() {
+        let scaled = (peak as f64 * vol).clamp(0.0, 1.0);
+        let half_h = (scaled * half_range).max(1.0);
+        let x = cx + i as f64 + 0.5;
+        let line = Line { x, y1: mid_y - half_h, y2: mid_y + half_h };
+        if scaled >= 0.5 {
+            red.push(line);
+        } else if scaled >= 0.126 {
+            yellow.push(line);
+        } else {
+            green.push(line);
+        }
+    }
+
+    for (lines, band_idx) in [(&green, 0usize), (&yellow, 1), (&red, 2)] {
+        if lines.is_empty() { continue; }
+        let (_, r, g, b) = BANDS[band_idx];
+        cr.set_source_rgba(r, g, b, alpha);
+        for line in lines {
+            cr.move_to(line.x, line.y1);
+            cr.line_to(line.x, line.y2);
+        }
+        cr.stroke().ok();
+    }
+}
+
 fn waveform_color(peak: f64) -> (f64, f64, f64) {
     if peak >= 0.5 {
         (0.95, 0.25, 0.15)  // red  — loud (≥ −6 dBFS)

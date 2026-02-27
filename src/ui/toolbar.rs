@@ -84,6 +84,8 @@ pub fn build_toolbar(
                         let project = project.clone();
                         let on_project_changed = on_project_changed.clone();
                         let timeline_state_cb = timeline_state_cb.clone();
+                        // Suppress timeline interaction while loading.
+                        timeline_state_cb.borrow_mut().loading = true;
                         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
                             match rx.try_recv() {
                                 Ok(Ok(mut new_proj)) => {
@@ -97,16 +99,21 @@ pub fn build_toolbar(
                                         st.pixels_per_second = 100.0;
                                         st.selected_clip_id = None;
                                         st.selected_track_id = None;
+                                        st.loading = false;
                                     }
                                     on_project_changed();
                                     glib::ControlFlow::Break
                                 }
                                 Ok(Err(e)) => {
                                     eprintln!("{e}");
+                                    timeline_state_cb.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                Err(_) => glib::ControlFlow::Break,
+                                Err(_) => {
+                                    timeline_state_cb.borrow_mut().loading = false;
+                                    glib::ControlFlow::Break
+                                }
                             }
                         });
                     }
@@ -181,6 +188,8 @@ pub fn build_toolbar(
                         let timeline_state = timeline_state.clone();
                         let on_project_changed = on_project_changed.clone();
                         let path_owned = path_owned.clone();
+                        // Suppress timeline interaction while loading.
+                        timeline_state.borrow_mut().loading = true;
                         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
                             match rx.try_recv() {
                                 Ok(Ok(mut new_proj)) => {
@@ -194,16 +203,21 @@ pub fn build_toolbar(
                                         st.pixels_per_second = 100.0;
                                         st.selected_clip_id = None;
                                         st.selected_track_id = None;
+                                        st.loading = false;
                                     }
                                     on_project_changed();
                                     glib::ControlFlow::Break
                                 }
                                 Ok(Err(e)) => {
                                     eprintln!("{e}");
+                                    timeline_state.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                Err(_) => glib::ControlFlow::Break,
+                                Err(_) => {
+                                    timeline_state.borrow_mut().loading = false;
+                                    glib::ControlFlow::Break
+                                }
                             }
                         });
                     });

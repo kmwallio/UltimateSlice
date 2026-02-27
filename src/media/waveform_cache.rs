@@ -2,7 +2,7 @@
 ///
 /// Background threads decode audio via GStreamer and compute normalized
 /// peak amplitude at PEAKS_PER_SEC resolution. Main thread draws from these peaks.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -10,6 +10,9 @@ use gstreamer_app::AppSink;
 
 /// Number of peak samples stored per second of audio (time-axis resolution).
 pub const PEAKS_PER_SEC: f64 = 100.0; // one peak per 10 ms
+
+/// Maximum number of simultaneous waveform extraction threads.
+const MAX_CONCURRENT: usize = 4;
 
 struct RawPeaks {
     key: String,
@@ -19,6 +22,8 @@ struct RawPeaks {
 pub struct WaveformCache {
     pub data: HashMap<String, Vec<f32>>,
     loading: HashSet<String>,
+    pending: VecDeque<String>,
+    in_flight: usize,
     tx: mpsc::SyncSender<RawPeaks>,
     rx: mpsc::Receiver<RawPeaks>,
 }
@@ -29,6 +34,8 @@ impl WaveformCache {
         Self {
             data: HashMap::new(),
             loading: HashSet::new(),
+            pending: VecDeque::new(),
+            in_flight: 0,
             tx,
             rx,
         }
@@ -40,21 +47,18 @@ impl WaveformCache {
             return;
         }
         self.loading.insert(source_path.to_string());
-        let key = source_path.to_string();
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            if let Some(peaks) = extract_peaks(&key) {
-                let _ = tx.send(RawPeaks { key, peaks });
-            }
-        });
+        self.pending.push_back(source_path.to_string());
+        self.flush_pending();
     }
 
     /// Drain completed background results. Call this periodically on the main thread.
     pub fn poll(&mut self) {
         while let Ok(raw) = self.rx.try_recv() {
             self.loading.remove(&raw.key);
+            self.in_flight = self.in_flight.saturating_sub(1);
             self.data.insert(raw.key, raw.peaks);
         }
+        self.flush_pending();
     }
 
     /// Get peak slice for the clip's marked region, downsampled to `pixel_width` columns.
@@ -92,6 +96,23 @@ impl WaveformCache {
             result.push(max);
         }
         Some(result)
+    }
+
+    /// Spawn pending extraction threads up to the concurrency limit.
+    fn flush_pending(&mut self) {
+        while self.in_flight < MAX_CONCURRENT {
+            if let Some(key) = self.pending.pop_front() {
+                self.in_flight += 1;
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    if let Some(peaks) = extract_peaks(&key) {
+                        let _ = tx.send(RawPeaks { key, peaks });
+                    }
+                });
+            } else {
+                break;
+            }
+        }
     }
 }
 

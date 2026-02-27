@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use anyhow::Result;
 use gstreamer as gst;
@@ -9,6 +9,9 @@ use gtk4::cairo;
 const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
 
+/// Maximum number of simultaneous thumbnail extraction threads.
+const MAX_CONCURRENT: usize = 4;
+
 /// A loaded thumbnail ready to draw.
 struct RawFrame {
     key: String,
@@ -18,14 +21,16 @@ struct RawFrame {
 /// Asynchronous thumbnail cache.
 ///
 /// Usage pattern (all on GTK main thread):
-/// 1. Call `request(path, time_ns)` in the draw func — spawns a background
-///    thread the first time a key is seen.
+/// 1. Call `request(path, time_ns)` in the draw func — queues extraction
+///    (up to MAX_CONCURRENT run in parallel).
 /// 2. Call `poll()` periodically (e.g., in the 100 ms redraw timer) to drain
 ///    completed frames and convert them to Cairo surfaces.
 /// 3. Call `get(path, time_ns)` in the draw func to obtain a surface.
 pub struct ThumbnailCache {
     pub surfaces: HashMap<String, cairo::ImageSurface>,
     loading: HashSet<String>,
+    pending: VecDeque<(String, String, u64)>, // (key, source_path, time_ns)
+    in_flight: usize,
     tx: mpsc::SyncSender<RawFrame>,
     rx: mpsc::Receiver<RawFrame>,
 }
@@ -36,13 +41,15 @@ impl ThumbnailCache {
         Self {
             surfaces: HashMap::new(),
             loading: HashSet::new(),
+            pending: VecDeque::new(),
+            in_flight: 0,
             tx,
             rx,
         }
     }
 
     /// Request a thumbnail for `source_path` at `time_ns`.
-    /// Spawns a background thread on the first call for a given key.
+    /// Queues extraction; spawns up to MAX_CONCURRENT background threads.
     /// Returns `true` if the thumbnail is already cached.
     pub fn request(&mut self, source_path: &str, time_ns: u64) -> bool {
         let key = cache_key(source_path, time_ns);
@@ -51,14 +58,8 @@ impl ThumbnailCache {
         }
         if !self.loading.contains(&key) {
             self.loading.insert(key.clone());
-            let tx = self.tx.clone();
-            let path = source_path.to_string();
-            std::thread::spawn(move || {
-                match extract_rgba(path, time_ns) {
-                    Ok(data) => { let _ = tx.send(RawFrame { key, data }); }
-                    Err(e)   => { eprintln!("[thumb] error: {e}"); }
-                }
-            });
+            self.pending.push_back((key, source_path.to_string(), time_ns));
+            self.flush_pending();
         }
         false
     }
@@ -69,17 +70,37 @@ impl ThumbnailCache {
         let mut dirty = false;
         while let Ok(frame) = self.rx.try_recv() {
             self.loading.remove(&frame.key);
+            self.in_flight = self.in_flight.saturating_sub(1);
             if let Ok(surf) = rgba_to_surface(&frame.data) {
                 self.surfaces.insert(frame.key, surf);
                 dirty = true;
             }
         }
+        self.flush_pending();
         dirty
     }
 
     /// Returns the cached surface for `source_path` at `time_ns`, if available.
     pub fn get(&self, source_path: &str, time_ns: u64) -> Option<&cairo::ImageSurface> {
         self.surfaces.get(&cache_key(source_path, time_ns))
+    }
+
+    /// Spawn pending extraction threads up to the concurrency limit.
+    fn flush_pending(&mut self) {
+        while self.in_flight < MAX_CONCURRENT {
+            if let Some((key, path, time_ns)) = self.pending.pop_front() {
+                self.in_flight += 1;
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    match extract_rgba(path, time_ns) {
+                        Ok(data) => { let _ = tx.send(RawFrame { key, data }); }
+                        Err(e)   => { eprintln!("[thumb] error: {e}"); }
+                    }
+                });
+            } else {
+                break;
+            }
+        }
     }
 }
 
