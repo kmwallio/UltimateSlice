@@ -48,6 +48,20 @@ Preferences are grouped by category in a sidebar:
   - `get_preferences` returns `proxy_mode`.
   - `set_proxy_mode` updates the mode and re-generates proxies as needed.
 
+## Preview Quality (Playback)
+
+- **Preview quality** scales down the compositor output resolution for preview playback:
+  - `Full` (default): renders at project resolution (e.g. 1920×1080).
+  - `Half`: halves both dimensions (e.g. 960×540) — 4× fewer pixels, significantly less memory and CPU.
+  - `Quarter`: quarters both dimensions (e.g. 480×270) — 16× fewer pixels, best for low-memory devices.
+- Takes effect immediately — no restart required.
+- Export always uses full project resolution regardless of this setting.
+- Combine with **Proxy preview mode** for maximum performance on constrained hardware: Quarter-res proxies + Quarter preview quality minimizes both decode and compositing cost.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `preview_quality`.
+  - `set_preview_quality` updates the quality level.
+
 ## Saving
 
 - Click **Save** to persist changes.

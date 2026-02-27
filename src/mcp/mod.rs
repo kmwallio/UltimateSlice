@@ -71,6 +71,7 @@ pub enum McpCommand {
         reply:   SyncSender<Value>,
     },
     SetGskRenderer { renderer: String, reply: SyncSender<Value> },
+    SetPreviewQuality { quality: String, reply: SyncSender<Value> },
 }
 
 /// Spawn the MCP stdio server on a background thread.

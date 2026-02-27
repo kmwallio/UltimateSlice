@@ -171,6 +171,10 @@ pub struct ProgramPlayer {
     _video_sink_bin: gst::Element,
     /// Capsfilter on compositor output for project resolution.
     comp_capsfilter: gst::Element,
+    /// Capsfilter on the black background source (must match compositor output).
+    black_capsfilter: gst::Element,
+    /// Current preview quality divisor.
+    preview_divisor: u32,
     /// Wall-clock instant when playback last entered Playing state.
     play_start: Option<Instant>,
 }
@@ -458,6 +462,8 @@ impl ProgramPlayer {
                 current_idx: None,
                 _video_sink_bin: video_sink_bin,
                 comp_capsfilter,
+                black_capsfilter: black_caps,
+                preview_divisor: 1,
                 play_start: None,
             },
             paintable,
@@ -482,13 +488,34 @@ impl ProgramPlayer {
     pub fn set_project_dimensions(&mut self, width: u32, height: u32) {
         self.project_width = width;
         self.project_height = height;
+        self.apply_compositor_caps();
+    }
+
+    /// Set preview quality (compositor resolution divisor). Takes effect immediately.
+    pub fn set_preview_quality(&mut self, divisor: u32) {
+        self.preview_divisor = divisor.max(1);
+        self.apply_compositor_caps();
+    }
+
+    /// Re-apply compositor and black-source capsfilter caps from project
+    /// dimensions and preview quality divisor.
+    fn apply_compositor_caps(&self) {
+        let w = (self.project_width / self.preview_divisor).max(2) as i32;
+        let h = (self.project_height / self.preview_divisor).max(2) as i32;
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", width as i32)
-            .field("height", height as i32)
+            .field("width", w)
+            .field("height", h)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         self.comp_capsfilter.set_property("caps", &caps);
+        let bg_caps = gst::Caps::builder("video/x-raw")
+            .field("format", "RGBA")
+            .field("width", w)
+            .field("height", h)
+            .field("framerate", gst::Fraction::new(30, 1))
+            .build();
+        self.black_capsfilter.set_property("caps", &bg_caps);
     }
 
     /// Returns (opacity_a, opacity_b) for the two program monitor pictures.

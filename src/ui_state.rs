@@ -93,6 +93,48 @@ impl GskRenderer {
     }
 }
 
+/// Controls the compositor output resolution relative to project dimensions.
+/// Lower quality reduces memory and CPU usage for smoother preview playback
+/// on low-end hardware. Export always uses full project resolution.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewQuality {
+    Full,
+    Half,
+    Quarter,
+}
+
+impl Default for PreviewQuality {
+    fn default() -> Self { Self::Full }
+}
+
+impl PreviewQuality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Half => "half",
+            Self::Quarter => "quarter",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "half" => Self::Half,
+            "quarter" => Self::Quarter,
+            _ => Self::Full,
+        }
+    }
+
+    /// Divisor applied to project width/height for the compositor output.
+    pub fn divisor(&self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Half => 2,
+            Self::Quarter => 4,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
@@ -144,6 +186,9 @@ pub struct PreferencesState {
     /// GTK renderer backend (requires restart to take effect).
     #[serde(default)]
     pub gsk_renderer: GskRenderer,
+    /// Compositor output quality for preview playback.
+    #[serde(default)]
+    pub preview_quality: PreviewQuality,
 }
 
 impl Default for PreferencesState {
@@ -155,6 +200,7 @@ impl Default for PreferencesState {
             show_waveform_on_video: false,
             mcp_socket_enabled: false,
             gsk_renderer: GskRenderer::default(),
+            preview_quality: PreviewQuality::default(),
         }
     }
 }

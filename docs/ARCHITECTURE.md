@@ -322,6 +322,7 @@ Key design points:
 | `set_playback_priority` | Set program-monitor playback priority (`smooth` / `balanced` / `accurate`) |
 | `set_proxy_mode` | Set proxy preview mode (`off` / `half_res` / `quarter_res`) |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |
+| `set_preview_quality` | Set compositor preview quality (`full` / `half` / `quarter`); takes effect immediately |
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |

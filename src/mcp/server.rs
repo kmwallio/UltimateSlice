@@ -457,6 +457,17 @@ fn tools_list() -> Value {
                 },
                 "required": ["renderer"]
             }
+        },
+        {
+            "name": "set_preview_quality",
+            "description": "Set compositor preview quality. Lower quality reduces memory and CPU usage for smoother playback on low-end hardware. Export always uses full project resolution.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "quality": { "type": "string", "enum": ["full", "half", "quarter"], "description": "Preview quality level. 'half' halves both dimensions (4x less pixels), 'quarter' quarters them (16x less pixels)." }
+                },
+                "required": ["quality"]
+            }
         }
     ]})
 }
@@ -602,6 +613,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "set_gsk_renderer" => McpCommand::SetGskRenderer {
             renderer: args["renderer"].as_str().unwrap_or("auto").to_string(),
+            reply: tx,
+        },
+
+        "set_preview_quality" => McpCommand::SetPreviewQuality {
+            quality: args["quality"].as_str().unwrap_or("full").to_string(),
             reply: tx,
         },
 

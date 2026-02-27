@@ -39,6 +39,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
     let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
+    let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
     let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
@@ -47,6 +48,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         .expect("Failed to create program player");
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
+    prog_player_raw.set_preview_quality(initial_preview_quality.divisor());
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -107,6 +109,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                     prog_player.borrow_mut().set_playback_priority(new_state.playback_priority.clone());
                     prog_player.borrow_mut().set_proxy_enabled(new_state.proxy_mode.is_enabled());
+                    prog_player.borrow_mut().set_preview_quality(new_state.preview_quality.divisor());
                     if new_state.proxy_mode.is_enabled() {
                         // If the proxy scale changed, invalidate old entries so clips are
                         // re-transcoded at the new resolution.
@@ -1403,7 +1406,8 @@ fn handle_mcp_command(
                 "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
                 "playback_priority": prefs.playback_priority.as_str(),
                 "proxy_mode": prefs.proxy_mode.as_str(),
-                "gsk_renderer": prefs.gsk_renderer.as_str()
+                "gsk_renderer": prefs.gsk_renderer.as_str(),
+                "preview_quality": prefs.preview_quality.as_str()
             })).ok();
         }
 
@@ -1498,6 +1502,21 @@ fn handle_mcp_command(
                 "success": true,
                 "gsk_renderer": new_state.gsk_renderer.as_str(),
                 "note": "Restart the application for the new renderer to take effect."
+            })).ok();
+        }
+
+        McpCommand::SetPreviewQuality { quality, reply } => {
+            let parsed = crate::ui_state::PreviewQuality::from_str(&quality);
+            prog_player.borrow_mut().set_preview_quality(parsed.divisor());
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.preview_quality = parsed;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply.send(json!({
+                "success": true,
+                "preview_quality": new_state.preview_quality.as_str()
             })).ok();
         }
 

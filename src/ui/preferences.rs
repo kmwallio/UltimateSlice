@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack, StackSidebar};
 use std::rc::Rc;
-use crate::ui_state::{GskRenderer, PlaybackPriority, ProxyMode, PreferencesState};
+use crate::ui_state::{GskRenderer, PlaybackPriority, PreviewQuality, ProxyMode, PreferencesState};
 
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
@@ -95,6 +95,23 @@ pub fn show_preferences_dialog(
     playback_box.append(&proxy_mode);
     playback_box.append(&proxy_hint);
 
+    let pq_label = Label::new(Some("Preview quality"));
+    pq_label.set_halign(gtk::Align::Start);
+    let preview_quality = gtk4::ComboBoxText::new();
+    preview_quality.append(Some("full"), "Full (project resolution)");
+    preview_quality.append(Some("half"), "Half (÷2 — lower memory)");
+    preview_quality.append(Some("quarter"), "Quarter (÷4 — lowest memory)");
+    preview_quality.set_active_id(Some(current.preview_quality.as_str()));
+    preview_quality.set_halign(gtk::Align::Start);
+    let pq_hint = Label::new(Some("Scales the compositor output for preview playback. Lower settings reduce memory and CPU usage. Export always uses full resolution."));
+    pq_hint.set_halign(gtk::Align::Start);
+    pq_hint.add_css_class("dim-label");
+    pq_hint.set_wrap(true);
+    pq_hint.set_max_width_chars(60);
+    playback_box.append(&pq_label);
+    playback_box.append(&preview_quality);
+    playback_box.append(&pq_hint);
+
     let renderer_label = Label::new(Some("GTK renderer"));
     renderer_label.set_halign(gtk::Align::Start);
     let gsk_renderer = gtk4::ComboBoxText::new();
@@ -173,6 +190,7 @@ pub fn show_preferences_dialog(
                 show_waveform_on_video: waveform_video_check.is_active(),
                 mcp_socket_enabled: mcp_socket_check.is_active(),
                 gsk_renderer: GskRenderer::from_str(gsk_renderer.active_id().as_deref().unwrap_or("auto")),
+                preview_quality: PreviewQuality::from_str(preview_quality.active_id().as_deref().unwrap_or("full")),
             });
         }
         d.close();
