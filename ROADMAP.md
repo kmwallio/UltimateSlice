@@ -183,6 +183,7 @@ Tracking docs:
 - [x] Rotate clip (90° / 180° / 270° presets) via GStreamer `videoflip`
 - [x] Flip horizontal / flip vertical via GStreamer `videoflip`
 - [x] Position offset (X / Y translation within the output frame) via GStreamer `videobox`
+- [x] Transform edits (Scale/Position) now refresh immediately in Program Monitor preview/playback without stale black-bar framing
 - [x] Persist transform settings in FCPXML (`us:crop-*`, `us:rotate`, `us:flip-h/v`, `us:scale`, `us:position-x/y` attributes)
 - [x] Interactive transform overlay in program monitor — when a clip is selected, show drag handles on the preview frame so the user can:
   - **Move**: drag the frame to adjust Position X/Y

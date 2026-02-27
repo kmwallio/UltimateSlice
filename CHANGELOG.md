@@ -5,6 +5,11 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Program monitor transform refresh**: Scale/Position edits now reliably refresh the
+  active preview clip by syncing ProgramPlayer's cached clip transform state and
+  forcing an immediate in-place re-seek of the current segment. This prevents stale
+  framing where black bars could remain visible in preview/playback even though the
+  transform overlay and inspector values were updated.
 - **Accurate canvas preview**: The Program Monitor now constrains the video display
   area to the project's canvas aspect ratio (e.g. 16:9). Previously, clips whose
   native resolution differed from the canvas (e.g. a 21:9 source on a 16:9 canvas)

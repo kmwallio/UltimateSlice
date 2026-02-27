@@ -37,7 +37,8 @@ or outside the export frame.
 
 - The program monitor loads clips from the timeline in order and switches between them automatically at clip boundaries.
 - The **timeline playhead** moves in sync with program monitor playback (polled at ~33 ms, with redraw coalescing during playback).
-- All per-clip effects (color, denoise, sharpness, crop, rotate, flip, title overlay, speed) are applied during playback.
+- All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied during playback.
+- Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.
 - Playback priority can be set in **Preferences → Playback** (`Smooth`, `Balanced`, `Accurate`) to control smoothness vs seek precision.
 - Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
 

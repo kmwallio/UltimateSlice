@@ -181,10 +181,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
+            let timeline_state = timeline_state.clone();
             let transform_overlay_cell = transform_overlay_cell.clone();
             move |cl, cr, ct, cb, rot, fh, fv, sc, px, py| {
                 player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
-                prog_player.borrow_mut().update_current_transform(cl, cr, ct, cb, rot, fh, fv, sc, px, py);
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                let mut pp = prog_player.borrow_mut();
+                if let Some(ref clip_id) = selected {
+                    pp.update_transform_for_clip(clip_id, cl, cr, ct, cb, rot, fh, fv, sc, px, py);
+                } else {
+                    pp.update_current_transform(cl, cr, ct, cb, rot, fh, fv, sc, px, py);
+                }
                 // Keep the transform overlay in sync so drag handles reflect slider changes.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
                     to.set_transform(sc, px, py);
@@ -431,7 +438,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
                 let fh  = inspector_view.flip_h_btn.is_active();
                 let fv  = inspector_view.flip_v_btn.is_active();
-                prog_player.borrow_mut().update_current_transform(cl, crv, ct, cb, rot, fh, fv, sc, px, py);
+                let mut pp = prog_player.borrow_mut();
+                if let Some(ref clip_id) = selected {
+                    pp.update_transform_for_clip(clip_id, cl, crv, ct, cb, rot, fh, fv, sc, px, py);
+                } else {
+                    pp.update_current_transform(cl, crv, ct, cb, rot, fh, fv, sc, px, py);
+                }
                 // 4. Update window dirty marker
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
@@ -825,6 +837,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let clips = proj.tracks.iter().enumerate().flat_map(|(t_idx, t)| {
                     let audio_only = t.kind == TrackKind::Audio;
                     t.clips.iter().map(move |c| ProgramClip {
+                        id:                c.id.clone(),
                         source_path:       c.source_path.clone(),
                         source_in_ns:      c.source_in,
                         source_out_ns:     c.source_out,

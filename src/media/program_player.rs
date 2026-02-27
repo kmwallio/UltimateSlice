@@ -23,6 +23,7 @@ pub struct ScopeFrame {
 
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
+    pub id: String,
     pub source_path: String,
     pub source_in_ns: u64,
     pub source_out_ns: u64,
@@ -303,6 +304,14 @@ impl ProgramPlayer {
         let videoscale_zoom = gst::ElementFactory::make("videoscale").build().ok();
         let capsfilter_zoom = gst::ElementFactory::make("capsfilter").build().ok();
         let videobox_zoom   = gst::ElementFactory::make("videobox").build().ok();
+        if videoscale_norm.is_none()
+            || capsfilter_proj.is_none()
+            || videoscale_zoom.is_none()
+            || capsfilter_zoom.is_none()
+            || videobox_zoom.is_none()
+        {
+            log::warn!("ProgramPlayer: zoom chain unavailable; scale/position preview transforms may be disabled");
+        }
 
         let default_proj_caps = gst::Caps::builder("video/x-raw")
             .field("width", 1920i32).field("height", 1080i32).build();
@@ -313,10 +322,15 @@ impl ProgramPlayer {
             cf.set_property("caps", &default_proj_caps.copy());
         }
 
-        if videobalance.is_some() && gaussianblur.is_some() {
-            let vb = videobalance.as_ref().unwrap();
-            let gb = gaussianblur.as_ref().unwrap();
-            gb.set_property("sigma", 0.0_f64);
+        let blur_stage = gaussianblur.clone().or_else(|| {
+            log::warn!("ProgramPlayer: gaussianblur unavailable; using identity filter so transform chain remains active");
+            gst::ElementFactory::make("identity").build().ok()
+        });
+
+        if let (Some(ref vb), Some(ref gb)) = (&videobalance, &blur_stage) {
+            if gaussianblur.is_some() {
+                gb.set_property("sigma", 0.0_f64);
+            }
             let bin = gst::Bin::new();
             let conv1 = gst::ElementFactory::make("videoconvert").build()
                 .expect("videoconvert must be available");
@@ -1255,17 +1269,47 @@ impl ProgramPlayer {
     pub fn update_current_transform(&mut self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32,
                                     rotate: i32, flip_h: bool, flip_v: bool,
                                     scale: f64, position_x: f64, position_y: f64) {
+        if let Some(idx) = self.current_idx {
+            if let Some(clip) = self.clips.get_mut(idx) {
+                clip.crop_left = crop_left;
+                clip.crop_right = crop_right;
+                clip.crop_top = crop_top;
+                clip.crop_bottom = crop_bottom;
+                clip.rotate = rotate;
+                clip.flip_h = flip_h;
+                clip.flip_v = flip_v;
+                clip.scale = scale;
+                clip.position_x = position_x;
+                clip.position_y = position_y;
+            }
+        }
         self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v, scale, position_x, position_y);
-        if self.current_idx.is_some() && self.state != PlayerState::Playing {
-            let pos = self.timeline_pos_ns;
-            if let Some(idx) = self.clip_at(pos) {
-                let clip = &self.clips[idx];
-                let source_ns = clip.source_pos_ns(pos);
-                let speed = clip.speed;
-                let _ = self.pipeline.seek(speed,
-                    Self::paused_seek_flags(),
-                    gst::SeekType::Set, gst::ClockTime::from_nseconds(source_ns),
-                    gst::SeekType::None, gst::ClockTime::NONE);
+        self.reseek_current_video_clip();
+    }
+
+    /// Update cached transform for a specific clip id and refresh preview immediately
+    /// when that clip is currently loaded in the program monitor.
+    pub fn update_transform_for_clip(&mut self, clip_id: &str,
+                                     crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32,
+                                     rotate: i32, flip_h: bool, flip_v: bool,
+                                     scale: f64, position_x: f64, position_y: f64) {
+        let idx = self.clips.iter().position(|c| c.id == clip_id);
+        if let Some(i) = idx {
+            if let Some(clip) = self.clips.get_mut(i) {
+                clip.crop_left = crop_left;
+                clip.crop_right = crop_right;
+                clip.crop_top = crop_top;
+                clip.crop_bottom = crop_bottom;
+                clip.rotate = rotate;
+                clip.flip_h = flip_h;
+                clip.flip_v = flip_v;
+                clip.scale = scale;
+                clip.position_x = position_x;
+                clip.position_y = position_y;
+            }
+            if self.current_idx == Some(i) {
+                self.set_transform(crop_left, crop_right, crop_top, crop_bottom, rotate, flip_h, flip_v, scale, position_x, position_y);
+                self.reseek_current_video_clip();
             }
         }
     }
@@ -1293,6 +1337,27 @@ impl ProgramPlayer {
             .filter(|(_, c)| c.timeline_start_ns == next_start)
             .max_by_key(|(_, c)| c.track_index)
             .map(|(i, _)| i)
+    }
+
+    fn reseek_current_video_clip(&mut self) {
+        let Some(idx) = self.current_idx else { return; };
+        let pos = self.timeline_pos_ns;
+        let clip = &self.clips[idx];
+        let source_ns = clip.source_pos_ns(pos);
+        let speed = clip.speed;
+        let flags = if self.state == PlayerState::Playing {
+            self.clip_seek_flags()
+        } else {
+            Self::paused_seek_flags()
+        };
+        let _ = self.pipeline.seek(
+            speed,
+            flags,
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(source_ns),
+            gst::SeekType::None,
+            gst::ClockTime::NONE,
+        );
     }
 
     fn load_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
