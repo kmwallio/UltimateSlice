@@ -63,6 +63,11 @@ pub enum McpCommand {
         position_y: f64,
         reply:      SyncSender<Value>,
     },
+    SetClipOpacity {
+        clip_id: String,
+        opacity: f64,
+        reply:   SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

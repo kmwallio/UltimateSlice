@@ -83,6 +83,7 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:flip-h",     clip.flip_h.to_string().as_str()));
             asset_clip.push_attribute(("us:flip-v",     clip.flip_v.to_string().as_str()));
             asset_clip.push_attribute(("us:scale",      clip.scale.to_string().as_str()));
+            asset_clip.push_attribute(("us:opacity",    clip.opacity.to_string().as_str()));
             asset_clip.push_attribute(("us:position-x", clip.position_x.to_string().as_str()));
             asset_clip.push_attribute(("us:position-y", clip.position_y.to_string().as_str()));
             asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));

@@ -14,6 +14,7 @@ fn default_saturation() -> f32 { 1.0 }
 fn default_volume() -> f32 { 1.0 }
 fn default_speed() -> f64 { 1.0 }
 fn default_scale() -> f64 { 1.0 }
+fn default_opacity() -> f64 { 1.0 }
 fn default_title_font() -> String { "Sans Bold 36".to_string() }
 fn default_title_color() -> u32 { 0xFFFFFFFF }
 fn default_title_x() -> f64 { 0.5 }
@@ -100,6 +101,9 @@ pub struct Clip {
     /// 0.5 = half-size with black borders. Range 0.1–4.0, default 1.0.
     #[serde(default = "default_scale")]
     pub scale: f64,
+    /// Clip opacity for compositing: 0.0 = fully transparent, 1.0 = fully opaque.
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
     /// Horizontal position offset: −1.0 (clip anchored to left edge) to 1.0 (right edge).
     /// Meaningful when scale ≠ 1.0. Default 0.0 (centered).
     #[serde(default)]
@@ -149,6 +153,7 @@ impl Clip {
             transition_after_ns: 0,
             lut_path: None,
             scale: 1.0,
+            opacity: 1.0,
             position_x: 0.0,
             position_y: 0.0,
         }

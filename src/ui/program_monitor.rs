@@ -93,9 +93,8 @@ pub fn build_program_monitor(
 
     root.append(&title_bar);
 
-    // Video display: GtkOverlay composites picture_a (primary) with picture_b
-    // (incoming transition clip) on top. Opacities are updated each poll tick to
-    // create a true cross-dissolve (complementary alpha blend).
+    // Video display: GtkOverlay composites picture_b as the bottom layer and
+    // picture_a as the top layer. Opacities are updated each poll tick.
     let picture_a = Picture::new();
     picture_a.set_paintable(Some(&paintable_a));
     picture_a.set_hexpand(true);
@@ -108,14 +107,14 @@ pub fn build_program_monitor(
     picture_b.set_hexpand(true);
     picture_b.set_vexpand(true);
     picture_b.set_content_fit(gtk::ContentFit::Contain);
-    picture_b.set_opacity(0.0); // hidden until a transition is active
+    picture_b.set_opacity(0.0); // hidden until a lower layer/transition is active
 
-    // Inner overlay: composites picture_a (primary) and picture_b (transition).
+    // Inner overlay: composites picture_b (bottom) and picture_a (top).
     // The transform DA is NOT added here — it lives on the outer overlay so it can
     // draw handles outside the canvas boundary (e.g. when scale > 1.0).
     let overlay = Overlay::new();
-    overlay.set_child(Some(&picture_a));
-    overlay.add_overlay(&picture_b);
+    overlay.set_child(Some(&picture_b));
+    overlay.add_overlay(&picture_a);
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 

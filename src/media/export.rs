@@ -147,7 +147,7 @@ pub fn export_project(
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
-        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h);
+        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
         filter.push_str(&format!(
             "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{scale_pos_filter},fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
             project.frame_rate.numerator, project.frame_rate.denominator
@@ -227,11 +227,12 @@ pub fn export_project(
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
-        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h);
+        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
+        let opacity = clip.opacity.clamp(0.0, 1.0);
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{scale_pos_filter},format=yuva420p{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{scale_pos_filter},format=yuva420p,colorchannelmixer=aa={opacity:.4}{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
@@ -410,7 +411,12 @@ fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.
 /// Inserts BEFORE the output pad/crop so the final result is still `out_w × out_h`.
-fn build_scale_position_filter(clip: &crate::model::clip::Clip, out_w: u32, out_h: u32) -> String {
+fn build_scale_position_filter(
+    clip: &crate::model::clip::Clip,
+    out_w: u32,
+    out_h: u32,
+    transparent_pad: bool,
+) -> String {
     let scale = clip.scale.clamp(0.1, 4.0);
     if (scale - 1.0).abs() < 0.001 && clip.position_x.abs() < 0.001 && clip.position_y.abs() < 0.001 {
         return String::new(); // passthrough when scale=1 and position=0
@@ -439,7 +445,8 @@ fn build_scale_position_filter(clip: &crate::model::clip::Clip, out_w: u32, out_
         // pad x,y = position of the downscaled clip within the output frame
         let pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as u32;
         let pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as u32;
-        format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:black")
+        let pad_color = if transparent_pad { "black@0" } else { "black" };
+        format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
     }
 }
 

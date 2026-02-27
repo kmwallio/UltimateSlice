@@ -277,6 +277,27 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_opacity_changed: clip opacity slider → update top layer alpha immediately
+        {
+            let prog_player = prog_player.clone();
+            let window_weak = window_weak.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            move |opacity: f64| {
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                let mut pp = prog_player.borrow_mut();
+                if let Some(ref clip_id) = selected {
+                    pp.update_opacity_for_clip(clip_id, opacity);
+                } else {
+                    pp.update_current_opacity(opacity);
+                }
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -868,6 +889,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         transition_after_ns:c.transition_after_ns,
                         lut_path:          c.lut_path.clone(),
                         scale:             c.scale,
+                        opacity:           c.opacity,
                         position_x:        c.position_x,
                         position_y:        c.position_y,
                     })
@@ -1310,6 +1332,7 @@ fn handle_mcp_command(
                     "saturation":       c.saturation,
                     "denoise":          c.denoise,
                     "sharpness":        c.sharpness,
+                    "opacity":          c.opacity,
                 })))
                 .collect();
             reply.send(json!(clips)).ok();
@@ -1559,6 +1582,24 @@ fn handle_mcp_command(
                         clip.scale      = scale.clamp(0.1, 4.0);
                         clip.position_x = position_x.clamp(-1.0, 1.0);
                         clip.position_y = position_y.clamp(-1.0, 1.0);
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SetClipOpacity { clip_id, opacity, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.opacity = opacity.clamp(0.0, 1.0);
                         proj.dirty = true;
                         found = true;
                         break 'outer;

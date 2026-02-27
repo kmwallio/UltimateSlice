@@ -36,6 +36,7 @@ or outside the export frame.
 ## Playback Behaviour
 
 - The program monitor loads clips from the timeline in order and switches between them automatically at clip boundaries.
+- When multiple video tracks overlap, the top active clip is composited over the nearest active lower track so uncovered areas (from scale/position transforms) reveal underlying video.
 - The **timeline playhead** moves in sync with program monitor playback (polled at ~33 ms, with redraw coalescing during playback).
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied during playback.
 - Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.

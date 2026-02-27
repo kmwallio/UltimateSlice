@@ -36,6 +36,7 @@ pub struct InspectorView {
     pub flip_h_btn: gtk4::ToggleButton,
     pub flip_v_btn: gtk4::ToggleButton,
     pub scale_slider: Scale,
+    pub opacity_slider: Scale,
     pub position_x_slider: Scale,
     pub position_y_slider: Scale,
     // Title / text overlay
@@ -115,6 +116,7 @@ impl InspectorView {
                 self.flip_h_btn.set_active(c.flip_h);
                 self.flip_v_btn.set_active(c.flip_v);
                 self.scale_slider.set_value(c.scale);
+                self.opacity_slider.set_value(c.opacity);
                 self.position_x_slider.set_value(c.position_x);
                 self.position_y_slider.set_value(c.position_y);
                 self.title_entry.set_text(&c.title_text);
@@ -157,6 +159,7 @@ impl InspectorView {
                 self.flip_h_btn.set_active(false);
                 self.flip_v_btn.set_active(false);
                 self.scale_slider.set_value(1.0);
+                self.opacity_slider.set_value(1.0);
                 self.position_x_slider.set_value(0.0);
                 self.position_y_slider.set_value(0.0);
                 self.title_entry.set_text("");
@@ -188,6 +191,7 @@ pub fn build_inspector(
     on_title_changed: impl Fn(String, f64, f64) + 'static,
     on_speed_changed: impl Fn(f64) + 'static,
     on_lut_changed: impl Fn(Option<String>) + 'static,
+    on_opacity_changed: impl Fn(f64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(200);
@@ -345,6 +349,17 @@ pub fn build_inspector(
     scale_slider.set_hexpand(true);
     scale_slider.set_tooltip_text(Some("Scale: <1 = shrink with black borders, >1 = zoom in"));
     transform_inner.append(&scale_slider);
+
+    row_label(&transform_inner, "Opacity");
+    let opacity_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    opacity_slider.set_value(1.0);
+    opacity_slider.set_draw_value(true);
+    opacity_slider.set_digits(2);
+    opacity_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0%"));
+    opacity_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("100%"));
+    opacity_slider.set_hexpand(true);
+    opacity_slider.set_tooltip_text(Some("Clip opacity for compositing"));
+    transform_inner.append(&opacity_slider);
 
     row_label(&transform_inner, "Position X");
     let position_x_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
@@ -509,6 +524,7 @@ pub fn build_inspector(
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
     let on_speed_changed: Rc<dyn Fn(f64)> = Rc::new(on_speed_changed);
     let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
+    let on_opacity_changed: Rc<dyn Fn(f64)> = Rc::new(on_opacity_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -931,6 +947,30 @@ pub fn build_inspector(
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
+        let on_opacity_changed = on_opacity_changed.clone();
+        opacity_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() { return; }
+            let opacity = sl.value().clamp(0.0, 1.0);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.opacity = opacity;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_opacity_changed(opacity);
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
         let on_transform_changed = on_transform_changed.clone();
         let crop_left_s = crop_left_slider.clone();
         let crop_right_s = crop_right_slider.clone();
@@ -1218,6 +1258,7 @@ pub fn build_inspector(
         flip_h_btn,
         flip_v_btn,
         scale_slider,
+        opacity_slider,
         position_x_slider,
         position_y_slider,
         title_entry,

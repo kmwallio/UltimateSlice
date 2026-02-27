@@ -4,6 +4,13 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Added
+- **Clip opacity controls**: Added per-clip opacity (`0.0–1.0`) in the Inspector Transform section, plus MCP support via `set_clip_opacity`. Opacity is now included in `list_clips` output and persisted in FCPXML as `us:opacity`.
+
+### Changed
+- **Program Monitor layered preview**: The monitor now composites the top active video clip over the nearest active lower track, allowing scale/position uncover areas to reveal lower-track video in preview.
+- **Export compositing parity**: Secondary-track overlays now use transparent zoom-out padding (`pad ... black@0`) and apply per-clip opacity via ffmpeg `colorchannelmixer=aa=...`, improving preview/export consistency for layered shots.
+
 ### Fixed
 - **Program monitor transform refresh**: Scale/Position edits now reliably refresh the
   active preview clip by syncing ProgramPlayer's cached clip transform state and

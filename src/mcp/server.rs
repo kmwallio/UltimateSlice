@@ -339,6 +339,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_opacity",
+            "description": "Set clip opacity for compositing. 1.0 is fully opaque; 0.0 is fully transparent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":  { "type": "string", "description": "Clip id (from list_clips)." },
+                    "opacity":  { "type": "number", "description": "Opacity in range 0.0–1.0 (default 1.0)." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "create_project",
             "description": "Create a new empty project, discarding the current one. Resets the timeline to a blank state.",
             "inputSchema": {
@@ -477,6 +489,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             scale: args["scale"].as_f64().unwrap_or(1.0),
             position_x: args["position_x"].as_f64().unwrap_or(0.0),
             position_y: args["position_y"].as_f64().unwrap_or(0.0),
+            reply: tx,
+        },
+        "set_clip_opacity" => McpCommand::SetClipOpacity {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            opacity: args["opacity"].as_f64().unwrap_or(1.0),
             reply: tx,
         },
 

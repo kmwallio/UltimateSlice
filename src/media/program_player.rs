@@ -70,6 +70,8 @@ pub struct ProgramClip {
     pub lut_path: Option<String>,
     /// Scale multiplier: 1.0 = fill frame, >1.0 = zoom in, <1.0 = shrink with black borders.
     pub scale: f64,
+    /// Opacity multiplier for compositing: 0.0 = transparent, 1.0 = opaque.
+    pub opacity: f64,
     /// Horizontal position offset: −1.0 (left) to 1.0 (right). Default 0.0.
     pub position_x: f64,
     /// Vertical position offset: −1.0 (top) to 1.0 (bottom). Default 0.0.
@@ -147,6 +149,11 @@ pub struct ProgramPlayer {
     /// Second pipeline for cross-dissolve preview: plays the incoming clip while
     /// pipeline1 fades out the outgoing clip.
     pipeline2: gst::Element,
+    /// When true, pipeline2 is currently being used as the underlay layer
+    /// (highest active track beneath the current/top clip).
+    underlay_active: bool,
+    /// Index into `clips` currently loaded as underlay in pipeline2.
+    underlay_idx: Option<usize>,
     /// Whether pipeline2 is currently active (playing the incoming transition clip).
     transition_active: bool,
     /// Index into `clips` of the incoming clip currently loaded in pipeline2.
@@ -513,6 +520,8 @@ impl ProgramPlayer {
                 proxy_enabled: false,
                 proxy_paths: HashMap::new(),
                 pipeline2,
+                underlay_active: false,
+                underlay_idx: None,
                 transition_active: false,
                 transition_incoming_idx: None,
                 pipeline2_pending_seek_ns: None,
@@ -557,36 +566,40 @@ impl ProgramPlayer {
     }
 
     /// Returns (opacity_a, opacity_b) for the two program monitor pictures.
-    /// Outside transition windows: (1.0, 0.0). During a cross-dissolve: complementary values.
+    /// picture_a is the top layer; picture_b is the bottom layer.
     pub fn transition_opacities(&self) -> (f64, f64) {
-        // If pipeline2 is not actually running, always show only picture_a.
-        if !self.transition_active { return (1.0, 0.0); }
-        let Some(idx) = self.current_idx else { return (1.0, 0.0) };
-        let clip = &self.clips[idx];
-        if clip.transition_after.is_empty() || clip.transition_after_ns == 0 {
+        if self.transition_active {
+            let Some(idx) = self.current_idx else { return (1.0, 0.0) };
+            let clip = &self.clips[idx];
+            if clip.transition_after.is_empty() || clip.transition_after_ns == 0 {
+                return (clip.opacity.clamp(0.0, 1.0), 0.0);
+            }
+            let d = clip.transition_after_ns.min(clip.duration_ns());
+            let start = clip.timeline_end_ns().saturating_sub(d);
+            if self.timeline_pos_ns >= start && self.timeline_pos_ns < clip.timeline_end_ns() && d > 0 {
+                let t = ((self.timeline_pos_ns - start) as f64 / d as f64).clamp(0.0, 1.0);
+                return match clip.transition_after.as_str() {
+                    "fade_to_black" => {
+                        // First half: top fades to black, second half: incoming fades in.
+                        let top = (1.0 - 2.0 * t).clamp(0.0, 1.0);
+                        let bottom = (2.0 * t - 1.0).clamp(0.0, 1.0);
+                        (top, bottom)
+                    }
+                    "wipe_right" | "wipe_left" => {
+                        // Live preview approximation for wipe transitions.
+                        if t < 0.5 { (1.0, 0.0) } else { (0.0, 1.0) }
+                    }
+                    _ => (1.0 - t, 1.0), // cross_dissolve and unknown kinds
+                };
+            }
             return (1.0, 0.0);
         }
-        let d = clip.transition_after_ns.min(clip.duration_ns());
-        let start = clip.timeline_end_ns().saturating_sub(d);
-        if self.timeline_pos_ns >= start && self.timeline_pos_ns < clip.timeline_end_ns() && d > 0 {
-            let t = ((self.timeline_pos_ns - start) as f64 / d as f64).clamp(0.0, 1.0);
-            return match clip.transition_after.as_str() {
-                "fade_to_black" => {
-                    // First half: A fades to black; second half: B fades in from black.
-                    let a = (1.0 - 2.0 * t).clamp(0.0, 1.0);
-                    let b = (2.0 * t - 1.0).clamp(0.0, 1.0);
-                    (a, b)
-                }
-                "wipe_right" | "wipe_left" => {
-                    // True wipe geometry is rendered by ffmpeg xfade on export.
-                    // In the live preview, approximate with a step at t=0.5 so the
-                    // visual is clearly different from a cross-dissolve (which blends).
-                    if t < 0.5 { (1.0, 0.0) } else { (0.0, 1.0) }
-                }
-                _ => (1.0 - t, t), // cross_dissolve and future unknown kinds
-            };
-        }
-        (1.0, 0.0)
+        let top_opacity = self.current_idx
+            .and_then(|idx| self.clips.get(idx))
+            .map(|c| c.opacity.clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        let bottom_opacity = if self.underlay_active { 1.0 } else { 0.0 };
+        (top_opacity, bottom_opacity)
     }
 
     /// Returns the latest decoded scope frame (320×180 RGBA), or `None` if no
@@ -668,6 +681,7 @@ impl ProgramPlayer {
             self.seek_anchor_timeline_ns = pos;
             self.seek_anchor_source_ns = source_pos;
             self.seek_reports_relative = None;
+            self.sync_underlay(pos);
         }
     }
 
@@ -676,6 +690,7 @@ impl ProgramPlayer {
     /// Non-blocking: pipeline2 is set to Playing immediately and the seek to
     /// `source_in_ns` is deferred to the next `poll()` tick via `pipeline2_pending_seek_ns`.
     fn activate_transition(&mut self, incoming_idx: usize) {
+        self.clear_underlay();
         if self.transition_incoming_idx == Some(incoming_idx) {
             return; // already active for this clip
         }
@@ -712,6 +727,83 @@ impl ProgramPlayer {
             self.transition_incoming_idx = None;
         }
         self.pipeline2_pending_seek_ns = None;
+    }
+
+    fn clear_underlay(&mut self) {
+        if self.underlay_active {
+            let _ = self.pipeline2.set_state(gst::State::Ready);
+        }
+        self.underlay_active = false;
+        self.underlay_idx = None;
+    }
+
+    fn underlay_clip_at(&self, timeline_pos_ns: u64, top_idx: usize) -> Option<usize> {
+        let top_track_idx = self.clips.get(top_idx)?.track_index;
+        self.clips.iter().enumerate()
+            .filter(|(_, c)|
+                c.track_index < top_track_idx
+                    && timeline_pos_ns >= c.timeline_start_ns
+                    && timeline_pos_ns < c.timeline_end_ns()
+            )
+            .max_by_key(|(_, c)| c.track_index)
+            .map(|(i, _)| i)
+    }
+
+    fn sync_underlay(&mut self, timeline_pos_ns: u64) {
+        if self.transition_active {
+            self.clear_underlay();
+            return;
+        }
+        let Some(top_idx) = self.current_idx else {
+            self.clear_underlay();
+            return;
+        };
+        let Some(idx) = self.underlay_clip_at(timeline_pos_ns, top_idx) else {
+            self.clear_underlay();
+            return;
+        };
+        let clip = &self.clips[idx];
+        let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
+        let same_loaded = self.underlay_idx == Some(idx);
+        if !same_loaded {
+            let effective_path = if self.proxy_enabled {
+                let key = crate::media::proxy_cache::proxy_key(
+                    &clip.source_path,
+                    clip.lut_path.as_deref(),
+                );
+                self.proxy_paths.get(&key)
+                    .map(|p| p.as_str())
+                    .unwrap_or(&clip.source_path)
+            } else {
+                &clip.source_path
+            };
+            let uri = format!("file://{}", effective_path);
+            let _ = self.pipeline2.set_state(gst::State::Ready);
+            self.pipeline2.set_property("uri", &uri);
+            let target_state = if self.state == PlayerState::Playing {
+                gst::State::Playing
+            } else {
+                gst::State::Paused
+            };
+            let _ = self.pipeline2.set_state(target_state);
+        }
+        if !same_loaded || self.state != PlayerState::Playing {
+            let flags = if self.state == PlayerState::Playing {
+                self.clip_seek_flags()
+            } else {
+                Self::paused_seek_flags()
+            };
+            let _ = self.pipeline2.seek(
+                clip.speed,
+                flags,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
+            );
+        }
+        self.underlay_active = true;
+        self.underlay_idx = Some(idx);
     }
 
     fn should_block_preroll(&self) -> bool {
@@ -754,6 +846,7 @@ impl ProgramPlayer {
         self.audio_pipeline.set_property("uri", "");
         let _ = self.audio_pipeline.set_state(gst::State::Ready);
         self.deactivate_transition();
+        self.clear_underlay();
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
     }
@@ -769,9 +862,11 @@ impl ProgramPlayer {
             self.seek_anchor_timeline_ns = timeline_pos_ns;
             self.seek_anchor_source_ns = 0;
             self.seek_reports_relative = None;
+            self.clear_underlay();
         }
         // Sync audio pipeline
         self.sync_audio_to(timeline_pos_ns);
+        self.sync_underlay(timeline_pos_ns);
     }
 
     pub fn play(&mut self) {
@@ -822,6 +917,7 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
         self.state = PlayerState::Playing;
+        self.sync_underlay(pos);
         // Normal play always resets JKL shuttle speed.
         self.jkl_rate = 0.0;
     }
@@ -829,6 +925,9 @@ impl ProgramPlayer {
     pub fn pause(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
+        if self.underlay_active {
+            let _ = self.pipeline2.set_state(gst::State::Paused);
+        }
         self.state = PlayerState::Paused;
         self.jkl_rate = 0.0;
     }
@@ -845,6 +944,7 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
         self.deactivate_transition();
+        self.clear_underlay();
         self.state = PlayerState::Paused;
         self.timeline_pos_ns = 0;
         if let Some(idx) = self.clip_at(0) {
@@ -855,6 +955,7 @@ impl ProgramPlayer {
             self.seek_anchor_timeline_ns = 0;
             self.seek_anchor_source_ns = 0;
             self.seek_reports_relative = None;
+            self.clear_underlay();
         }
         self.sync_audio_to(0);
         self.state = PlayerState::Stopped;
@@ -905,6 +1006,7 @@ impl ProgramPlayer {
         if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
             let _ = self.pipeline.set_state(gst::State::Ready);
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.clear_underlay();
             self.state = PlayerState::Stopped;
             self.current_idx = None;
             self.audio_current_idx = None;
@@ -913,6 +1015,7 @@ impl ProgramPlayer {
         }
 
         let Some(idx) = self.current_idx else {
+            self.clear_underlay();
             // No video clip is currently active; keep tracking audio-only tails and
             // stop cleanly at timeline end.
             if let Some(aidx) = self.audio_current_idx {
@@ -933,6 +1036,7 @@ impl ProgramPlayer {
                 if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
                     let _ = self.pipeline.set_state(gst::State::Ready);
                     let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                    self.clear_underlay();
                     self.state = PlayerState::Stopped;
                     self.current_idx = None;
                     self.audio_current_idx = None;
@@ -1052,6 +1156,7 @@ impl ProgramPlayer {
                     } else {
                         let _ = self.pipeline.set_state(gst::State::Ready);
                         let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                        self.clear_underlay();
                         self.state = PlayerState::Stopped;
                         self.current_idx = None;
                         self.audio_current_idx = None;
@@ -1061,11 +1166,13 @@ impl ProgramPlayer {
                     // No clip active at this timeline position — end of timeline
                     let _ = self.pipeline.set_state(gst::State::Ready);
                     let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                    self.clear_underlay();
                     self.state = PlayerState::Stopped;
                     self.current_idx = None;
                     self.audio_current_idx = None;
                 }
             }
+            self.sync_underlay(self.timeline_pos_ns);
             return true;
         }
 
@@ -1074,6 +1181,7 @@ impl ProgramPlayer {
         if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
             let _ = self.pipeline.set_state(gst::State::Ready);
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.clear_underlay();
             self.state = PlayerState::Stopped;
             self.current_idx = None;
             self.audio_current_idx = None;
@@ -1096,6 +1204,7 @@ impl ProgramPlayer {
                 }
             }
         }
+        self.sync_underlay(new_pos);
 
         changed
     }
@@ -1323,6 +1432,36 @@ impl ProgramPlayer {
         }
     }
 
+    pub fn update_current_opacity(&mut self, opacity: f64) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if let Some(idx) = self.current_idx {
+            if let Some(clip) = self.clips.get_mut(idx) {
+                clip.opacity = opacity;
+            }
+        }
+        if let Some(ref a) = self.alpha_filter {
+            a.set_property("alpha", opacity);
+        }
+        self.sync_underlay(self.timeline_pos_ns);
+        self.reseek_current_video_clip();
+    }
+
+    pub fn update_opacity_for_clip(&mut self, clip_id: &str, opacity: f64) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
+            if let Some(clip) = self.clips.get_mut(i) {
+                clip.opacity = opacity;
+            }
+            if self.current_idx == Some(i) {
+                if let Some(ref a) = self.alpha_filter {
+                    a.set_property("alpha", opacity);
+                }
+                self.sync_underlay(self.timeline_pos_ns);
+                self.reseek_current_video_clip();
+            }
+        }
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────
 
     fn clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
@@ -1395,6 +1534,9 @@ impl ProgramPlayer {
                            clip.scale, clip.position_x, clip.position_y);
         // Apply per-clip title overlay
         self.set_title(&clip.title_text, &clip.title_font, clip.title_color, clip.title_x, clip.title_y);
+        if let Some(ref a) = self.alpha_filter {
+            a.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
+        }
 
         let same_source_loaded = self.current_idx
             .and_then(|cur| self.clips.get(cur))
@@ -1479,11 +1621,10 @@ impl ProgramPlayer {
         self.seek_anchor_source_ns = source_seek_ns;
         self.seek_reports_relative = None;
         self.timeline_pos_ns = timeline_pos_ns;
-        // Cross-dissolve opacity is now handled by the dual-pipeline GTK overlay
-        // (picture_a / picture_b set_opacity). The GStreamer alpha filter must stay
-        // at 1.0 so pipeline1 is always opaque — the GTK layer blends both pictures.
+        // Cross-dissolve/layer compositing is handled by GTK picture opacities; keep
+        // pipeline alpha aligned with the clip's own opacity setting.
         if let Some(ref a) = self.alpha_filter {
-            a.set_property("alpha", 1.0_f64);
+            a.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
         }
     }
 

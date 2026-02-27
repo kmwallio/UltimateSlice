@@ -82,5 +82,6 @@ Clips with a speed multiplier are exported correctly:
 
 - Export requires **ffmpeg** to be installed and on `$PATH`.
 - All video tracks are processed in timeline order, with letterbox/pillarbox padding applied to each clip.
+- Secondary-track overlays keep transparent padding when zoomed out and honor per-clip opacity, so layered composites export closer to Program Monitor preview.
 - Audio is mixed from all non-muted audio tracks plus embedded audio in video clips.
 - Export runs in a background thread; the UI remains responsive.
