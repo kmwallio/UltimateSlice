@@ -112,6 +112,8 @@ struct VideoSlot {
     compositor_pad: Option<gst::Pad>,
     /// Audiomixer sink pad for this slot's audio.
     audio_mixer_pad: Option<gst::Pad>,
+    /// `audioconvert` element between decoder audio and audiomixer (must be cleaned up).
+    audio_conv: Option<gst::Element>,
     /// Per-slot video effect elements.
     videobalance: Option<gst::Element>,
     gaussianblur: Option<gst::Element>,
@@ -988,8 +990,14 @@ impl ProgramPlayer {
         for slot in self.slots.drain(..) {
             let _ = slot.decoder.set_state(gst::State::Null);
             let _ = slot.effects_bin.set_state(gst::State::Null);
+            if let Some(ref ac) = slot.audio_conv {
+                let _ = ac.set_state(gst::State::Null);
+            }
             self.pipeline.remove(&slot.decoder).ok();
             self.pipeline.remove(slot.effects_bin.upcast_ref::<gst::Element>()).ok();
+            if let Some(ref ac) = slot.audio_conv {
+                self.pipeline.remove(ac).ok();
+            }
             if let Some(ref pad) = slot.compositor_pad {
                 self.compositor.release_request_pad(pad);
             }
@@ -1124,7 +1132,13 @@ impl ProgramPlayer {
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         let was_playing = self.state == PlayerState::Playing;
-        let _ = self.pipeline.set_state(gst::State::Paused);
+
+        // Go through Ready to reset the pipeline's base-time / running-time.
+        // Without this, the always-on videotestsrc accumulates running-time
+        // while newly-created decoders start at running-time 0 after their
+        // flush seek.  The compositor waits for the decoders to catch up,
+        // deadlocking the pipeline and freezing the playhead.
+        let _ = self.pipeline.set_state(gst::State::Ready);
 
         // Tear down existing slots.
         self.teardown_slots();
@@ -1132,11 +1146,16 @@ impl ProgramPlayer {
         let active = self.clips_active_at(timeline_pos);
         if active.is_empty() {
             self.current_idx = None;
+            // Move back to Paused so the background sources are ready.
+            let _ = self.pipeline.set_state(gst::State::Paused);
             if was_playing {
                 let _ = self.pipeline.set_state(gst::State::Playing);
             }
             return;
         }
+
+        // Transition to Paused so new elements can preroll.
+        let _ = self.pipeline.set_state(gst::State::Paused);
 
         // Update current_idx to highest-priority clip.
         self.current_idx = active.last().copied();
@@ -1253,6 +1272,7 @@ impl ProgramPlayer {
                 effects_bin: effects_bin.clone(),
                 compositor_pad: Some(comp_pad.clone()),
                 audio_mixer_pad: amix_pad.clone(),
+                audio_conv: audio_conv.clone(),
                 videobalance: videobalance.clone(),
                 gaussianblur: gaussianblur.clone(),
                 videocrop: videocrop.clone(),
@@ -1279,6 +1299,7 @@ impl ProgramPlayer {
                 effects_bin,
                 compositor_pad: Some(comp_pad),
                 audio_mixer_pad: amix_pad,
+                audio_conv,
                 videobalance,
                 gaussianblur,
                 videocrop,
