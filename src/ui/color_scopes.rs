@@ -64,6 +64,7 @@ pub fn build_color_scopes() -> (gtk::Widget, Rc<RefCell<ColorScopesState>>) {
     // ── Drawing area ───────────────────────────────────────────────────────
     let da = DrawingArea::new();
     da.set_hexpand(true);
+    da.set_vexpand(true);
     da.set_height_request(200);
     root.append(&da);
 

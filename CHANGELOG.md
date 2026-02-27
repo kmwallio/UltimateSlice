@@ -11,6 +11,7 @@ All notable project changes and progress should be recorded here.
 - **`--mcp-attach` CLI flag**: A built-in stdio-to-socket proxy that bridges stdin/stdout to the running instance's MCP socket, letting standard MCP clients (which expect stdio) connect via `.mcp.json` `ultimate-slice-attach` entry.
 
 ### Changed
+- **Scopes expand when program monitor is popped out**: The vectorscope, histogram, waveform, and RGB parade panels now expand to fill the available vertical space when the program monitor preview is detached into a separate window. When docked, the scopes retain their compact size below the video preview.
 - **Batch-sort clips during FCPXML import**: Clips are now appended unsorted during XML parsing and sorted once per track at the end, reducing O(n² log n) sorting overhead on large projects to O(n log n).
 - **Parallel proxy transcoding**: `ProxyCache` now uses 4 worker threads instead of 1, transcoding up to 4 proxy files concurrently via ffmpeg.
 - **Optimized media library sync**: `on_project_changed` now deduplicates clip source paths before syncing and avoids cloning library paths into a `HashSet<String>`, reducing allocations on every project change.

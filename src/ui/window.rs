@@ -644,6 +644,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let pop_cell = popout_window_cell.clone();
         let popped = monitor_popped.clone();
         let monitor_state = monitor_state.clone();
+        let scopes_rev = scopes_revealer.clone();
         Rc::new(move || {
             if !popped.get() {
                 let state = monitor_state.borrow().clone();
@@ -656,12 +657,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
                 host.remove(&monitor);
                 pop_win.set_child(Some(&monitor));
+                scopes_rev.set_vexpand(true);
 
                 let host_c = host.clone();
                 let monitor_c = monitor.clone();
                 let pop_cell_c = pop_cell.clone();
                 let popped_c = popped.clone();
                 let monitor_state_c = monitor_state.clone();
+                let scopes_rev_c = scopes_rev.clone();
                 pop_win.connect_close_request(move |w| {
                     let mut state = monitor_state_c.borrow_mut();
                     state.width = w.width().max(320);
@@ -672,6 +675,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     if monitor_c.parent().is_none() {
                         host_c.append(&monitor_c);
                     }
+                    scopes_rev_c.set_vexpand(false);
                     popped_c.set(false);
                     *pop_cell_c.borrow_mut() = None;
                     glib::Propagation::Proceed
