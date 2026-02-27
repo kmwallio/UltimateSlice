@@ -127,7 +127,8 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
     };
 
     // Decode audio → F32LE mono via appsink
-    let pipeline = gst::Pipeline::new();
+    let guard = super::PipelineGuard(gst::Pipeline::new());
+    let pipeline = &guard.0;
 
     let src  = gst::ElementFactory::make("uridecodebin").property("uri", &uri).build().ok()?;
     let conv = gst::ElementFactory::make("audioconvert").build().ok()?;
@@ -206,7 +207,7 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
         if appsink.is_eos() { break; }
     }
 
-    let _ = pipeline.set_state(gst::State::Null);
+    // PipelineGuard ensures pipeline is set to Null when this function returns.
 
     if samples.is_empty() { return None; }
 

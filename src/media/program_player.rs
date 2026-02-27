@@ -1200,11 +1200,15 @@ impl ProgramPlayer {
             if let Some(ref pad) = slot.audio_mixer_pad {
                 self.audiomixer.release_request_pad(pad);
             }
-            // 3. Set to Null — pads already unlinked, deactivation is fast.
+            // 3. Set to Null and wait for completion to avoid
+            //    "Trying to dispose element in READY state" warnings.
             let _ = slot.decoder.set_state(gst::State::Null);
+            let _ = slot.decoder.state(gst::ClockTime::from_mseconds(100));
             let _ = slot.effects_bin.set_state(gst::State::Null);
+            let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(100));
             if let Some(ref ac) = slot.audio_conv {
                 let _ = ac.set_state(gst::State::Null);
+                let _ = ac.state(gst::ClockTime::from_mseconds(100));
             }
         }
     }

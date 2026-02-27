@@ -124,9 +124,12 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
          appsink name=sink sync=false max-buffers=1 drop=false"
     );
 
-    let pipeline = gst::parse::launch(&pipeline_desc)?
-        .downcast::<gst::Pipeline>()
-        .map_err(|_| anyhow::anyhow!("not a pipeline"))?;
+    let guard = super::PipelineGuard(
+        gst::parse::launch(&pipeline_desc)?
+            .downcast::<gst::Pipeline>()
+            .map_err(|_| anyhow::anyhow!("not a pipeline"))?,
+    );
+    let pipeline = &guard.0;
 
     let appsink = pipeline
         .by_name("sink")
@@ -156,8 +159,7 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     let data = map.as_slice().to_vec();
     drop(map);
 
-    let _ = pipeline.set_state(gst::State::Null);
-
+    // PipelineGuard ensures pipeline is set to Null when this function returns.
     Ok(data)
 }
 
