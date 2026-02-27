@@ -32,6 +32,7 @@ pub fn build_program_monitor(
     on_stop: impl Fn() + 'static,
     on_play_pause: impl Fn() + 'static,
     on_toggle_popout: impl Fn() + 'static,
+    transform_overlay_da: Option<DrawingArea>,
 ) -> (GBox, Label, Label, Picture, Picture, DrawingArea, Rc<Cell<[f64; 2]>>) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -90,6 +91,11 @@ pub fn build_program_monitor(
     let overlay = Overlay::new();
     overlay.set_child(Some(&picture_a));
     overlay.add_overlay(&picture_b);
+    if let Some(da) = transform_overlay_da {
+        da.set_hexpand(true);
+        da.set_vexpand(true);
+        overlay.add_overlay(&da);
+    }
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 

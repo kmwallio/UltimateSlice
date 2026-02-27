@@ -132,6 +132,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     // timeline_panel_cell is shared between the inspector's on_audio_changed callback
     // and the program monitor poll timer. Declare it early (filled in after timeline build).
     let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+    // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
+    let transform_overlay_cell: Rc<RefCell<Option<Rc<crate::ui::transform_overlay::TransformOverlay>>>> =
+        Rc::new(RefCell::new(None));
     let (inspector_box, inspector_view) = inspector::build_inspector(
         project.clone(),
         // on_clip_changed: name changes → full project-changed cycle
@@ -383,33 +386,91 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         })
     };
 
-    let (prog_monitor_widget, pos_label, speed_label, picture_a, picture_b, vu_meter, vu_peak_cell) = program_monitor::build_program_monitor(
-        prog_player.clone(),
-        prog_paintable,
-        prog_paintable2,
-        // on_stop
-        {
-            let pp = prog_player.clone();
-            let ts = timeline_state.clone();
-            let cell = timeline_panel_cell.clone();
-            move || {
-                pp.borrow_mut().stop();
-                ts.borrow_mut().playhead_ns = 0;
-                if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+    let (prog_monitor_widget, pos_label, speed_label, picture_a, picture_b, vu_meter, vu_peak_cell) = {
+        // Build the interactive transform overlay and wire its drag callback.
+        let transform_overlay = Rc::new(crate::ui::transform_overlay::TransformOverlay::new({
+            let inspector_view  = inspector_view.clone();
+            let prog_player     = prog_player.clone();
+            let project         = project.clone();
+            let timeline_state  = timeline_state.clone();
+            let window_weak     = window_weak.clone();
+            move |sc, px, py| {
+                // 1. Update selected clip in model
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.scale = sc;
+                            clip.position_x = px;
+                            clip.position_y = py;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                // 2. Sync inspector sliders without re-triggering the transform callback
+                {
+                    *inspector_view.updating.borrow_mut() = true;
+                    inspector_view.scale_slider.set_value(sc);
+                    inspector_view.position_x_slider.set_value(px);
+                    inspector_view.position_y_slider.set_value(py);
+                    *inspector_view.updating.borrow_mut() = false;
+                }
+                // 3. Push to GStreamer (read existing crop/rotate/flip from inspector)
+                let cl  = inspector_view.crop_left_slider.value() as i32;
+                let crv = inspector_view.crop_right_slider.value() as i32;
+                let ct  = inspector_view.crop_top_slider.value() as i32;
+                let cb  = inspector_view.crop_bottom_slider.value() as i32;
+                let rot = inspector_view.rotate_combo.active_id()
+                    .and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
+                let fh  = inspector_view.flip_h_btn.is_active();
+                let fv  = inspector_view.flip_v_btn.is_active();
+                prog_player.borrow_mut().update_current_transform(cl, crv, ct, cb, rot, fh, fv, sc, px, py);
+                // 4. Update window dirty marker
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
+                }
             }
-        },
-        // on_play_pause
+        }));
+        // Initialise project dimensions (default 1920×1080 until first on_project_changed)
         {
-            let pp = prog_player.clone();
-            move || {
-                pp.borrow_mut().toggle_play_pause();
-            }
-        },
-        {
-            let cb = on_toggle_popout.clone();
-            move || cb()
-        },
-    );
+            let p = project.borrow();
+            transform_overlay.set_project_dimensions(p.width, p.height);
+        }
+
+        // Store the overlay handle for use in on_project_changed_impl
+        let to = transform_overlay.clone();
+        *transform_overlay_cell.borrow_mut() = Some(transform_overlay);
+
+        program_monitor::build_program_monitor(
+            prog_player.clone(),
+            prog_paintable,
+            prog_paintable2,
+            // on_stop
+            {
+                let pp = prog_player.clone();
+                let ts = timeline_state.clone();
+                let cell = timeline_panel_cell.clone();
+                move || {
+                    pp.borrow_mut().stop();
+                    ts.borrow_mut().playhead_ns = 0;
+                    if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
+                }
+            },
+            // on_play_pause
+            {
+                let pp = prog_player.clone();
+                move || { pp.borrow_mut().toggle_play_pause(); }
+            },
+            {
+                let cb = on_toggle_popout.clone();
+                move || cb()
+            },
+            Some(to.drawing_area.clone()),
+        )
+    };
 
     // ── Build colour scopes panel (hidden by default) ──────────────────────
     let (scopes_widget, scopes_state) = crate::ui::color_scopes::build_color_scopes();
@@ -700,6 +761,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
+        let transform_overlay_cell = transform_overlay_cell.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Update window title
@@ -714,6 +776,24 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 inspector_view.update(&proj, selected.as_deref());
+
+                // Sync transform overlay: show handles when a clip is selected
+                if let Some(ref to) = *transform_overlay_cell.borrow() {
+                    to.set_project_dimensions(proj.width, proj.height);
+                    if let Some(ref cid) = selected {
+                        let clip_opt = proj.tracks.iter()
+                            .flat_map(|t| t.clips.iter())
+                            .find(|c| &c.id == cid);
+                        if let Some(c) = clip_opt {
+                            to.set_transform(c.scale, c.position_x, c.position_y);
+                            to.set_clip_selected(true);
+                        } else {
+                            to.set_clip_selected(false);
+                        }
+                    } else {
+                        to.set_clip_selected(false);
+                    }
+                }
 
                 let clips = proj.tracks.iter().enumerate().flat_map(|(t_idx, t)| {
                     let audio_only = t.kind == TrackKind::Audio;

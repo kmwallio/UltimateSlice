@@ -7,3 +7,4 @@ pub mod inspector;
 pub mod program_monitor;
 pub mod preferences;
 pub mod color_scopes;
+pub mod transform_overlay;
