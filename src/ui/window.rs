@@ -181,9 +181,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
+            let transform_overlay_cell = transform_overlay_cell.clone();
             move |cl, cr, ct, cb, rot, fh, fv, sc, px, py| {
                 player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                 prog_player.borrow_mut().update_current_transform(cl, cr, ct, cb, rot, fh, fv, sc, px, py);
+                // Keep the transform overlay in sync so drag handles reflect slider changes.
+                if let Some(ref to) = *transform_overlay_cell.borrow() {
+                    to.set_transform(sc, px, py);
+                }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -482,8 +487,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     // Give the transform overlay access to picture_a so it can query the actual
     // paintable intrinsic dimensions for pixel-perfect frame rect alignment.
+    // Also give it the canvas AspectFrame so canvas_video_rect() can use
+    // compute_bounds() to find the true canvas rect at any zoom level.
     if let Some(ref to) = *transform_overlay_cell.borrow() {
         to.set_picture(picture_a.clone());
+        to.set_canvas_widget(prog_canvas_frame.clone().upcast::<gtk4::Widget>());
     }
 
     // ── Build colour scopes panel (hidden by default) ──────────────────────

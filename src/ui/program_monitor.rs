@@ -110,16 +110,12 @@ pub fn build_program_monitor(
     picture_b.set_content_fit(gtk::ContentFit::Contain);
     picture_b.set_opacity(0.0); // hidden until a transition is active
 
+    // Inner overlay: composites picture_a (primary) and picture_b (transition).
+    // The transform DA is NOT added here — it lives on the outer overlay so it can
+    // draw handles outside the canvas boundary (e.g. when scale > 1.0).
     let overlay = Overlay::new();
     overlay.set_child(Some(&picture_a));
     overlay.add_overlay(&picture_b);
-    if let Some(da) = transform_overlay_da {
-        da.set_hexpand(true);
-        da.set_vexpand(true);
-        da.set_halign(gtk::Align::Fill);
-        da.set_valign(gtk::Align::Fill);
-        overlay.add_overlay(&da);
-    }
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 
@@ -136,6 +132,27 @@ pub fn build_program_monitor(
     canvas_frame.set_hexpand(true);
     canvas_frame.set_vexpand(true);
 
+    // Outer overlay: canvas_frame (primary child) + transform DA (overlay child).
+    // The outer overlay fills the scroll viewport, giving the transform DA the full
+    // viewport area to draw in. This means handles drawn outside the canvas boundary
+    // (e.g. bounding box corners when scale > 1.0) are visible when the user zooms
+    // out the program monitor. The canvas position computed by video_rect() in the
+    // transform overlay matches canvas_frame's layout exactly, because AspectFrame
+    // centres its child using the same letterbox geometry as video_rect().
+    let outer_overlay = Overlay::new();
+    outer_overlay.set_child(Some(&canvas_frame));
+    outer_overlay.set_hexpand(true);
+    outer_overlay.set_vexpand(true);
+    // Keep a clone of the transform DA so apply_zoom can queue_draw() after each zoom.
+    let transform_da_for_zoom: Option<DrawingArea> = transform_overlay_da.as_ref().cloned();
+    if let Some(da) = transform_overlay_da {
+        da.set_hexpand(true);
+        da.set_vexpand(true);
+        da.set_halign(gtk::Align::Fill);
+        da.set_valign(gtk::Align::Fill);
+        outer_overlay.add_overlay(&da);
+    }
+
     let zoom_level: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
     // Natural (fit) size of the canvas_frame recorded the moment we first leave zoom=1.0.
     // At zoom=1.0 with hexpand=true the canvas_frame fills the scroll viewport exactly,
@@ -145,7 +162,7 @@ pub fn build_program_monitor(
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scroll.set_child(Some(&canvas_frame));
+    scroll.set_child(Some(&outer_overlay));
     scroll.set_hexpand(true);
     scroll.set_vexpand(true);
 
@@ -153,10 +170,11 @@ pub fn build_program_monitor(
     // At non-1.0 zoom, disables hexpand/vexpand so the frame can grow beyond viewport.
     let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let apply_zoom = {
-        let canvas_frame = canvas_frame.clone();
-        let zoom_level = zoom_level.clone();
-        let fit_w      = fit_w.clone();
-        let fit_h      = fit_h.clone();
+        let canvas_frame       = canvas_frame.clone();
+        let zoom_level         = zoom_level.clone();
+        let fit_w              = fit_w.clone();
+        let fit_h              = fit_h.clone();
+        let transform_da_zoom  = transform_da_for_zoom.clone();
         move |new_z: f64| {
             let z = zoom_levels.iter()
                 .cloned()
@@ -196,6 +214,11 @@ pub fn build_program_monitor(
                         canvas_frame.set_valign(gtk::Align::Fill);
                     }
                 }
+            }
+            // Redraw the transform overlay so the canvas border/vignette
+            // repositions immediately after any zoom change.
+            if let Some(ref da) = transform_da_zoom {
+                da.queue_draw();
             }
         }
     };

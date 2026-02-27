@@ -41,13 +41,20 @@ struct DragState {
 
 pub struct TransformOverlay {
     pub drawing_area: DrawingArea,
-    scale:      Rc<Cell<f64>>,
-    position_x: Rc<Cell<f64>>,
-    position_y: Rc<Cell<f64>>,
-    selected:   Rc<Cell<bool>>,
-    proj_w:     Rc<Cell<u32>>,
-    proj_h:     Rc<Cell<u32>>,
-    picture:    Rc<RefCell<Option<gtk4::Picture>>>,
+    scale:         Rc<Cell<f64>>,
+    position_x:    Rc<Cell<f64>>,
+    position_y:    Rc<Cell<f64>>,
+    selected:      Rc<Cell<bool>>,
+    proj_w:        Rc<Cell<u32>>,
+    proj_h:        Rc<Cell<u32>>,
+    picture:       Rc<RefCell<Option<gtk4::Picture>>>,
+    /// The AspectFrame widget that constrains the canvas area.
+    /// When set, the draw/drag functions query its bounds in the DA's coordinate
+    /// space via `Widget::compute_bounds()` instead of calling `video_rect()` on
+    /// the full DA size.  This gives correct results when the DA is larger than the
+    /// canvas (e.g. when the outer overlay covers the full scroll viewport and the
+    /// canvas_frame is smaller due to zoom < 1.0).
+    canvas_widget: Rc<RefCell<Option<gtk4::Widget>>>,
 }
 
 impl TransformOverlay {
@@ -61,6 +68,7 @@ impl TransformOverlay {
         let proj_w     = Rc::new(Cell::new(1920_u32));
         let proj_h     = Rc::new(Cell::new(1080_u32));
         let picture: Rc<RefCell<Option<gtk4::Picture>>> = Rc::new(RefCell::new(None));
+        let canvas_widget: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
 
         let da = DrawingArea::new();
         da.set_hexpand(true);
@@ -70,20 +78,21 @@ impl TransformOverlay {
 
         // Draw function ----------------------------------------------------
         {
-            let scale      = scale.clone();
-            let position_x = position_x.clone();
-            let position_y = position_y.clone();
-            let selected   = selected.clone();
-            let proj_w     = proj_w.clone();
-            let proj_h     = proj_h.clone();
-            let picture    = picture.clone();
+            let scale         = scale.clone();
+            let position_x    = position_x.clone();
+            let position_y    = position_y.clone();
+            let selected      = selected.clone();
+            let proj_w        = proj_w.clone();
+            let proj_h        = proj_h.clone();
+            let picture       = picture.clone();
+            let canvas_widget = canvas_widget.clone();
 
-            da.set_draw_func(move |_da, cr, ww, wh| {
+            da.set_draw_func(move |da, cr, ww, wh| {
                 if !selected.get() { return; }
                 // Always use project dimensions for the canvas boundary.
                 // The canvas border represents what will be exported, not the clip's native size.
                 let _ = &picture; // kept for potential future use
-                let (vx, vy, vw, vh) = video_rect(ww, wh, proj_w.get(), proj_h.get());
+                let (vx, vy, vw, vh) = canvas_video_rect(da, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
                 // Always draw: dark vignette + canvas border
                 draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
@@ -106,22 +115,23 @@ impl TransformOverlay {
 
         // drag_begin: hit-test → choose handle
         {
-            let scale      = scale.clone();
-            let position_x = position_x.clone();
-            let position_y = position_y.clone();
-            let selected   = selected.clone();
-            let proj_w     = proj_w.clone();
-            let proj_h     = proj_h.clone();
-            let picture    = picture.clone();
-            let drag_state = drag_state.clone();
-            let da_ref     = da.clone();
+            let scale         = scale.clone();
+            let position_x    = position_x.clone();
+            let position_y    = position_y.clone();
+            let selected      = selected.clone();
+            let proj_w        = proj_w.clone();
+            let proj_h        = proj_h.clone();
+            let picture       = picture.clone();
+            let drag_state    = drag_state.clone();
+            let da_ref        = da.clone();
+            let canvas_widget = canvas_widget.clone();
 
             gesture.connect_drag_begin(move |_g, sx, sy| {
                 if !selected.get() { return; }
                 let ww = da_ref.width();
                 let wh = da_ref.height();
                 let _ = &picture; // kept for potential future use
-                let (vx, vy, vw, vh) = video_rect(ww, wh, proj_w.get(), proj_h.get());
+                let (vx, vy, vw, vh) = canvas_video_rect(&da_ref, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
                 let s  = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
@@ -237,7 +247,14 @@ impl TransformOverlay {
 
         da.add_controller(gesture);
 
-        TransformOverlay { drawing_area: da, scale, position_x, position_y, selected, proj_w, proj_h, picture }
+        TransformOverlay { drawing_area: da, scale, position_x, position_y, selected, proj_w, proj_h, picture, canvas_widget }
+    }
+
+    /// Give the overlay access to the AspectFrame that constrains the canvas area.
+    /// When set, canvas rect computation uses `Widget::compute_bounds()` for pixel-
+    /// perfect alignment at all program monitor zoom levels.
+    pub fn set_canvas_widget(&self, w: gtk4::Widget) {
+        *self.canvas_widget.borrow_mut() = Some(w);
     }
 
     /// Give the overlay access to the GtkPicture so it can query the actual
@@ -283,6 +300,53 @@ fn paintable_dims(picture: &Rc<RefCell<Option<gtk4::Picture>>>, proj_w: u32, pro
         }
     }
     (proj_w, proj_h)
+}
+
+/// Compute the canvas video rect in the DrawingArea's coordinate space.
+///
+/// If a `canvas_widget` is set (the AspectFrame that constrains the canvas),
+/// queries its actual bounds in the DA's coordinate space via `compute_bounds()`
+/// and then letterboxes the canvas ratio within those bounds.  This gives correct
+/// results when the DA is larger than the canvas_widget (e.g. when the outer overlay
+/// fills the full scroll viewport and the canvas_frame is smaller due to zoom < 1.0).
+///
+/// Falls back to `video_rect()` on the full DA if compute_bounds() fails.
+fn canvas_video_rect(
+    da: &DrawingArea,
+    canvas_widget: &Rc<RefCell<Option<gtk4::Widget>>>,
+    ww: i32, wh: i32,
+    proj_w: u32, proj_h: u32,
+) -> (f64, f64, f64, f64) {
+    if let Some(ref cw) = *canvas_widget.borrow() {
+        if let Some(bounds) = cw.compute_bounds(da) {
+            let cfx = bounds.x() as f64;
+            let cfy = bounds.y() as f64;
+            let cfw = bounds.width() as f64;
+            let cfh = bounds.height() as f64;
+            if cfw > 0.0 && cfh > 0.0 {
+                return video_rect_within(cfx, cfy, cfw, cfh, proj_w, proj_h);
+            }
+        }
+    }
+    video_rect(ww, wh, proj_w, proj_h)
+}
+
+/// Letterbox `proj_w × proj_h` within the box `(bx, by, bw, bh)`.
+/// Returns `(vx, vy, vw, vh)` — the canvas rect in the outer DA coordinate space.
+fn video_rect_within(bx: f64, by: f64, bw: f64, bh: f64, pw: u32, ph: u32) -> (f64, f64, f64, f64) {
+    if bw <= 0.0 || bh <= 0.0 || pw == 0 || ph == 0 {
+        return (bx, by, bw.max(1.0), bh.max(1.0));
+    }
+    let vid_asp = pw as f64 / ph as f64;
+    let box_asp = bw / bh;
+    let (vw, vh) = if vid_asp > box_asp {
+        (bw, bw / vid_asp)
+    } else {
+        (bh * vid_asp, bh)
+    };
+    let vx = bx + (bw - vw) / 2.0;
+    let vy = by + (bh - vh) / 2.0;
+    (vx, vy, vw, vh)
 }
 
 /// Compute the video letterbox rect `(x, y, w, h)` inside a widget of size

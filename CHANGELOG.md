@@ -12,6 +12,17 @@ All notable project changes and progress should be recorded here.
   scale. Now the preview matches the export output: a 21:9 clip on a 16:9 canvas
   will show black bars in the program monitor, exactly as it appears in the exported
   video. The canvas ratio updates automatically when project settings change.
+- **Transform overlay syncs with inspector sliders**: Adjusting the Scale, Position X,
+  or Position Y sliders in the inspector now immediately updates the transform overlay
+  handles in the program monitor. Previously the handles only moved when dragged
+  directly in the monitor.
+- **Transform handles visible outside canvas**: The transform overlay DrawingArea is now
+  placed on an outer overlay that covers the full scroll viewport, rather than being
+  confined inside the canvas AspectFrame. When a clip is scaled > 1× (zoomed in so the
+  clip extends beyond the canvas), the bounding-box handles are visible when the user
+  zooms out the program monitor (using the −/Fit buttons or Ctrl+Scroll). The canvas
+  boundary overlay alignment is unchanged: `video_rect()` and `AspectFrame` use the
+  same letterbox geometry, so the drawn canvas border stays pixel-accurate.
 
 ### Added
 - **Zoomable program monitor**: Preview can now be zoomed in/out independently of
