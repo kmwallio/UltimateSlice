@@ -145,7 +145,7 @@ Tracking docs:
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
   - [x] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
-  - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching
+  - [ ] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching — see Picture-in-Picture section under Video Transform
   - [x] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
   - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
@@ -194,6 +194,13 @@ Tracking docs:
   - **Ctrl+Scroll** on the preview also adjusts zoom
   - Scrollbars appear automatically when zoomed > 100%; panning by scrolling shows content outside the canvas boundary
   - Transform overlay handles scale correctly at all zoom levels
+- [ ] **Picture-in-Picture / layered video compositing** — when multiple video tracks have clips active at the same position and the upper track does not fully cover the canvas, the lower track should be visible in the uncovered areas:
+  - Compositor-based preview pipeline using GStreamer `compositor` element to layer all active video tracks simultaneously (replaces the current clip-switching approach for multi-track compositing)
+  - Upper tracks render on top; alpha from the per-clip scale/position transform (black borders become transparent so lower tracks show through)
+  - Lower tracks fill any canvas area not covered by upper tracks (true compositing, not just B-roll switching)
+  - Export pipeline updated similarly — all concurrent clips composited via ffmpeg `overlay` filter chain before final output
+  - Inspector shows which track layer a clip is on; layer order controls composite z-order
+  - Per-clip opacity control so tracks can blend softly over each other
 - [ ] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
 - [ ] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
 - [ ] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
