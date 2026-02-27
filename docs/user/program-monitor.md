@@ -55,7 +55,7 @@ or outside the export frame.
 
 ## Playhead Accuracy
 
-- When you set the playhead and then press Play, UltimateSlice blocks briefly (up to 100 ms) for the GStreamer pipeline to reach PAUSED state, then re-issues the seek before starting playback. This prevents the common issue of play starting from position 0 after a seek.
+- When you seek and then press Play, UltimateSlice rebuilds the compositor pipeline for the active clips at the playhead position, waits briefly (up to 200 ms) for all decoders to preroll, then transitions to Playing. This ensures playback starts from the correct frame rather than jumping to position 0.
 
 ## Speed Change Preview
 

@@ -154,10 +154,10 @@ Tracking docs:
   - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
   - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
-  - [x] Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff
-  - [x] Reduce boundary stutter with pre-emptive clip handoff and non-blocking switch path during active playback
-  - [x] Reduce black flash on track switches by avoiding `Ready` sink reset during active source handoff
-  - [x] Fix preview halting with 3+ video tracks — ensure preroll before seek during mid-playback clip switches, plus timeline-position safety check
+  - [x] ~~Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff~~ *(superseded by compositor rewrite — full rebuild at clip boundaries)*
+  - [x] ~~Reduce boundary stutter with pre-emptive clip handoff and non-blocking switch path during active playback~~ *(superseded by compositor rewrite)*
+  - [x] ~~Reduce black flash on track switches by avoiding `Ready` sink reset during active source handoff~~ *(superseded by compositor rewrite — pipeline goes through Ready to reset running-time)*
+  - [x] ~~Fix preview halting with 3+ video tracks — ensure preroll before seek during mid-playback clip switches, plus timeline-position safety check~~ *(superseded by compositor rewrite — wall-clock position tracking)*
 
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
