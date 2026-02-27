@@ -126,9 +126,9 @@ impl TransformOverlay {
                 let px = position_x.get();
                 let py = position_y.get();
 
-                // Clip bounding box in widget space
-                let cx = vx + vw / 2.0 + px * vw / 2.0;
-                let cy = vy + vh / 2.0 + py * vh / 2.0;
+                // Clip bounding box in widget space (same formula as draw_overlay)
+                let cx = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
+                let cy = vy + vh / 2.0 + py * vh * (1.0 - s) / 2.0;
                 let hw = vw * s / 2.0;
                 let hh = vh * s / 2.0;
 
@@ -181,17 +181,33 @@ impl TransformOverlay {
 
                 match ds.handle {
                     Handle::Pan => {
-                        // One full video-rect width/height = ±1.0 in position space
-                        let new_px = (ds.start_px + off_x / (ds.vw / 2.0)).clamp(-1.0, 1.0);
-                        let new_py = (ds.start_py + off_y / (ds.vh / 2.0)).clamp(-1.0, 1.0);
+                        // Position sensitivity: d(pos_x) = off_x / (vw*(1-scale)/2)
+                        // This gives 1:1 pixel movement of the clip centre in canvas space.
+                        // For scale>1 the denominator is negative, so dragging right decreases
+                        // pos_x — which is correct because at scale>1, pos_x controls which
+                        // part of the clip is visible (higher pos_x = viewport panned right
+                        // = clip appears shifted left).
+                        let h_range = ds.vw * (1.0 - ds.start_scale) / 2.0;
+                        let v_range = ds.vh * (1.0 - ds.start_scale) / 2.0;
+                        let new_px = if h_range.abs() > 0.5 {
+                            (ds.start_px + off_x / h_range).clamp(-1.0, 1.0)
+                        } else {
+                            ds.start_px // scale≈1.0: position has no effect
+                        };
+                        let new_py = if v_range.abs() > 0.5 {
+                            (ds.start_py + off_y / v_range).clamp(-1.0, 1.0)
+                        } else {
+                            ds.start_py
+                        };
                         position_x.set(new_px);
                         position_y.set(new_py);
                         on_change(scale.get(), new_px, new_py);
                     }
                     _ => {
-                        // Scale: ratio of distance from clip centre to current vs. start
-                        let clip_cx = ds.vx + ds.vw / 2.0 + ds.start_px * ds.vw / 2.0;
-                        let clip_cy = ds.vy + ds.vh / 2.0 + ds.start_py * ds.vh / 2.0;
+                        // Scale: ratio of distance from clip centre to current vs. start.
+                        // Use the same centre formula as draw_overlay for consistency.
+                        let clip_cx = ds.vx + ds.vw / 2.0 + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
+                        let clip_cy = ds.vy + ds.vh / 2.0 + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
                         let orig = ((ds.start_wx - clip_cx).powi(2)
                                   + (ds.start_wy - clip_cy).powi(2)).sqrt();
                         let cur_x = ds.start_wx + off_x;
@@ -368,9 +384,12 @@ fn draw_overlay(
     vx: f64, vy: f64, vw: f64, vh: f64,
     scale: f64, pos_x: f64, pos_y: f64,
 ) {
-    // Clip centre and half-extents in widget coords
-    let cx = vx + vw / 2.0 + pos_x * vw / 2.0;
-    let cy = vy + vh / 2.0 + pos_y * vh / 2.0;
+    // Clip centre and half-extents in widget coords.
+    // GStreamer's videobox pads/crops (1-scale)*pw*(1+pos_x)/2 on the left, so the
+    // clip centre = canvas_centre + pos_x * canvas_half * (1-scale).
+    // This formula is valid for both zoom-in (scale>1) and zoom-out (scale<1).
+    let cx = vx + vw / 2.0 + pos_x * vw * (1.0 - scale) / 2.0;
+    let cy = vy + vh / 2.0 + pos_y * vh * (1.0 - scale) / 2.0;
     let hw = vw * scale / 2.0;
     let hh = vh * scale / 2.0;
 
