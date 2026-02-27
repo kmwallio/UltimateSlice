@@ -321,6 +321,7 @@ impl ProgramPlayer {
         }
 
         let default_proj_caps = gst::Caps::builder("video/x-raw")
+            .field("format", "RGBA")
             .field("width", 1920i32)
             .field("height", 1080i32)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
@@ -557,6 +558,7 @@ impl ProgramPlayer {
         // Update capsfilter_proj to match new project resolution (no-op when scale=1.0).
         if let Some(ref cf) = self.capsfilter_zoom {
             let caps = gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
                 .field("width", width as i32)
                 .field("height", height as i32)
                 .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
@@ -1308,6 +1310,7 @@ impl ProgramPlayer {
             let sw = (pw * scale).round() as i32;
             let sh = (ph * scale).round() as i32;
             let caps = gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
                 .field("width", sw)
                 .field("height", sh)
                 .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
@@ -1339,6 +1342,8 @@ impl ProgramPlayer {
             vb.set_property("right",  box_right);
             vb.set_property("top",    box_top);
             vb.set_property("bottom", box_bottom);
+            // Keep zoom-out borders transparent so lower composited layers remain visible.
+            vb.set_property("border-alpha", 0.0_f64);
         }
     }
 

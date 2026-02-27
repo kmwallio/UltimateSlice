@@ -99,6 +99,10 @@ pub fn build_program_monitor(
     picture_a.set_paintable(Some(&paintable_a));
     picture_a.set_hexpand(true);
     picture_a.set_vexpand(true);
+    picture_a.set_halign(gtk::Align::Fill);
+    picture_a.set_valign(gtk::Align::Fill);
+    picture_a.set_can_shrink(true);
+    picture_a.set_size_request(1, 1);
     picture_a.set_content_fit(gtk::ContentFit::Contain);
     picture_a.add_css_class("preview-video");
 
@@ -106,15 +110,27 @@ pub fn build_program_monitor(
     picture_b.set_paintable(Some(&paintable_b));
     picture_b.set_hexpand(true);
     picture_b.set_vexpand(true);
+    picture_b.set_halign(gtk::Align::Fill);
+    picture_b.set_valign(gtk::Align::Fill);
+    picture_b.set_can_shrink(true);
+    picture_b.set_size_request(1, 1);
     picture_b.set_content_fit(gtk::ContentFit::Contain);
+    picture_b.add_css_class("preview-video");
     picture_b.set_opacity(0.0); // hidden until a lower layer/transition is active
 
     // Inner overlay: composites picture_b (bottom) and picture_a (top).
     // The transform DA is NOT added here — it lives on the outer overlay so it can
     // draw handles outside the canvas boundary (e.g. when scale > 1.0).
     let overlay = Overlay::new();
-    overlay.set_child(Some(&picture_b));
+    let overlay_base = GBox::new(Orientation::Vertical, 0);
+    overlay_base.set_hexpand(true);
+    overlay_base.set_vexpand(true);
+    overlay_base.set_size_request(1, 1);
+    overlay.set_child(Some(&overlay_base));
+    overlay.add_overlay(&picture_b);
     overlay.add_overlay(&picture_a);
+    overlay.set_measure_overlay(&picture_b, false);
+    overlay.set_measure_overlay(&picture_a, false);
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 
@@ -170,6 +186,7 @@ pub fn build_program_monitor(
     let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let apply_zoom = {
         let canvas_frame       = canvas_frame.clone();
+        let scroll             = scroll.clone();
         let zoom_level         = zoom_level.clone();
         let fit_w              = fit_w.clone();
         let fit_h              = fit_h.clone();
@@ -184,8 +201,18 @@ pub fn build_program_monitor(
 
             // When transitioning away from 1.0, snapshot the natural canvas_frame size.
             if (zoom_level.get() - 1.0).abs() < 0.01 && (z - 1.0).abs() > 0.01 {
-                fit_w.set(canvas_frame.width());
-                fit_h.set(canvas_frame.height());
+                let mut fw = canvas_frame.width();
+                let mut fh = canvas_frame.height();
+                if fw <= 0 || fh <= 0 {
+                    fw = scroll.width();
+                    fh = scroll.height();
+                }
+                if fw <= 0 || fh <= 0 {
+                    fw = canvas_width.max(1) as i32;
+                    fh = canvas_height.max(1) as i32;
+                }
+                fit_w.set(fw);
+                fit_h.set(fh);
             }
             zoom_level.set(z);
 
