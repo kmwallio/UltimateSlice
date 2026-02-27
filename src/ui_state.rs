@@ -87,7 +87,7 @@ impl GskRenderer {
         match self {
             Self::Auto => None,
             Self::Cairo => Some("cairo"),
-            Self::Opengl => Some("ngl"),
+            Self::Opengl => Some("gl"),
             Self::Vulkan => Some("vulkan"),
         }
     }
