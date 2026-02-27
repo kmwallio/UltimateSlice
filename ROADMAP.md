@@ -170,6 +170,8 @@ Tracking docs:
 - [x] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
+- [ ] Shadows and Highlights
+- [ ] Advanced color grading
 - [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)
 - [ ] HDR workflow (PQ/HLG preview + export metadata)
 - [x] Titles / text overlay (`textoverlay`)
