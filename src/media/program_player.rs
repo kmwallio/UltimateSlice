@@ -1619,7 +1619,10 @@ impl ProgramPlayer {
         }
 
         // Wait for pipeline to preroll so seeks are accepted.
-        if self.should_block_preroll() {
+        // When paused (scrubbing), always wait — we need a decoded frame for
+        // the preview.  When playing, respect the playback priority to avoid
+        // stutter during clip boundary crossings.
+        if !was_playing || self.should_block_preroll() {
             let _ = self.pipeline.state(gst::ClockTime::from_mseconds(200));
         }
 
