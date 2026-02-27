@@ -28,6 +28,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let library: Rc<RefCell<Vec<MediaItem>>> = Rc::new(RefCell::new(Vec::new()));
     let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
 
+    // MCP command channel — created unconditionally so the socket transport can
+    // be toggled at runtime via Preferences without restarting.
+    let (mcp_sender, mcp_receiver) = std::sync::mpsc::channel::<crate::mcp::McpCommand>();
+    let mcp_sender = Rc::new(mcp_sender);
+    let mcp_receiver = Rc::new(RefCell::new(Some(mcp_receiver))); // taken once in the MCP block
+    let mcp_socket_stop: Rc<RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>> =
+        Rc::new(RefCell::new(None));
+
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
     let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
@@ -77,6 +85,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let proxy_cache = proxy_cache.clone();
         let project = project.clone();
         let timeline_state = timeline_state.clone();
+        let mcp_sender = mcp_sender.clone();
+        let mcp_socket_stop = mcp_socket_stop.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
@@ -87,6 +97,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let proxy_cache = proxy_cache.clone();
                 let project = project.clone();
                 let timeline_state = timeline_state.clone();
+                let mcp_sender = mcp_sender.clone();
+                let mcp_socket_stop = mcp_socket_stop.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
                     *preferences_state.borrow_mut() = new_state.clone();
                     crate::ui_state::save_preferences_state(&new_state);
@@ -122,6 +134,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         prog_player.borrow_mut().update_proxy_paths(paths);
                     }
                     timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
+                    // Start/stop MCP socket server based on preference change.
+                    if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
+                        let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
+                        *mcp_socket_stop.borrow_mut() = Some(stop);
+                    } else if !new_state.mcp_socket_enabled {
+                        if let Some(stop) = mcp_socket_stop.borrow_mut().take() {
+                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 });
                 preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
             }
@@ -1111,9 +1132,26 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
-    // ── MCP server (optional, enabled via --mcp flag) ─────────────────────
-    if mcp_enabled {
-        let mcp_receiver = crate::mcp::start_mcp_server();
+    // ── MCP server (stdio + optional socket) ────────────────────────────
+    {
+        let mcp_receiver = mcp_receiver.borrow_mut().take()
+            .expect("MCP receiver already taken");
+
+        // Stdio transport (--mcp flag)
+        if mcp_enabled {
+            let stdio_sender = (*mcp_sender).clone();
+            std::thread::spawn(move || {
+                crate::mcp::server::run_stdio_server(stdio_sender);
+            });
+            eprintln!("[MCP] Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
+        }
+
+        // Socket transport (Preferences toggle) — can start/stop at runtime.
+        if preferences_state.borrow().mcp_socket_enabled {
+            let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
+            *mcp_socket_stop.borrow_mut() = Some(stop);
+        }
+
         let project = project.clone();
         let library = library.clone();
         let player = player.clone();
@@ -1141,7 +1179,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
             glib::ControlFlow::Continue
         });
-        eprintln!("[MCP] Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
     }
 
     // Auto-save: every 60 seconds, write to a temp file if the project is dirty.

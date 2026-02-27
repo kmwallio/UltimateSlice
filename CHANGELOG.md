@@ -4,6 +4,10 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Added
+- **MCP socket transport**: UltimateSlice can now listen on a Unix domain socket (`$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`) so AI agents can connect to an already-running instance. Enabled via Preferences → Integration → Enable MCP socket server. The toggle takes effect immediately without restarting.
+- **`--mcp-attach` CLI flag**: A built-in stdio-to-socket proxy that bridges stdin/stdout to the running instance's MCP socket, letting standard MCP clients (which expect stdio) connect via `.mcp.json` `ultimate-slice-attach` entry.
+
 ### Changed
 - **Batch-sort clips during FCPXML import**: Clips are now appended unsorted during XML parsing and sorted once per track at the end, reducing O(n² log n) sorting overhead on large projects to O(n log n).
 - **Parallel proxy transcoding**: `ProxyCache` now uses 4 worker threads instead of 1, transcoding up to 4 proxy files concurrently via ffmpeg.

@@ -1,17 +1,21 @@
 use crate::mcp::McpCommand;
 use serde_json::{json, Value};
-/// MCP stdio transport — reads newline-delimited JSON-RPC from stdin,
-/// dispatches tool calls to the GTK main thread via `sender`, and
-/// writes JSON-RPC responses to stdout.
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
-    let stdin = std::io::stdin();
-    let mut out = std::io::stdout();
-
-    for line in stdin.lock().lines() {
+/// Transport-agnostic MCP JSON-RPC loop.  Reads newline-delimited JSON-RPC
+/// messages from `reader`, dispatches tool calls via `sender`, and writes
+/// JSON-RPC responses to `writer`.
+fn run_server(
+    reader: impl BufRead,
+    writer: &mut impl Write,
+    sender: &std::sync::mpsc::Sender<McpCommand>,
+) {
+    for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
             Err(_) => break,
@@ -25,8 +29,8 @@ pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
             Ok(v) => v,
             Err(e) => {
                 let r = err(Value::Null, -32700, &format!("Parse error: {e}"));
-                let _ = writeln!(out, "{r}");
-                let _ = out.flush();
+                let _ = writeln!(writer, "{r}");
+                let _ = writer.flush();
                 continue;
             }
         };
@@ -45,13 +49,96 @@ pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
             "ping" => ok(&id, json!({})),
             "tools/list" => ok(&id, tools_list()),
             "resources/list" => ok(&id, json!({"resources": []})),
-            "tools/call" => call_tool(&id, &params, &sender),
+            "tools/call" => call_tool(&id, &params, sender),
             _ => err(id, -32601, "Method not found"),
         };
 
-        let _ = writeln!(out, "{response}");
-        let _ = out.flush();
+        let _ = writeln!(writer, "{response}");
+        let _ = writer.flush();
     }
+}
+
+/// Stdio transport — wraps stdin/stdout around the generic handler.
+pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    run_server(stdin.lock(), &mut stdout, &sender);
+}
+
+/// Return the path used for the MCP Unix domain socket.
+pub fn socket_path() -> PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    dir.join("ultimateslice-mcp.sock")
+}
+
+/// Unix domain socket transport.  Listens for one client at a time; rejects
+/// additional connections while a session is active.  Exits when `stop` is set.
+pub fn run_socket_server(
+    sender: std::sync::mpsc::Sender<McpCommand>,
+    stop: Arc<AtomicBool>,
+) {
+    use std::os::unix::net::UnixListener;
+
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path); // remove stale socket
+
+    let listener = match UnixListener::bind(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[MCP-socket] Failed to bind {}: {e}", path.display());
+            return;
+        }
+    };
+    listener.set_nonblocking(true).ok();
+    eprintln!("[MCP-socket] Listening on {}", path.display());
+
+    let client_active = Arc::new(AtomicBool::new(false));
+
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // Enforce single-client: reject if one is already connected.
+                if client_active
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    let mut w = &stream;
+                    let _ = writeln!(
+                        w,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Another MCP client is already connected"}})
+                    );
+                    continue;
+                }
+                eprintln!("[MCP-socket] Client connected");
+                let sender = sender.clone();
+                let active = client_active.clone();
+                std::thread::spawn(move || {
+                    stream.set_nonblocking(false).ok();
+                    let reader = BufReader::new(match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(_) => { active.store(false, Ordering::Relaxed); return; }
+                    });
+                    let mut writer = stream;
+                    run_server(reader, &mut writer, &sender);
+                    active.store(false, Ordering::Relaxed);
+                    eprintln!("[MCP-socket] Client disconnected");
+                });
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("[MCP-socket] Accept error: {e}");
+                break;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&path);
+    eprintln!("[MCP-socket] Server stopped");
 }
 
 // ── JSON-RPC helpers ─────────────────────────────────────────────────────────

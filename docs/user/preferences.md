@@ -52,3 +52,12 @@ Preferences are grouped by category in a sidebar:
 
 - Click **Save** to persist changes.
 - Click **Cancel** to discard changes.
+
+## MCP Socket Server (Integration)
+
+- **Enable MCP socket server** allows AI agents to connect to this running instance via a Unix domain socket.
+- When enabled, UltimateSlice listens at `$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`.
+- The toggle takes effect immediately — no restart required.
+- Only one agent can be connected at a time; additional connections are rejected.
+- Agents using the `.mcp.json` `ultimate-slice-attach` server entry connect via `--mcp-attach`, which bridges stdio to the socket.
+- The setting is persisted across launches.

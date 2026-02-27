@@ -95,6 +95,9 @@ pub struct PreferencesState {
     /// Show audio waveforms overlaid on video clips in the timeline.
     #[serde(default)]
     pub show_waveform_on_video: bool,
+    /// Enable the MCP Unix-domain-socket server so agents can connect to this instance.
+    #[serde(default)]
+    pub mcp_socket_enabled: bool,
 }
 
 impl Default for PreferencesState {
@@ -104,6 +107,7 @@ impl Default for PreferencesState {
             playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
             show_waveform_on_video: false,
+            mcp_socket_enabled: false,
         }
     }
 }

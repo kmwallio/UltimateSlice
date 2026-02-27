@@ -245,6 +245,8 @@ cargo run
 GST_DEBUG=2 cargo run
 # With MCP server enabled (stdio JSON-RPC):
 cargo run -- --mcp
+# Attach to a running instance via Unix socket (stdio proxy):
+cargo run -- --mcp-attach
 # Via installed Flatpak (used by .mcp.json / AI agents):
 flatpak run io.github.ultimateslice --mcp
 ```
@@ -264,22 +266,34 @@ flatpak run io.github.ultimateslice --mcp
 
 ## MCP Server
 
-When started with `--mcp`, UltimateSlice exposes a Model Context Protocol server
-over **stdio** (newline-delimited JSON-RPC 2.0, protocol version `2024-11-05`).
-Agents connect by spawning the process and piping stdio.
+UltimateSlice exposes a Model Context Protocol server (newline-delimited
+JSON-RPC 2.0, protocol version `2024-11-05`) via two transports:
+
+1. **Stdio** (`--mcp` flag) — agents spawn the process and pipe stdin/stdout.
+2. **Unix domain socket** (Preferences → Integration toggle) — agents connect to
+   a running instance at `$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`.
+
+For socket transport, a built-in stdio proxy (`--mcp-attach`) bridges
+stdin/stdout to the socket so standard MCP clients can use either transport
+via `.mcp.json`.
 
 ### Architecture
 
 ```
-Agent (stdin/stdout)
-    ↓ JSON-RPC lines
-MCP server thread  (src/mcp/server.rs)
-    ↓ McpCommand + SyncSender<Value>  (std::sync::mpsc)
-GTK main thread  (src/ui/window.rs — polled every 10 ms)
-    ↓ mutates Project, calls on_project_changed()
-    ↑ sends Value reply back via SyncSender
-MCP server thread
-    ↑ JSON-RPC response to stdout
+Agent (stdin/stdout)                  Agent (Unix socket)
+    ↓ JSON-RPC lines                      ↓ JSON-RPC lines
+MCP stdio thread                     MCP socket thread (per-connection)
+    ↓ McpCommand + SyncSender            ↓ McpCommand + SyncSender
+    └──────────── shared mpsc channel ────┘
+                        ↓
+            GTK main thread  (src/ui/window.rs — polled every 10 ms)
+                ↓ mutates Project, calls on_project_changed()
+                ↑ sends Value reply back via SyncSender
+```
+
+`--mcp-attach` stdio proxy (no GUI):
+```
+Agent (stdio) ↔ ultimate-slice --mcp-attach ↔ Unix socket ↔ running instance
 ```
 
 Key design points:
@@ -288,6 +302,10 @@ Key design points:
 - `McpCommand` variants carry a `std::sync::mpsc::SyncSender<serde_json::Value>`
   as a one-shot reply channel. All types are `Send`.
 - `glib::Sender` / `MainContext::channel` are **not used** (API changed in glib 0.22).
+- The socket server accepts **one client at a time**; additional connections are
+  rejected with a JSON-RPC error.
+- The socket can be enabled/disabled at runtime via Preferences; the listener
+  thread is started/stopped accordingly.
 
 ### Available Tools
 

@@ -117,6 +117,30 @@ pub fn show_preferences_dialog(
     timeline_box.append(&waveform_hint);
     stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
 
+    // ── Integration section ───────────────────────────────────────────────
+    let integration_box = GBox::new(Orientation::Vertical, 10);
+    integration_box.set_margin_start(8);
+    integration_box.set_margin_end(8);
+    integration_box.set_margin_top(8);
+    let integration_label = Label::new(Some("Integration"));
+    integration_label.set_halign(gtk::Align::Start);
+    integration_label.add_css_class("title-4");
+    let mcp_socket_check = CheckButton::with_label("Enable MCP socket server");
+    mcp_socket_check.set_active(current.mcp_socket_enabled);
+    mcp_socket_check.set_halign(gtk::Align::Start);
+    let socket_path_str = crate::mcp::server::socket_path().display().to_string();
+    let mcp_socket_hint = Label::new(Some(
+        &format!("Allow AI agents to connect to this running instance via a Unix socket at {socket_path_str}"),
+    ));
+    mcp_socket_hint.set_halign(gtk::Align::Start);
+    mcp_socket_hint.add_css_class("dim-label");
+    mcp_socket_hint.set_wrap(true);
+    mcp_socket_hint.set_max_width_chars(60);
+    integration_box.append(&integration_label);
+    integration_box.append(&mcp_socket_check);
+    integration_box.append(&mcp_socket_hint);
+    stack.add_titled(&integration_box, Some("integration"), "Integration");
+
     body.append(&sidebar);
     body.append(&stack);
     dialog.content_area().append(&body);
@@ -128,6 +152,7 @@ pub fn show_preferences_dialog(
                 playback_priority: PlaybackPriority::from_str(playback_priority.active_id().as_deref().unwrap_or("smooth")),
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
+                mcp_socket_enabled: mcp_socket_check.is_active(),
             });
         }
         d.close();
