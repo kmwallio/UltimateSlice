@@ -56,7 +56,9 @@ impl WaveformCache {
         while let Ok(raw) = self.rx.try_recv() {
             self.loading.remove(&raw.key);
             self.in_flight = self.in_flight.saturating_sub(1);
-            self.data.insert(raw.key, raw.peaks);
+            if !raw.peaks.is_empty() {
+                self.data.insert(raw.key, raw.peaks);
+            }
         }
         self.flush_pending();
     }
@@ -105,9 +107,8 @@ impl WaveformCache {
                 self.in_flight += 1;
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    if let Some(peaks) = extract_peaks(&key) {
-                        let _ = tx.send(RawPeaks { key, peaks });
-                    }
+                    let peaks = extract_peaks(&key).unwrap_or_default();
+                    let _ = tx.send(RawPeaks { key, peaks });
                 });
             } else {
                 break;

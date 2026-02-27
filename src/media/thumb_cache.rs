@@ -71,6 +71,7 @@ impl ThumbnailCache {
         while let Ok(frame) = self.rx.try_recv() {
             self.loading.remove(&frame.key);
             self.in_flight = self.in_flight.saturating_sub(1);
+            if frame.data.is_empty() { continue; }
             if let Ok(surf) = rgba_to_surface(&frame.data) {
                 self.surfaces.insert(frame.key, surf);
                 dirty = true;
@@ -92,10 +93,11 @@ impl ThumbnailCache {
                 self.in_flight += 1;
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    match extract_rgba(path, time_ns) {
-                        Ok(data) => { let _ = tx.send(RawFrame { key, data }); }
-                        Err(e)   => { eprintln!("[thumb] error: {e}"); }
-                    }
+                    let data = extract_rgba(path, time_ns).unwrap_or_else(|e| {
+                        eprintln!("[thumb] error: {e}");
+                        Vec::new()
+                    });
+                    let _ = tx.send(RawFrame { key, data });
                 });
             } else {
                 break;

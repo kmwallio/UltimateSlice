@@ -1716,36 +1716,56 @@ fn draw_clip(
     // ── Waveform for audio clips ───────────────────────────────────────────
     if track.kind == TrackKind::Audio && cw > 8.0 {
         wcache.request(&clip.source_path);
-        let px_count = cw as usize;
-        if let Some(peaks) = wcache.get_peaks(&clip.source_path, clip.source_in, clip.source_out, px_count) {
-            cr.save().ok();
-            rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
-            cr.clip();
-            let mid = cy + ch / 2.0;
-            cr.set_line_width(1.0);
-            let vol = (clip.volume as f64).max(0.0);
-            draw_waveform_batched(cr, &peaks, cx, mid, ch / 2.0 - 2.0, vol, 0.85);
-            cr.restore().ok();
+        // Only compute peaks for the visible portion of the clip to avoid
+        // allocating/iterating over tens of thousands of off-screen pixels.
+        let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
+        let vis_x1 = (cx + cw).min(view_width);
+        let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
+        if vis_px > 0 {
+            let src_span_ns = clip.source_out.saturating_sub(clip.source_in) as f64;
+            let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
+            let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
+            let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
+            let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
+            if let Some(peaks) = wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px) {
+                cr.save().ok();
+                rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
+                cr.clip();
+                let mid = cy + ch / 2.0;
+                cr.set_line_width(1.0);
+                let vol = (clip.volume as f64).max(0.0);
+                draw_waveform_batched(cr, &peaks, vis_x0, mid, ch / 2.0 - 2.0, vol, 0.85);
+                cr.restore().ok();
+            }
         }
     }
 
     // ── Waveform overlay for video clips (when preference enabled) ────────
     if track.kind == TrackKind::Video && st.show_waveform_on_video && cw > 8.0 {
         wcache.request(&clip.source_path);
-        let px_count = cw as usize;
-        if let Some(peaks) = wcache.get_peaks(&clip.source_path, clip.source_in, clip.source_out, px_count) {
-            let wave_h = (ch * 0.40).max(6.0);
-            let wave_y = cy + ch - wave_h - 1.0;
-            cr.save().ok();
-            rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
-            cr.clip();
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-            cr.paint().ok();
-            cr.set_line_width(1.0);
-            let wave_mid = wave_y + wave_h / 2.0;
-            let vol = (clip.volume as f64).max(0.0);
-            draw_waveform_batched(cr, &peaks, cx, wave_mid, wave_h / 2.0 - 1.0, vol, 0.9);
-            cr.restore().ok();
+        let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
+        let vis_x1 = (cx + cw).min(view_width);
+        let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
+        if vis_px > 0 {
+            let src_span_ns = clip.source_out.saturating_sub(clip.source_in) as f64;
+            let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
+            let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
+            let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
+            let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
+            if let Some(peaks) = wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px) {
+                let wave_h = (ch * 0.40).max(6.0);
+                let wave_y = cy + ch - wave_h - 1.0;
+                cr.save().ok();
+                rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
+                cr.clip();
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+                cr.paint().ok();
+                cr.set_line_width(1.0);
+                let wave_mid = wave_y + wave_h / 2.0;
+                let vol = (clip.volume as f64).max(0.0);
+                draw_waveform_batched(cr, &peaks, vis_x0, wave_mid, wave_h / 2.0 - 1.0, vol, 0.9);
+                cr.restore().ok();
+            }
         }
     }
 
