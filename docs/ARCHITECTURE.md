@@ -329,6 +329,8 @@ Key design points:
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |
+| `insert_clip` | Insert a source clip at playhead, shifting subsequent clips right (3-point insert edit) |
+| `overwrite_clip` | Overwrite timeline content at playhead with a source clip (3-point overwrite edit) |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_project_title` | Rename the project |

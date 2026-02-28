@@ -5,6 +5,12 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **3-Point editing (Insert/Overwrite from Source)**: Professional insert and overwrite edit operations from the source monitor to the timeline.
+  - **Insert** (`,`): Places source selection at playhead, shifting all subsequent clips right to make room (ripple insert). Button: ⤵ Insert.
+  - **Overwrite** (`.`): Places source selection at playhead, replacing existing material in the time range — clips are trimmed, split, or removed as needed. Button: ⏺ Overwrite.
+  - Both operations support full undo/redo via `SetTrackClipsCommand`.
+  - MCP tools: `insert_clip` (insert at playhead with ripple) and `overwrite_clip` (overwrite at playhead).
+  - Source monitor transport bar now has Insert and Overwrite buttons alongside Append.
 - **Slip/Slide edit modes**: New Slip and Slide timeline tools completing the professional edit mode suite alongside Ripple and Roll.
   - **Slip** (`Y`): Drag a clip to shift its source content window (source in/out) without moving the clip on the timeline or changing its duration. Toolbar button: ↔ Slip.
   - **Slide** (`U`): Drag a clip to reposition it on the timeline while neighboring clips' edit points adjust to compensate — total timeline duration stays constant. Toolbar button: ⇔ Slide.

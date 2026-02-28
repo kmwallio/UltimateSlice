@@ -19,6 +19,8 @@ pub fn build_preview(
     player: Rc<RefCell<Player>>,
     paintable: gdk4::Paintable,
     on_append: Rc<dyn Fn()>,
+    on_insert: Rc<dyn Fn()>,
+    on_overwrite: Rc<dyn Fn()>,
     on_close_preview: Rc<dyn Fn()>,
 ) -> (GBox, Rc<RefCell<SourceMarks>>, Label) {
     let source_marks = Rc::new(RefCell::new(SourceMarks::default()));
@@ -262,10 +264,16 @@ pub fn build_preview(
     let btn_play_pause = Button::with_label("▶");
     let btn_next_frame = Button::with_label("▮▶");
     let btn_append     = Button::with_label("⬇ Append");
+    let btn_insert     = Button::with_label("⤵ Insert");
+    let btn_overwrite  = Button::with_label("⏺ Overwrite");
     btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     btn_next_frame.set_tooltip_text(Some("Step forward one frame (→)"));
     btn_append.set_tooltip_text(Some("Append selection to timeline"));
+    btn_insert.set_tooltip_text(Some("Insert at playhead, shifting subsequent clips (,)"));
+    btn_overwrite.set_tooltip_text(Some("Overwrite at playhead, replacing existing material (.)"));
     btn_append.set_sensitive(false); // enabled once a source is loaded
+    btn_insert.set_sensitive(false);
+    btn_overwrite.set_sensitive(false);
 
     controls.append(&btn_set_in);
     controls.append(&btn_prev_frame);
@@ -274,6 +282,8 @@ pub fn build_preview(
     controls.append(&btn_next_frame);
     controls.append(&btn_set_out);
     controls.append(&btn_append);
+    controls.append(&btn_insert);
+    controls.append(&btn_overwrite);
     vbox.append(&controls);
 
     // Shuttle speed state for J/K/L: negative = reverse, 0 = paused, positive = forward.
@@ -331,6 +341,20 @@ pub fn build_preview(
     {
         btn_append.connect_clicked(move |_| {
             on_append();
+        });
+    }
+
+    // Insert at playhead
+    {
+        btn_insert.connect_clicked(move |_| {
+            on_insert();
+        });
+    }
+
+    // Overwrite at playhead
+    {
+        btn_overwrite.connect_clicked(move |_| {
+            on_overwrite();
         });
     }
 
@@ -512,6 +536,8 @@ pub fn build_preview(
         let frame_ns = frame_ns.clone();
         let update_marks_bar = update_marks_bar.clone();
         let btn_append = btn_append.clone();
+        let btn_insert = btn_insert.clone();
+        let btn_overwrite = btn_overwrite.clone();
         let btn_close_preview = btn_close_preview.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
@@ -575,6 +601,8 @@ pub fn build_preview(
                 let m = source_marks.borrow();
                 // Enable append once a source is loaded
                 btn_append.set_sensitive(!m.path.is_empty());
+                btn_insert.set_sensitive(!m.path.is_empty());
+                btn_overwrite.set_sensitive(!m.path.is_empty());
                 btn_close_preview.set_sensitive(!m.path.is_empty());
                 update_marks_bar(&m);
             }

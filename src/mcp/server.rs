@@ -492,6 +492,34 @@ fn tools_list() -> Value {
                 },
                 "required": ["quality"]
             }
+        },
+        {
+            "name": "insert_clip",
+            "description": "Insert a source clip at the playhead position, shifting all subsequent clips right to make room (3-point insert edit).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": "Absolute path to the media file." },
+                    "source_in_ns": { "type": "integer", "description": "Source in-point in nanoseconds." },
+                    "source_out_ns": { "type": "integer", "description": "Source out-point in nanoseconds." },
+                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." }
+                },
+                "required": ["source_path", "source_in_ns", "source_out_ns"]
+            }
+        },
+        {
+            "name": "overwrite_clip",
+            "description": "Overwrite timeline content at the playhead position with a source clip, replacing existing material in the time range (3-point overwrite edit).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": "Absolute path to the media file." },
+                    "source_in_ns": { "type": "integer", "description": "Source in-point in nanoseconds." },
+                    "source_out_ns": { "type": "integer", "description": "Source out-point in nanoseconds." },
+                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." }
+                },
+                "required": ["source_path", "source_in_ns", "source_out_ns"]
+            }
         }
     ]})
 }
@@ -654,6 +682,22 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "set_preview_quality" => McpCommand::SetPreviewQuality {
             quality: args["quality"].as_str().unwrap_or("full").to_string(),
+            reply: tx,
+        },
+
+        "insert_clip" => McpCommand::InsertClip {
+            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
+            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
+            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            track_index: args["track_index"].as_u64().map(|v| v as usize),
+            reply: tx,
+        },
+
+        "overwrite_clip" => McpCommand::OverwriteClip {
+            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
+            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
+            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            track_index: args["track_index"].as_u64().map(|v| v as usize),
             reply: tx,
         },
 

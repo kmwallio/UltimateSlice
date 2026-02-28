@@ -373,6 +373,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             if let Some(f) = cb.borrow().as_ref() { f(); }
         })
     };
+    let on_insert_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_insert: Rc<dyn Fn()> = {
+        let cb = on_insert_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
+    let on_overwrite_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_overwrite: Rc<dyn Fn()> = {
+        let cb = on_overwrite_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
     let on_close_preview_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     let on_close_preview: Rc<dyn Fn()> = {
         let cb = on_close_preview_impl.clone();
@@ -384,6 +398,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         player.clone(),
         paintable,
         on_append.clone(),
+        on_insert.clone(),
+        on_overwrite.clone(),
         on_close_preview.clone(),
     );
 
@@ -742,6 +758,197 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     if magnetic_mode {
                         track.compact_gap_free();
                     }
+                    proj.dirty = true;
+                }
+            }
+            on_project_changed();
+        })
+    });
+
+    // ── on_insert: reads source_marks, creates clip at playhead, shifts subsequent clips ──
+    *on_insert_impl.borrow_mut() = Some({
+        let project = project.clone();
+        let source_marks = source_marks.clone();
+        let on_project_changed = on_project_changed.clone();
+        let timeline_state = timeline_state.clone();
+        Rc::new(move || {
+            let marks = source_marks.borrow();
+            if marks.path.is_empty() { return; }
+            let path = marks.path.clone();
+            let in_ns = marks.in_ns;
+            let out_ns = marks.out_ns;
+            let is_audio = marks.is_audio_only;
+            drop(marks);
+
+            let ts = timeline_state.borrow();
+            let magnetic_mode = ts.magnetic_mode;
+            let playhead = ts.playhead_ns;
+            let active_tid = ts.selected_track_id.clone();
+            drop(ts);
+
+            let target_kind = if is_audio { TrackKind::Audio } else { TrackKind::Video };
+            let clip_kind = if is_audio { ClipKind::Audio } else { ClipKind::Video };
+            let clip_duration = out_ns.saturating_sub(in_ns);
+            if clip_duration == 0 { return; }
+
+            {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(ref tid) = active_tid {
+                    if proj.tracks.iter().any(|t| &t.id == tid && t.kind == target_kind) {
+                        proj.tracks.iter_mut().find(|t| &t.id == tid)
+                    } else {
+                        proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                    }
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+
+                    // Shift clips that start at or after playhead
+                    for c in track.clips.iter_mut() {
+                        if c.timeline_start >= playhead {
+                            c.timeline_start += clip_duration;
+                        }
+                    }
+
+                    let mut new_clip = Clip::new(path, out_ns, playhead, clip_kind);
+                    new_clip.source_in = in_ns;
+                    new_clip.source_out = out_ns;
+                    track.add_clip(new_clip);
+
+                    if magnetic_mode {
+                        track.compact_gap_free();
+                    }
+
+                    let new_clips = track.clips.clone();
+                    drop(proj);
+
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id,
+                        old_clips,
+                        new_clips,
+                        label: "Insert at playhead".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    // Push directly — clips are already applied
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
+                    proj.dirty = true;
+                }
+            }
+            on_project_changed();
+        })
+    });
+
+    // ── on_overwrite: reads source_marks, replaces timeline range at playhead ──
+    *on_overwrite_impl.borrow_mut() = Some({
+        let project = project.clone();
+        let source_marks = source_marks.clone();
+        let on_project_changed = on_project_changed.clone();
+        let timeline_state = timeline_state.clone();
+        Rc::new(move || {
+            let marks = source_marks.borrow();
+            if marks.path.is_empty() { return; }
+            let path = marks.path.clone();
+            let in_ns = marks.in_ns;
+            let out_ns = marks.out_ns;
+            let is_audio = marks.is_audio_only;
+            drop(marks);
+
+            let ts = timeline_state.borrow();
+            let magnetic_mode = ts.magnetic_mode;
+            let playhead = ts.playhead_ns;
+            let active_tid = ts.selected_track_id.clone();
+            drop(ts);
+
+            let target_kind = if is_audio { TrackKind::Audio } else { TrackKind::Video };
+            let clip_kind = if is_audio { ClipKind::Audio } else { ClipKind::Video };
+            let clip_duration = out_ns.saturating_sub(in_ns);
+            if clip_duration == 0 { return; }
+
+            let range_start = playhead;
+            let range_end = playhead + clip_duration;
+
+            {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(ref tid) = active_tid {
+                    if proj.tracks.iter().any(|t| &t.id == tid && t.kind == target_kind) {
+                        proj.tracks.iter_mut().find(|t| &t.id == tid)
+                    } else {
+                        proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                    }
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+
+                    // Resolve overlaps with the overwrite range
+                    let mut kept: Vec<Clip> = Vec::new();
+                    for c in track.clips.drain(..) {
+                        let c_start = c.timeline_start;
+                        let c_end = c.timeline_end();
+                        if c_end <= range_start || c_start >= range_end {
+                            // No overlap — keep as-is
+                            kept.push(c);
+                        } else if c_start >= range_start && c_end <= range_end {
+                            // Fully contained — remove (skip)
+                        } else if c_start < range_start && c_end > range_end {
+                            // Clip spans entire range — split into two
+                            let mut left = c.clone();
+                            left.source_out = left.source_in + (range_start - c_start);
+                            let mut right = c;
+                            let trim_left = range_end - right.timeline_start;
+                            right.source_in += trim_left;
+                            right.timeline_start = range_end;
+                            kept.push(left);
+                            kept.push(right);
+                        } else if c_start < range_start {
+                            // Overlap at end — trim out-point
+                            let mut trimmed = c;
+                            trimmed.source_out = trimmed.source_in + (range_start - trimmed.timeline_start);
+                            kept.push(trimmed);
+                        } else {
+                            // Overlap at start — trim in-point, adjust timeline_start
+                            let mut trimmed = c;
+                            let trim_amount = range_end - trimmed.timeline_start;
+                            trimmed.source_in += trim_amount;
+                            trimmed.timeline_start = range_end;
+                            kept.push(trimmed);
+                        }
+                    }
+                    track.clips = kept;
+
+                    let mut new_clip = Clip::new(path, out_ns, playhead, clip_kind);
+                    new_clip.source_in = in_ns;
+                    new_clip.source_out = out_ns;
+                    track.add_clip(new_clip);
+
+                    if magnetic_mode {
+                        track.compact_gap_free();
+                    }
+
+                    let new_clips = track.clips.clone();
+                    drop(proj);
+
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id,
+                        old_clips,
+                        new_clips,
+                        label: "Overwrite at playhead".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
                     proj.dirty = true;
                 }
             }
@@ -1296,6 +1503,38 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let pos = prog_player.borrow().timeline_pos_ns;
             project.borrow_mut().add_marker(pos, "Marker");
             on_project_changed();
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level , and . keys: Insert / Overwrite at playhead ─────────
+    {
+        let on_insert = on_insert.clone();
+        let on_overwrite = on_overwrite.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            // Skip if Ctrl is held (Ctrl+, = Preferences)
+            if mods.contains(ModifierType::CONTROL_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            if key != Key::comma && key != Key::period {
+                return glib::Propagation::Proceed;
+            }
+            // Don't intercept when a text entry has focus
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            if key == Key::comma {
+                on_insert();
+            } else {
+                on_overwrite();
+            }
             glib::Propagation::Stop
         });
         window.add_controller(key_ctrl);
@@ -1926,6 +2165,147 @@ fn handle_mcp_command(
             }
             reply.send(json!({"success": true, "title": title})).ok();
             on_project_changed();
+        }
+
+        McpCommand::InsertClip { source_path, source_in_ns, source_out_ns, track_index, reply } => {
+            let clip_duration = source_out_ns.saturating_sub(source_in_ns);
+            if clip_duration == 0 {
+                reply.send(json!({"error": "source_in_ns must be less than source_out_ns"})).ok();
+                return;
+            }
+            let playhead = timeline_state.borrow().playhead_ns;
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
+            let result = {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(idx) = track_index {
+                    proj.tracks.get_mut(idx)
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == crate::model::track::TrackKind::Video)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+                    for c in track.clips.iter_mut() {
+                        if c.timeline_start >= playhead {
+                            c.timeline_start += clip_duration;
+                        }
+                    }
+                    let mut new_clip = Clip::new(source_path, source_out_ns, playhead, ClipKind::Video);
+                    new_clip.source_in = source_in_ns;
+                    new_clip.source_out = source_out_ns;
+                    let clip_id = new_clip.id.clone();
+                    track.add_clip(new_clip);
+                    if magnetic_mode { track.compact_gap_free(); }
+                    let new_clips = track.clips.clone();
+                    proj.dirty = true;
+                    Ok((track_id, clip_id, old_clips, new_clips))
+                } else {
+                    Err("No matching track found")
+                }
+            };
+            match result {
+                Ok((track_id, clip_id, old_clips, new_clips)) => {
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id, old_clips, new_clips,
+                        label: "Insert at playhead (MCP)".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
+                    proj.dirty = true;
+                    drop(proj);
+                    reply.send(json!({"success": true, "clip_id": clip_id})).ok();
+                    on_project_changed();
+                }
+                Err(e) => { reply.send(json!({"error": e})).ok(); }
+            }
+        }
+
+        McpCommand::OverwriteClip { source_path, source_in_ns, source_out_ns, track_index, reply } => {
+            let clip_duration = source_out_ns.saturating_sub(source_in_ns);
+            if clip_duration == 0 {
+                reply.send(json!({"error": "source_in_ns must be less than source_out_ns"})).ok();
+                return;
+            }
+            let playhead = timeline_state.borrow().playhead_ns;
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
+            let range_start = playhead;
+            let range_end = playhead + clip_duration;
+            let result = {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(idx) = track_index {
+                    proj.tracks.get_mut(idx)
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == crate::model::track::TrackKind::Video)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+                    let mut kept: Vec<Clip> = Vec::new();
+                    for c in track.clips.drain(..) {
+                        let c_start = c.timeline_start;
+                        let c_end = c.timeline_end();
+                        if c_end <= range_start || c_start >= range_end {
+                            kept.push(c);
+                        } else if c_start >= range_start && c_end <= range_end {
+                            // fully contained — remove
+                        } else if c_start < range_start && c_end > range_end {
+                            let mut left = c.clone();
+                            left.source_out = left.source_in + (range_start - c_start);
+                            let mut right = c;
+                            let trim_left = range_end - right.timeline_start;
+                            right.source_in += trim_left;
+                            right.timeline_start = range_end;
+                            kept.push(left);
+                            kept.push(right);
+                        } else if c_start < range_start {
+                            let mut trimmed = c;
+                            trimmed.source_out = trimmed.source_in + (range_start - trimmed.timeline_start);
+                            kept.push(trimmed);
+                        } else {
+                            let mut trimmed = c;
+                            let trim_amount = range_end - trimmed.timeline_start;
+                            trimmed.source_in += trim_amount;
+                            trimmed.timeline_start = range_end;
+                            kept.push(trimmed);
+                        }
+                    }
+                    track.clips = kept;
+                    let mut new_clip = Clip::new(source_path, source_out_ns, playhead, ClipKind::Video);
+                    new_clip.source_in = source_in_ns;
+                    new_clip.source_out = source_out_ns;
+                    let clip_id = new_clip.id.clone();
+                    track.add_clip(new_clip);
+                    if magnetic_mode { track.compact_gap_free(); }
+                    let new_clips = track.clips.clone();
+                    proj.dirty = true;
+                    Ok((track_id, clip_id, old_clips, new_clips))
+                } else {
+                    Err("No matching track found")
+                }
+            };
+            match result {
+                Ok((track_id, clip_id, old_clips, new_clips)) => {
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id, old_clips, new_clips,
+                        label: "Overwrite at playhead (MCP)".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
+                    proj.dirty = true;
+                    drop(proj);
+                    reply.send(json!({"success": true, "clip_id": clip_id})).ok();
+                    on_project_changed();
+                }
+                Err(e) => { reply.send(json!({"error": e})).ok(); }
+            }
         }
     }
 }

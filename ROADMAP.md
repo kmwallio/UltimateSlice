@@ -253,7 +253,7 @@ Tracking docs:
 ### Professional Workflow (The "Pro" Edge)
 - [ ] Multicam editing (sync by audio or timecode)
 - [ ] Nested Timelines / Compound Clips
-- [ ] 3-Point and 4-Point editing (Insert/Overwrite from Source)
+- [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio is a future enhancement)
 - [ ] Match Frame (shortcut to find timeline clip in media library)
 - [ ] Proxy Workflow: One-click toggle between original and proxy media

@@ -64,6 +64,21 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - The left neighbor's out-point extends/shrinks and the right neighbor's in-point shrinks/extends — overall timeline duration stays the same.
 - Press **U** to toggle Slide mode on/off.
 
+### Insert at Playhead (`,`)
+
+- Places the current source selection (In → Out from the source monitor) at the playhead position on the active track.
+- All clips at or after the playhead are **shifted right** to make room — a ripple insert.
+- Also available via the **⤵ Insert** button in the source monitor transport bar.
+- Requires a source to be loaded with valid in/out marks.
+
+### Overwrite at Playhead (`.`)
+
+- Places the current source selection at the playhead position, **replacing** any existing material in the time range.
+- Clips that fall within the overwrite range are trimmed, split, or removed as needed.
+- No subsequent clips are shifted — the timeline duration only changes if you overwrite past the end.
+- Also available via the **⏺ Overwrite** button in the source monitor transport bar.
+- Requires a source to be loaded with valid in/out marks.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -74,6 +89,8 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `E` | Toggle Roll edit tool |
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
+| `,` | Insert at playhead (from source monitor) |
+| `.` | Overwrite at playhead (from source monitor) |
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip |
 | `M` | Add chapter marker at current playhead position |

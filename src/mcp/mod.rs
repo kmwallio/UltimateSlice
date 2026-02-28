@@ -82,6 +82,20 @@ pub enum McpCommand {
     },
     SetGskRenderer { renderer: String, reply: SyncSender<Value> },
     SetPreviewQuality { quality: String, reply: SyncSender<Value> },
+    InsertClip {
+        source_path:  String,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        track_index:  Option<usize>,
+        reply:        SyncSender<Value>,
+    },
+    OverwriteClip {
+        source_path:  String,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        track_index:  Option<usize>,
+        reply:        SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.
