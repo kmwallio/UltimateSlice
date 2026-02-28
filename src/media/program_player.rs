@@ -711,29 +711,19 @@ impl ProgramPlayer {
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             return;
         }
-        let desired = self.clips_active_at(timeline_pos_ns);
-        let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
-        let same_active_set = self.state != PlayerState::Playing && !self.slots.is_empty() && desired == current;
-        if same_active_set {
-            self.current_idx = self.clip_at(timeline_pos_ns);
-            for slot in &self.slots {
-                let clip = &self.clips[slot.clip_idx];
-                let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos_ns);
-            }
-            self.wait_for_paused_preroll();
-            // Nudge PAUSED pipelines to consume post-seek output for same-clip scrubs.
-            let _ = self.pipeline.set_state(gst::State::Playing);
-            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(250));
-            let _ = self.pipeline.set_state(gst::State::Paused);
-            self.wait_for_paused_preroll();
-        } else {
-            // Rebuild when active clip membership changes.
-            self.rebuild_pipeline_at(timeline_pos_ns);
-        }
+        // Always rebuild at the seek target so decoder branches, compositor state,
+        // and seek/preroll ordering stay deterministic during timeline scrubbing.
+        self.rebuild_pipeline_at(timeline_pos_ns);
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
         if resume_playback {
             self.play_start = Some(Instant::now());
+        } else if self.current_idx.is_some() {
+            // Ensure sinks consume post-seek output and refresh the paused frame.
+            let _ = self.pipeline.set_state(gst::State::Playing);
+            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(80));
+            let _ = self.pipeline.set_state(gst::State::Paused);
+            self.wait_for_paused_preroll();
         }
     }
 

@@ -63,10 +63,9 @@ or outside the export frame.
 - During paused scrubbing, UltimateSlice waits for a fresh post-seek preroll frame so the Program Monitor and transform overlay update to the new playhead frame instead of showing black.
 - During paused scrubbing, active clip decoder branches are created before preroll/seek settle so the monitor does not remain stuck on a black frame after moving the playhead.
 - Manual timeline seeks use the paused accurate-seek path and then resume playback if it was active, so the frame shown at the playhead is updated before playback continues.
-- If decoder pads link late during paused rebuild, UltimateSlice re-issues the paused seek at link time so preview frame selection still targets the playhead position.
+- Paused seeks include a short internal sink-refresh pass so the monitor displays decoded clip content rather than a stale black frame.
 - During paused rebuilds, decoder seeks are applied before the first monitor preroll to avoid the initial keyframe preroll sticking in the preview.
 - While paused, the monitor is repainted continuously so delayed post-seek frame updates still appear without requiring playback to resume.
-- After paused seek settle, UltimateSlice performs a short internal play→pause nudge to force frame consumption on sinks and keep the monitor frame in sync with the playhead.
 
 ## Playhead Accuracy
 
