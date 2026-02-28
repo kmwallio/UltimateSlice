@@ -141,6 +141,8 @@ The undo history is per-session (not persisted in the FCPXML).
 ## Clip Appearance
 
 - Video clips show a time-mapped thumbnail strip (extracted in the background): tiles progress across the clip's source range instead of repeating one frame.
+- Thumbnail strips now load progressively with adaptive tile density to keep timeline warm-up responsive on heavy media.
+- Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
 - Selected clips have a yellow highlight border.

@@ -152,6 +152,16 @@ pub fn show_preferences_dialog(
     timeline_box.append(&timeline_label);
     timeline_box.append(&waveform_video_check);
     timeline_box.append(&waveform_hint);
+    let timeline_preview_check = CheckButton::with_label("Show timeline preview");
+    timeline_preview_check.set_active(current.show_timeline_preview);
+    timeline_preview_check.set_halign(gtk::Align::Start);
+    let timeline_preview_hint = Label::new(Some("When enabled, video clips show a thumbnail strip. When disabled, only start/end thumbnails are shown."));
+    timeline_preview_hint.set_halign(gtk::Align::Start);
+    timeline_preview_hint.add_css_class("dim-label");
+    timeline_preview_hint.set_wrap(true);
+    timeline_preview_hint.set_max_width_chars(60);
+    timeline_box.append(&timeline_preview_check);
+    timeline_box.append(&timeline_preview_hint);
     stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
 
     // ── Integration section ───────────────────────────────────────────────
@@ -189,6 +199,7 @@ pub fn show_preferences_dialog(
                 playback_priority: PlaybackPriority::from_str(playback_priority.active_id().as_deref().unwrap_or("smooth")),
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
+                show_timeline_preview: timeline_preview_check.is_active(),
                 mcp_socket_enabled: mcp_socket_check.is_active(),
                 gsk_renderer: GskRenderer::from_str(gsk_renderer.active_id().as_deref().unwrap_or("auto")),
                 preview_quality: PreviewQuality::from_str(preview_quality.active_id().as_deref().unwrap_or("full")),

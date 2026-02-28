@@ -192,6 +192,9 @@ pub struct PreferencesState {
     /// Show audio waveforms overlaid on video clips in the timeline.
     #[serde(default)]
     pub show_waveform_on_video: bool,
+    /// Show thumbnail preview strips on timeline video clips.
+    #[serde(default = "default_show_timeline_preview")]
+    pub show_timeline_preview: bool,
     /// Enable the MCP Unix-domain-socket server so agents can connect to this instance.
     #[serde(default)]
     pub mcp_socket_enabled: bool,
@@ -210,12 +213,15 @@ impl Default for PreferencesState {
             playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
             show_waveform_on_video: false,
+            show_timeline_preview: default_show_timeline_preview(),
             mcp_socket_enabled: false,
             gsk_renderer: GskRenderer::default(),
             preview_quality: PreviewQuality::default(),
         }
     }
 }
+
+fn default_show_timeline_preview() -> bool { true }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct UiState {

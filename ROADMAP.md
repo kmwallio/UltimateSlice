@@ -110,6 +110,7 @@ Tracking docs:
 
 ### Timeline Improvements
 - [x] Time-mapped clip filmstrip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
+- [x] Timeline preview toggle to switch between full thumbnail strips and start/end-only thumbnails
 - [x] Snap-to-clip-edge when moving clips (10 px threshold, snaps both start and end edges)
 - [x] Multiple video tracks and audio tracks (Add/Remove Track buttons below timeline)
 - [x] Audio waveform rendering in audio track rows (background GStreamer decode, normalized peaks)
@@ -152,6 +153,8 @@ Tracking docs:
   - [x] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
   - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
+  - [x] Move MCP `open_fcpxml` read/parse path off the GTK main thread and trim parser attribute-allocation overhead
+  - [x] Reduce timeline thumbnail/waveform warm-up spikes via lower extraction concurrency and lighter thumbnail tile density
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
    - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region

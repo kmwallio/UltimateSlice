@@ -117,6 +117,8 @@ pub struct TimelineState {
     hover_transition_pair: Option<(String, String)>,
     /// Show audio waveforms overlaid on video clips in the timeline.
     pub show_waveform_on_video: bool,
+    /// Show thumbnail preview strips on timeline video clips.
+    pub show_timeline_preview: bool,
     /// When true, the timeline is loading a project and interaction is suppressed.
     pub loading: bool,
 }
@@ -141,6 +143,7 @@ impl TimelineState {
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
+            show_timeline_preview: true,
             loading: false,
         }
     }
@@ -1839,7 +1842,8 @@ fn draw_clip(
     // ── Thumbnail strip for video clips ──────────────────────────────────
     if track.kind == TrackKind::Video && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
-        const MAX_THUMB_TILES_PER_CLIP: usize = 24;
+        const MAX_THUMB_TILES_PER_CLIP: usize = 6;
+        const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
 
         let inner_x = cx + 1.0;
         let inner_y = cy + 1.0;
@@ -1847,9 +1851,6 @@ fn draw_clip(
         let inner_h = (ch - 2.0).max(0.0);
 
         if inner_w > 1.0 && inner_h > 1.0 {
-            let nominal_tile_w = (inner_h * THUMB_ASPECT).max(1.0);
-            let approx_tiles = (inner_w / nominal_tile_w).ceil().max(1.0) as usize;
-            let tile_count = approx_tiles.min(MAX_THUMB_TILES_PER_CLIP).max(1);
             let src_span = clip.source_out.saturating_sub(clip.source_in);
             let scale_y = inner_h / 90.0;
 
@@ -1857,31 +1858,61 @@ fn draw_clip(
             rounded_rect(cr, inner_x, inner_y, inner_w, inner_h, 3.0);
             cr.clip();
 
-            for i in 0..tile_count {
-                let f0 = i as f64 / tile_count as f64;
-                let f1 = (i + 1) as f64 / tile_count as f64;
-                let x0 = inner_x + f0 * inner_w;
-                let x1 = inner_x + f1 * inner_w;
-                let draw_w = (x1 - x0).max(1.0);
-                let mid = (f0 + f1) * 0.5;
+            if st.show_timeline_preview {
+                let nominal_tile_w = (inner_h * THUMB_ASPECT).max(1.0);
+                let approx_tiles = (inner_w / nominal_tile_w).ceil().max(1.0) as usize;
+                let tile_count = approx_tiles.min(MAX_THUMB_TILES_PER_CLIP).max(1);
+                let mut requested_this_draw = 0usize;
 
-                let src_offset = if src_span <= 1 {
-                    0
-                } else {
-                    ((mid * src_span as f64) as u64).min(src_span - 1)
-                };
-                let sample_time = clip.source_in + src_offset;
+                for i in 0..tile_count {
+                    let f0 = i as f64 / tile_count as f64;
+                    let f1 = (i + 1) as f64 / tile_count as f64;
+                    let x0 = inner_x + f0 * inner_w;
+                    let x1 = inner_x + f1 * inner_w;
+                    let draw_w = (x1 - x0).max(1.0);
+                    let mid = (f0 + f1) * 0.5;
 
-                cache.request(&clip.source_path, sample_time);
-                if let Some(surf) = cache.get(&clip.source_path, sample_time) {
-                    cr.save().ok();
-                    cr.rectangle(x0, inner_y, draw_w, inner_h);
-                    cr.clip();
-                    cr.translate(x0, inner_y);
-                    cr.scale(draw_w / 160.0, scale_y);
-                    cr.set_source_surface(surf, 0.0, 0.0).ok();
-                    cr.paint_with_alpha(0.75).ok();
-                    cr.restore().ok();
+                    let src_offset = if src_span <= 1 {
+                        0
+                    } else {
+                        ((mid * src_span as f64) as u64).min(src_span - 1)
+                    };
+                    let sample_time = clip.source_in + src_offset;
+
+                    if let Some(surf) = cache.get(&clip.source_path, sample_time) {
+                        cr.save().ok();
+                        cr.rectangle(x0, inner_y, draw_w, inner_h);
+                        cr.clip();
+                        cr.translate(x0, inner_y);
+                        cr.scale(draw_w / 160.0, scale_y);
+                        cr.set_source_surface(surf, 0.0, 0.0).ok();
+                        cr.paint_with_alpha(0.75).ok();
+                        cr.restore().ok();
+                    } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
+                        cache.request(&clip.source_path, sample_time);
+                        requested_this_draw += 1;
+                    }
+                }
+            } else {
+                let draw_w = ((inner_h * THUMB_ASPECT).max(1.0)).min((inner_w * 0.5).max(1.0));
+                let mut requested_this_draw = 0usize;
+                let start_time = clip.source_in;
+                let end_time = clip.source_out.saturating_sub(1).max(clip.source_in);
+                let endpoints = [(inner_x, start_time), (inner_x + inner_w - draw_w, end_time)];
+                for (x0, sample_time) in endpoints {
+                    if let Some(surf) = cache.get(&clip.source_path, sample_time) {
+                        cr.save().ok();
+                        cr.rectangle(x0, inner_y, draw_w, inner_h);
+                        cr.clip();
+                        cr.translate(x0, inner_y);
+                        cr.scale(draw_w / 160.0, scale_y);
+                        cr.set_source_surface(surf, 0.0, 0.0).ok();
+                        cr.paint_with_alpha(0.75).ok();
+                        cr.restore().ok();
+                    } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
+                        cache.request(&clip.source_path, sample_time);
+                        requested_this_draw += 1;
+                    }
                 }
             }
             cr.restore().ok();

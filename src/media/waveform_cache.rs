@@ -12,7 +12,7 @@ use gstreamer_app::AppSink;
 pub const PEAKS_PER_SEC: f64 = 100.0; // one peak per 10 ms
 
 /// Maximum number of simultaneous waveform extraction threads.
-const MAX_CONCURRENT: usize = 4;
+const MAX_CONCURRENT: usize = 1;
 
 struct RawPeaks {
     key: String,
@@ -149,6 +149,12 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
     appsink.set_property("drop", false);
     appsink.set_property("emit-signals", false);
 
+    if let Ok(src_bin) = src.clone().dynamic_cast::<gst::Bin>() {
+        src_bin.connect_element_added(|_, element| {
+            tune_decoder_threads(element);
+        });
+    }
+
     pipeline.add_many([&src, &conv, &resample, &capsf, &sink]).ok()?;
     gst::Element::link_many([&conv, &resample, &capsf, &sink]).ok()?;
 
@@ -218,4 +224,13 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
     }
 
     Some(samples)
+}
+
+fn tune_decoder_threads(element: &gst::Element) {
+    if element.find_property("max-threads").is_some() {
+        element.set_property_from_str("max-threads", "1");
+    }
+    if element.find_property("threads").is_some() {
+        element.set_property_from_str("threads", "1");
+    }
 }

@@ -77,6 +77,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
     let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
+    let initial_show_timeline_preview = preferences_state.borrow().show_timeline_preview;
     let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
@@ -95,6 +96,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
     timeline_state.borrow_mut().show_waveform_on_video = initial_show_waveform_on_video;
+    timeline_state.borrow_mut().show_timeline_preview = initial_show_timeline_preview;
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
@@ -177,6 +179,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         prog_player.borrow_mut().update_proxy_paths(paths);
                     }
                     timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
+                    timeline_state.borrow_mut().show_timeline_preview = new_state.show_timeline_preview;
                     // Start/stop MCP socket server based on preference change.
                     if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
                         let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
@@ -1244,9 +1247,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
                 // Collect only unique source paths to avoid redundant work.
-                let mut media_seen = HashSet::new();
+                let mut media_seen: HashSet<&str> = HashSet::new();
                 let media: Vec<(String, u64)> = proj.tracks.iter().flat_map(|t| t.clips.iter())
-                    .filter(|c| media_seen.insert(c.source_path.as_str() as *const str))
+                    .filter(|c| media_seen.insert(c.source_path.as_str()))
                     .map(|c| (c.source_path.clone(), c.source_out))
                     .collect();
                 (clips, media, (proj.width, proj.height))
@@ -1265,51 +1268,71 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
             // Reload program player — preserve current position so the monitor
             // doesn't jump to 0 on every project change (e.g., clip name edit).
-            let prev_pos = prog_player.borrow().timeline_pos_ns;
-            let was_playing = matches!(
-                prog_player.borrow().state(),
-                crate::media::player::PlayerState::Playing
-            );
+            let (prev_pos, was_playing) = {
+                let pp = prog_player.borrow();
+                (
+                    pp.timeline_pos_ns,
+                    matches!(pp.state(), crate::media::player::PlayerState::Playing),
+                )
+            };
             let (proj_w, proj_h) = project_dims;
-            prog_player.borrow_mut().set_project_dimensions(proj_w, proj_h);
-            prog_player.borrow_mut().load_clips(clips);
-            // Seek back to the previous position (loads the clip at that point
-            // and applies the current color correction values).
-            if !prog_player.borrow().clips.is_empty() {
-                prog_player.borrow_mut().seek(prev_pos);
-                if was_playing {
-                    prog_player.borrow_mut().play();
+            let prog_player_reload = prog_player.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
+                let mut pp = prog_player_reload.borrow_mut();
+                pp.set_project_dimensions(proj_w, proj_h);
+                pp.load_clips(clips);
+                // Seek back to the previous position (loads the clip at that point
+                // and applies the current color correction values).
+                if !pp.clips.is_empty() {
+                    pp.seek(prev_pos);
+                    if was_playing {
+                        pp.play();
+                    }
                 }
-            }
+            });
 
             // Request proxy generation for all clips if proxy mode is enabled.
-            // Each clip's lut_path is passed so LUT-assigned clips get their own baked proxy.
+            // Do this right after the current callback returns so project load UI
+            // updates are not blocked by proxy request iteration.
             {
-                let prefs = preferences_state.borrow();
-                if prefs.proxy_mode.is_enabled() {
-                    let scale = match prefs.proxy_mode {
-                        crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
-                        _ => crate::media::proxy_cache::ProxyScale::Half,
-                    };
-                    let clip_sources: Vec<(String, Option<String>)> = {
-                        let proj = project.borrow();
-                        proj.tracks.iter()
-                            .flat_map(|t| t.clips.iter())
-                            .map(|c| (c.source_path.clone(), c.lut_path.clone()))
-                            .collect()
-                    };
-                    {
-                        let mut cache = proxy_cache.borrow_mut();
-                        for (path, lut) in &clip_sources {
-                            cache.request(path, scale, lut.as_deref());
+                let preferences_state = preferences_state.clone();
+                let project = project.clone();
+                let proxy_cache = proxy_cache.clone();
+                let prog_player = prog_player.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
+                    let prefs = preferences_state.borrow();
+                    if prefs.proxy_mode.is_enabled() {
+                        let scale = match prefs.proxy_mode {
+                            crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+                            _ => crate::media::proxy_cache::ProxyScale::Half,
+                        };
+                        let clip_sources: Vec<(String, Option<String>)> = {
+                            let proj = project.borrow();
+                            let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+                            proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter_map(|c| {
+                                    let key = (c.source_path.clone(), c.lut_path.clone());
+                                    if seen.insert(key.clone()) {
+                                        Some(key)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        };
+                        {
+                            let mut cache = proxy_cache.borrow_mut();
+                            for (path, lut) in &clip_sources {
+                                cache.request(path, scale, lut.as_deref());
+                            }
                         }
+                        // Disk-cached proxies are added to self.proxies synchronously by
+                        // request() above. Push them to the player immediately.
+                        let paths = proxy_cache.borrow().proxies.clone();
+                        prog_player.borrow_mut().update_proxy_paths(paths);
                     }
-                    // Disk-cached proxies are added to self.proxies synchronously by
-                    // request() above. Push them to the player immediately so the seek
-                    // that follows can use them rather than falling back to source files.
-                    let paths = proxy_cache.borrow().proxies.clone();
-                    prog_player.borrow_mut().update_proxy_paths(paths);
-                }
+                });
             }
 
             // Force immediate timeline redraw (don't wait for 100ms timer)
@@ -1764,6 +1787,7 @@ fn handle_mcp_command(
                 "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
                 "playback_priority": prefs.playback_priority.as_str(),
                 "proxy_mode": prefs.proxy_mode.as_str(),
+                "show_timeline_preview": prefs.show_timeline_preview,
                 "gsk_renderer": prefs.gsk_renderer.as_str(),
                 "preview_quality": prefs.preview_quality.as_str()
             })).ok();
@@ -1827,9 +1851,17 @@ fn handle_mcp_command(
                 };
                 let clip_sources: Vec<(String, Option<String>)> = {
                     let proj = project.borrow();
+                    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
                     proj.tracks.iter()
                         .flat_map(|t| t.clips.iter())
-                        .map(|c| (c.source_path.clone(), c.lut_path.clone()))
+                        .filter_map(|c| {
+                            let key = (c.source_path.clone(), c.lut_path.clone());
+                            if seen.insert(key.clone()) {
+                                Some(key)
+                            } else {
+                                None
+                            }
+                        })
                         .collect()
                 };
                 {
@@ -2124,20 +2156,46 @@ fn handle_mcp_command(
         }
 
         McpCommand::OpenFcpxml { path, reply } => {
-            match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|xml| crate::fcpxml::parser::parse_fcpxml(&xml).map_err(|e| e.to_string()))
-            {
-                Ok(mut new_proj) => {
-                    new_proj.file_path = Some(path.clone());
-                    let track_count = new_proj.tracks.len();
-                    let clip_count: usize = new_proj.tracks.iter().map(|t| t.clips.len()).sum();
-                    *project.borrow_mut() = new_proj;
-                    on_project_changed();
-                    reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+            let path_bg = path.clone();
+            std::thread::spawn(move || {
+                let result = std::fs::read_to_string(&path_bg)
+                    .map_err(|e| e.to_string())
+                    .and_then(|xml| crate::fcpxml::parser::parse_fcpxml(&xml).map_err(|e| e.to_string()));
+                let _ = tx.send(result);
+            });
+            timeline_state.borrow_mut().loading = true;
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+                match rx.try_recv() {
+                    Ok(Ok(mut new_proj)) => {
+                        new_proj.file_path = Some(path.clone());
+                        let track_count = new_proj.tracks.len();
+                        let clip_count: usize = new_proj.tracks.iter().map(|t| t.clips.len()).sum();
+                        *project.borrow_mut() = new_proj;
+                        timeline_state.borrow_mut().loading = false;
+                        reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
+                        let on_project_changed = on_project_changed.clone();
+                        glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
+                            on_project_changed();
+                        });
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(e)) => {
+                        timeline_state.borrow_mut().loading = false;
+                        reply.send(json!({"success": false, "error": e})).ok();
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        timeline_state.borrow_mut().loading = false;
+                        reply.send(json!({"success": false, "error": "open_fcpxml worker disconnected"})).ok();
+                        glib::ControlFlow::Break
+                    }
                 }
-                Err(e) => { reply.send(json!({"success": false, "error": e})).ok(); }
-            };
+            });
         }
 
         McpCommand::ExportMp4 { path, reply } => {

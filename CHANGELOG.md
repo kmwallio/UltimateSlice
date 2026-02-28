@@ -30,6 +30,9 @@ All notable project changes and progress should be recorded here.
 - **Batch-sort clips during FCPXML import**: Clips are now appended unsorted during XML parsing and sorted once per track at the end, reducing O(n² log n) sorting overhead on large projects to O(n log n).
 - **Parallel proxy transcoding**: `ProxyCache` now uses 4 worker threads instead of 1, transcoding up to 4 proxy files concurrently via ffmpeg.
 - **Optimized media library sync**: `on_project_changed` now deduplicates clip source paths before syncing and avoids cloning library paths into a `HashSet<String>`, reducing allocations on every project change.
+- **MCP project-open responsiveness**: `open_fcpxml` file-read/parse now runs on a background worker before main-thread apply, parser hot-path allocations were reduced, and proxy-request dedupe was tightened to avoid redundant work while preserving existing project-load behavior.
+- **Timeline warm-up load shaping**: Thumbnail/waveform warm-up now uses lower extraction concurrency and lighter thumbnail request density, reducing post-open background thread and memory spikes while preserving timeline thumbnail/waveform functionality.
+- **Timeline preview preference**: Added a Timeline setting (`Show timeline preview`) that controls video thumbnail generation strategy. Enabled keeps the full strip behavior; disabled renders only start/end thumbnails per video clip for lower thumbnail workload.
 
 ### Added
 - **Clip opacity controls**: Added per-clip opacity (`0.0–1.0`) in the Inspector Transform section, plus MCP support via `set_clip_opacity`. Opacity is now included in `list_clips` output and persisted in FCPXML as `us:opacity`.

@@ -12,6 +12,7 @@ Preferences are grouped by category in a sidebar:
 
 - **General** — placeholder for upcoming general settings.
 - **Playback** — performance-related settings.
+- **Timeline** — timeline display and analysis overlays.
 
 ## Hardware Acceleration (Playback)
 
@@ -68,6 +69,14 @@ Preferences are grouped by category in a sidebar:
 
 - Click **Save** to persist changes.
 - Click **Cancel** to discard changes.
+
+## Timeline Preview (Timeline)
+
+- **Show timeline preview** controls video thumbnail rendering in the timeline:
+  - Enabled (default): show the regular thumbnail strip across each visible video clip.
+  - Disabled: only show start/end thumbnails for each visible video clip.
+- Use Disabled mode to reduce thumbnail-generation workload on heavy media/projects.
+- The setting is persisted across launches.
 
 ## GTK Renderer (Playback)
 

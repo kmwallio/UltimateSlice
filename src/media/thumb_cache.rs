@@ -10,7 +10,7 @@ const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
 
 /// Maximum number of simultaneous thumbnail extraction threads.
-const MAX_CONCURRENT: usize = 4;
+const MAX_CONCURRENT: usize = 2;
 
 /// A loaded thumbnail ready to draw.
 struct RawFrame {
@@ -106,9 +106,11 @@ impl ThumbnailCache {
     }
 }
 
-/// Round time to the nearest second to avoid redundant extractions for nearby seeks.
+/// Quantize sample times into 2-second buckets to avoid excessive unique
+/// extraction jobs while preserving useful visual coverage.
 fn cache_key(source_path: &str, time_ns: u64) -> String {
     let sec = time_ns / 1_000_000_000;
+    let sec = (sec / 2) * 2;
     format!("{source_path}@{sec}s")
 }
 
@@ -119,7 +121,7 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     let uri = crate::media::thumbnail::path_to_uri(&source_path);
 
     let pipeline_desc = format!(
-        "uridecodebin uri=\"{uri}\" ! videoconvert ! videoscale ! \
+        "uridecodebin name=dec uri=\"{uri}\" ! videoconvert ! videoscale ! \
          video/x-raw,format=RGBA,width={THUMB_W},height={THUMB_H} ! \
          appsink name=sink sync=false max-buffers=1 drop=false"
     );
@@ -136,6 +138,12 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow::anyhow!("no appsink"))?
         .downcast::<AppSink>()
         .map_err(|_| anyhow::anyhow!("not appsink"))?;
+
+    if let Some(dec) = pipeline.by_name("dec").and_then(|e| e.dynamic_cast::<gst::Bin>().ok()) {
+        dec.connect_element_added(|_, element| {
+            tune_decoder_threads(element);
+        });
+    }
 
     pipeline.set_state(gst::State::Paused)?;
     // Wait for pre-roll (up to 5 s)
@@ -161,6 +169,15 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
 
     // PipelineGuard ensures pipeline is set to Null when this function returns.
     Ok(data)
+}
+
+fn tune_decoder_threads(element: &gst::Element) {
+    if element.find_property("max-threads").is_some() {
+        element.set_property_from_str("max-threads", "1");
+    }
+    if element.find_property("threads").is_some() {
+        element.set_property_from_str("threads", "1");
+    }
 }
 
 /// Convert raw RGBA bytes to a Cairo ARGB32 `ImageSurface`.

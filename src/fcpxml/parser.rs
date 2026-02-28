@@ -34,16 +34,17 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
         match reader.read_event_into(&mut buf)? {
             Event::Start(ref e) | Event::Empty(ref e) => {
                 let name_local = e.local_name();
-                let name = std::str::from_utf8(name_local.as_ref())?.to_string();
-                let attrs = parse_attrs(e)?;
+                let name = std::str::from_utf8(name_local.as_ref())?;
 
-                match name.as_str() {
+                match name {
                     "project" => {
+                        let attrs = parse_attrs(e)?;
                         if let Some(n) = attrs.get("name") {
                             project.title = n.clone();
                         }
                     }
                     "format" => {
+                        let attrs = parse_attrs(e)?;
                         if let (Some(w), Some(h)) = (attrs.get("width"), attrs.get("height")) {
                             project.width = w.parse().unwrap_or(1920);
                             project.height = h.parse().unwrap_or(1080);
@@ -53,6 +54,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                         }
                     }
                     "asset" => {
+                        let attrs = parse_attrs(e)?;
                         if let (Some(id), Some(src)) = (attrs.get("id"), attrs.get("src")) {
                             let duration_ns = attrs.get("duration")
                                 .and_then(|d| parse_fcpxml_time(d))
@@ -69,6 +71,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                         in_spine = true;
                     }
                     "asset-clip" if in_spine => {
+                        let attrs = parse_attrs(e)?;
                         if let Some(asset_ref) = attrs.get("ref") {
                             if let Some(asset) = assets.get(asset_ref) {
                                 let timeline_start = attrs.get("offset")
@@ -156,6 +159,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                         }
                     }
                     "marker" => {
+                        let attrs = parse_attrs(e)?;
                         // Restore timeline markers
                         if let Some(start_str) = attrs.get("start") {
                             if let Some(pos_ns) = parse_fcpxml_time(start_str) {
@@ -203,8 +207,9 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
 }
 
 fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, String>> {
-    let mut map = HashMap::new();
-    for attr in e.attributes() {
+    let mut attrs = e.attributes();
+    let mut map = HashMap::with_capacity(attrs.size_hint().0);
+    for attr in attrs {
         let attr = attr?;
         let key = std::str::from_utf8(attr.key.as_ref())?.to_string();
         let value = std::str::from_utf8(attr.value.as_ref())?.to_string();
