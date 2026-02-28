@@ -13,7 +13,8 @@
     "target",
     "Sample-Media",
     "src",
-    "docs"
+    "docs",
+    "data"
   ],
   "notes" : "",
   "icon" : ""
