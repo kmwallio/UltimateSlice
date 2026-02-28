@@ -54,6 +54,7 @@ Preferences are grouped by category in a sidebar:
   - `Full` (default): renders at project resolution (e.g. 1920×1080).
   - `Half`: halves both dimensions (e.g. 960×540) — 4× fewer pixels, significantly less memory and CPU.
   - `Quarter`: quarters both dimensions (e.g. 480×270) — 16× fewer pixels, best for low-memory devices.
+- Reduced preview quality keeps the same framing as Full quality: the full composed frame is scaled to fit the monitor (no top-left cropping).
 - Takes effect immediately — no restart required.
 - Export always uses full project resolution regardless of this setting.
 - Combine with **Proxy preview mode** for maximum performance on constrained hardware: Quarter-res proxies + Quarter preview quality minimizes both decode and compositing cost.

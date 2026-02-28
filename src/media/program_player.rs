@@ -173,6 +173,8 @@ pub struct ProgramPlayer {
     comp_capsfilter: gst::Element,
     /// Capsfilter on the black background source (must match compositor output).
     black_capsfilter: gst::Element,
+    /// Capsfilter on final monitor output after preview-quality downscaling.
+    preview_capsfilter: gst::Element,
     /// Current preview quality divisor.
     preview_divisor: u32,
     /// Wall-clock instant when playback last entered Playing state.
@@ -311,6 +313,21 @@ impl ProgramPlayer {
         let videoconvert_out = gst::ElementFactory::make("videoconvert")
             .build()
             .map_err(|_| anyhow!("videoconvert not available"))?;
+        let videoscale_out = gst::ElementFactory::make("videoscale")
+            .build()
+            .map_err(|_| anyhow!("videoscale not available"))?;
+        let preview_capsfilter = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", "RGBA")
+                    .field("width", 1920i32)
+                    .field("height", 1080i32)
+                    .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+                    .build(),
+            )
+            .build()
+            .map_err(|_| anyhow!("capsfilter not available"))?;
 
         // Always-on black background so compositor has at least one input.
         let black_src = gst::ElementFactory::make("videotestsrc")
@@ -364,6 +381,8 @@ impl ProgramPlayer {
             &compositor,
             &comp_capsfilter,
             &videoconvert_out,
+            &videoscale_out,
+            &preview_capsfilter,
             &video_sink_bin,
         ])?;
         pipeline.add_many([
@@ -385,11 +404,13 @@ impl ProgramPlayer {
         comp_bg_pad.set_property("zorder", 0u32);
         black_caps.static_pad("src").unwrap().link(&comp_bg_pad)?;
 
-        // Link compositor → capsfilter → videoconvert → display/scope
+        // Link compositor → project caps → convert → scale/output caps → display/scope
         gst::Element::link_many([
             &compositor,
             &comp_capsfilter,
             &videoconvert_out,
+            &videoscale_out,
+            &preview_capsfilter,
             &video_sink_bin,
         ])?;
 
@@ -463,6 +484,7 @@ impl ProgramPlayer {
                 _video_sink_bin: video_sink_bin,
                 comp_capsfilter,
                 black_capsfilter: black_caps,
+                preview_capsfilter,
                 preview_divisor: 1,
                 play_start: None,
             },
@@ -493,29 +515,47 @@ impl ProgramPlayer {
 
     /// Set preview quality (compositor resolution divisor). Takes effect immediately.
     pub fn set_preview_quality(&mut self, divisor: u32) {
-        self.preview_divisor = divisor.max(1);
+        let new_divisor = divisor.max(1);
+        if self.preview_divisor == new_divisor {
+            return;
+        }
+        self.preview_divisor = new_divisor;
         self.apply_compositor_caps();
+        if !self.clips.is_empty() {
+            // Force a clean renegotiation so monitor output reflects new caps
+            // immediately without stale/cropped framing.
+            self.rebuild_pipeline_at(self.timeline_pos_ns);
+        }
     }
 
     /// Re-apply compositor and black-source capsfilter caps from project
     /// dimensions and preview quality divisor.
     fn apply_compositor_caps(&self) {
-        let w = (self.project_width / self.preview_divisor).max(2) as i32;
-        let h = (self.project_height / self.preview_divisor).max(2) as i32;
+        let comp_w = self.project_width.max(2) as i32;
+        let comp_h = self.project_height.max(2) as i32;
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", w)
-            .field("height", h)
+            .field("width", comp_w)
+            .field("height", comp_h)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         self.comp_capsfilter.set_property("caps", &caps);
         let bg_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", w)
-            .field("height", h)
+            .field("width", comp_w)
+            .field("height", comp_h)
             .field("framerate", gst::Fraction::new(30, 1))
             .build();
         self.black_capsfilter.set_property("caps", &bg_caps);
+        let out_w = (self.project_width / self.preview_divisor).max(2) as i32;
+        let out_h = (self.project_height / self.preview_divisor).max(2) as i32;
+        let out_caps = gst::Caps::builder("video/x-raw")
+            .field("format", "RGBA")
+            .field("width", out_w)
+            .field("height", out_h)
+            .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+            .build();
+        self.preview_capsfilter.set_property("caps", &out_caps);
     }
 
     /// Returns (opacity_a, opacity_b) for the two program monitor pictures.

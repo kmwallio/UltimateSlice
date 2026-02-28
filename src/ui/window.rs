@@ -46,6 +46,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     let (mut prog_player_raw, prog_paintable, prog_paintable2) = ProgramPlayer::new()
         .expect("Failed to create program player");
+    {
+        let p = project.borrow();
+        prog_player_raw.set_project_dimensions(p.width, p.height);
+    }
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
     prog_player_raw.set_preview_quality(initial_preview_quality.divisor());
@@ -1063,7 +1067,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
 
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
-            let (clips, media_from_project): (Vec<ProgramClip>, Vec<(String, u64)>) = {
+            let (clips, media_from_project, project_dims): (Vec<ProgramClip>, Vec<(String, u64)>, (u32, u32)) = {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 inspector_view.update(&proj, selected.as_deref());
@@ -1136,7 +1140,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .filter(|c| media_seen.insert(c.source_path.as_str() as *const str))
                     .map(|c| (c.source_path.clone(), c.source_out))
                     .collect();
-                (clips, media)
+                (clips, media, (proj.width, proj.height))
             }; // proj borrow dropped here — safe to call GStreamer below
 
             {
@@ -1157,6 +1161,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 prog_player.borrow().state(),
                 crate::media::player::PlayerState::Playing
             );
+            let (proj_w, proj_h) = project_dims;
+            prog_player.borrow_mut().set_project_dimensions(proj_w, proj_h);
             prog_player.borrow_mut().load_clips(clips);
             // Seek back to the previous position (loads the clip at that point
             // and applies the current color correction values).

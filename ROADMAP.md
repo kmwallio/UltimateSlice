@@ -152,9 +152,10 @@ Tracking docs:
   - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
-  - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
-  - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
-  - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
+   - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
+   - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
+   - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
+   - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
   - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
   - [x] ~~Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff~~ *(superseded by compositor rewrite — full rebuild at clip boundaries)*
