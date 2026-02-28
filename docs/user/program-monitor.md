@@ -27,6 +27,12 @@ or outside the export frame.
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
 
+## Docked Resize
+
+- When the Program Monitor is docked, you can drag the splitter between the preview and scopes area to resize how much space each gets.
+- If scopes are hidden, the scopes pane is fully collapsed (the splitter/pane disappears).
+- The docked splitter position is saved and restored on next launch.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |

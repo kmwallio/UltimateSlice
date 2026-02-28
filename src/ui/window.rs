@@ -613,6 +613,33 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     scopes_revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
     scopes_revealer.set_child(Some(&scopes_widget));
     scopes_revealer.set_reveal_child(false);
+    let docked_scopes_paned = Paned::new(Orientation::Vertical);
+    docked_scopes_paned.set_hexpand(true);
+    docked_scopes_paned.set_vexpand(true);
+    docked_scopes_paned.set_resize_start_child(true);
+    docked_scopes_paned.set_resize_end_child(true);
+    docked_scopes_paned.set_shrink_end_child(true);
+    docked_scopes_paned.set_start_child(Some(&prog_monitor_widget));
+    docked_scopes_paned.set_end_child(Option::<&gtk::Widget>::None);
+    {
+        let state = monitor_state.borrow().clone();
+        docked_scopes_paned.set_position(state.docked_split_pos.max(160));
+    }
+    {
+        let monitor_state = monitor_state.clone();
+        let monitor_popped = monitor_popped.clone();
+        docked_scopes_paned.connect_position_notify(move |p| {
+            if monitor_popped.get() {
+                return;
+            }
+            let pos = p.position().max(160);
+            let mut state = monitor_state.borrow_mut();
+            if state.docked_split_pos != pos {
+                state.docked_split_pos = pos;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+        });
+    }
 
     // 33 ms poll timer (~30 FPS): smoother playhead/timeline updates and
     // tighter clip-boundary handoff timing.
@@ -703,26 +730,45 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
-    prog_monitor_host.append(&prog_monitor_widget);
-    // Scopes toggle button — sits between the program monitor and the scopes panel.
+    // Scopes toggle for the docked monitor/scopes split.
     {
         let scopes_btn = gtk::ToggleButton::with_label("▾ Scopes");
         scopes_btn.add_css_class("flat");
         scopes_btn.set_halign(gtk::Align::Start);
         scopes_btn.set_margin_start(4);
         let rev = scopes_revealer.clone();
+        let docked_paned = docked_scopes_paned.clone();
+        let monitor_state = monitor_state.clone();
         scopes_btn.connect_toggled(move |b| {
-            rev.set_reveal_child(b.is_active());
+            if b.is_active() {
+                if docked_paned.end_child().is_none() {
+                    docked_paned.set_end_child(Some(&rev));
+                    let pos = monitor_state.borrow().docked_split_pos.max(160);
+                    docked_paned.set_position(pos);
+                }
+                rev.set_reveal_child(true);
+            } else {
+                let pos = docked_paned.position().max(160);
+                {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.docked_split_pos != pos {
+                        state.docked_split_pos = pos;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+                rev.set_reveal_child(false);
+                docked_paned.set_end_child(Option::<&gtk::Widget>::None);
+            }
         });
         prog_monitor_host.append(&scopes_btn);
     }
-    prog_monitor_host.append(&scopes_revealer);
+    prog_monitor_host.append(&docked_scopes_paned);
     top_paned.set_end_child(Some(&prog_monitor_host));
 
     // Program monitor pop-out/dock toggle
     *on_toggle_popout_impl.borrow_mut() = Some({
         let app = app.clone();
-        let host = prog_monitor_host.clone();
+        let docked_paned = docked_scopes_paned.clone();
         let monitor = prog_monitor_widget.clone();
         let pop_cell = popout_window_cell.clone();
         let popped = monitor_popped.clone();
@@ -738,11 +784,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .default_height(state.height.max(180))
                     .build();
 
-                host.remove(&monitor);
+                docked_paned.set_start_child(Option::<&gtk::Widget>::None);
                 pop_win.set_child(Some(&monitor));
                 scopes_rev.set_vexpand(true);
 
-                let host_c = host.clone();
+                let docked_paned_c = docked_paned.clone();
                 let monitor_c = monitor.clone();
                 let pop_cell_c = pop_cell.clone();
                 let popped_c = popped.clone();
@@ -756,7 +802,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     crate::ui_state::save_program_monitor_state(&state);
                     w.set_child(Option::<&gtk::Widget>::None);
                     if monitor_c.parent().is_none() {
-                        host_c.append(&monitor_c);
+                        docked_paned_c.set_start_child(Some(&monitor_c));
                     }
                     scopes_rev_c.set_vexpand(false);
                     popped_c.set(false);

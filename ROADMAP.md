@@ -142,6 +142,7 @@ Tracking docs:
   - Timeline seek (click ruler) also seeks the program monitor
   - Clips reload automatically on every project change
 - [x] Program-monitor playback priority mode in Preferences (`Smooth` / `Balanced` / `Accurate`)
+- [x] Docked Program Monitor and scopes are resizable via draggable splitter (position persisted; pane collapses fully when scopes are hidden)
 - [ ] Detachable Program Monitor window (pop-out preview)
   - [x] Pop out Program Monitor into a separate top-level window for dual-display workflows
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
