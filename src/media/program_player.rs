@@ -1335,6 +1335,11 @@ impl ProgramPlayer {
             let clip = &self.clips[slot.clip_idx];
             let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos_ns);
         }
+        // Wait for decoders to decode the target frame and push it through
+        // the effects chain to the compositor.  The flush seek clears the
+        // compositor's input buffers; without this wait the Playing pulse
+        // below would fire before new frames arrive, producing a black frame.
+        self.wait_for_paused_preroll();
         // Playing pulse: per-decoder FLUSH events stop at the compositor's
         // sink pads and are NOT forwarded downstream.  The display sink stays
         // prerolled with its old frame.  Briefly entering Playing starts the
@@ -1462,10 +1467,26 @@ impl ProgramPlayer {
     /// Tear down all active decoder slots (decoders, effects, pads).
     ///
     /// Order is critical to avoid both races and hangs:
+    /// 0. Flush compositor/audiomixer sink pads (unblocks streaming threads).
     /// 1. Remove elements from the pipeline (pads become unlinked).
     /// 2. Transition removed elements to Null to stop residual streaming work.
     /// 3. Release compositor/audiomixer request pads after branch shutdown.
     fn teardown_slots(&mut self) {
+        // Pre-flush: send FlushStart to all compositor/audiomixer sink pads
+        // to unblock aggregation.  Streaming threads may be blocked in
+        // downstream pushes, holding STREAM_LOCKs that set_state(Null) needs
+        // for pad deactivation.  Flushing releases those locks first.
+        // (We cannot simply reverse the remove/Null order — setting Null while
+        // branches are still attached caused a different hang; see CHANGELOG.)
+        for slot in &self.slots {
+            if let Some(ref pad) = slot.compositor_pad {
+                let _ = pad.send_event(gst::event::FlushStart::new());
+            }
+            if let Some(ref pad) = slot.audio_mixer_pad {
+                let _ = pad.send_event(gst::event::FlushStart::new());
+            }
+        }
+
         for slot in self.slots.drain(..) {
             // 1. Detach branch elements from the pipeline.
             self.pipeline.remove(&slot.decoder).ok();

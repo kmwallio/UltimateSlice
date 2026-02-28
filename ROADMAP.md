@@ -285,6 +285,19 @@ Tracking docs:
 - [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
 - [ ] Optical Flow slow-motion (AI frame interpolation)
 
+### Script-to-Timeline (Create Project from Script & Clips)
+- [ ] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order
+- [ ] **Speech-to-text transcription**: run STT (e.g. Whisper via `whisper-rs` or subprocess) on every imported clip in the background; produce a timestamped transcript per clip
+- [ ] **Transcript-to-script alignment**: use fuzzy text matching (e.g. Smith-Waterman or token-level diff) to align each clip's transcript against the full script; score every clip against every scene and pick the best-fit placement
+- [ ] **Dialogue-aware ordering**: clips are placed on the timeline in the order their best-matching script position falls, so the assembled cut follows the screenplay beat-for-beat
+- [ ] **Sub-clip trimming from transcript**: if a clip's transcript spans multiple scenes, split the clip at the scene boundary timestamps provided by the STT alignment
+- [ ] **Auto-assembly wizard**: multi-step dialog — (1) load script, (2) import clips folder, (3) background STT + alignment pass with progress bar, (4) review/confirm clip↔scene mapping, (5) generate timeline
+- [ ] **Timeline population**: clips inserted in script scene order at correct timeline positions with scene-heading title overlays
+- [ ] **Unmatched clips bin**: clips whose transcript could not be confidently aligned appear in a dedicated "Unassigned" library group for manual placement
+- [ ] **Confidence indicators**: low-confidence matches shown with a warning badge on the clip in the wizard review step
+- [ ] **Re-order by script**: right-click timeline command to re-run alignment and re-sequence existing clips against a newly loaded or updated script
+- [ ] Persist script path, scene mapping, and transcript cache in FCPXML (`us:script-path`, `us:scene-id`, `us:transcript-cache` attributes)
+
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks

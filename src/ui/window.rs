@@ -1316,9 +1316,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         pp.seek(prev_pos);
                         pp.play();
                     } else {
-                        // Avoid synchronous paused seeks during project-load callbacks;
-                        // user-initiated seek/scrub will position preview on demand.
-                        pp.timeline_pos_ns = prev_pos.min(pp.timeline_dur_ns);
+                        // Rebuild the pipeline at the previous position so the
+                        // program monitor shows the correct composited frame.
+                        // Without this, load_clips() leaves the pipeline in Ready
+                        // (no decoder slots) and the monitor stays black.
+                        let pos = prev_pos.min(pp.timeline_dur_ns);
+                        pp.seek(pos);
                     }
                 }
             });
