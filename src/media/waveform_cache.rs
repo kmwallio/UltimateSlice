@@ -1,18 +1,18 @@
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_app::AppSink;
 /// Asynchronous audio waveform peak cache.
 ///
 /// Background threads decode audio via GStreamer and compute normalized
 /// peak amplitude at PEAKS_PER_SEC resolution. Main thread draws from these peaks.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
-use gstreamer as gst;
-use gstreamer::prelude::*;
-use gstreamer_app::AppSink;
 
 /// Number of peak samples stored per second of audio (time-axis resolution).
 pub const PEAKS_PER_SEC: f64 = 100.0; // one peak per 10 ms
 
 /// Maximum number of simultaneous waveform extraction threads.
-const MAX_CONCURRENT: usize = 1;
+const MAX_CONCURRENT: usize = 4;
 
 struct RawPeaks {
     key: String,
@@ -89,7 +89,7 @@ impl WaveformCache {
             return None;
         }
 
-        let in_sec  = source_in_ns  as f64 / 1_000_000_000.0;
+        let in_sec = source_in_ns as f64 / 1_000_000_000.0;
         let out_sec = source_out_ns as f64 / 1_000_000_000.0;
         let dur_sec = (out_sec - in_sec).max(0.001);
 
@@ -98,13 +98,15 @@ impl WaveformCache {
         let mut result = Vec::with_capacity(pixel_width);
         for px in 0..pixel_width {
             let start_peak = (in_sec * PEAKS_PER_SEC + px as f64 * peaks_per_px) as usize;
-            let end_peak   = (in_sec * PEAKS_PER_SEC + (px + 1) as f64 * peaks_per_px) as usize;
-            let end_peak   = end_peak.max(start_peak + 1);
+            let end_peak = (in_sec * PEAKS_PER_SEC + (px + 1) as f64 * peaks_per_px) as usize;
+            let end_peak = end_peak.max(start_peak + 1);
 
             let mut max = 0.0f32;
             for i in start_peak..end_peak {
                 if let Some(&v) = all.get(i) {
-                    if v > max { max = v; }
+                    if v > max {
+                        max = v;
+                    }
                 }
             }
             result.push(max);
@@ -114,7 +116,9 @@ impl WaveformCache {
 
     /// Spawn pending extraction threads up to the concurrency limit.
     fn flush_pending(&mut self) {
-        if self.paused { return; }
+        if self.paused {
+            return;
+        }
         while self.in_flight < MAX_CONCURRENT {
             if let Some(key) = self.pending.pop_front() {
                 self.in_flight += 1;
@@ -143,11 +147,14 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
     let guard = super::PipelineGuard(gst::Pipeline::new());
     let pipeline = &guard.0;
 
-    let src  = gst::ElementFactory::make("uridecodebin").property("uri", &uri).build().ok()?;
+    let src = gst::ElementFactory::make("uridecodebin")
+        .property("uri", &uri)
+        .build()
+        .ok()?;
     let conv = gst::ElementFactory::make("audioconvert").build().ok()?;
     let resample = gst::ElementFactory::make("audioresample").build().ok()?;
     let capsf = gst::ElementFactory::make("capsfilter").build().ok()?;
-    let sink  = gst::ElementFactory::make("appsink").build().ok()?;
+    let sink = gst::ElementFactory::make("appsink").build().ok()?;
 
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
@@ -168,7 +175,9 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
         });
     }
 
-    pipeline.add_many([&src, &conv, &resample, &capsf, &sink]).ok()?;
+    pipeline
+        .add_many([&src, &conv, &resample, &capsf, &sink])
+        .ok()?;
     gst::Element::link_many([&conv, &resample, &capsf, &sink]).ok()?;
 
     // uridecodebin pads are dynamic — connect when an audio pad appears
@@ -179,7 +188,9 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
             let name = caps.structure(0).map(|s| s.name()).unwrap_or_default();
             if name.starts_with("audio/") {
                 let sink_pad = conv.static_pad("sink").unwrap();
-                if sink_pad.is_linked() { return; }
+                if sink_pad.is_linked() {
+                    return;
+                }
                 let _ = pad.link(&sink_pad);
             }
         });
@@ -207,7 +218,10 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
             let mut i = 0;
             while i < floats.len() {
                 let end = (i + chunk).min(floats.len());
-                let peak = floats[i..end].iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let peak = floats[i..end]
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(0.0f32, f32::max);
                 samples.push(peak);
                 i = end;
             }
@@ -223,17 +237,23 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
         }
 
         // If no sample came in and pipeline reached EOS state, stop
-        if appsink.is_eos() { break; }
+        if appsink.is_eos() {
+            break;
+        }
     }
 
     // PipelineGuard ensures pipeline is set to Null when this function returns.
 
-    if samples.is_empty() { return None; }
+    if samples.is_empty() {
+        return None;
+    }
 
     // Normalize to 0..=1
     let max = samples.iter().cloned().fold(0.0f32, f32::max);
     if max > 0.0 {
-        for v in &mut samples { *v /= max; }
+        for v in &mut samples {
+            *v /= max;
+        }
     }
 
     Some(samples)

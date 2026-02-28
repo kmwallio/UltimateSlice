@@ -1,16 +1,16 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::mpsc;
 use anyhow::Result;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use gtk4::cairo;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::mpsc;
 
 const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
 
 /// Maximum number of simultaneous thumbnail extraction threads.
-const MAX_CONCURRENT: usize = 2;
+const MAX_CONCURRENT: usize = 4;
 
 /// A loaded thumbnail ready to draw.
 struct RawFrame {
@@ -70,7 +70,8 @@ impl ThumbnailCache {
         }
         if !self.loading.contains(&key) {
             self.loading.insert(key.clone());
-            self.pending.push_back((key, source_path.to_string(), time_ns));
+            self.pending
+                .push_back((key, source_path.to_string(), time_ns));
             self.flush_pending();
         }
         false
@@ -83,7 +84,9 @@ impl ThumbnailCache {
         while let Ok(frame) = self.rx.try_recv() {
             self.loading.remove(&frame.key);
             self.in_flight = self.in_flight.saturating_sub(1);
-            if frame.data.is_empty() { continue; }
+            if frame.data.is_empty() {
+                continue;
+            }
             if let Ok(surf) = rgba_to_surface(&frame.data) {
                 self.surfaces.insert(frame.key, surf);
                 dirty = true;
@@ -100,7 +103,9 @@ impl ThumbnailCache {
 
     /// Spawn pending extraction threads up to the concurrency limit.
     fn flush_pending(&mut self) {
-        if self.paused { return; }
+        if self.paused {
+            return;
+        }
         while self.in_flight < MAX_CONCURRENT {
             if let Some((key, path, time_ns)) = self.pending.pop_front() {
                 self.in_flight += 1;
@@ -152,7 +157,10 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
         .downcast::<AppSink>()
         .map_err(|_| anyhow::anyhow!("not appsink"))?;
 
-    if let Some(dec) = pipeline.by_name("dec").and_then(|e| e.dynamic_cast::<gst::Bin>().ok()) {
+    if let Some(dec) = pipeline
+        .by_name("dec")
+        .and_then(|e| e.dynamic_cast::<gst::Bin>().ok())
+    {
         dec.connect_element_added(|_, element| {
             tune_decoder_threads(element);
         });
@@ -172,10 +180,13 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
 
     let _ = pipeline.set_state(gst::State::Playing);
 
-    let sample = appsink.pull_sample()
+    let sample = appsink
+        .pull_sample()
         .map_err(|_| anyhow::anyhow!("pull_sample failed"))?;
 
-    let buffer = sample.buffer().ok_or_else(|| anyhow::anyhow!("no buffer"))?;
+    let buffer = sample
+        .buffer()
+        .ok_or_else(|| anyhow::anyhow!("no buffer"))?;
     let map = buffer.map_readable()?;
     let data = map.as_slice().to_vec();
     drop(map);
@@ -205,7 +216,9 @@ fn rgba_to_surface(rgba: &[u8]) -> Result<cairo::ImageSurface> {
         .map_err(|_| anyhow::anyhow!("surface create failed"))?;
 
     {
-        let mut buf = surface.data().map_err(|_| anyhow::anyhow!("surface data error"))?;
+        let mut buf = surface
+            .data()
+            .map_err(|_| anyhow::anyhow!("surface data error"))?;
         for row in 0..THUMB_H as usize {
             let src_row = row * THUMB_W as usize * 4;
             let dst_row = row * stride;
@@ -213,9 +226,9 @@ fn rgba_to_surface(rgba: &[u8]) -> Result<cairo::ImageSurface> {
                 let s = src_row + col * 4;
                 let d = dst_row + col * 4;
                 if s + 3 < rgba.len() && d + 3 < buf.len() {
-                    buf[d]     = rgba[s + 2]; // B
+                    buf[d] = rgba[s + 2]; // B
                     buf[d + 1] = rgba[s + 1]; // G
-                    buf[d + 2] = rgba[s];     // R
+                    buf[d + 2] = rgba[s]; // R
                     buf[d + 3] = rgba[s + 3]; // A
                 }
             }
