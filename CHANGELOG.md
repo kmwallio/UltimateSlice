@@ -22,6 +22,7 @@ All notable project changes and progress should be recorded here.
 - **Preview quality preference**: New "Preview quality" setting in Preferences → Playback scales down the compositor output resolution (Full / Half / Quarter) for smoother preview playback on low-memory devices. Quarter mode renders at 480×270 instead of 1920×1080, using 16× less memory per frame. Takes effect immediately without restart. Also exposed via `set_preview_quality` MCP tool and included in `get_preferences` response.
 - **MCP socket transport**: UltimateSlice can now listen on a Unix domain socket (`$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`) so AI agents can connect to an already-running instance. Enabled via Preferences → Integration → Enable MCP socket server. The toggle takes effect immediately without restarting.
 - **`--mcp-attach` CLI flag**: A built-in stdio-to-socket proxy that bridges stdin/stdout to the running instance's MCP socket, letting standard MCP clients (which expect stdio) connect via `.mcp.json` `ultimate-slice-attach` entry.
+- **Auto preview quality mode**: Preview quality now supports an `Auto` setting that adapts Program Monitor compositor resolution to the current monitor canvas size; manual `Full/Half/Quarter` modes remain available.
 
 ### Changed
 - **Scopes expand when program monitor is popped out**: The vectorscope, histogram, waveform, and RGB parade panels now expand to fill the available vertical space when the program monitor preview is detached into a separate window. When docked, the scopes retain their compact size below the video preview.

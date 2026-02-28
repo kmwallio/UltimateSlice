@@ -576,6 +576,10 @@ impl ProgramPlayer {
         &self.state
     }
 
+    pub fn preview_divisor(&self) -> u32 {
+        self.preview_divisor
+    }
+
     pub fn current_clip_transform(&self) -> Option<crate::ui::program_monitor::ClipTransform> {
         let c = self.clips.get(self.current_idx?)?;
         Some(crate::ui::program_monitor::ClipTransform {

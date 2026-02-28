@@ -484,11 +484,11 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_preview_quality",
-            "description": "Set compositor preview quality. Lower quality reduces memory and CPU usage for smoother playback on low-end hardware. Export always uses full project resolution.",
+            "description": "Set compositor preview quality. Lower quality reduces memory and CPU usage for smoother playback on low-end hardware. Use 'auto' to adapt quality to current Program Monitor size. Export always uses full project resolution.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "quality": { "type": "string", "enum": ["full", "half", "quarter"], "description": "Preview quality level. 'half' halves both dimensions (4x less pixels), 'quarter' quarters them (16x less pixels)." }
+                    "quality": { "type": "string", "enum": ["auto", "full", "half", "quarter"], "description": "Preview quality level. 'auto' adapts to monitor size, 'half' halves both dimensions (4x less pixels), 'quarter' quarters them (16x less pixels)." }
                 },
                 "required": ["quality"]
             }

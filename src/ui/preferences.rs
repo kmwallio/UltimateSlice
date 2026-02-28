@@ -98,12 +98,13 @@ pub fn show_preferences_dialog(
     let pq_label = Label::new(Some("Preview quality"));
     pq_label.set_halign(gtk::Align::Start);
     let preview_quality = gtk4::ComboBoxText::new();
+    preview_quality.append(Some("auto"), "Auto (adapt to monitor size)");
     preview_quality.append(Some("full"), "Full (project resolution)");
     preview_quality.append(Some("half"), "Half (÷2 — lower memory)");
     preview_quality.append(Some("quarter"), "Quarter (÷4 — lowest memory)");
     preview_quality.set_active_id(Some(current.preview_quality.as_str()));
     preview_quality.set_halign(gtk::Align::Start);
-    let pq_hint = Label::new(Some("Scales the compositor output for preview playback. Lower settings reduce memory and CPU usage. Export always uses full resolution."));
+    let pq_hint = Label::new(Some("Auto adapts quality to current Program Monitor size. Manual levels scale the compositor output for preview playback. Export always uses full resolution."));
     pq_hint.set_halign(gtk::Align::Start);
     pq_hint.add_css_class("dim-label");
     pq_hint.set_wrap(true);

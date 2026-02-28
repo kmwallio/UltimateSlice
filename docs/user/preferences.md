@@ -51,6 +51,7 @@ Preferences are grouped by category in a sidebar:
 ## Preview Quality (Playback)
 
 - **Preview quality** scales down the compositor output resolution for preview playback:
+  - `Auto`: adapts quality to the current Program Monitor canvas size.
   - `Full` (default): renders at project resolution (e.g. 1920×1080).
   - `Half`: halves both dimensions (e.g. 960×540) — 4× fewer pixels, significantly less memory and CPU.
   - `Quarter`: quarters both dimensions (e.g. 480×270) — 16× fewer pixels, best for low-memory devices.
@@ -61,7 +62,7 @@ Preferences are grouped by category in a sidebar:
 - The setting is persisted across launches.
 - MCP automation:
   - `get_preferences` returns `preview_quality`.
-  - `set_preview_quality` updates the quality level.
+  - `set_preview_quality` updates the quality level (`auto`, `full`, `half`, `quarter`).
 
 ## Saving
 

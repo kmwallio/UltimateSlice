@@ -13,6 +13,42 @@ use crate::media::program_player::{ProgramPlayer, ProgramClip};
 use crate::ui::{media_browser, preview, toolbar, inspector, program_monitor, preferences};
 use crate::ui::timeline::{TimelineState, build_timeline_panel};
 
+fn auto_preview_divisor(
+    project_width: u32,
+    project_height: u32,
+    canvas_width: i32,
+    canvas_height: i32,
+    current_divisor: u32,
+) -> u32 {
+    let cw = canvas_width.max(1) as f64;
+    let ch = canvas_height.max(1) as f64;
+    let pw = project_width.max(2) as f64;
+    let ph = project_height.max(2) as f64;
+    let ratio = (pw / cw).max(ph / ch);
+    let cur = match current_divisor {
+        1 | 2 | 4 => current_divisor,
+        _ => 1,
+    };
+    match cur {
+        1 => {
+            if ratio >= 1.9 { 2 } else { 1 }
+        }
+        2 => {
+            if ratio >= 3.6 {
+                4
+            } else if ratio <= 1.35 {
+                1
+            } else {
+                2
+            }
+        }
+        4 => {
+            if ratio <= 2.4 { 2 } else { 4 }
+        }
+        _ => 1,
+    }
+}
+
 /// Build and show the main application window.
 pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let window = ApplicationWindow::builder()
@@ -593,9 +629,36 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let scopes_rev = scopes_revealer.clone();
         let scopes_st  = scopes_state.clone();
         let speed_lbl = speed_label.clone();
+        let preferences_state = preferences_state.clone();
+        let project = project.clone();
+        let prog_canvas_frame = prog_canvas_frame.clone();
+        let last_auto_check_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_auto_check_us_c = last_auto_check_us.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
+                let now_us = glib::monotonic_time();
+                if now_us - last_auto_check_us_c.get() >= 250_000 {
+                    last_auto_check_us_c.set(now_us);
+                    let preview_quality = preferences_state.borrow().preview_quality.clone();
+                    let divisor = match preview_quality {
+                        crate::ui_state::PreviewQuality::Auto => {
+                            let (pw, ph) = {
+                                let proj = project.borrow();
+                                (proj.width, proj.height)
+                            };
+                            auto_preview_divisor(
+                                pw,
+                                ph,
+                                prog_canvas_frame.width(),
+                                prog_canvas_frame.height(),
+                                player.preview_divisor(),
+                            )
+                        }
+                        _ => preview_quality.divisor(),
+                    };
+                    player.set_preview_quality(divisor);
+                }
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
                 let sf = if scopes_rev.reveals_child() { player.try_pull_scope_frame() } else { None };

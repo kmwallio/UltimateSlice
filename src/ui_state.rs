@@ -99,6 +99,7 @@ impl GskRenderer {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewQuality {
+    Auto,
     Full,
     Half,
     Quarter,
@@ -111,6 +112,7 @@ impl Default for PreviewQuality {
 impl PreviewQuality {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Full => "full",
             Self::Half => "half",
             Self::Quarter => "quarter",
@@ -119,6 +121,7 @@ impl PreviewQuality {
 
     pub fn from_str(value: &str) -> Self {
         match value {
+            "auto" => Self::Auto,
             "half" => Self::Half,
             "quarter" => Self::Quarter,
             _ => Self::Full,
@@ -128,6 +131,7 @@ impl PreviewQuality {
     /// Divisor applied to project width/height for the compositor output.
     pub fn divisor(&self) -> u32 {
         match self {
+            Self::Auto => 1,
             Self::Full => 1,
             Self::Half => 2,
             Self::Quarter => 4,
