@@ -2000,6 +2000,20 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Paused);
         self.wait_for_video_links();
 
+        // If any decoder's video pad didn't link in time, send EOS on its
+        // compositor/audiomixer pads so the aggregator doesn't wait
+        // indefinitely for buffers that will never arrive.
+        for slot in &self.slots {
+            if !slot.video_linked.load(Ordering::Relaxed) {
+                if let Some(ref pad) = slot.compositor_pad {
+                    let _ = pad.send_event(gst::event::Eos::new());
+                }
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    let _ = pad.send_event(gst::event::Eos::new());
+                }
+            }
+        }
+
         // Wait for pipeline to preroll so seeks are accepted.
         // When paused (scrubbing), always wait — we need a decoded frame for
         // the preview.  When playing, respect the playback priority to avoid
@@ -2014,17 +2028,43 @@ impl ProgramPlayer {
         }
 
         // Seek each decoder to its source position with stop boundary.
+        let seek_flags = self.clip_seek_flags();
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             if was_playing {
-                let _ = Self::seek_slot_decoder_with_retry(
+                let ok = Self::seek_slot_decoder_with_retry(
                     slot,
                     clip,
                     timeline_pos,
-                    self.clip_seek_flags(),
+                    seek_flags,
                 );
+                // A failed seek leaves the decoder in a flushing state where
+                // it will never produce a buffer.  Send EOS on its aggregator
+                // pads so the compositor / audiomixer don't stall.
+                if !ok {
+                    if let Some(ref pad) = slot.compositor_pad {
+                        let _ = pad.send_event(gst::event::Eos::new());
+                    }
+                    if let Some(ref pad) = slot.audio_mixer_pad {
+                        let _ = pad.send_event(gst::event::Eos::new());
+                    }
+                }
             } else {
                 let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+            }
+        }
+
+        // Post-seek settle for the playing path.
+        // The flush seeks above reset each decoder's internal preroll state
+        // (the multiqueue inside uridecodebin needs a new buffer on every
+        // pad before it considers itself prerolled again).  Waiting here
+        // ensures post-seek frames have propagated through the 18-element
+        // effects chains to the compositor *before* the clock starts.
+        // Without this the compositor enters Playing with empty input pads
+        // and stalls — displaying a frozen frame.
+        if was_playing {
+            for slot in &self.slots {
+                let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
             }
         }
 
