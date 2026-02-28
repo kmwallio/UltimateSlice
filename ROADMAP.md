@@ -125,7 +125,7 @@ Tracking docs:
 - [x] Cross-dissolve transitions between clips
 - [x] Ripple edit mode (Trim In/Out)
 - [x] Roll edit mode
-- [ ] Slip/slide edit modes
+- [x] Slip/slide edit modes
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export

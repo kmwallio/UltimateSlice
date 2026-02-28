@@ -218,6 +218,96 @@ impl EditCommand for RippleTrimInCommand {
     fn description(&self) -> &str { "Ripple trim in-point" }
 }
 
+/// Slip edit: shift source_in and source_out equally, keeping timeline position and duration fixed.
+pub struct SlipClipCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_source_in: u64,
+    pub old_source_out: u64,
+    pub new_source_in: u64,
+    pub new_source_out: u64,
+}
+
+impl EditCommand for SlipClipCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.source_in = self.new_source_in;
+                clip.source_out = self.new_source_out;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.source_in = self.old_source_in;
+                clip.source_out = self.old_source_out;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Slip clip" }
+}
+
+/// Slide edit: move a clip on the timeline while adjusting neighboring clips to compensate.
+pub struct SlideClipCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_start: u64,
+    pub new_start: u64,
+    pub left_clip_id: Option<String>,
+    pub old_left_out: Option<u64>,
+    pub new_left_out: Option<u64>,
+    pub right_clip_id: Option<String>,
+    pub old_right_in: Option<u64>,
+    pub new_right_in: Option<u64>,
+    pub old_right_start: Option<u64>,
+    pub new_right_start: Option<u64>,
+}
+
+impl EditCommand for SlideClipCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.timeline_start = self.new_start;
+            }
+            if let (Some(ref lid), Some(new_out)) = (&self.left_clip_id, self.new_left_out) {
+                if let Some(left) = track.clips.iter_mut().find(|c| &c.id == lid) {
+                    left.source_out = new_out;
+                }
+            }
+            if let (Some(ref rid), Some(new_in), Some(new_rs)) = (&self.right_clip_id, self.new_right_in, self.new_right_start) {
+                if let Some(right) = track.clips.iter_mut().find(|c| &c.id == rid) {
+                    right.source_in = new_in;
+                    right.timeline_start = new_rs;
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.timeline_start = self.old_start;
+            }
+            if let (Some(ref lid), Some(old_out)) = (&self.left_clip_id, self.old_left_out) {
+                if let Some(left) = track.clips.iter_mut().find(|c| &c.id == lid) {
+                    left.source_out = old_out;
+                }
+            }
+            if let (Some(ref rid), Some(old_in), Some(old_rs)) = (&self.right_clip_id, self.old_right_in, self.old_right_start) {
+                if let Some(right) = track.clips.iter_mut().find(|c| &c.id == rid) {
+                    right.source_in = old_in;
+                    right.timeline_start = old_rs;
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str { "Slide clip" }
+}
+
 /// Roll edit: adjust the cut point between two clips (left out-point, right in-point/start)
 /// Total duration remains constant.
 pub struct RollEditCommand {

@@ -70,6 +70,16 @@ pub enum McpCommand {
         opacity: f64,
         reply:   SyncSender<Value>,
     },
+    SlipClip {
+        clip_id:  String,
+        delta_ns: i64,
+        reply:    SyncSender<Value>,
+    },
+    SlideClip {
+        clip_id:  String,
+        delta_ns: i64,
+        reply:    SyncSender<Value>,
+    },
     SetGskRenderer { renderer: String, reply: SyncSender<Value> },
     SetPreviewQuality { quality: String, reply: SyncSender<Value> },
 }

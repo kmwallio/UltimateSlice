@@ -5,6 +5,13 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **Slip/Slide edit modes**: New Slip and Slide timeline tools completing the professional edit mode suite alongside Ripple and Roll.
+  - **Slip** (`Y`): Drag a clip to shift its source content window (source in/out) without moving the clip on the timeline or changing its duration. Toolbar button: ↔ Slip.
+  - **Slide** (`U`): Drag a clip to reposition it on the timeline while neighboring clips' edit points adjust to compensate — total timeline duration stays constant. Toolbar button: ⇔ Slide.
+  - Both modes support full undo/redo via `SlipClipCommand` and `SlideClipCommand`.
+  - MCP tools: `slip_clip` (shift source window by delta) and `slide_clip` (move clip by delta, adjusting neighbors).
+  - Tool indicator overlay on timeline (yellow text) when Slip or Slide mode is active.
+  - Keyboard shortcut overlay updated with all edit tool shortcuts (R, E, Y, U).
 - **GTK Renderer preference**: New "GTK renderer" setting in Preferences → Playback lets users choose between Auto, Cairo (Software), OpenGL, and Vulkan backends. Cairo mode uses zero GPU memory, resolving `VK_ERROR_OUT_OF_DEVICE_MEMORY` errors on devices with limited GPU memory. Requires application restart. Also exposed via `set_gsk_renderer` MCP tool and included in `get_preferences` response.
 - **Preview quality preference**: New "Preview quality" setting in Preferences → Playback scales down the compositor output resolution (Full / Half / Quarter) for smoother preview playback on low-memory devices. Quarter mode renders at 480×270 instead of 1920×1080, using 16× less memory per frame. Takes effect immediately without restart. Also exposed via `set_preview_quality` MCP tool and included in `get_preferences` response.
 - **MCP socket transport**: UltimateSlice can now listen on a Unix domain socket (`$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`) so AI agents can connect to an already-running instance. Enabled via Preferences → Integration → Enable MCP socket server. The toggle takes effect immediately without restarting.

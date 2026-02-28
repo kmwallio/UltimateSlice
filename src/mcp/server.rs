@@ -287,6 +287,30 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "slip_clip",
+            "description": "Slip a clip: shift its source window (source_in and source_out) by a delta without changing timeline position or duration.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":  { "type": "string",  "description": "Clip id to slip." },
+                    "delta_ns": { "type": "integer", "description": "Nanoseconds to shift the source window. Positive shifts forward (later source content), negative shifts backward." }
+                },
+                "required": ["clip_id", "delta_ns"]
+            }
+        },
+        {
+            "name": "slide_clip",
+            "description": "Slide a clip: move its timeline position by a delta while adjusting neighboring clips to compensate.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":  { "type": "string",  "description": "Clip id to slide." },
+                    "delta_ns": { "type": "integer", "description": "Nanoseconds to slide on the timeline. Positive slides right, negative slides left." }
+                },
+                "required": ["clip_id", "delta_ns"]
+            }
+        },
+        {
             "name": "set_clip_color",
             "description": "Set color correction and denoise/sharpness effects for a clip by id.",
             "inputSchema": {
@@ -525,6 +549,18 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
             source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "slip_clip" => McpCommand::SlipClip {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            delta_ns: args["delta_ns"].as_i64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "slide_clip" => McpCommand::SlideClip {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            delta_ns: args["delta_ns"].as_i64().unwrap_or(0),
             reply: tx,
         },
 

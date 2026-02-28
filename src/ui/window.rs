@@ -1613,6 +1613,65 @@ fn handle_mcp_command(
             if found { on_project_changed(); }
         }
 
+        McpCommand::SlipClip { clip_id, delta_ns, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            for track in proj.tracks.iter_mut() {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                    let new_in = (clip.source_in as i64 + delta_ns).max(0) as u64;
+                    let new_out = (clip.source_out as i64 + delta_ns).max(new_in as i64 + 1_000_000) as u64;
+                    clip.source_in = new_in;
+                    clip.source_out = new_out;
+                    proj.dirty = true;
+                    found = true;
+                    break;
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SlideClip { clip_id, delta_ns, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            for track in proj.tracks.iter_mut() {
+                let clip_idx = track.clips.iter().position(|c| c.id == clip_id);
+                if let Some(idx) = clip_idx {
+                    let mut sorted_indices: Vec<usize> = (0..track.clips.len()).collect();
+                    sorted_indices.sort_by_key(|&i| track.clips[i].timeline_start);
+                    let sorted_pos = sorted_indices.iter().position(|&i| i == idx);
+                    let left_idx = sorted_pos.and_then(|p| if p > 0 { Some(sorted_indices[p - 1]) } else { None });
+                    let right_idx = sorted_pos.and_then(|p| sorted_indices.get(p + 1).copied());
+                    // Validate neighbors
+                    let left_ok = left_idx.map(|li| {
+                        let new_out = (track.clips[li].source_out as i64 + delta_ns).max(0) as u64;
+                        new_out > track.clips[li].source_in + 1_000_000
+                    }).unwrap_or(true);
+                    let right_ok = right_idx.map(|ri| {
+                        let new_in = (track.clips[ri].source_in as i64 + delta_ns).max(0) as u64;
+                        new_in + 1_000_000 < track.clips[ri].source_out
+                    }).unwrap_or(true);
+                    if left_ok && right_ok {
+                        track.clips[idx].timeline_start = (track.clips[idx].timeline_start as i64 + delta_ns).max(0) as u64;
+                        if let Some(li) = left_idx {
+                            track.clips[li].source_out = (track.clips[li].source_out as i64 + delta_ns).max(0) as u64;
+                        }
+                        if let Some(ri) = right_idx {
+                            track.clips[ri].source_in = (track.clips[ri].source_in as i64 + delta_ns).max(0) as u64;
+                            track.clips[ri].timeline_start = (track.clips[ri].timeline_start as i64 + delta_ns).max(0) as u64;
+                        }
+                        proj.dirty = true;
+                        found = true;
+                    }
+                    break;
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
         McpCommand::SetClipColor { clip_id, brightness, contrast, saturation, denoise, sharpness, reply } => {
             let mut proj = project.borrow_mut();
             let mut found = false;

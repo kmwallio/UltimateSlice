@@ -327,6 +327,8 @@ Key design points:
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
+| `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
+| `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_project_title` | Rename the project |
