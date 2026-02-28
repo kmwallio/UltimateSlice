@@ -520,6 +520,21 @@ fn tools_list() -> Value {
                 },
                 "required": ["source_path", "source_in_ns", "source_out_ns"]
             }
+        },
+        {
+            "name": "play",
+            "description": "Start program monitor playback from the current playhead position.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "pause",
+            "description": "Pause program monitor playback, holding the current position.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "stop",
+            "description": "Stop program monitor playback and return the playhead to the beginning.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ]})
 }
@@ -700,6 +715,10 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             track_index: args["track_index"].as_u64().map(|v| v as usize),
             reply: tx,
         },
+
+        "play"  => McpCommand::Play  { reply: tx },
+        "pause" => McpCommand::Pause { reply: tx },
+        "stop"  => McpCommand::Stop  { reply: tx },
 
         _ => return err(id.clone(), -32602, &format!("Unknown tool: '{name}'")),
     };

@@ -82,6 +82,9 @@ pub enum McpCommand {
     },
     SetGskRenderer { renderer: String, reply: SyncSender<Value> },
     SetPreviewQuality { quality: String, reply: SyncSender<Value> },
+    Play  { reply: SyncSender<Value> },
+    Pause { reply: SyncSender<Value> },
+    Stop  { reply: SyncSender<Value> },
     InsertClip {
         source_path:  String,
         source_in_ns: u64,

@@ -2480,5 +2480,20 @@ fn handle_mcp_command(
                 Err(e) => { reply.send(json!({"error": e})).ok(); }
             }
         }
+
+        McpCommand::Play { reply } => {
+            prog_player.borrow_mut().play();
+            reply.send(json!({"ok": true})).ok();
+        }
+
+        McpCommand::Pause { reply } => {
+            prog_player.borrow_mut().pause();
+            reply.send(json!({"ok": true})).ok();
+        }
+
+        McpCommand::Stop { reply } => {
+            prog_player.borrow_mut().stop();
+            reply.send(json!({"ok": true})).ok();
+        }
     }
 }

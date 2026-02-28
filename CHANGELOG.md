@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **MCP transport controls**: `play`, `pause`, and `stop` commands added to the MCP server, allowing external clients and automation scripts to control program monitor playback.
 - **3-Point editing (Insert/Overwrite from Source)**: Professional insert and overwrite edit operations from the source monitor to the timeline.
   - **Insert** (`,`): Places source selection at playhead, shifting all subsequent clips right to make room (ripple insert). Button: ⤵ Insert.
   - **Overwrite** (`.`): Places source selection at playhead, replacing existing material in the time range — clips are trimmed, split, or removed as needed. Button: ⏺ Overwrite.
