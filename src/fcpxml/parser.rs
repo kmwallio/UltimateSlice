@@ -151,7 +151,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                 if let Some(v) = attrs.get("us:lut-path")  { clip.lut_path   = Some(v.clone()); }
                                 if let Some(v) = attrs.get("us:transition-after")    { clip.transition_after    = v.clone(); }
                                 if let Some(v) = attrs.get("us:transition-after-ns") { clip.transition_after_ns = v.parse().unwrap_or(0); }
-                                track.add_clip(clip);
+                                track.push_unsorted(clip);
                             }
                         }
                     }
@@ -186,8 +186,9 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
         buf.clear();
     }
 
-    // Add tracks in index order
-    for (_idx, track) in track_map {
+    // Add tracks in index order, sorting clips once per track
+    for (_idx, mut track) in track_map {
+        track.sort_clips();
         if !track.clips.is_empty() {
             project.tracks.push(track);
         }

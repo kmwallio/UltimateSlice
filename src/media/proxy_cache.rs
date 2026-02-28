@@ -80,23 +80,31 @@ impl ProxyCache {
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyResult>(32);
         let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Option<String>)>();
 
-        // Single worker thread processes transcodes sequentially.
-        std::thread::spawn(move || {
-            while let Ok((source_path, scale, lut_path)) = work_rx.recv() {
-                let key = proxy_key(&source_path, lut_path.as_deref());
-                let (proxy_path, success) = transcode_proxy(&source_path, scale, lut_path.as_deref());
-                if result_tx
-                    .send(ProxyResult {
-                        cache_key: key,
-                        proxy_path,
-                        success,
-                    })
-                    .is_err()
-                {
-                    break;
+        // Pool of worker threads to transcode proxies in parallel.
+        let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
+        let num_workers = 4;
+        for _ in 0..num_workers {
+            let rx = work_rx.clone();
+            let tx = result_tx.clone();
+            std::thread::spawn(move || {
+                loop {
+                    let item = {
+                        let lock = rx.lock().unwrap();
+                        lock.recv()
+                    };
+                    match item {
+                        Ok((source_path, scale, lut_path)) => {
+                            let key = proxy_key(&source_path, lut_path.as_deref());
+                            let (proxy_path, success) = transcode_proxy(&source_path, scale, lut_path.as_deref());
+                            if tx.send(ProxyResult { cache_key: key, proxy_path, success }).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
                 }
-            }
-        });
+            });
+        }
 
         Self {
             proxies: HashMap::new(),

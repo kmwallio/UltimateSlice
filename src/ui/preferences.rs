@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack, StackSidebar};
 use std::rc::Rc;
-use crate::ui_state::{PlaybackPriority, ProxyMode, PreferencesState};
+use crate::ui_state::{GskRenderer, PlaybackPriority, PreviewQuality, ProxyMode, PreferencesState};
 
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
@@ -94,6 +94,43 @@ pub fn show_preferences_dialog(
     playback_box.append(&proxy_label);
     playback_box.append(&proxy_mode);
     playback_box.append(&proxy_hint);
+
+    let pq_label = Label::new(Some("Preview quality"));
+    pq_label.set_halign(gtk::Align::Start);
+    let preview_quality = gtk4::ComboBoxText::new();
+    preview_quality.append(Some("auto"), "Auto (adapt to monitor size)");
+    preview_quality.append(Some("full"), "Full (project resolution)");
+    preview_quality.append(Some("half"), "Half (÷2 — lower memory)");
+    preview_quality.append(Some("quarter"), "Quarter (÷4 — lowest memory)");
+    preview_quality.set_active_id(Some(current.preview_quality.as_str()));
+    preview_quality.set_halign(gtk::Align::Start);
+    let pq_hint = Label::new(Some("Auto adapts quality to current Program Monitor size. Manual levels scale the compositor output for preview playback. Export always uses full resolution."));
+    pq_hint.set_halign(gtk::Align::Start);
+    pq_hint.add_css_class("dim-label");
+    pq_hint.set_wrap(true);
+    pq_hint.set_max_width_chars(60);
+    playback_box.append(&pq_label);
+    playback_box.append(&preview_quality);
+    playback_box.append(&pq_hint);
+
+    let renderer_label = Label::new(Some("GTK renderer"));
+    renderer_label.set_halign(gtk::Align::Start);
+    let gsk_renderer = gtk4::ComboBoxText::new();
+    gsk_renderer.append(Some("auto"), "Auto (let GTK decide)");
+    gsk_renderer.append(Some("cairo"), "Cairo (Software — no GPU memory)");
+    gsk_renderer.append(Some("opengl"), "OpenGL (moderate GPU memory)");
+    gsk_renderer.append(Some("vulkan"), "Vulkan (highest quality)");
+    gsk_renderer.set_active_id(Some(current.gsk_renderer.as_str()));
+    gsk_renderer.set_halign(gtk::Align::Start);
+    let renderer_hint = Label::new(Some("Choose Cairo on devices with limited GPU memory to avoid Vulkan out-of-memory errors. Requires restart."));
+    renderer_hint.set_halign(gtk::Align::Start);
+    renderer_hint.add_css_class("dim-label");
+    renderer_hint.set_wrap(true);
+    renderer_hint.set_max_width_chars(60);
+    playback_box.append(&renderer_label);
+    playback_box.append(&gsk_renderer);
+    playback_box.append(&renderer_hint);
+
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     // ── Timeline section ──────────────────────────────────────────────────
@@ -117,6 +154,30 @@ pub fn show_preferences_dialog(
     timeline_box.append(&waveform_hint);
     stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
 
+    // ── Integration section ───────────────────────────────────────────────
+    let integration_box = GBox::new(Orientation::Vertical, 10);
+    integration_box.set_margin_start(8);
+    integration_box.set_margin_end(8);
+    integration_box.set_margin_top(8);
+    let integration_label = Label::new(Some("Integration"));
+    integration_label.set_halign(gtk::Align::Start);
+    integration_label.add_css_class("title-4");
+    let mcp_socket_check = CheckButton::with_label("Enable MCP socket server");
+    mcp_socket_check.set_active(current.mcp_socket_enabled);
+    mcp_socket_check.set_halign(gtk::Align::Start);
+    let socket_path_str = crate::mcp::server::socket_path().display().to_string();
+    let mcp_socket_hint = Label::new(Some(
+        &format!("Allow AI agents to connect to this running instance via a Unix socket at {socket_path_str}"),
+    ));
+    mcp_socket_hint.set_halign(gtk::Align::Start);
+    mcp_socket_hint.add_css_class("dim-label");
+    mcp_socket_hint.set_wrap(true);
+    mcp_socket_hint.set_max_width_chars(60);
+    integration_box.append(&integration_label);
+    integration_box.append(&mcp_socket_check);
+    integration_box.append(&mcp_socket_hint);
+    stack.add_titled(&integration_box, Some("integration"), "Integration");
+
     body.append(&sidebar);
     body.append(&stack);
     dialog.content_area().append(&body);
@@ -128,6 +189,9 @@ pub fn show_preferences_dialog(
                 playback_priority: PlaybackPriority::from_str(playback_priority.active_id().as_deref().unwrap_or("smooth")),
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
+                mcp_socket_enabled: mcp_socket_check.is_active(),
+                gsk_renderer: GskRenderer::from_str(gsk_renderer.active_id().as_deref().unwrap_or("auto")),
+                preview_quality: PreviewQuality::from_str(preview_quality.active_id().as_deref().unwrap_or("full")),
             });
         }
         d.close();

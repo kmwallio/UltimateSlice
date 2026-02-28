@@ -15,6 +15,20 @@ const MCP_PID_FILE: &str = "/tmp/ultimateslice-mcp.pid";
 fn main() {
     env_logger::init();
     let mcp_enabled = std::env::args().any(|a| a == "--mcp");
+    let mcp_attach = std::env::args().any(|a| a == "--mcp-attach");
+
+    // --mcp-attach: bridge stdio to the running instance's Unix domain socket
+    // and exit. No GUI is started.
+    if mcp_attach {
+        std::process::exit(run_mcp_attach());
+    }
+
+    // Apply GSK renderer preference before GTK initializes.
+    let prefs = ui_state::load_preferences_state();
+    if let Some(renderer) = prefs.gsk_renderer.env_value() {
+        std::env::set_var("GSK_RENDERER", renderer);
+    }
+
     if mcp_enabled {
         ensure_single_mcp_instance();
     }
@@ -23,6 +37,68 @@ fn main() {
         // Clean up the PID file when the app exits normally.
         let _ = std::fs::remove_file(MCP_PID_FILE);
     }
+}
+
+/// Bridge stdin/stdout to the running UltimateSlice instance's MCP Unix socket.
+/// Returns 0 on clean shutdown, 1 on error.
+fn run_mcp_attach() -> i32 {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let path = mcp::server::socket_path();
+    let stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "Failed to connect to MCP socket at {}: {e}\n\
+                 Make sure UltimateSlice is running with the MCP socket server enabled \
+                 (Preferences → Integration → Enable MCP socket server).",
+                path.display()
+            );
+            return 1;
+        }
+    };
+
+    let reader_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to clone socket: {e}");
+            return 1;
+        }
+    };
+    let mut writer_stream = stream;
+
+    // Thread 1: stdin → socket
+    let writer_handle = std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match stdin.lock().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if writer_stream.write_all(&buf[..n]).is_err() { break; }
+            if writer_stream.flush().is_err() { break; }
+        }
+        // Shut down write half so the server sees EOF
+        let _ = writer_stream.shutdown(std::net::Shutdown::Write);
+    });
+
+    // Thread 2 (main): socket → stdout
+    let reader = BufReader::new(reader_stream);
+    let mut stdout = std::io::stdout();
+    for line in reader.lines() {
+        match line {
+            Ok(l) => {
+                if writeln!(stdout, "{l}").is_err() { break; }
+                if stdout.flush().is_err() { break; }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let _ = writer_handle.join();
+    0
 }
 
 /// If another `--mcp` instance is already running (tracked via `MCP_PID_FILE`),

@@ -13,6 +13,42 @@ use crate::media::program_player::{ProgramPlayer, ProgramClip};
 use crate::ui::{media_browser, preview, toolbar, inspector, program_monitor, preferences};
 use crate::ui::timeline::{TimelineState, build_timeline_panel};
 
+fn auto_preview_divisor(
+    project_width: u32,
+    project_height: u32,
+    canvas_width: i32,
+    canvas_height: i32,
+    current_divisor: u32,
+) -> u32 {
+    let cw = canvas_width.max(1) as f64;
+    let ch = canvas_height.max(1) as f64;
+    let pw = project_width.max(2) as f64;
+    let ph = project_height.max(2) as f64;
+    let ratio = (pw / cw).max(ph / ch);
+    let cur = match current_divisor {
+        1 | 2 | 4 => current_divisor,
+        _ => 1,
+    };
+    match cur {
+        1 => {
+            if ratio >= 1.9 { 2 } else { 1 }
+        }
+        2 => {
+            if ratio >= 3.6 {
+                4
+            } else if ratio <= 1.35 {
+                1
+            } else {
+                2
+            }
+        }
+        4 => {
+            if ratio <= 2.4 { 2 } else { 4 }
+        }
+        _ => 1,
+    }
+}
+
 /// Build and show the main application window.
 pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let window = ApplicationWindow::builder()
@@ -28,17 +64,31 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let library: Rc<RefCell<Vec<MediaItem>>> = Rc::new(RefCell::new(Vec::new()));
     let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
 
+    // MCP command channel — created unconditionally so the socket transport can
+    // be toggled at runtime via Preferences without restarting.
+    let (mcp_sender, mcp_receiver) = std::sync::mpsc::channel::<crate::mcp::McpCommand>();
+    let mcp_sender = Rc::new(mcp_sender);
+    let mcp_receiver = Rc::new(RefCell::new(Some(mcp_receiver))); // taken once in the MCP block
+    let mcp_socket_stop: Rc<RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>> =
+        Rc::new(RefCell::new(None));
+
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
     let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
+    let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
     let (player, paintable) = Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     let player = Rc::new(RefCell::new(player));
 
     let (mut prog_player_raw, prog_paintable, prog_paintable2) = ProgramPlayer::new()
         .expect("Failed to create program player");
+    {
+        let p = project.borrow();
+        prog_player_raw.set_project_dimensions(p.width, p.height);
+    }
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
+    prog_player_raw.set_preview_quality(initial_preview_quality.divisor());
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -77,6 +127,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let proxy_cache = proxy_cache.clone();
         let project = project.clone();
         let timeline_state = timeline_state.clone();
+        let mcp_sender = mcp_sender.clone();
+        let mcp_socket_stop = mcp_socket_stop.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
@@ -87,6 +139,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let proxy_cache = proxy_cache.clone();
                 let project = project.clone();
                 let timeline_state = timeline_state.clone();
+                let mcp_sender = mcp_sender.clone();
+                let mcp_socket_stop = mcp_socket_stop.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> = Rc::new(move |new_state| {
                     *preferences_state.borrow_mut() = new_state.clone();
                     crate::ui_state::save_preferences_state(&new_state);
@@ -95,6 +149,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                     prog_player.borrow_mut().set_playback_priority(new_state.playback_priority.clone());
                     prog_player.borrow_mut().set_proxy_enabled(new_state.proxy_mode.is_enabled());
+                    prog_player.borrow_mut().set_preview_quality(new_state.preview_quality.divisor());
                     if new_state.proxy_mode.is_enabled() {
                         // If the proxy scale changed, invalidate old entries so clips are
                         // re-transcoded at the new resolution.
@@ -122,6 +177,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         prog_player.borrow_mut().update_proxy_paths(paths);
                     }
                     timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
+                    // Start/stop MCP socket server based on preference change.
+                    if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
+                        let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
+                        *mcp_socket_stop.borrow_mut() = Some(stop);
+                    } else if !new_state.mcp_socket_enabled {
+                        if let Some(stop) = mcp_socket_stop.borrow_mut().take() {
+                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 });
                 preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
             }
@@ -349,6 +413,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             if let Some(f) = cb.borrow().as_ref() { f(); }
         })
     };
+    let on_insert_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_insert: Rc<dyn Fn()> = {
+        let cb = on_insert_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
+    let on_overwrite_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_overwrite: Rc<dyn Fn()> = {
+        let cb = on_overwrite_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() { f(); }
+        })
+    };
     let on_close_preview_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     let on_close_preview: Rc<dyn Fn()> = {
         let cb = on_close_preview_impl.clone();
@@ -360,6 +438,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         player.clone(),
         paintable,
         on_append.clone(),
+        on_insert.clone(),
+        on_overwrite.clone(),
         on_close_preview.clone(),
     );
 
@@ -533,6 +613,33 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     scopes_revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
     scopes_revealer.set_child(Some(&scopes_widget));
     scopes_revealer.set_reveal_child(false);
+    let docked_scopes_paned = Paned::new(Orientation::Vertical);
+    docked_scopes_paned.set_hexpand(true);
+    docked_scopes_paned.set_vexpand(true);
+    docked_scopes_paned.set_resize_start_child(true);
+    docked_scopes_paned.set_resize_end_child(true);
+    docked_scopes_paned.set_shrink_end_child(true);
+    docked_scopes_paned.set_start_child(Some(&prog_monitor_widget));
+    docked_scopes_paned.set_end_child(Option::<&gtk::Widget>::None);
+    {
+        let state = monitor_state.borrow().clone();
+        docked_scopes_paned.set_position(state.docked_split_pos.max(160));
+    }
+    {
+        let monitor_state = monitor_state.clone();
+        let monitor_popped = monitor_popped.clone();
+        docked_scopes_paned.connect_position_notify(move |p| {
+            if monitor_popped.get() {
+                return;
+            }
+            let pos = p.position().max(160);
+            let mut state = monitor_state.borrow_mut();
+            if state.docked_split_pos != pos {
+                state.docked_split_pos = pos;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+        });
+    }
 
     // 33 ms poll timer (~30 FPS): smoother playhead/timeline updates and
     // tighter clip-boundary handoff timing.
@@ -549,9 +656,36 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let scopes_rev = scopes_revealer.clone();
         let scopes_st  = scopes_state.clone();
         let speed_lbl = speed_label.clone();
+        let preferences_state = preferences_state.clone();
+        let project = project.clone();
+        let prog_canvas_frame = prog_canvas_frame.clone();
+        let last_auto_check_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_auto_check_us_c = last_auto_check_us.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
+                let now_us = glib::monotonic_time();
+                if now_us - last_auto_check_us_c.get() >= 250_000 {
+                    last_auto_check_us_c.set(now_us);
+                    let preview_quality = preferences_state.borrow().preview_quality.clone();
+                    let divisor = match preview_quality {
+                        crate::ui_state::PreviewQuality::Auto => {
+                            let (pw, ph) = {
+                                let proj = project.borrow();
+                                (proj.width, proj.height)
+                            };
+                            auto_preview_divisor(
+                                pw,
+                                ph,
+                                prog_canvas_frame.width(),
+                                prog_canvas_frame.height(),
+                                player.preview_divisor(),
+                            )
+                        }
+                        _ => preview_quality.divisor(),
+                    };
+                    player.set_preview_quality(divisor);
+                }
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
                 let sf = if scopes_rev.reveals_child() { player.try_pull_scope_frame() } else { None };
@@ -596,30 +730,50 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
-    prog_monitor_host.append(&prog_monitor_widget);
-    // Scopes toggle button — sits between the program monitor and the scopes panel.
+    // Scopes toggle for the docked monitor/scopes split.
     {
         let scopes_btn = gtk::ToggleButton::with_label("▾ Scopes");
         scopes_btn.add_css_class("flat");
         scopes_btn.set_halign(gtk::Align::Start);
         scopes_btn.set_margin_start(4);
         let rev = scopes_revealer.clone();
+        let docked_paned = docked_scopes_paned.clone();
+        let monitor_state = monitor_state.clone();
         scopes_btn.connect_toggled(move |b| {
-            rev.set_reveal_child(b.is_active());
+            if b.is_active() {
+                if docked_paned.end_child().is_none() {
+                    docked_paned.set_end_child(Some(&rev));
+                    let pos = monitor_state.borrow().docked_split_pos.max(160);
+                    docked_paned.set_position(pos);
+                }
+                rev.set_reveal_child(true);
+            } else {
+                let pos = docked_paned.position().max(160);
+                {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.docked_split_pos != pos {
+                        state.docked_split_pos = pos;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+                rev.set_reveal_child(false);
+                docked_paned.set_end_child(Option::<&gtk::Widget>::None);
+            }
         });
         prog_monitor_host.append(&scopes_btn);
     }
-    prog_monitor_host.append(&scopes_revealer);
+    prog_monitor_host.append(&docked_scopes_paned);
     top_paned.set_end_child(Some(&prog_monitor_host));
 
     // Program monitor pop-out/dock toggle
     *on_toggle_popout_impl.borrow_mut() = Some({
         let app = app.clone();
-        let host = prog_monitor_host.clone();
+        let docked_paned = docked_scopes_paned.clone();
         let monitor = prog_monitor_widget.clone();
         let pop_cell = popout_window_cell.clone();
         let popped = monitor_popped.clone();
         let monitor_state = monitor_state.clone();
+        let scopes_rev = scopes_revealer.clone();
         Rc::new(move || {
             if !popped.get() {
                 let state = monitor_state.borrow().clone();
@@ -630,14 +784,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .default_height(state.height.max(180))
                     .build();
 
-                host.remove(&monitor);
+                docked_paned.set_start_child(Option::<&gtk::Widget>::None);
                 pop_win.set_child(Some(&monitor));
+                scopes_rev.set_vexpand(true);
 
-                let host_c = host.clone();
+                let docked_paned_c = docked_paned.clone();
                 let monitor_c = monitor.clone();
                 let pop_cell_c = pop_cell.clone();
                 let popped_c = popped.clone();
                 let monitor_state_c = monitor_state.clone();
+                let scopes_rev_c = scopes_rev.clone();
                 pop_win.connect_close_request(move |w| {
                     let mut state = monitor_state_c.borrow_mut();
                     state.width = w.width().max(320);
@@ -646,8 +802,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     crate::ui_state::save_program_monitor_state(&state);
                     w.set_child(Option::<&gtk::Widget>::None);
                     if monitor_c.parent().is_none() {
-                        host_c.append(&monitor_c);
+                        docked_paned_c.set_start_child(Some(&monitor_c));
                     }
+                    scopes_rev_c.set_vexpand(false);
                     popped_c.set(false);
                     *pop_cell_c.borrow_mut() = None;
                     glib::Propagation::Proceed
@@ -714,6 +871,197 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     if magnetic_mode {
                         track.compact_gap_free();
                     }
+                    proj.dirty = true;
+                }
+            }
+            on_project_changed();
+        })
+    });
+
+    // ── on_insert: reads source_marks, creates clip at playhead, shifts subsequent clips ──
+    *on_insert_impl.borrow_mut() = Some({
+        let project = project.clone();
+        let source_marks = source_marks.clone();
+        let on_project_changed = on_project_changed.clone();
+        let timeline_state = timeline_state.clone();
+        Rc::new(move || {
+            let marks = source_marks.borrow();
+            if marks.path.is_empty() { return; }
+            let path = marks.path.clone();
+            let in_ns = marks.in_ns;
+            let out_ns = marks.out_ns;
+            let is_audio = marks.is_audio_only;
+            drop(marks);
+
+            let ts = timeline_state.borrow();
+            let magnetic_mode = ts.magnetic_mode;
+            let playhead = ts.playhead_ns;
+            let active_tid = ts.selected_track_id.clone();
+            drop(ts);
+
+            let target_kind = if is_audio { TrackKind::Audio } else { TrackKind::Video };
+            let clip_kind = if is_audio { ClipKind::Audio } else { ClipKind::Video };
+            let clip_duration = out_ns.saturating_sub(in_ns);
+            if clip_duration == 0 { return; }
+
+            {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(ref tid) = active_tid {
+                    if proj.tracks.iter().any(|t| &t.id == tid && t.kind == target_kind) {
+                        proj.tracks.iter_mut().find(|t| &t.id == tid)
+                    } else {
+                        proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                    }
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+
+                    // Shift clips that start at or after playhead
+                    for c in track.clips.iter_mut() {
+                        if c.timeline_start >= playhead {
+                            c.timeline_start += clip_duration;
+                        }
+                    }
+
+                    let mut new_clip = Clip::new(path, out_ns, playhead, clip_kind);
+                    new_clip.source_in = in_ns;
+                    new_clip.source_out = out_ns;
+                    track.add_clip(new_clip);
+
+                    if magnetic_mode {
+                        track.compact_gap_free();
+                    }
+
+                    let new_clips = track.clips.clone();
+                    drop(proj);
+
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id,
+                        old_clips,
+                        new_clips,
+                        label: "Insert at playhead".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    // Push directly — clips are already applied
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
+                    proj.dirty = true;
+                }
+            }
+            on_project_changed();
+        })
+    });
+
+    // ── on_overwrite: reads source_marks, replaces timeline range at playhead ──
+    *on_overwrite_impl.borrow_mut() = Some({
+        let project = project.clone();
+        let source_marks = source_marks.clone();
+        let on_project_changed = on_project_changed.clone();
+        let timeline_state = timeline_state.clone();
+        Rc::new(move || {
+            let marks = source_marks.borrow();
+            if marks.path.is_empty() { return; }
+            let path = marks.path.clone();
+            let in_ns = marks.in_ns;
+            let out_ns = marks.out_ns;
+            let is_audio = marks.is_audio_only;
+            drop(marks);
+
+            let ts = timeline_state.borrow();
+            let magnetic_mode = ts.magnetic_mode;
+            let playhead = ts.playhead_ns;
+            let active_tid = ts.selected_track_id.clone();
+            drop(ts);
+
+            let target_kind = if is_audio { TrackKind::Audio } else { TrackKind::Video };
+            let clip_kind = if is_audio { ClipKind::Audio } else { ClipKind::Video };
+            let clip_duration = out_ns.saturating_sub(in_ns);
+            if clip_duration == 0 { return; }
+
+            let range_start = playhead;
+            let range_end = playhead + clip_duration;
+
+            {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(ref tid) = active_tid {
+                    if proj.tracks.iter().any(|t| &t.id == tid && t.kind == target_kind) {
+                        proj.tracks.iter_mut().find(|t| &t.id == tid)
+                    } else {
+                        proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                    }
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == target_kind)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+
+                    // Resolve overlaps with the overwrite range
+                    let mut kept: Vec<Clip> = Vec::new();
+                    for c in track.clips.drain(..) {
+                        let c_start = c.timeline_start;
+                        let c_end = c.timeline_end();
+                        if c_end <= range_start || c_start >= range_end {
+                            // No overlap — keep as-is
+                            kept.push(c);
+                        } else if c_start >= range_start && c_end <= range_end {
+                            // Fully contained — remove (skip)
+                        } else if c_start < range_start && c_end > range_end {
+                            // Clip spans entire range — split into two
+                            let mut left = c.clone();
+                            left.source_out = left.source_in + (range_start - c_start);
+                            let mut right = c;
+                            let trim_left = range_end - right.timeline_start;
+                            right.source_in += trim_left;
+                            right.timeline_start = range_end;
+                            kept.push(left);
+                            kept.push(right);
+                        } else if c_start < range_start {
+                            // Overlap at end — trim out-point
+                            let mut trimmed = c;
+                            trimmed.source_out = trimmed.source_in + (range_start - trimmed.timeline_start);
+                            kept.push(trimmed);
+                        } else {
+                            // Overlap at start — trim in-point, adjust timeline_start
+                            let mut trimmed = c;
+                            let trim_amount = range_end - trimmed.timeline_start;
+                            trimmed.source_in += trim_amount;
+                            trimmed.timeline_start = range_end;
+                            kept.push(trimmed);
+                        }
+                    }
+                    track.clips = kept;
+
+                    let mut new_clip = Clip::new(path, out_ns, playhead, clip_kind);
+                    new_clip.source_in = in_ns;
+                    new_clip.source_out = out_ns;
+                    track.add_clip(new_clip);
+
+                    if magnetic_mode {
+                        track.compact_gap_free();
+                    }
+
+                    let new_clips = track.clips.clone();
+                    drop(proj);
+
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id,
+                        old_clips,
+                        new_clips,
+                        label: "Overwrite at playhead".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
                     proj.dirty = true;
                 }
             }
@@ -828,7 +1176,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
 
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
-            let (clips, media_from_project): (Vec<ProgramClip>, Vec<(String, u64)>) = {
+            let (clips, media_from_project, project_dims): (Vec<ProgramClip>, Vec<(String, u64)>, (u32, u32)) = {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 inspector_view.update(&proj, selected.as_deref());
@@ -895,19 +1243,23 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     })
                 }).collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
-                let media = proj.tracks.iter().flat_map(|t| t.clips.iter())
+                // Collect only unique source paths to avoid redundant work.
+                let mut media_seen = HashSet::new();
+                let media: Vec<(String, u64)> = proj.tracks.iter().flat_map(|t| t.clips.iter())
+                    .filter(|c| media_seen.insert(c.source_path.as_str() as *const str))
                     .map(|c| (c.source_path.clone(), c.source_out))
                     .collect();
-                (clips, media)
+                (clips, media, (proj.width, proj.height))
             }; // proj borrow dropped here — safe to call GStreamer below
 
             {
                 let mut lib = library.borrow_mut();
-                let mut seen: HashSet<String> = lib.iter().map(|i| i.source_path.clone()).collect();
-                for (path, dur) in media_from_project {
-                    if seen.insert(path.clone()) {
-                        lib.push(MediaItem::new(path, dur));
-                    }
+                let seen: HashSet<&str> = lib.iter().map(|i| i.source_path.as_str()).collect();
+                let new_items: Vec<_> = media_from_project.into_iter()
+                    .filter(|(path, _)| !seen.contains(path.as_str()))
+                    .collect();
+                for (path, dur) in new_items {
+                    lib.push(MediaItem::new(path, dur));
                 }
             }
 
@@ -918,6 +1270,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 prog_player.borrow().state(),
                 crate::media::player::PlayerState::Playing
             );
+            let (proj_w, proj_h) = project_dims;
+            prog_player.borrow_mut().set_project_dimensions(proj_w, proj_h);
             prog_player.borrow_mut().load_clips(clips);
             // Seek back to the previous position (loads the clip at that point
             // and applies the current color correction values).
@@ -1107,9 +1461,26 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
-    // ── MCP server (optional, enabled via --mcp flag) ─────────────────────
-    if mcp_enabled {
-        let mcp_receiver = crate::mcp::start_mcp_server();
+    // ── MCP server (stdio + optional socket) ────────────────────────────
+    {
+        let mcp_receiver = mcp_receiver.borrow_mut().take()
+            .expect("MCP receiver already taken");
+
+        // Stdio transport (--mcp flag)
+        if mcp_enabled {
+            let stdio_sender = (*mcp_sender).clone();
+            std::thread::spawn(move || {
+                crate::mcp::server::run_stdio_server(stdio_sender);
+            });
+            eprintln!("[MCP] Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
+        }
+
+        // Socket transport (Preferences toggle) — can start/stop at runtime.
+        if preferences_state.borrow().mcp_socket_enabled {
+            let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
+            *mcp_socket_stop.borrow_mut() = Some(stop);
+        }
+
         let project = project.clone();
         let library = library.clone();
         let player = player.clone();
@@ -1137,7 +1508,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
             glib::ControlFlow::Continue
         });
-        eprintln!("[MCP] Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
     }
 
     // Auto-save: every 60 seconds, write to a temp file if the project is dirty.
@@ -1252,6 +1622,38 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
         window.add_controller(key_ctrl);
     }
+    // ── Window-level , and . keys: Insert / Overwrite at playhead ─────────
+    {
+        let on_insert = on_insert.clone();
+        let on_overwrite = on_overwrite.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            // Skip if Ctrl is held (Ctrl+, = Preferences)
+            if mods.contains(ModifierType::CONTROL_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            if key != Key::comma && key != Key::period {
+                return glib::Propagation::Proceed;
+            }
+            // Don't intercept when a text entry has focus
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            if key == Key::comma {
+                on_insert();
+            } else {
+                on_overwrite();
+            }
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
     // ── Window-level Ctrl+, key: open Preferences ───────────────────────────
     {
         let open_preferences = open_preferences.clone();
@@ -1361,7 +1763,9 @@ fn handle_mcp_command(
             reply.send(json!({
                 "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
                 "playback_priority": prefs.playback_priority.as_str(),
-                "proxy_mode": prefs.proxy_mode.as_str()
+                "proxy_mode": prefs.proxy_mode.as_str(),
+                "gsk_renderer": prefs.gsk_renderer.as_str(),
+                "preview_quality": prefs.preview_quality.as_str()
             })).ok();
         }
 
@@ -1441,6 +1845,36 @@ fn handle_mcp_command(
             reply.send(json!({
                 "success": true,
                 "proxy_mode": new_state.proxy_mode.as_str()
+            })).ok();
+        }
+
+        McpCommand::SetGskRenderer { renderer, reply } => {
+            let parsed = crate::ui_state::GskRenderer::from_str(&renderer);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.gsk_renderer = parsed;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply.send(json!({
+                "success": true,
+                "gsk_renderer": new_state.gsk_renderer.as_str(),
+                "note": "Restart the application for the new renderer to take effect."
+            })).ok();
+        }
+
+        McpCommand::SetPreviewQuality { quality, reply } => {
+            let parsed = crate::ui_state::PreviewQuality::from_str(&quality);
+            prog_player.borrow_mut().set_preview_quality(parsed.divisor());
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.preview_quality = parsed;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply.send(json!({
+                "success": true,
+                "preview_quality": new_state.preview_quality.as_str()
             })).ok();
         }
 
@@ -1525,6 +1959,65 @@ fn handle_mcp_command(
                     }
                     proj.dirty = true;
                     found = true;
+                    break;
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SlipClip { clip_id, delta_ns, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            for track in proj.tracks.iter_mut() {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                    let new_in = (clip.source_in as i64 + delta_ns).max(0) as u64;
+                    let new_out = (clip.source_out as i64 + delta_ns).max(new_in as i64 + 1_000_000) as u64;
+                    clip.source_in = new_in;
+                    clip.source_out = new_out;
+                    proj.dirty = true;
+                    found = true;
+                    break;
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found { on_project_changed(); }
+        }
+
+        McpCommand::SlideClip { clip_id, delta_ns, reply } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            for track in proj.tracks.iter_mut() {
+                let clip_idx = track.clips.iter().position(|c| c.id == clip_id);
+                if let Some(idx) = clip_idx {
+                    let mut sorted_indices: Vec<usize> = (0..track.clips.len()).collect();
+                    sorted_indices.sort_by_key(|&i| track.clips[i].timeline_start);
+                    let sorted_pos = sorted_indices.iter().position(|&i| i == idx);
+                    let left_idx = sorted_pos.and_then(|p| if p > 0 { Some(sorted_indices[p - 1]) } else { None });
+                    let right_idx = sorted_pos.and_then(|p| sorted_indices.get(p + 1).copied());
+                    // Validate neighbors
+                    let left_ok = left_idx.map(|li| {
+                        let new_out = (track.clips[li].source_out as i64 + delta_ns).max(0) as u64;
+                        new_out > track.clips[li].source_in + 1_000_000
+                    }).unwrap_or(true);
+                    let right_ok = right_idx.map(|ri| {
+                        let new_in = (track.clips[ri].source_in as i64 + delta_ns).max(0) as u64;
+                        new_in + 1_000_000 < track.clips[ri].source_out
+                    }).unwrap_or(true);
+                    if left_ok && right_ok {
+                        track.clips[idx].timeline_start = (track.clips[idx].timeline_start as i64 + delta_ns).max(0) as u64;
+                        if let Some(li) = left_idx {
+                            track.clips[li].source_out = (track.clips[li].source_out as i64 + delta_ns).max(0) as u64;
+                        }
+                        if let Some(ri) = right_idx {
+                            track.clips[ri].source_in = (track.clips[ri].source_in as i64 + delta_ns).max(0) as u64;
+                            track.clips[ri].timeline_start = (track.clips[ri].timeline_start as i64 + delta_ns).max(0) as u64;
+                        }
+                        proj.dirty = true;
+                        found = true;
+                    }
                     break;
                 }
             }
@@ -1787,6 +2280,147 @@ fn handle_mcp_command(
             }
             reply.send(json!({"success": true, "title": title})).ok();
             on_project_changed();
+        }
+
+        McpCommand::InsertClip { source_path, source_in_ns, source_out_ns, track_index, reply } => {
+            let clip_duration = source_out_ns.saturating_sub(source_in_ns);
+            if clip_duration == 0 {
+                reply.send(json!({"error": "source_in_ns must be less than source_out_ns"})).ok();
+                return;
+            }
+            let playhead = timeline_state.borrow().playhead_ns;
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
+            let result = {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(idx) = track_index {
+                    proj.tracks.get_mut(idx)
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == crate::model::track::TrackKind::Video)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+                    for c in track.clips.iter_mut() {
+                        if c.timeline_start >= playhead {
+                            c.timeline_start += clip_duration;
+                        }
+                    }
+                    let mut new_clip = Clip::new(source_path, source_out_ns, playhead, ClipKind::Video);
+                    new_clip.source_in = source_in_ns;
+                    new_clip.source_out = source_out_ns;
+                    let clip_id = new_clip.id.clone();
+                    track.add_clip(new_clip);
+                    if magnetic_mode { track.compact_gap_free(); }
+                    let new_clips = track.clips.clone();
+                    proj.dirty = true;
+                    Ok((track_id, clip_id, old_clips, new_clips))
+                } else {
+                    Err("No matching track found")
+                }
+            };
+            match result {
+                Ok((track_id, clip_id, old_clips, new_clips)) => {
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id, old_clips, new_clips,
+                        label: "Insert at playhead (MCP)".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
+                    proj.dirty = true;
+                    drop(proj);
+                    reply.send(json!({"success": true, "clip_id": clip_id})).ok();
+                    on_project_changed();
+                }
+                Err(e) => { reply.send(json!({"error": e})).ok(); }
+            }
+        }
+
+        McpCommand::OverwriteClip { source_path, source_in_ns, source_out_ns, track_index, reply } => {
+            let clip_duration = source_out_ns.saturating_sub(source_in_ns);
+            if clip_duration == 0 {
+                reply.send(json!({"error": "source_in_ns must be less than source_out_ns"})).ok();
+                return;
+            }
+            let playhead = timeline_state.borrow().playhead_ns;
+            let magnetic_mode = timeline_state.borrow().magnetic_mode;
+            let range_start = playhead;
+            let range_end = playhead + clip_duration;
+            let result = {
+                let mut proj = project.borrow_mut();
+                let track = if let Some(idx) = track_index {
+                    proj.tracks.get_mut(idx)
+                } else {
+                    proj.tracks.iter_mut().find(|t| t.kind == crate::model::track::TrackKind::Video)
+                };
+                if let Some(track) = track {
+                    let old_clips = track.clips.clone();
+                    let track_id = track.id.clone();
+                    let mut kept: Vec<Clip> = Vec::new();
+                    for c in track.clips.drain(..) {
+                        let c_start = c.timeline_start;
+                        let c_end = c.timeline_end();
+                        if c_end <= range_start || c_start >= range_end {
+                            kept.push(c);
+                        } else if c_start >= range_start && c_end <= range_end {
+                            // fully contained — remove
+                        } else if c_start < range_start && c_end > range_end {
+                            let mut left = c.clone();
+                            left.source_out = left.source_in + (range_start - c_start);
+                            let mut right = c;
+                            let trim_left = range_end - right.timeline_start;
+                            right.source_in += trim_left;
+                            right.timeline_start = range_end;
+                            kept.push(left);
+                            kept.push(right);
+                        } else if c_start < range_start {
+                            let mut trimmed = c;
+                            trimmed.source_out = trimmed.source_in + (range_start - trimmed.timeline_start);
+                            kept.push(trimmed);
+                        } else {
+                            let mut trimmed = c;
+                            let trim_amount = range_end - trimmed.timeline_start;
+                            trimmed.source_in += trim_amount;
+                            trimmed.timeline_start = range_end;
+                            kept.push(trimmed);
+                        }
+                    }
+                    track.clips = kept;
+                    let mut new_clip = Clip::new(source_path, source_out_ns, playhead, ClipKind::Video);
+                    new_clip.source_in = source_in_ns;
+                    new_clip.source_out = source_out_ns;
+                    let clip_id = new_clip.id.clone();
+                    track.add_clip(new_clip);
+                    if magnetic_mode { track.compact_gap_free(); }
+                    let new_clips = track.clips.clone();
+                    proj.dirty = true;
+                    Ok((track_id, clip_id, old_clips, new_clips))
+                } else {
+                    Err("No matching track found")
+                }
+            };
+            match result {
+                Ok((track_id, clip_id, old_clips, new_clips)) => {
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id, old_clips, new_clips,
+                        label: "Overwrite at playhead (MCP)".to_string(),
+                    };
+                    let st = timeline_state.borrow_mut();
+                    let project_rc = st.project.clone();
+                    drop(st);
+                    let mut proj = project_rc.borrow_mut();
+                    timeline_state.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                    timeline_state.borrow_mut().history.redo_stack.clear();
+                    proj.dirty = true;
+                    drop(proj);
+                    reply.send(json!({"success": true, "clip_id": clip_id})).ok();
+                    on_project_changed();
+                }
+                Err(e) => { reply.send(json!({"error": e})).ok(); }
+            }
         }
     }
 }

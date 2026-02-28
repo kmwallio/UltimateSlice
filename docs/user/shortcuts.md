@@ -29,6 +29,8 @@
 | `L` | Shuttle forward (1× → 2× → 4×) |
 | `←` | Step one frame back |
 | `→` | Step one frame forward |
+| `,` | Insert at playhead (shift subsequent clips) |
+| `.` | Overwrite at playhead (replace existing material) |
 
 ---
 
@@ -41,6 +43,12 @@
 | `K` | Stop shuttle / Pause program monitor |
 | `L` | Shuttle forward in program monitor (1× → 2× → 4× → 8×) |
 | `B` | Toggle Razor (Blade) tool |
+| `R` | Toggle Ripple edit tool |
+| `E` | Toggle Roll edit tool |
+| `Y` | Toggle Slip edit tool |
+| `U` | Toggle Slide edit tool |
+| `,` | Insert at playhead (shift subsequent clips) |
+| `.` | Overwrite at playhead (replace existing material) |
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip |
 | `M` | Add chapter marker at playhead |

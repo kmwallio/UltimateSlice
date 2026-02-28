@@ -641,6 +641,14 @@ pub fn build_toolbar(
     btn_roll.set_tooltip_text(Some("Roll edit tool (E)"));
     btn_roll.set_group(Some(&btn_select));
 
+    let btn_slip = ToggleButton::with_label("↔ Slip");
+    btn_slip.set_tooltip_text(Some("Slip edit tool (Y)"));
+    btn_slip.set_group(Some(&btn_select));
+
+    let btn_slide = ToggleButton::with_label("⇔ Slide");
+    btn_slide.set_tooltip_text(Some("Slide edit tool (U)"));
+    btn_slide.set_group(Some(&btn_select));
+
     {
         let timeline_state = timeline_state.clone();
         btn_select.connect_toggled(move |btn| {
@@ -673,6 +681,22 @@ pub fn build_toolbar(
             }
         });
     }
+    {
+        let timeline_state = timeline_state.clone();
+        btn_slip.connect_toggled(move |btn| {
+            if btn.is_active() {
+                timeline_state.borrow_mut().active_tool = ActiveTool::Slip;
+            }
+        });
+    }
+    {
+        let timeline_state = timeline_state.clone();
+        btn_slide.connect_toggled(move |btn| {
+            if btn.is_active() {
+                timeline_state.borrow_mut().active_tool = ActiveTool::Slide;
+            }
+        });
+    }
     let btn_magnetic = ToggleButton::with_label("Magnetic");
     btn_magnetic.set_tooltip_text(Some("Gap-free timeline mode (edited track)"));
     btn_magnetic.set_active(timeline_state.borrow().magnetic_mode);
@@ -689,6 +713,8 @@ pub fn build_toolbar(
     header.pack_start(&btn_razor);
     header.pack_start(&btn_ripple);
     header.pack_start(&btn_roll);
+    header.pack_start(&btn_slip);
+    header.pack_start(&btn_slide);
     header.pack_start(&btn_magnetic);
 
     header

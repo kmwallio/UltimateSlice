@@ -17,9 +17,12 @@ pub fn extract_frame(source_path: &str, time_ns: u64) -> Result<gdk4::MemoryText
          appsink name=sink sync=false"
     );
 
-    let pipeline = gst::parse::launch(&pipeline_desc)?
-        .downcast::<gst::Pipeline>()
-        .map_err(|_| anyhow!("not a pipeline"))?;
+    let guard = super::PipelineGuard(
+        gst::parse::launch(&pipeline_desc)?
+            .downcast::<gst::Pipeline>()
+            .map_err(|_| anyhow!("not a pipeline"))?,
+    );
+    let pipeline = &guard.0;
 
     let appsink = pipeline
         .by_name("sink")
@@ -59,8 +62,7 @@ pub fn extract_frame(source_path: &str, time_ns: u64) -> Result<gdk4::MemoryText
         160 * 4,
     );
 
-    pipeline.set_state(gst::State::Null)?;
-
+    // PipelineGuard ensures pipeline is set to Null when this function returns.
     Ok(texture)
 }
 

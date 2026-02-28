@@ -28,8 +28,8 @@ pub fn run(mcp_enabled: bool) {
         build_window(app, mcp_enabled);
     });
 
-    // Strip --mcp from argv before GLib sees it (unknown flags cause errors).
-    let args: Vec<String> = std::env::args().filter(|a| a != "--mcp").collect();
+    // Strip --mcp and --mcp-attach from argv before GLib sees it (unknown flags cause errors).
+    let args: Vec<String> = std::env::args().filter(|a| a != "--mcp" && a != "--mcp-attach").collect();
     app.run_with_args(&args);
 }
 

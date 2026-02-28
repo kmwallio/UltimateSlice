@@ -95,6 +95,8 @@ Tracking docs:
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
 - [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
+- [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
+- [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 
 ---
 
@@ -123,7 +125,7 @@ Tracking docs:
 - [x] Cross-dissolve transitions between clips
 - [x] Ripple edit mode (Trim In/Out)
 - [x] Roll edit mode
-- [ ] Slip/slide edit modes
+- [x] Slip/slide edit modes
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
@@ -140,6 +142,7 @@ Tracking docs:
   - Timeline seek (click ruler) also seeks the program monitor
   - Clips reload automatically on every project change
 - [x] Program-monitor playback priority mode in Preferences (`Smooth` / `Balanced` / `Accurate`)
+- [x] Docked Program Monitor and scopes are resizable via draggable splitter (position persisted; pane collapses fully when scopes are hidden)
 - [ ] Detachable Program Monitor window (pop-out preview)
   - [x] Pop out Program Monitor into a separate top-level window for dual-display workflows
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
@@ -150,9 +153,12 @@ Tracking docs:
   - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
-  - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
-  - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
-  - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
+   - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
+   - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
+   - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
+   - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
+   - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
+  - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
   - [x] ~~Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff~~ *(superseded by compositor rewrite — full rebuild at clip boundaries)*
   - [x] ~~Reduce boundary stutter with pre-emptive clip handoff and non-blocking switch path during active playback~~ *(superseded by compositor rewrite)*
@@ -241,6 +247,7 @@ Tracking docs:
 ### Polish
 - [x] Keyboard shortcut reference overlay (? or / key opens a modal dialog)
 - [x] Preferences dialog with categorized sections + hardware acceleration toggle wired to source preview playback
+- [x] GTK renderer preference (Auto / Cairo / OpenGL / Vulkan) for low-memory devices
 - [ ] Accessibility: keyboard navigation in all panels
 - [ ] Welcome window for choosing recent project or new one
 - [ ] Help documentation and tutorials
@@ -249,7 +256,7 @@ Tracking docs:
 ### Professional Workflow (The "Pro" Edge)
 - [ ] Multicam editing (sync by audio or timecode)
 - [ ] Nested Timelines / Compound Clips
-- [ ] 3-Point and 4-Point editing (Insert/Overwrite from Source)
+- [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio is a future enhancement)
 - [ ] Match Frame (shortcut to find timeline clip in media library)
 - [ ] Proxy Workflow: One-click toggle between original and proxy media

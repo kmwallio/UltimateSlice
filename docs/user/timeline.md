@@ -41,12 +41,56 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - In v1, magnetic behavior is **track-local** (it does not ripple other tracks).
 - Magnetic mode affects timeline edits from UI and MCP clip-edit tools.
 
+### Ripple Edit Tool (`R`)
+
+- Activates ripple trimming: trim a clip's in-point or out-point and all subsequent clips on the same track shift to fill or accommodate the change.
+- Press **R** to toggle Ripple mode on/off.
+
+### Roll Edit Tool (`E`)
+
+- Click near an edit point (boundary between two adjacent clips) to adjust the cut point.
+- The left clip's out-point and the right clip's in-point move together — the overall timeline duration stays the same.
+- Press **E** to toggle Roll mode on/off.
+
+### Slip Edit Tool (`Y`)
+
+- Drag a clip body to shift its **source window** (source in/out) without moving the clip on the timeline or changing its duration.
+- Useful for adjusting which portion of the source footage appears in a fixed-length clip.
+- Press **Y** to toggle Slip mode on/off.
+
+### Slide Edit Tool (`U`)
+
+- Drag a clip body to **move it on the timeline** while the neighboring clips adjust their edit points to compensate.
+- The left neighbor's out-point extends/shrinks and the right neighbor's in-point shrinks/extends — overall timeline duration stays the same.
+- Press **U** to toggle Slide mode on/off.
+
+### Insert at Playhead (`,`)
+
+- Places the current source selection (In → Out from the source monitor) at the playhead position on the active track.
+- All clips at or after the playhead are **shifted right** to make room — a ripple insert.
+- Also available via the **⤵ Insert** button in the source monitor transport bar.
+- Requires a source to be loaded with valid in/out marks.
+
+### Overwrite at Playhead (`.`)
+
+- Places the current source selection at the playhead position, **replacing** any existing material in the time range.
+- Clips that fall within the overwrite range are trimmed, split, or removed as needed.
+- No subsequent clips are shifted — the timeline duration only changes if you overwrite past the end.
+- Also available via the **⏺ Overwrite** button in the source monitor transport bar.
+- Requires a source to be loaded with valid in/out marks.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause program monitor |
 | `B` | Toggle Razor (Blade) tool |
+| `R` | Toggle Ripple edit tool |
+| `E` | Toggle Roll edit tool |
+| `Y` | Toggle Slip edit tool |
+| `U` | Toggle Slide edit tool |
+| `,` | Insert at playhead (from source monitor) |
+| `.` | Overwrite at playhead (from source monitor) |
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip |
 | `M` | Add chapter marker at current playhead position |

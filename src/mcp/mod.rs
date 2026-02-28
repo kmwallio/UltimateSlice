@@ -1,4 +1,6 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
+use std::sync::Arc;
 use serde_json::Value;
 
 pub mod server;
@@ -68,14 +70,56 @@ pub enum McpCommand {
         opacity: f64,
         reply:   SyncSender<Value>,
     },
+    SlipClip {
+        clip_id:  String,
+        delta_ns: i64,
+        reply:    SyncSender<Value>,
+    },
+    SlideClip {
+        clip_id:  String,
+        delta_ns: i64,
+        reply:    SyncSender<Value>,
+    },
+    SetGskRenderer { renderer: String, reply: SyncSender<Value> },
+    SetPreviewQuality { quality: String, reply: SyncSender<Value> },
+    InsertClip {
+        source_path:  String,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        track_index:  Option<usize>,
+        reply:        SyncSender<Value>,
+    },
+    OverwriteClip {
+        source_path:  String,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        track_index:  Option<usize>,
+        reply:        SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.
-/// Returns a `Receiver` that the GTK main thread should poll for commands.
-pub fn start_mcp_server() -> std::sync::mpsc::Receiver<McpCommand> {
+/// Returns the `Sender` (for sharing with other transports) and the `Receiver`
+/// that the GTK main thread should poll for commands.
+pub fn start_mcp_server() -> (std::sync::mpsc::Sender<McpCommand>, std::sync::mpsc::Receiver<McpCommand>) {
     let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+    let stdio_sender = sender.clone();
     std::thread::spawn(move || {
-        server::run_stdio_server(sender);
+        server::run_stdio_server(stdio_sender);
     });
-    receiver
+    (sender, receiver)
+}
+
+/// Spawn the MCP Unix-domain-socket server on a background thread.
+/// Shares the same command channel as the stdio server.
+/// Returns a stop flag — set it to `true` to shut down the listener.
+pub fn start_mcp_socket_server(
+    sender: std::sync::mpsc::Sender<McpCommand>,
+) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    std::thread::spawn(move || {
+        server::run_socket_server(sender, stop_clone);
+    });
+    stop
 }

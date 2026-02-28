@@ -48,7 +48,46 @@ Preferences are grouped by category in a sidebar:
   - `get_preferences` returns `proxy_mode`.
   - `set_proxy_mode` updates the mode and re-generates proxies as needed.
 
+## Preview Quality (Playback)
+
+- **Preview quality** scales down the compositor output resolution for preview playback:
+  - `Auto`: adapts quality to the current Program Monitor canvas size.
+  - `Full` (default): renders at project resolution (e.g. 1920×1080).
+  - `Half`: halves both dimensions (e.g. 960×540) — 4× fewer pixels, significantly less memory and CPU.
+  - `Quarter`: quarters both dimensions (e.g. 480×270) — 16× fewer pixels, best for low-memory devices.
+- Reduced preview quality keeps the same framing as Full quality: the full composed frame is scaled to fit the monitor (no top-left cropping).
+- Takes effect immediately — no restart required.
+- Export always uses full project resolution regardless of this setting.
+- Combine with **Proxy preview mode** for maximum performance on constrained hardware: Quarter-res proxies + Quarter preview quality minimizes both decode and compositing cost.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `preview_quality`.
+  - `set_preview_quality` updates the quality level (`auto`, `full`, `half`, `quarter`).
+
 ## Saving
 
 - Click **Save** to persist changes.
 - Click **Cancel** to discard changes.
+
+## GTK Renderer (Playback)
+
+- **GTK renderer** controls which graphics backend GTK uses to draw the application window:
+  - `Auto` (default): let GTK decide (usually Vulkan on supported systems).
+  - `Cairo (Software)`: CPU-based rendering — uses no GPU memory at all. Best for devices with limited GPU memory that see `VK_ERROR_OUT_OF_DEVICE_MEMORY` errors.
+  - `OpenGL`: moderate GPU memory usage — a good middle ground.
+  - `Vulkan`: explicit Vulkan rendering — highest quality, highest GPU memory usage.
+- **Requires a restart** to take effect (the renderer is selected before GTK initializes).
+- Export is unaffected — it always uses ffmpeg regardless of the renderer setting.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `gsk_renderer`.
+  - `set_gsk_renderer` updates the mode (restart required to apply).
+
+## MCP Socket Server (Integration)
+
+- **Enable MCP socket server** allows AI agents to connect to this running instance via a Unix domain socket.
+- When enabled, UltimateSlice listens at `$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`.
+- The toggle takes effect immediately — no restart required.
+- Only one agent can be connected at a time; additional connections are rejected.
+- Agents using the `.mcp.json` `ultimate-slice-attach` server entry connect via `--mcp-attach`, which bridges stdio to the socket.
+- The setting is persisted across launches.

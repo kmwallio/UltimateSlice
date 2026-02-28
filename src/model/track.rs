@@ -48,6 +48,16 @@ impl Track {
         self.clips.sort_by_key(|c| c.timeline_start);
     }
 
+    /// Append a clip without sorting. Call `sort_clips()` once after bulk insertion.
+    pub fn push_unsorted(&mut self, clip: Clip) {
+        self.clips.push(clip);
+    }
+
+    /// Sort clips by timeline position. Use after one or more `push_unsorted()` calls.
+    pub fn sort_clips(&mut self) {
+        self.clips.sort_by_key(|c| c.timeline_start);
+    }
+
     /// Remove timeline gaps by packing clips back-to-back in timeline order.
     pub fn compact_gap_free(&mut self) {
         self.clips.sort_by_key(|c| c.timeline_start);

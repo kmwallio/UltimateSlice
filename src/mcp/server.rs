@@ -1,17 +1,21 @@
 use crate::mcp::McpCommand;
 use serde_json::{json, Value};
-/// MCP stdio transport — reads newline-delimited JSON-RPC from stdin,
-/// dispatches tool calls to the GTK main thread via `sender`, and
-/// writes JSON-RPC responses to stdout.
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
-    let stdin = std::io::stdin();
-    let mut out = std::io::stdout();
-
-    for line in stdin.lock().lines() {
+/// Transport-agnostic MCP JSON-RPC loop.  Reads newline-delimited JSON-RPC
+/// messages from `reader`, dispatches tool calls via `sender`, and writes
+/// JSON-RPC responses to `writer`.
+fn run_server(
+    reader: impl BufRead,
+    writer: &mut impl Write,
+    sender: &std::sync::mpsc::Sender<McpCommand>,
+) {
+    for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
             Err(_) => break,
@@ -25,8 +29,8 @@ pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
             Ok(v) => v,
             Err(e) => {
                 let r = err(Value::Null, -32700, &format!("Parse error: {e}"));
-                let _ = writeln!(out, "{r}");
-                let _ = out.flush();
+                let _ = writeln!(writer, "{r}");
+                let _ = writer.flush();
                 continue;
             }
         };
@@ -45,13 +49,96 @@ pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
             "ping" => ok(&id, json!({})),
             "tools/list" => ok(&id, tools_list()),
             "resources/list" => ok(&id, json!({"resources": []})),
-            "tools/call" => call_tool(&id, &params, &sender),
+            "tools/call" => call_tool(&id, &params, sender),
             _ => err(id, -32601, "Method not found"),
         };
 
-        let _ = writeln!(out, "{response}");
-        let _ = out.flush();
+        let _ = writeln!(writer, "{response}");
+        let _ = writer.flush();
     }
+}
+
+/// Stdio transport — wraps stdin/stdout around the generic handler.
+pub fn run_stdio_server(sender: std::sync::mpsc::Sender<McpCommand>) {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    run_server(stdin.lock(), &mut stdout, &sender);
+}
+
+/// Return the path used for the MCP Unix domain socket.
+pub fn socket_path() -> PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    dir.join("ultimateslice-mcp.sock")
+}
+
+/// Unix domain socket transport.  Listens for one client at a time; rejects
+/// additional connections while a session is active.  Exits when `stop` is set.
+pub fn run_socket_server(
+    sender: std::sync::mpsc::Sender<McpCommand>,
+    stop: Arc<AtomicBool>,
+) {
+    use std::os::unix::net::UnixListener;
+
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path); // remove stale socket
+
+    let listener = match UnixListener::bind(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[MCP-socket] Failed to bind {}: {e}", path.display());
+            return;
+        }
+    };
+    listener.set_nonblocking(true).ok();
+    eprintln!("[MCP-socket] Listening on {}", path.display());
+
+    let client_active = Arc::new(AtomicBool::new(false));
+
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // Enforce single-client: reject if one is already connected.
+                if client_active
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    let mut w = &stream;
+                    let _ = writeln!(
+                        w,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Another MCP client is already connected"}})
+                    );
+                    continue;
+                }
+                eprintln!("[MCP-socket] Client connected");
+                let sender = sender.clone();
+                let active = client_active.clone();
+                std::thread::spawn(move || {
+                    stream.set_nonblocking(false).ok();
+                    let reader = BufReader::new(match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(_) => { active.store(false, Ordering::Relaxed); return; }
+                    });
+                    let mut writer = stream;
+                    run_server(reader, &mut writer, &sender);
+                    active.store(false, Ordering::Relaxed);
+                    eprintln!("[MCP-socket] Client disconnected");
+                });
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("[MCP-socket] Accept error: {e}");
+                break;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&path);
+    eprintln!("[MCP-socket] Server stopped");
 }
 
 // ── JSON-RPC helpers ─────────────────────────────────────────────────────────
@@ -197,6 +284,30 @@ fn tools_list() -> Value {
                     "source_out_ns": { "type": "integer", "description": "New source out-point in nanoseconds." }
                 },
                 "required": ["clip_id", "source_in_ns", "source_out_ns"]
+            }
+        },
+        {
+            "name": "slip_clip",
+            "description": "Slip a clip: shift its source window (source_in and source_out) by a delta without changing timeline position or duration.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":  { "type": "string",  "description": "Clip id to slip." },
+                    "delta_ns": { "type": "integer", "description": "Nanoseconds to shift the source window. Positive shifts forward (later source content), negative shifts backward." }
+                },
+                "required": ["clip_id", "delta_ns"]
+            }
+        },
+        {
+            "name": "slide_clip",
+            "description": "Slide a clip: move its timeline position by a delta while adjusting neighboring clips to compensate.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":  { "type": "string",  "description": "Clip id to slide." },
+                    "delta_ns": { "type": "integer", "description": "Nanoseconds to slide on the timeline. Positive slides right, negative slides left." }
+                },
+                "required": ["clip_id", "delta_ns"]
             }
         },
         {
@@ -359,6 +470,56 @@ fn tools_list() -> Value {
                     "title": { "type": "string", "description": "Title for the new project (default: 'Untitled')." }
                 }
             }
+        },
+        {
+            "name": "set_gsk_renderer",
+            "description": "Set the GTK renderer backend. Use 'cairo' on devices with limited GPU memory to avoid Vulkan out-of-memory errors. Requires application restart to take effect.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "renderer": { "type": "string", "enum": ["auto", "cairo", "opengl", "vulkan"], "description": "GTK renderer backend." }
+                },
+                "required": ["renderer"]
+            }
+        },
+        {
+            "name": "set_preview_quality",
+            "description": "Set compositor preview quality. Lower quality reduces memory and CPU usage for smoother playback on low-end hardware. Use 'auto' to adapt quality to current Program Monitor size. Export always uses full project resolution.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "quality": { "type": "string", "enum": ["auto", "full", "half", "quarter"], "description": "Preview quality level. 'auto' adapts to monitor size, 'half' halves both dimensions (4x less pixels), 'quarter' quarters them (16x less pixels)." }
+                },
+                "required": ["quality"]
+            }
+        },
+        {
+            "name": "insert_clip",
+            "description": "Insert a source clip at the playhead position, shifting all subsequent clips right to make room (3-point insert edit).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": "Absolute path to the media file." },
+                    "source_in_ns": { "type": "integer", "description": "Source in-point in nanoseconds." },
+                    "source_out_ns": { "type": "integer", "description": "Source out-point in nanoseconds." },
+                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." }
+                },
+                "required": ["source_path", "source_in_ns", "source_out_ns"]
+            }
+        },
+        {
+            "name": "overwrite_clip",
+            "description": "Overwrite timeline content at the playhead position with a source clip, replacing existing material in the time range (3-point overwrite edit).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": "Absolute path to the media file." },
+                    "source_in_ns": { "type": "integer", "description": "Source in-point in nanoseconds." },
+                    "source_out_ns": { "type": "integer", "description": "Source out-point in nanoseconds." },
+                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." }
+                },
+                "required": ["source_path", "source_in_ns", "source_out_ns"]
+            }
         }
     ]})
 }
@@ -416,6 +577,18 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
             source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "slip_clip" => McpCommand::SlipClip {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            delta_ns: args["delta_ns"].as_i64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "slide_clip" => McpCommand::SlideClip {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            delta_ns: args["delta_ns"].as_i64().unwrap_or(0),
             reply: tx,
         },
 
@@ -499,6 +672,32 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "create_project" => McpCommand::CreateProject {
             title: args["title"].as_str().unwrap_or("Untitled").to_string(),
+            reply: tx,
+        },
+
+        "set_gsk_renderer" => McpCommand::SetGskRenderer {
+            renderer: args["renderer"].as_str().unwrap_or("auto").to_string(),
+            reply: tx,
+        },
+
+        "set_preview_quality" => McpCommand::SetPreviewQuality {
+            quality: args["quality"].as_str().unwrap_or("full").to_string(),
+            reply: tx,
+        },
+
+        "insert_clip" => McpCommand::InsertClip {
+            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
+            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
+            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            track_index: args["track_index"].as_u64().map(|v| v as usize),
+            reply: tx,
+        },
+
+        "overwrite_clip" => McpCommand::OverwriteClip {
+            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
+            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
+            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            track_index: args["track_index"].as_u64().map(|v| v as usize),
             reply: tx,
         },
 

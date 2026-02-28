@@ -5,6 +5,33 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **3-Point editing (Insert/Overwrite from Source)**: Professional insert and overwrite edit operations from the source monitor to the timeline.
+  - **Insert** (`,`): Places source selection at playhead, shifting all subsequent clips right to make room (ripple insert). Button: ⤵ Insert.
+  - **Overwrite** (`.`): Places source selection at playhead, replacing existing material in the time range — clips are trimmed, split, or removed as needed. Button: ⏺ Overwrite.
+  - Both operations support full undo/redo via `SetTrackClipsCommand`.
+  - MCP tools: `insert_clip` (insert at playhead with ripple) and `overwrite_clip` (overwrite at playhead).
+  - Source monitor transport bar now has Insert and Overwrite buttons alongside Append.
+- **Slip/Slide edit modes**: New Slip and Slide timeline tools completing the professional edit mode suite alongside Ripple and Roll.
+  - **Slip** (`Y`): Drag a clip to shift its source content window (source in/out) without moving the clip on the timeline or changing its duration. Toolbar button: ↔ Slip.
+  - **Slide** (`U`): Drag a clip to reposition it on the timeline while neighboring clips' edit points adjust to compensate — total timeline duration stays constant. Toolbar button: ⇔ Slide.
+  - Both modes support full undo/redo via `SlipClipCommand` and `SlideClipCommand`.
+  - MCP tools: `slip_clip` (shift source window by delta) and `slide_clip` (move clip by delta, adjusting neighbors).
+  - Tool indicator overlay on timeline (yellow text) when Slip or Slide mode is active.
+  - Keyboard shortcut overlay updated with all edit tool shortcuts (R, E, Y, U).
+- **GTK Renderer preference**: New "GTK renderer" setting in Preferences → Playback lets users choose between Auto, Cairo (Software), OpenGL, and Vulkan backends. Cairo mode uses zero GPU memory, resolving `VK_ERROR_OUT_OF_DEVICE_MEMORY` errors on devices with limited GPU memory. Requires application restart. Also exposed via `set_gsk_renderer` MCP tool and included in `get_preferences` response.
+- **Preview quality preference**: New "Preview quality" setting in Preferences → Playback scales down the compositor output resolution (Full / Half / Quarter) for smoother preview playback on low-memory devices. Quarter mode renders at 480×270 instead of 1920×1080, using 16× less memory per frame. Takes effect immediately without restart. Also exposed via `set_preview_quality` MCP tool and included in `get_preferences` response.
+- **MCP socket transport**: UltimateSlice can now listen on a Unix domain socket (`$XDG_RUNTIME_DIR/ultimateslice-mcp.sock`) so AI agents can connect to an already-running instance. Enabled via Preferences → Integration → Enable MCP socket server. The toggle takes effect immediately without restarting.
+- **`--mcp-attach` CLI flag**: A built-in stdio-to-socket proxy that bridges stdin/stdout to the running instance's MCP socket, letting standard MCP clients (which expect stdio) connect via `.mcp.json` `ultimate-slice-attach` entry.
+- **Auto preview quality mode**: Preview quality now supports an `Auto` setting that adapts Program Monitor compositor resolution to the current monitor canvas size; manual `Full/Half/Quarter` modes remain available.
+
+### Changed
+- **Scopes expand when program monitor is popped out**: The vectorscope, histogram, waveform, and RGB parade panels now expand to fill the available vertical space when the program monitor preview is detached into a separate window. When docked, the scopes retain their compact size below the video preview.
+- **Docked Program Monitor/scopes splitter**: In docked mode, the Program Monitor preview and scopes area are now separated by a draggable splitter so users can resize them interactively. When scopes are hidden, the scopes pane is fully removed (no empty split area). The docked split position is persisted across sessions.
+- **Batch-sort clips during FCPXML import**: Clips are now appended unsorted during XML parsing and sorted once per track at the end, reducing O(n² log n) sorting overhead on large projects to O(n log n).
+- **Parallel proxy transcoding**: `ProxyCache` now uses 4 worker threads instead of 1, transcoding up to 4 proxy files concurrently via ffmpeg.
+- **Optimized media library sync**: `on_project_changed` now deduplicates clip source paths before syncing and avoids cloning library paths into a `HashSet<String>`, reducing allocations on every project change.
+
+### Added
 - **Clip opacity controls**: Added per-clip opacity (`0.0–1.0`) in the Inspector Transform section, plus MCP support via `set_clip_opacity`. Opacity is now included in `list_clips` output and persisted in FCPXML as `us:opacity`.
 
 ### Changed
@@ -13,6 +40,8 @@ All notable project changes and progress should be recorded here.
 - **Export compositing parity**: Secondary-track overlays now use transparent zoom-out padding (`pad ... black@0`) and apply per-clip opacity via ffmpeg `colorchannelmixer=aa=...`, improving preview/export consistency for layered shots.
 
 ### Fixed
+- **Program monitor preview-quality framing**: Reduced preview quality (`Half` / `Quarter`) now scales the fully composed frame to fit the monitor instead of showing a top-left cropped quadrant, and switching quality now forces an immediate pipeline rebuild so caps renegotiation applies cleanly at runtime.
+- **GStreamer element disposal warnings on playback end**: Fixed critical warnings ("Trying to dispose element ... but it is in READY instead of the NULL state") that appeared when timeline playback reached the end. Added `PipelineGuard` RAII wrapper that sets temporary GStreamer pipelines to NULL on drop, ensuring proper cleanup even on early-return error paths in waveform extraction, thumbnail extraction, and single-frame capture. Also added state-change waits in `teardown_slots()` so video slot elements fully reach NULL before being dropped.
 - **App freeze on early interaction during project load**: Fixed deadlock when interacting with the timeline or transport controls before a project finishes loading. In `rebuild_pipeline_at()`, the pipeline-wide `set_state(Ready)` was called *before* tearing down individual decoder slots. If decoders were mid-transition (still opening files asynchronously), the pipeline state change blocked the GTK main thread waiting for those transitions to complete — while `gtk4paintablesink` needed the main thread to finish its own transition, causing a deadlock. Swapped the order so slots are torn down individually first (setting each decoder to Null), then the pipeline transitions to Ready with only lightweight background sources remaining. Also added empty-clips guards to `play()`, `seek()`, and `stop()` to prevent unnecessary pipeline operations when no project is loaded.
 - **App freeze on timeline edit during playback**: Fixed a second deadlock in `teardown_slots()` where setting decoders to Null *before* disconnecting them from the compositor caused the main thread to block on pad locks held by the compositor's streaming thread. Reordered teardown to: (1) remove elements from pipeline (`gst_bin_remove` unlinks pads using only the object lock — safe), (2) release compositor/audiomixer request pads (already unlinked), (3) set to Null (pad deactivation is fast on unlinked pads). This also prevents FLOW_NOT_LINKED errors from reaching the pipeline bus, which could corrupt the pipeline state and produce black video or audio static.
 - **Black preview when scrubbing**: The faster teardown (above) eliminated implicit settling time that the old synchronous `set_state(Null)` calls provided. New decoders hadn't reached Paused state when seeks were issued, so seeks were silently ignored. Now `rebuild_pipeline_at` always waits for preroll when paused (scrubbing), only skipping the wait during playback boundary crossings to avoid stutter.

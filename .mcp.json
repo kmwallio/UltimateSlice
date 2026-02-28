@@ -148,6 +148,11 @@
           }
         }
       ]
+    },
+    "ultimate-slice-attach": {
+      "command": "cargo",
+      "args": ["run", "--", "--mcp-attach"],
+      "cwd": "UltimateSlice"
     }
   }
 }
