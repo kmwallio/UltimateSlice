@@ -26,6 +26,8 @@ pub struct WaveformCache {
     in_flight: usize,
     tx: mpsc::SyncSender<RawPeaks>,
     rx: mpsc::Receiver<RawPeaks>,
+    /// When true, no new extraction threads are started (during active playback).
+    paused: bool,
 }
 
 impl WaveformCache {
@@ -38,6 +40,16 @@ impl WaveformCache {
             in_flight: 0,
             tx,
             rx,
+            paused: false,
+        }
+    }
+
+    /// Pause / resume background extraction. When paused (during playback),
+    /// pending requests are queued but no new threads are spawned until resumed.
+    pub fn set_extraction_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        if !paused {
+            self.flush_pending();
         }
     }
 
@@ -102,6 +114,7 @@ impl WaveformCache {
 
     /// Spawn pending extraction threads up to the concurrency limit.
     fn flush_pending(&mut self) {
+        if self.paused { return; }
         while self.in_flight < MAX_CONCURRENT {
             if let Some(key) = self.pending.pop_front() {
                 self.in_flight += 1;

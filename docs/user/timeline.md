@@ -13,9 +13,10 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 
 | Action | How |
 |---|---|
-| Seek | Click on the ruler or drag the playhead |
+| Seek | Click on the ruler or left-drag in the ruler |
 | Zoom in/out | Scroll the mouse wheel vertically |
 | Pan left/right | Scroll the mouse wheel horizontally |
+| Pan ruler view | Middle/right-drag in the ruler |
 
 ## Tools
 

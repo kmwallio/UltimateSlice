@@ -13,7 +13,8 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -168,6 +169,10 @@ pub struct ProgramPlayer {
     jkl_rate: f64,
     /// Latest RGBA frame captured from the scope appsink.
     latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>>,
+    /// When false, the scope appsink callback skips frame allocation (scopes panel hidden).
+    scope_enabled: Arc<AtomicBool>,
+    /// Monotonic counter incremented whenever a new scope frame is captured.
+    scope_frame_seq: Arc<AtomicU64>,
     /// Index of the top-priority clip for `current_clip_idx()` / effects queries.
     current_idx: Option<usize>,
     /// Video sink bin (display + scope). Kept to avoid early drop.
@@ -205,6 +210,9 @@ impl ProgramPlayer {
 
         // Shared frame store for colour scope analysis.
         let latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
+        // Flag set false when the scopes panel is hidden to skip the frame copy allocation.
+        let scope_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+        let scope_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
         // Build tee-based sink bin: display + scope appsink (320x180 RGBA).
         let video_sink_bin: gst::Element = (|| {
@@ -227,9 +235,17 @@ impl ProgramPlayer {
 
             let lsf_preroll = latest_scope_frame.clone();
             let lsf_sample = latest_scope_frame.clone();
+            let scope_en_preroll = scope_enabled.clone();
+            let scope_en_sample = scope_enabled.clone();
+            let seq_preroll = scope_frame_seq.clone();
+            let seq_sample = scope_frame_seq.clone();
             sink.set_callbacks(
                 gstreamer_app::AppSinkCallbacks::builder()
                     .new_preroll(move |appsink| {
+                        if !scope_en_preroll.load(Ordering::Relaxed) {
+                            let _ = appsink.pull_preroll();
+                            return Ok(gst::FlowSuccess::Ok);
+                        }
                         if let Ok(sample) = appsink.pull_preroll() {
                             if let Some(buffer) = sample.buffer() {
                                 if let Ok(map) = buffer.map_readable() {
@@ -240,6 +256,7 @@ impl ProgramPlayer {
                                                 width: 320,
                                                 height: 180,
                                             });
+                                            seq_preroll.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
                                 }
@@ -248,6 +265,10 @@ impl ProgramPlayer {
                         Ok(gst::FlowSuccess::Ok)
                     })
                     .new_sample(move |appsink| {
+                        if !scope_en_sample.load(Ordering::Relaxed) {
+                            let _ = appsink.pull_sample();
+                            return Ok(gst::FlowSuccess::Ok);
+                        }
                         if let Ok(sample) = appsink.pull_sample() {
                             if let Some(buffer) = sample.buffer() {
                                 if let Ok(map) = buffer.map_readable() {
@@ -258,6 +279,7 @@ impl ProgramPlayer {
                                                 width: 320,
                                                 height: 180,
                                             });
+                                            seq_sample.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
                                 }
@@ -483,6 +505,8 @@ impl ProgramPlayer {
                 audio_peak_db: [-60.0, -60.0],
                 jkl_rate: 0.0,
                 latest_scope_frame,
+                scope_enabled,
+                scope_frame_seq,
                 current_idx: None,
                 _video_sink_bin: video_sink_bin,
                 comp_capsfilter,
@@ -504,6 +528,12 @@ impl ProgramPlayer {
 
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
         self.proxy_enabled = enabled;
+    }
+
+    /// Enable or disable scope frame capture. When disabled (scopes panel hidden),
+    /// the appsink callback drops frames without allocating, saving ~7MB/s at 30fps.
+    pub fn set_scope_enabled(&self, enabled: bool) {
+        self.scope_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
@@ -569,6 +599,40 @@ impl ProgramPlayer {
 
     pub fn try_pull_scope_frame(&self) -> Option<ScopeFrame> {
         self.latest_scope_frame.lock().ok()?.clone()
+    }
+
+    /// Export the currently displayed scope-capture frame as a binary PPM image (P6).
+    pub fn export_displayed_frame_ppm(&self, path: &str) -> Result<()> {
+        let start_seq = self.scope_frame_seq.load(Ordering::Relaxed);
+        let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        let result = (|| -> Result<()> {
+            if self.current_idx.is_some() && self.state != PlayerState::Playing {
+                self.reseek_slot_for_current();
+            }
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while self.scope_frame_seq.load(Ordering::Relaxed) <= start_seq && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let frame = self
+                .try_pull_scope_frame()
+                .ok_or_else(|| anyhow!("no displayed frame available yet"))?;
+            let pixel_count = frame.width.saturating_mul(frame.height);
+            let needed = pixel_count.saturating_mul(4);
+            if frame.data.len() < needed {
+                return Err(anyhow!("scope frame buffer is incomplete"));
+            }
+            let mut bytes = Vec::with_capacity(32 + pixel_count.saturating_mul(3));
+            write!(&mut bytes, "P6\n{} {}\n255\n", frame.width, frame.height)?;
+            for rgba in frame.data[..needed].chunks_exact(4) {
+                bytes.extend_from_slice(&rgba[..3]);
+            }
+            std::fs::write(path, bytes)?;
+            Ok(())
+        })();
+        if !was_enabled {
+            self.scope_enabled.store(false, Ordering::Relaxed);
+        }
+        result
     }
 
     pub fn jkl_rate(&self) -> f64 {
@@ -640,19 +704,35 @@ impl ProgramPlayer {
     // ── Transport controls ─────────────────────────────────────────────────
 
     pub fn seek(&mut self, timeline_pos_ns: u64) {
-        let was_playing = self.state == PlayerState::Playing;
+        let resume_playback = self.state == PlayerState::Playing;
         self.timeline_pos_ns = timeline_pos_ns;
         self.base_timeline_ns = timeline_pos_ns;
         self.play_start = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             return;
         }
-        // Always rebuild at the seek target so decoder branches, compositor state,
-        // and seek/preroll ordering stay deterministic during timeline scrubbing.
-        self.rebuild_pipeline_at(timeline_pos_ns);
+        let desired = self.clips_active_at(timeline_pos_ns);
+        let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
+        let same_active_set = self.state != PlayerState::Playing && !self.slots.is_empty() && desired == current;
+        if same_active_set {
+            self.current_idx = self.clip_at(timeline_pos_ns);
+            for slot in &self.slots {
+                let clip = &self.clips[slot.clip_idx];
+                let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos_ns);
+            }
+            self.wait_for_paused_preroll();
+            // Nudge PAUSED pipelines to consume post-seek output for same-clip scrubs.
+            let _ = self.pipeline.set_state(gst::State::Playing);
+            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(250));
+            let _ = self.pipeline.set_state(gst::State::Paused);
+            self.wait_for_paused_preroll();
+        } else {
+            // Rebuild when active clip membership changes.
+            self.rebuild_pipeline_at(timeline_pos_ns);
+        }
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
-        if was_playing {
+        if resume_playback {
             self.play_start = Some(Instant::now());
         }
     }
@@ -663,6 +743,9 @@ impl ProgramPlayer {
         }
         let pos = self.timeline_pos_ns;
         if self.slots.is_empty() {
+            // When starting playback from a cold/stopped state, rebuild via the
+            // playback path (not paused scrubbing path) to avoid paused-seek stalls.
+            self.state = PlayerState::Playing;
             self.rebuild_pipeline_at(pos);
         }
         let _ = self.pipeline.set_state(gst::State::Playing);
@@ -725,8 +808,8 @@ impl ProgramPlayer {
             return;
         }
         self.sync_audio_to(0);
-        // Rebuild at 0 so a paused frame is visible.
-        self.rebuild_pipeline_at(0);
+        // Keep stop lightweight; avoid paused rebuild/seek in the stop path.
+        let _ = self.pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Stopped;
     }
 
@@ -1139,7 +1222,10 @@ impl ProgramPlayer {
 
     /// Block briefly until the paused pipeline produces a post-seek preroll frame.
     fn wait_for_paused_preroll(&self) {
-        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(400));
+        // Accurate paused seeks (especially HEVC with long GOPs) can need >400ms
+        // to decode from keyframe to target frame before preroll completes.
+        let timeout_ms = if self.state == PlayerState::Playing { 400 } else { 2_000 };
+        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(timeout_ms));
     }
 
     fn seek_slot_decoder(
@@ -1161,6 +1247,57 @@ impl ProgramPlayer {
             .is_ok()
     }
 
+    fn seek_slot_decoder_paused(slot: &VideoSlot, clip: &ProgramClip, timeline_pos_ns: u64) -> bool {
+        let source_ns = clip.source_pos_ns(timeline_pos_ns);
+        slot.decoder
+            .seek_simple(
+                Self::paused_seek_flags(),
+                gst::ClockTime::from_nseconds(source_ns),
+            )
+            .is_ok()
+    }
+
+    fn seek_slot_decoder_with_retry(
+        slot: &VideoSlot,
+        clip: &ProgramClip,
+        timeline_pos_ns: u64,
+        seek_flags: gst::SeekFlags,
+    ) -> bool {
+        for _ in 0..4 {
+            if Self::seek_slot_decoder(slot, clip, timeline_pos_ns, seek_flags) {
+                return true;
+            }
+            let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        log::warn!(
+            "ProgramPlayer: decoder seek failed after retries (clip={}, timeline_ns={})",
+            clip.id,
+            timeline_pos_ns
+        );
+        false
+    }
+
+    fn seek_slot_decoder_paused_with_retry(
+        slot: &VideoSlot,
+        clip: &ProgramClip,
+        timeline_pos_ns: u64,
+    ) -> bool {
+        for _ in 0..4 {
+            if Self::seek_slot_decoder_paused(slot, clip, timeline_pos_ns) {
+                return true;
+            }
+            let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        log::warn!(
+            "ProgramPlayer: paused decoder seek failed after retries (clip={}, timeline_ns={})",
+            clip.id,
+            timeline_pos_ns
+        );
+        false
+    }
+
     /// Force a re-seek on the current clip's slot so a paused frame refreshes.
     fn reseek_slot_for_current(&self) {
         let Some(idx) = self.current_idx else { return };
@@ -1168,12 +1305,7 @@ impl ProgramPlayer {
             return;
         };
         let clip = &self.clips[idx];
-        let _ = Self::seek_slot_decoder(
-            slot,
-            clip,
-            self.timeline_pos_ns,
-            Self::paused_seek_flags(),
-        );
+        let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, self.timeline_pos_ns);
         self.wait_for_paused_preroll();
     }
 
@@ -1337,7 +1469,7 @@ impl ProgramPlayer {
         if self.slots.is_empty() {
             return;
         }
-        let deadline = Instant::now() + Duration::from_millis(250);
+        let deadline = Instant::now() + Duration::from_millis(1_000);
         while Instant::now() < deadline {
             if self
                 .slots
@@ -1347,6 +1479,13 @@ impl ProgramPlayer {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
+        }
+        if !self
+            .slots
+            .iter()
+            .all(|slot| slot.video_linked.load(Ordering::Relaxed))
+        {
+            log::warn!("ProgramPlayer: timed out waiting for video pad links");
         }
     }
 
@@ -1688,6 +1827,39 @@ impl ProgramPlayer {
                 }
             });
 
+            // Tune inner elements created by uridecodebin for local-file playback:
+            // – cap decoder thread count to avoid thread explosion across 3+ tracks
+            // – keep multiqueue limits seek-safe while paused scrubbing
+            let tune_playback_pipeline = was_playing;
+            decoder.connect("deep-element-added", false, move |args| {
+                // deep-element-added: args[0]=uridecodebin, args[1]=parent_bin, args[2]=element
+                let child = args[2].get::<gst::Element>().ok()?;
+                let factory_name = child
+                    .factory()
+                    .map(|f| f.name().to_string())
+                    .unwrap_or_default();
+                // Cap H.264/HEVC/VP9 decoder threads (avdec_* defaults to num_cpus).
+                if tune_playback_pipeline
+                    && (factory_name.starts_with("avdec_h264")
+                        || factory_name.starts_with("avdec_vp8"))
+                {
+                    child.set_property("max-threads", 2i32);
+                } else if tune_playback_pipeline
+                    && (factory_name.starts_with("avdec_h265")
+                        || factory_name.starts_with("avdec_vp9"))
+                {
+                    child.set_property("max-threads", 4i32);
+                } else if tune_playback_pipeline && factory_name == "multiqueue" {
+                    // Keep paused scrubbing seek-safe: ACCURATE seeks may need to decode
+                    // a full GOP before reaching the target frame, so paused rebuilds keep
+                    // default multiqueue behavior. During active playback, keep a 10MB
+                    // cap per slot to reduce decode buffering pressure.
+                    child.set_property("max-size-time", 0u64);
+                    child.set_property("max-size-bytes", 10_485_760u32);
+                }
+                None
+            });
+
             // Sync element states with pipeline.
             let _ = decoder.sync_state_with_parent();
             let _ = effects_bin.sync_state_with_parent();
@@ -1783,12 +1955,16 @@ impl ProgramPlayer {
         // Seek each decoder to its source position with stop boundary.
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
-            let seek_flags = if was_playing {
-                self.clip_seek_flags()
+            if was_playing {
+                let _ = Self::seek_slot_decoder_with_retry(
+                    slot,
+                    clip,
+                    timeline_pos,
+                    self.clip_seek_flags(),
+                );
             } else {
-                Self::paused_seek_flags()
-            };
-            let _ = Self::seek_slot_decoder(slot, clip, timeline_pos, seek_flags);
+                let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+            }
         }
 
         // In paused mode, perform a two-pass settle:
@@ -1799,7 +1975,7 @@ impl ProgramPlayer {
             self.wait_for_paused_preroll();
             for slot in &self.slots {
                 let clip = &self.clips[slot.clip_idx];
-                let _ = Self::seek_slot_decoder(slot, clip, timeline_pos, Self::paused_seek_flags());
+                let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
             }
             let _ = self.pipeline.set_state(gst::State::Paused);
             self.wait_for_paused_preroll();

@@ -82,6 +82,8 @@ pub enum McpCommand {
     },
     SetGskRenderer { renderer: String, reply: SyncSender<Value> },
     SetPreviewQuality { quality: String, reply: SyncSender<Value> },
+    SeekPlayhead { timeline_pos_ns: u64, reply: SyncSender<Value> },
+    ExportDisplayedFrame { path: String, reply: SyncSender<Value> },
     Play  { reply: SyncSender<Value> },
     Pause { reply: SyncSender<Value> },
     Stop  { reply: SyncSender<Value> },

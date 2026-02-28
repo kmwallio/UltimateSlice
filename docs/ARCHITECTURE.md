@@ -331,6 +331,11 @@ Key design points:
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |
 | `insert_clip` | Insert a source clip at playhead, shifting subsequent clips right (3-point insert edit) |
 | `overwrite_clip` | Overwrite timeline content at playhead with a source clip (3-point overwrite edit) |
+| `seek_playhead` | Seek the timeline/program monitor to an absolute `timeline_pos_ns` |
+| `export_displayed_frame` | Export current program-monitor displayed frame to an image file (PPM/P6) |
+| `play` | Start program monitor playback |
+| `pause` | Pause program monitor playback |
+| `stop` | Stop program monitor playback and return playhead to start |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_project_title` | Rename the project |

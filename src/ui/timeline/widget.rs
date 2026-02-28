@@ -109,6 +109,9 @@ pub struct TimelineState {
     pub on_project_changed: Option<Rc<dyn Fn()>>,
     /// Callback fired when the user presses Space to toggle play/pause
     pub on_play_pause: Option<Rc<dyn Fn()>>,
+    /// Callback to pause/resume background thumbnail+waveform extraction during playback.
+    /// Called with `true` when playback starts, `false` when it stops.
+    pub on_extraction_pause: Option<Rc<dyn Fn(bool)>>,
     /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
     pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
@@ -139,6 +142,7 @@ impl TimelineState {
             on_seek: None,
             on_project_changed: None,
             on_play_pause: None,
+            on_extraction_pause: None,
             on_drop_clip: None,
             magnetic_mode: false,
             hover_transition_pair: None,
@@ -359,6 +363,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             }
             glib::ControlFlow::Continue
         });
+    }
+
+    // Wire on_extraction_pause: pauses/resumes thumb+waveform extraction during playback.
+    {
+        let thumb_cache = thumb_cache.clone();
+        let wave_cache = wave_cache.clone();
+        state.borrow_mut().on_extraction_pause = Some(Rc::new(move |paused: bool| {
+            thumb_cache.borrow_mut().set_extraction_paused(paused);
+            wave_cache.borrow_mut().set_extraction_paused(paused);
+        }));
     }
 
     // ── Click: seek / select / razor ────────────────────────────────────────
@@ -645,12 +659,24 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let (start_x, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
                 let current_x = start_x + offset_x;
                 let current_y = start_y + offset_y;
+                let button = gesture.current_button();
 
                 if start_y < RULER_HEIGHT {
-                    // Drag on ruler = pan the timeline.
-                    let mut st = state.borrow_mut();
-                    st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
-                    if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+                    if button == 2 || button == 3 {
+                        // Middle/right drag on ruler = pan timeline.
+                        let mut st = state.borrow_mut();
+                        st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
+                        if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+                    } else {
+                        // Left drag on ruler = continuous scrubbing.
+                        let mut st = state.borrow_mut();
+                        let ns = st.x_to_ns(current_x);
+                        st.playhead_ns = ns;
+                        let seek_cb = st.on_seek.clone();
+                        drop(st);
+                        if let Some(cb) = seek_cb { cb(ns); }
+                        if let Some(a) = area_weak.upgrade() { a.queue_draw(); }
+                    }
                     return;
                 }
 

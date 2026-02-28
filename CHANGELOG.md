@@ -6,6 +6,14 @@ All notable project changes and progress should be recorded here.
 
 ### Added
 - **MCP transport controls**: `play`, `pause`, and `stop` commands added to the MCP server, allowing external clients and automation scripts to control program monitor playback.
+- **MCP seek and frame export tools**:
+  - `seek_playhead` seeks the timeline/program-monitor playhead to an absolute nanosecond position.
+  - `export_displayed_frame` writes the current displayed program frame to an image file (PPM/P6), useful for automated visual debugging of seek/playhead behavior.
+- **Playback performance optimizations**: Reduced CPU usage by ~26%, peak thread count by ~25%, and peak memory by ~1.5GB during 3-stream HEVC playback:
+  - Decoder thread cap: `avdec_h264` limited to 2 threads, `avdec_h265`/`avdec_vp9` limited to 4 threads (was unlimited, defaulting to all CPU cores) during active playback rebuilds. Implemented via `deep-element-added` signal on `uridecodebin`.
+  - Multiqueue tuning: GStreamer's internal multiqueue tuning now applies on active-playback rebuilds only (10MB byte cap per slot, unlimited time), while paused scrubbing rebuilds keep default multiqueue behavior for seek safety.
+  - Background extraction pause: Thumbnail and waveform extraction is suspended during playback and resumed on pause/stop, eliminating I/O contention from competing `typefind` threads.
+  - Scope frame skip: When the Scopes panel is hidden, the appsink frame copy is bypassed entirely (~7MB/s of saved allocations at 30fps).
 - **3-Point editing (Insert/Overwrite from Source)**: Professional insert and overwrite edit operations from the source monitor to the timeline.
   - **Insert** (`,`): Places source selection at playhead, shifting all subsequent clips right to make room (ripple insert). Button: ⤵ Insert.
   - **Overwrite** (`.`): Places source selection at playhead, replacing existing material in the time range — clips are trimmed, split, or removed as needed. Button: ⏺ Overwrite.
@@ -44,6 +52,12 @@ All notable project changes and progress should be recorded here.
 - **Export compositing parity**: Secondary-track overlays now use transparent zoom-out padding (`pad ... black@0`) and apply per-clip opacity via ffmpeg `colorchannelmixer=aa=...`, improving preview/export consistency for layered shots.
 
 ### Fixed
+- **Program monitor paused playhead scrubbing (follow-up)**: Timeline scrubbing keeps deterministic rebuild+seek ordering, with retry-backed decoder seeks, a longer video-pad-link wait window, a paused seek re-issued when each decoder video pad links, and paused rebuild ordering that seeks before first preroll. This improves reliability of rendering the frame at the playhead in the preview/transform monitor.
+- **Program monitor paused frame repaint (follow-up)**: While paused, the monitor pictures now explicitly queue redraws each poll tick so post-seek paintable updates become visible even when timeline position remains unchanged between timer iterations.
+- **Program monitor paused seek refresh nudge (follow-up)**: After paused seek settle, the pipeline performs a brief play→pause nudge to force post-seek frame consumption and paintable refresh on sinks that can otherwise remain on preroll output.
+- **Timeline ruler drag behavior**: Left-drag on the ruler now performs continuous playhead scrubbing (seek updates), while middle/right-drag keeps the existing ruler-pan behavior.
+- **Startup hang in paused seek path**: Removed paused-path `decoder.seek(...)` segment seeks (which could deadlock in `gst_element_send_event` during startup/rebuild) and use `seek_simple(FLUSH|ACCURATE)` for paused decoder seeks.
+- **MCP playback command hangs (follow-up)**: Starting playback from a cold/stopped state now rebuilds via the playback path, and stop no longer forces a paused seek rebuild. This prevents MCP `play`/`stop` from hanging after project load.
 - **Program monitor black frame on paused scrubbing (follow-up)**: In the compositor rebuild path, paused-state transition now happens after all active decoder branches are added, paused seeks use accurate seek flags, and the rebuild waits briefly for dynamic video pad links before seek/preroll settle. This prevents the background preroll path from winning before clip branches are ready, which could leave the Program Monitor and transform overlay stuck on black after timeline playhead moves.
 - **Program monitor frame refresh on timeline seek (compositor)**: Paused timeline seeks now use deterministic rebuild+seek+preroll ordering, enforce decoder readiness before seek, and apply a short gap fallback when resolving active clips near clip boundaries. Dragging/clicking the playhead now updates the preview frame reliably and the transform overlay no longer sits over a black frame.
 - **Program monitor preview-quality framing**: Reduced preview quality (`Half` / `Quarter`) now scales the fully composed frame to fit the monitor instead of showing a top-left cropped quadrant, and switching quality now forces an immediate pipeline rebuild so caps renegotiation applies cleanly at runtime.

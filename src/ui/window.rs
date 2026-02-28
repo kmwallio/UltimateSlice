@@ -381,7 +381,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     }
     {
         let prog_player = prog_player.clone();
+        let timeline_state2 = timeline_state.clone();
         timeline_state.borrow_mut().on_play_pause = Some(Rc::new(move || {
+            let is_playing = prog_player.borrow().is_playing();
+            // Pause extraction when starting playback, resume when stopping.
+            if let Some(cb) = timeline_state2.borrow().on_extraction_pause.clone() {
+                cb(!is_playing); // !is_playing because toggle hasn't happened yet
+            }
             prog_player.borrow_mut().toggle_play_pause();
         }));
     }
@@ -583,6 +589,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let ts = timeline_state.clone();
                 let cell = timeline_panel_cell.clone();
                 move || {
+                    if let Some(cb) = ts.borrow().on_extraction_pause.clone() { cb(false); }
                     pp.borrow_mut().stop();
                     ts.borrow_mut().playhead_ns = 0;
                     if let Some(ref w) = *cell.borrow() { w.queue_draw(); }
@@ -591,7 +598,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             // on_play_pause
             {
                 let pp = prog_player.clone();
-                move || { pp.borrow_mut().toggle_play_pause(); }
+                let ts = timeline_state.clone();
+                move || {
+                    let is_playing = pp.borrow().is_playing();
+                    if let Some(cb) = ts.borrow().on_extraction_pause.clone() { cb(!is_playing); }
+                    pp.borrow_mut().toggle_play_pause();
+                }
             },
             {
                 let cb = on_toggle_popout.clone();
@@ -698,6 +710,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             // Apply cross-dissolve opacities to the two program monitor pictures.
             picture_a.set_opacity(opacity_a);
             picture_b.set_opacity(opacity_b);
+            // Force monitor repaint while paused so post-seek paintable updates
+            // become visible even when timeline position is unchanged between ticks.
+            if !playing {
+                picture_a.queue_draw();
+                picture_b.queue_draw();
+            }
             // Update VU meter with current audio peak levels.
             vu_pc.set(peaks);
             vu.queue_draw();
@@ -742,8 +760,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let rev = scopes_revealer.clone();
         let docked_paned = docked_scopes_paned.clone();
         let monitor_state = monitor_state.clone();
+        let prog_player_scope = prog_player.clone();
         scopes_btn.connect_toggled(move |b| {
-            if b.is_active() {
+            let visible = b.is_active();
+            prog_player_scope.borrow().set_scope_enabled(visible);
+            if visible {
                 if docked_paned.end_child().is_none() {
                     docked_paned.set_end_child(Some(&rev));
                     let pos = monitor_state.borrow().docked_split_pos.max(160);
@@ -1281,12 +1302,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let mut pp = prog_player_reload.borrow_mut();
                 pp.set_project_dimensions(proj_w, proj_h);
                 pp.load_clips(clips);
-                // Seek back to the previous position (loads the clip at that point
-                // and applies the current color correction values).
                 if !pp.clips.is_empty() {
-                    pp.seek(prev_pos);
                     if was_playing {
+                        // Preserve playback behavior after clip reloads.
+                        pp.seek(prev_pos);
                         pp.play();
+                    } else {
+                        // Avoid synchronous paused seeks during project-load callbacks;
+                        // user-initiated seek/scrub will position preview on demand.
+                        pp.timeline_pos_ns = prev_pos.min(pp.timeline_dur_ns);
                     }
                 }
             });
@@ -2481,17 +2505,37 @@ fn handle_mcp_command(
             }
         }
 
+        McpCommand::SeekPlayhead { timeline_pos_ns, reply } => {
+            timeline_state.borrow_mut().playhead_ns = timeline_pos_ns;
+            prog_player.borrow_mut().seek(timeline_pos_ns);
+            reply.send(json!({"ok": true, "timeline_pos_ns": timeline_pos_ns})).ok();
+        }
+
+        McpCommand::ExportDisplayedFrame { path, reply } => {
+            if path.is_empty() {
+                reply.send(json!({"ok": false, "error": "path is required"})).ok();
+            } else {
+                match prog_player.borrow().export_displayed_frame_ppm(&path) {
+                    Ok(()) => reply.send(json!({"ok": true, "path": path, "format": "ppm"})).ok(),
+                    Err(e) => reply.send(json!({"ok": false, "error": e.to_string()})).ok(),
+                };
+            }
+        }
+
         McpCommand::Play { reply } => {
+            if let Some(cb) = timeline_state.borrow().on_extraction_pause.clone() { cb(true); }
             prog_player.borrow_mut().play();
             reply.send(json!({"ok": true})).ok();
         }
 
         McpCommand::Pause { reply } => {
+            if let Some(cb) = timeline_state.borrow().on_extraction_pause.clone() { cb(false); }
             prog_player.borrow_mut().pause();
             reply.send(json!({"ok": true})).ok();
         }
 
         McpCommand::Stop { reply } => {
+            if let Some(cb) = timeline_state.borrow().on_extraction_pause.clone() { cb(false); }
             prog_player.borrow_mut().stop();
             reply.send(json!({"ok": true})).ok();
         }

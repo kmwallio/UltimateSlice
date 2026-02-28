@@ -522,6 +522,28 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "seek_playhead",
+            "description": "Seek the timeline/program-monitor playhead to an absolute timeline position in nanoseconds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds." }
+                },
+                "required": ["timeline_pos_ns"]
+            }
+        },
+        {
+            "name": "export_displayed_frame",
+            "description": "Export the currently displayed program-monitor frame to an image file (binary PPM/P6 format).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute output file path (recommended .ppm extension)." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "play",
             "description": "Start program monitor playback from the current playhead position.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -719,6 +741,14 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "play"  => McpCommand::Play  { reply: tx },
         "pause" => McpCommand::Pause { reply: tx },
         "stop"  => McpCommand::Stop  { reply: tx },
+        "seek_playhead" => McpCommand::SeekPlayhead {
+            timeline_pos_ns: args["timeline_pos_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+        "export_displayed_frame" => McpCommand::ExportDisplayedFrame {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
 
         _ => return err(id.clone(), -32602, &format!("Unknown tool: '{name}'")),
     };
