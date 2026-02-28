@@ -4,6 +4,11 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Fixed
+- **Playhead seek preview**: Seeking the timeline playhead while paused now correctly shows the frame at the target position instead of a black screen or the first frame of the clip. Two complementary fixes:
+  1. **In-place seek fast path**: When the same clips are already loaded for the target position, decoders are seeked in-place (no pipeline teardown/rebuild). The previous always-rebuild approach went through GStreamer's `Ready` state (flashing black background) and allowed decoders to preroll at position 0 before the seek was applied (flashing first frame).
+  2. **Rebuild path display pulse**: After a full pipeline rebuild (cold start, clip boundary crossing), a brief `Playing` pulse (150 ms) is applied before returning to `Paused`. Without this, the GStreamer compositor holds its composited output until the clock advances; the pulse releases that back-pressure so the frame actually reaches `gtk4paintablesink` and the GTK paintable is updated.
+
 ### Added
 - **MCP transport controls**: `play`, `pause`, and `stop` commands added to the MCP server, allowing external clients and automation scripts to control program monitor playback.
 - **MCP seek and frame export tools**:

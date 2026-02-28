@@ -711,17 +711,35 @@ impl ProgramPlayer {
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             return;
         }
-        // Always rebuild at the seek target so decoder branches, compositor state,
-        // and seek/preroll ordering stay deterministic during timeline scrubbing.
+        // Fast path: when paused with the same clips already loaded, seek the
+        // existing decoders in-place instead of tearing down and rebuilding the
+        // pipeline.  Rebuilding always goes through Ready state (black background
+        // flash) and lets decoders preroll at position 0 (first-frame flash)
+        // before the ACCURATE seek is applied — exactly the bug that caused the
+        // monitor to show a black screen or the first frame during scrubbing.
+        if !resume_playback
+            && !self.slots.is_empty()
+            && self.clips_match_current_slots(timeline_pos_ns)
+        {
+            self.current_idx = self.clip_at(timeline_pos_ns);
+            self.seek_slots_in_place(timeline_pos_ns);
+            self.sync_audio_to(timeline_pos_ns);
+            return;
+        }
+        // Full rebuild: needed when the set of active clips has changed (e.g.
+        // crossing a clip boundary), on cold start, or when resuming from playing.
         self.rebuild_pipeline_at(timeline_pos_ns);
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
         if resume_playback {
             self.play_start = Some(Instant::now());
         } else if self.current_idx.is_some() {
-            // Ensure sinks consume post-seek output and refresh the paused frame.
+            // After rebuilding through Ready state, the compositor's output is
+            // held back by the GStreamer PAUSED clock until Playing is entered.
+            // A brief Playing pulse flushes the composited frame all the way
+            // through to gtk4paintablesink so the paintable is actually updated.
             let _ = self.pipeline.set_state(gst::State::Playing);
-            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(80));
+            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
             let _ = self.pipeline.set_state(gst::State::Paused);
             self.wait_for_paused_preroll();
         }
@@ -1297,6 +1315,30 @@ impl ProgramPlayer {
         let clip = &self.clips[idx];
         let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, self.timeline_pos_ns);
         self.wait_for_paused_preroll();
+    }
+
+    /// Returns true if the clips active at `timeline_pos_ns` exactly match the
+    /// decoder slots currently loaded (same indices, same order).
+    fn clips_match_current_slots(&self, timeline_pos_ns: u64) -> bool {
+        let desired = self.clips_active_at(timeline_pos_ns);
+        let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
+        desired == current
+    }
+
+    /// Seek all currently-loaded decoder slots to `timeline_pos_ns` without
+    /// rebuilding the pipeline.  Used when the same clips are active at the new
+    /// position — avoids the black-frame / first-frame flash caused by going
+    /// through Ready state and letting decoders preroll at position 0.
+    fn seek_slots_in_place(&mut self, timeline_pos_ns: u64) {
+        // First pass: seek every decoder to the new source position.
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos_ns);
+        }
+        self.wait_for_paused_preroll();
+        // Second pass: re-seek the primary (highest-priority) decoder to lock in
+        // the exact frame after the pipeline has settled.
+        self.reseek_slot_for_current();
     }
 
     fn apply_transform_to_slot(

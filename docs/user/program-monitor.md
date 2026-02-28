@@ -60,11 +60,11 @@ or outside the export frame.
 
 - Click on the **ruler** in the timeline to seek the program monitor to that position.
 - The program monitor seeks to the correct source position within the appropriate clip, accounting for clip speed.
+- When scrubbing within the same clip, the existing decoder is seeked in-place (no pipeline rebuild) so the monitor shows the frame at the exact playhead position without a black-screen or first-frame flash.
+- When the playhead crosses a clip boundary (different clips become active), the pipeline is briefly rebuilt for the new set of active clips.
 - During paused scrubbing, UltimateSlice waits for a fresh post-seek preroll frame so the Program Monitor and transform overlay update to the new playhead frame instead of showing black.
 - During paused scrubbing, active clip decoder branches are created before preroll/seek settle so the monitor does not remain stuck on a black frame after moving the playhead.
 - Manual timeline seeks use the paused accurate-seek path and then resume playback if it was active, so the frame shown at the playhead is updated before playback continues.
-- Paused seeks include a short internal sink-refresh pass so the monitor displays decoded clip content rather than a stale black frame.
-- During paused rebuilds, decoder seeks are applied before the first monitor preroll to avoid the initial keyframe preroll sticking in the preview.
 - While paused, the monitor is repainted continuously so delayed post-seek frame updates still appear without requiring playback to resume.
 
 ## Playhead Accuracy
