@@ -1330,15 +1330,21 @@ impl ProgramPlayer {
     /// position — avoids the black-frame / first-frame flash caused by going
     /// through Ready state and letting decoders preroll at position 0.
     fn seek_slots_in_place(&mut self, timeline_pos_ns: u64) {
-        // First pass: seek every decoder to the new source position.
+        // Seek every decoder to the new source position.
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos_ns);
         }
+        // Playing pulse: per-decoder FLUSH events stop at the compositor's
+        // sink pads and are NOT forwarded downstream.  The display sink stays
+        // prerolled with its old frame.  Briefly entering Playing starts the
+        // clock so the sink consumes the pending compositor buffer; the
+        // subsequent Paused transition triggers a fresh preroll with the
+        // latest composited frame.
+        let _ = self.pipeline.set_state(gst::State::Playing);
+        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
+        let _ = self.pipeline.set_state(gst::State::Paused);
         self.wait_for_paused_preroll();
-        // Second pass: re-seek the primary (highest-priority) decoder to lock in
-        // the exact frame after the pipeline has settled.
-        self.reseek_slot_for_current();
     }
 
     fn apply_transform_to_slot(
@@ -1455,20 +1461,13 @@ impl ProgramPlayer {
 
     /// Tear down all active decoder slots (decoders, effects, pads).
     ///
-    /// Order is critical to avoid both deadlock and pipeline errors:
-    /// 1. Remove elements from the pipeline — `gst_bin_remove` unlinks
-    ///    pads using only the pad *object* lock (not the stream lock),
-    ///    so it doesn't deadlock with the compositor's streaming thread.
-    ///    Once removed, FLOW_NOT_LINKED errors from the decoder's
-    ///    still-running streaming thread can't reach the pipeline bus.
-    /// 2. Release compositor/audiomixer request pads — the pads are
-    ///    already unlinked (step 1) so this just removes them from
-    ///    the aggregator and wakes up its aggregation thread.
-    /// 3. Set elements to Null — pad deactivation is fast because pads
-    ///    were already unlinked in step 1.
+    /// Order is critical to avoid both races and hangs:
+    /// 1. Remove elements from the pipeline (pads become unlinked).
+    /// 2. Transition removed elements to Null to stop residual streaming work.
+    /// 3. Release compositor/audiomixer request pads after branch shutdown.
     fn teardown_slots(&mut self) {
         for slot in self.slots.drain(..) {
-            // 1. Remove elements from pipeline (unlinks pads safely).
+            // 1. Detach branch elements from the pipeline.
             self.pipeline.remove(&slot.decoder).ok();
             self.pipeline
                 .remove(slot.effects_bin.upcast_ref::<gst::Element>())
@@ -1476,15 +1475,7 @@ impl ProgramPlayer {
             if let Some(ref ac) = slot.audio_conv {
                 self.pipeline.remove(ac).ok();
             }
-            // 2. Release aggregator pads (now unlinked, won't deadlock).
-            if let Some(ref pad) = slot.compositor_pad {
-                self.compositor.release_request_pad(pad);
-            }
-            if let Some(ref pad) = slot.audio_mixer_pad {
-                self.audiomixer.release_request_pad(pad);
-            }
-            // 3. Set to Null and wait for completion to avoid
-            //    "Trying to dispose element in READY state" warnings.
+            // 2. Stop any residual streaming work on removed elements.
             let _ = slot.decoder.set_state(gst::State::Null);
             let _ = slot.decoder.state(gst::ClockTime::from_mseconds(100));
             let _ = slot.effects_bin.set_state(gst::State::Null);
@@ -1492,6 +1483,13 @@ impl ProgramPlayer {
             if let Some(ref ac) = slot.audio_conv {
                 let _ = ac.set_state(gst::State::Null);
                 let _ = ac.state(gst::ClockTime::from_mseconds(100));
+            }
+            // 3. Release aggregator request pads after branch shutdown.
+            if let Some(ref pad) = slot.compositor_pad {
+                self.compositor.release_request_pad(pad);
+            }
+            if let Some(ref pad) = slot.audio_mixer_pad {
+                self.audiomixer.release_request_pad(pad);
             }
         }
     }

@@ -28,9 +28,11 @@ Tracking docs:
 - [x] Library list with clip name + filename display
 - [x] Selecting a library item loads it in the source preview
 - [x] Imported clips are **not** auto-added to the timeline
+- [x] Import no longer auto-loads Source Monitor; selecting a library item loads preview on demand (avoids import-time playbin reconfiguration races)
 
 ### Source Preview / Monitor
 - [x] GStreamer `playbin` + `gtk4paintablesink` video display
+- [x] Source preview URI reload path hardened (`Null` reconfigure + duplicate selection suppression) to avoid `gstplaysink` assertion aborts on import/selection
 - [x] Source scrubber `DrawingArea` with click-to-seek
 - [x] In-point (green) / Out-point (orange) markers on scrubber
 - [x] Selected region highlighted in scrubber

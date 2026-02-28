@@ -163,7 +163,6 @@ pub fn build_media_browser(
     {
         let library = library.clone();
         let flow_box = flow_box.clone();
-        let on_source_selected = on_source_selected.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
 
@@ -183,7 +182,6 @@ pub fn build_media_browser(
 
             let library = library.clone();
             let flow_box = flow_box.clone();
-            let on_source_selected = on_source_selected.clone();
             let thumb_cache = thumb_cache.clone();
             let probe_cache = probe_cache.clone();
 
@@ -191,24 +189,17 @@ pub fn build_media_browser(
 
             dialog.open_multiple(window.as_ref(), gio::Cancellable::NONE, move |result| {
                 if let Ok(files) = result {
-                    let mut last_import: Option<(String, u64, FlowBoxChild)> = None;
                     for i in 0..files.n_items() {
                         let Some(obj) = files.item(i) else { continue };
                         let Ok(file) = obj.downcast::<gio::File>() else { continue };
                         let Some(path) = file.path() else { continue };
-                        if let Some(imported) = import_path_into_library(
+                        let _ = import_path_into_library(
                             path.to_string_lossy().to_string(),
                             &library,
                             &flow_box,
                             &thumb_cache,
                             &probe_cache,
-                        ) {
-                            last_import = Some(imported);
-                        }
-                    }
-                    if let Some((path_str, duration_ns, child)) = last_import {
-                        flow_box.select_child(&child);
-                        on_source_selected(path_str, duration_ns);
+                        );
                     }
                 }
             });
@@ -219,7 +210,6 @@ pub fn build_media_browser(
     {
         let library = library.clone();
         let flow_box = flow_box.clone();
-        let on_source_selected = on_source_selected.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
         let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
@@ -229,19 +219,13 @@ pub fn build_media_browser(
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            let mut last_import: Option<(String, u64, FlowBoxChild)> = None;
+            let mut imported_any = false;
             for path in parse_external_drop_paths(&payload) {
-                if let Some(imported) = import_path_into_library(path, &library, &flow_box_for_drop, &thumb_cache, &probe_cache) {
-                    last_import = Some(imported);
+                if import_path_into_library(path, &library, &flow_box_for_drop, &thumb_cache, &probe_cache).is_some() {
+                    imported_any = true;
                 }
             }
-            if let Some((path_str, duration_ns, child)) = last_import {
-                flow_box_for_drop.select_child(&child);
-                on_source_selected(path_str, duration_ns);
-                true
-            } else {
-                false
-            }
+            imported_any
         });
         flow_box.add_controller(drop_target);
     }

@@ -1111,12 +1111,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 .to_string();
             clip_name_label.set_text(&name);
             let uri = format!("file://{path}");
+            // Guard against duplicate selection-changed emissions for the same
+            // item; avoid redundant playbin reconfiguration.
+            let should_reload = {
+                let m = source_marks.borrow();
+                m.path != path
+            };
             // Look up is_audio_only from library item (set by background probe).
             let audio_only = library.borrow().iter()
                 .find(|i| i.source_path == path)
                 .map(|i| i.is_audio_only)
                 .unwrap_or(false);
-            let _ = player.borrow().load(&uri);
+            if should_reload {
+                let _ = player.borrow().load(&uri);
+            }
             let mut m = source_marks.borrow_mut();
             m.path = path;
             m.duration_ns = duration_ns;
@@ -2270,7 +2278,6 @@ fn handle_mcp_command(
             let label = item.label.clone();
             library.borrow_mut().push(item);
             reply.send(json!({"success": true, "label": label, "duration_ns": duration_ns})).ok();
-            on_project_changed();
         }
 
         McpCommand::ReorderTrack { from_index, to_index, reply } => {

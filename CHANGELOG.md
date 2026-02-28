@@ -5,11 +5,18 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
-- **Playhead seek preview**: Seeking the timeline playhead while paused now correctly shows the frame at the target position instead of a black screen or the first frame of the clip. Two complementary fixes:
+- **Import-time `gstplaysink` abort mitigation**: Media import and external-drop paths no longer auto-select/auto-load the newly imported clip into the Source Monitor. Loading now happens on explicit user selection, avoiding import-time overlap between Discoverer probing and source `playbin` reconfiguration on problematic media.
+- **Source import preview stability**: Hardened source-monitor `playbin` URI reloads by transitioning through `Null` before setting a new URI, and ignoring duplicate same-item selection callbacks. This prevents rapid reconfiguration races that can abort with `gstplaysink` assertions during import/selection.
+- **Import abort in new projects (`gstplaysink` assertion)**: Import UI paths were invoking source selection twice (`select_child` callback + an explicit second callback), which could trigger overlapping `playbin` reconfiguration and crash with `gstplaysink.c:1475: try_element: assertion failed: (!element_bus)`. Import now selects the item once and relies on the existing selection callback to load preview media.
+- **MCP `import_media` hang after project open**: Importing media through MCP no longer triggers `on_project_changed()`. Importing into the library is now library-only (matching UI behavior), which avoids an unnecessary program-player reload that could stall subsequent MCP commands.
+- **Crash/hang during project updates**: `teardown_slots()` now detaches slot branch elements from the pipeline, transitions the removed elements to `Null`, and only then releases compositor/audiomixer request pads. This avoids both the prior race (in-flight audio query hitting a released pad) and the new hang observed when forcing `Null` while branches were still attached.
+- **Playhead seek preview**: Seeking the timeline playhead while paused now correctly shows the frame at the target position instead of a black screen or the first frame of the clip. Three complementary fixes:
   1. **In-place seek fast path**: When the same clips are already loaded for the target position, decoders are seeked in-place (no pipeline teardown/rebuild). The previous always-rebuild approach went through GStreamer's `Ready` state (flashing black background) and allowed decoders to preroll at position 0 before the seek was applied (flashing first frame).
   2. **Rebuild path display pulse**: After a full pipeline rebuild (cold start, clip boundary crossing), a brief `Playing` pulse (150 ms) is applied before returning to `Paused`. Without this, the GStreamer compositor holds its composited output until the clock advances; the pulse releases that back-pressure so the frame actually reaches `gtk4paintablesink` and the GTK paintable is updated.
+  3. **Fast-path display pulse**: The in-place seek fast path now also performs a `Playing → Paused` pulse after seeking decoders. Per-decoder FLUSH events stop at the compositor's sink pads and are not forwarded downstream, so the display sink stays prerolled with its old frame; the pulse starts the clock briefly to flush the new composited frame through to `gtk4paintablesink`.
 
 ### Added
+- **Agent verification rule**: `docs/ARCHITECTURE.md` now explicitly requires MCP completion checks before declaring tasks done: new-project import, existing-project open, and MCP validation of new/modified functionality when feasible.
 - **MCP transport controls**: `play`, `pause`, and `stop` commands added to the MCP server, allowing external clients and automation scripts to control program monitor playback.
 - **MCP seek and frame export tools**:
   - `seek_playhead` seeks the timeline/program-monitor playhead to an absolute nanosecond position.

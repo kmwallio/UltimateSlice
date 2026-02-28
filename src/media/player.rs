@@ -139,9 +139,18 @@ impl Player {
 
     /// Load a URI (e.g. `file:///path/to/video.mp4`)
     pub fn load(&self, uri: &str) -> Result<()> {
-        self.pipeline.set_state(gst::State::Ready)?;
+        // Fully quiesce playbin before replacing URI. Ready-level reconfiguration
+        // can still leave internal playsink children mid-transition under rapid
+        // repeated loads, which may trip assertions in playsink element setup.
+        self.pipeline.set_state(gst::State::Null)?;
+        let _ = self
+            .pipeline
+            .state(Some(gst::ClockTime::from_mseconds(200)));
         self.pipeline.set_property("uri", uri);
         self.pipeline.set_state(gst::State::Paused)?;
+        let _ = self
+            .pipeline
+            .state(Some(gst::ClockTime::from_mseconds(500)));
         *self.state.lock().unwrap() = PlayerState::Paused;
         Ok(())
     }

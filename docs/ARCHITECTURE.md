@@ -307,6 +307,14 @@ Key design points:
 - The socket can be enabled/disabled at runtime via Preferences; the listener
   thread is started/stopped accordingly.
 
+### Agent completion verification (required)
+
+Before declaring a task finished, agents must verify via MCP:
+
+1. A **new project** can be created and media can be imported.
+2. An **existing project** can be opened.
+3. When possible, any new or modified functionality is exercised via MCP.
+
 ### Available Tools
 
 | Tool | Description |
