@@ -13,8 +13,9 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// A single RGBA frame pulled from the scope appsink for colour scope analysis.
 #[derive(Clone)]
@@ -110,6 +111,8 @@ struct VideoSlot {
     clip_idx: usize,
     /// `uridecodebin` element for this slot.
     decoder: gst::Element,
+    /// True once the decoder's video pad has been linked into effects_bin.
+    video_linked: Arc<AtomicBool>,
     /// Video effect chain bin between decoder and compositor.
     effects_bin: gst::Bin,
     /// Compositor sink pad for this slot's video.
@@ -637,16 +640,19 @@ impl ProgramPlayer {
     // ── Transport controls ─────────────────────────────────────────────────
 
     pub fn seek(&mut self, timeline_pos_ns: u64) {
+        let was_playing = self.state == PlayerState::Playing;
         self.timeline_pos_ns = timeline_pos_ns;
         self.base_timeline_ns = timeline_pos_ns;
         self.play_start = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             return;
         }
+        // Always rebuild at the seek target so decoder branches, compositor state,
+        // and seek/preroll ordering stay deterministic during timeline scrubbing.
         self.rebuild_pipeline_at(timeline_pos_ns);
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
-        if self.state == PlayerState::Playing {
+        if was_playing {
             self.play_start = Some(Instant::now());
         }
     }
@@ -1084,6 +1090,27 @@ impl ProgramPlayer {
             })
             .map(|(i, _)| i)
             .collect();
+        if active.is_empty() {
+            const GAP_NS: u64 = 100_000_000;
+            if let Some(next_start) = self
+                .clips
+                .iter()
+                .filter(|c| {
+                    c.timeline_start_ns > timeline_pos_ns
+                        && c.timeline_start_ns <= timeline_pos_ns + GAP_NS
+                })
+                .map(|c| c.timeline_start_ns)
+                .min()
+            {
+                active = self
+                    .clips
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.timeline_start_ns == next_start)
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+        }
         active.sort_by_key(|&i| self.clips[i].track_index);
         active
     }
@@ -1110,6 +1137,30 @@ impl ProgramPlayer {
         gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     }
 
+    /// Block briefly until the paused pipeline produces a post-seek preroll frame.
+    fn wait_for_paused_preroll(&self) {
+        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(400));
+    }
+
+    fn seek_slot_decoder(
+        slot: &VideoSlot,
+        clip: &ProgramClip,
+        timeline_pos_ns: u64,
+        seek_flags: gst::SeekFlags,
+    ) -> bool {
+        let source_ns = clip.source_pos_ns(timeline_pos_ns);
+        slot.decoder
+            .seek(
+            clip.speed,
+            seek_flags,
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(source_ns),
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(clip.source_out_ns),
+            )
+            .is_ok()
+    }
+
     /// Force a re-seek on the current clip's slot so a paused frame refreshes.
     fn reseek_slot_for_current(&self) {
         let Some(idx) = self.current_idx else { return };
@@ -1117,16 +1168,13 @@ impl ProgramPlayer {
             return;
         };
         let clip = &self.clips[idx];
-        let source_ns = clip.source_pos_ns(self.timeline_pos_ns);
-        let speed = clip.speed;
-        let _ = slot.decoder.seek(
-            speed,
+        let _ = Self::seek_slot_decoder(
+            slot,
+            clip,
+            self.timeline_pos_ns,
             Self::paused_seek_flags(),
-            gst::SeekType::Set,
-            gst::ClockTime::from_nseconds(source_ns),
-            gst::SeekType::Set,
-            gst::ClockTime::from_nseconds(clip.source_out_ns),
         );
+        self.wait_for_paused_preroll();
     }
 
     fn apply_transform_to_slot(
@@ -1281,6 +1329,24 @@ impl ProgramPlayer {
                 let _ = ac.set_state(gst::State::Null);
                 let _ = ac.state(gst::ClockTime::from_mseconds(100));
             }
+        }
+    }
+
+    /// Wait briefly for dynamic decode pads to link into the effects chain.
+    fn wait_for_video_links(&self) {
+        if self.slots.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            if self
+                .slots
+                .iter()
+                .all(|slot| slot.video_linked.load(Ordering::Relaxed))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -1492,9 +1558,6 @@ impl ProgramPlayer {
             return;
         }
 
-        // Transition to Paused so new elements can preroll.
-        let _ = self.pipeline.set_state(gst::State::Paused);
-
         // Update current_idx to highest-priority clip.
         self.current_idx = active.last().copied();
 
@@ -1603,6 +1666,8 @@ impl ProgramPlayer {
             // Connect uridecodebin pad-added for dynamic linking.
             let effects_sink = effects_bin.static_pad("sink");
             let audio_sink = audio_conv.as_ref().and_then(|ac| ac.static_pad("sink"));
+            let video_linked = Arc::new(AtomicBool::new(false));
+            let video_linked_for_cb = video_linked.clone();
             decoder.connect_pad_added(move |_dec, pad| {
                 let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
                 if let Some(caps) = caps {
@@ -1610,7 +1675,9 @@ impl ProgramPlayer {
                         let name = s.name().to_string();
                         if name.starts_with("video/") {
                             if let Some(ref sink) = effects_sink {
-                                let _ = pad.link(sink);
+                                if pad.link(sink).is_ok() {
+                                    video_linked_for_cb.store(true, Ordering::Relaxed);
+                                }
                             }
                         } else if name.starts_with("audio/") {
                             if let Some(ref sink) = audio_sink {
@@ -1632,6 +1699,7 @@ impl ProgramPlayer {
             let slot_ref_for_transform = VideoSlot {
                 clip_idx,
                 decoder: decoder.clone(),
+                video_linked: video_linked.clone(),
                 effects_bin: effects_bin.clone(),
                 compositor_pad: Some(comp_pad.clone()),
                 audio_mixer_pad: amix_pad.clone(),
@@ -1677,6 +1745,7 @@ impl ProgramPlayer {
             self.slots.push(VideoSlot {
                 clip_idx,
                 decoder,
+                video_linked,
                 effects_bin,
                 compositor_pad: Some(comp_pad),
                 audio_mixer_pad: amix_pad,
@@ -1693,32 +1762,48 @@ impl ProgramPlayer {
             });
         }
 
+        // Transition to Paused after all branches are added so decoder pad-linking
+        // and preroll happen in the same cycle as the seek passes below.
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        self.wait_for_video_links();
+
         // Wait for pipeline to preroll so seeks are accepted.
         // When paused (scrubbing), always wait — we need a decoded frame for
         // the preview.  When playing, respect the playback priority to avoid
         // stutter during clip boundary crossings.
         if !was_playing || self.should_block_preroll() {
-            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(200));
+            self.wait_for_paused_preroll();
+        }
+
+        // Ensure decoders have reached their parent state before issuing seeks.
+        for slot in &self.slots {
+            let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
         }
 
         // Seek each decoder to its source position with stop boundary.
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
-            let source_pos = clip.source_pos_ns(timeline_pos);
-            let speed = clip.speed;
             let seek_flags = if was_playing {
                 self.clip_seek_flags()
             } else {
                 Self::paused_seek_flags()
             };
-            let _ = slot.decoder.seek(
-                speed,
-                seek_flags,
-                gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(source_pos),
-                gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(clip.source_out_ns),
-            );
+            let _ = Self::seek_slot_decoder(slot, clip, timeline_pos, seek_flags);
+        }
+
+        // In paused mode, perform a two-pass settle:
+        // 1) wait once for initial decoder/linking work to settle,
+        // 2) re-seek decoders after pads are likely linked,
+        // 3) wait again for a fresh preroll frame.
+        if !was_playing {
+            self.wait_for_paused_preroll();
+            for slot in &self.slots {
+                let clip = &self.clips[slot.clip_idx];
+                let _ = Self::seek_slot_decoder(slot, clip, timeline_pos, Self::paused_seek_flags());
+            }
+            let _ = self.pipeline.set_state(gst::State::Paused);
+            self.wait_for_paused_preroll();
+            self.reseek_slot_for_current();
         }
 
         // Restore pipeline state.

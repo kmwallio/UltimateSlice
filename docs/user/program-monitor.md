@@ -60,6 +60,8 @@ or outside the export frame.
 
 - Click on the **ruler** in the timeline to seek the program monitor to that position.
 - The program monitor seeks to the correct source position within the appropriate clip, accounting for clip speed.
+- During paused scrubbing, UltimateSlice waits for a fresh post-seek preroll frame so the Program Monitor and transform overlay update to the new playhead frame instead of showing black.
+- During paused scrubbing, active clip decoder branches are created before preroll/seek settle so the monitor does not remain stuck on a black frame after moving the playhead.
 
 ## Playhead Accuracy
 
