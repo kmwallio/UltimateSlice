@@ -1306,7 +1306,45 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             };
             let (proj_w, proj_h) = project_dims;
             let prog_player_reload = prog_player.clone();
+            let preferences_state_reload = preferences_state.clone();
+            let project_reload = project.clone();
+            let proxy_cache_reload = proxy_cache.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
+                // Resolve proxy paths BEFORE load_clips so the first
+                // rebuild_pipeline_at() uses proxies instead of originals.
+                {
+                    let prefs = preferences_state_reload.borrow();
+                    if prefs.proxy_mode.is_enabled() {
+                        let scale = match prefs.proxy_mode {
+                            crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+                            _ => crate::media::proxy_cache::ProxyScale::Half,
+                        };
+                        let clip_sources: Vec<(String, Option<String>)> = {
+                            let proj = project_reload.borrow();
+                            let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+                            proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter_map(|c| {
+                                    let key = (c.source_path.clone(), c.lut_path.clone());
+                                    if seen.insert(key.clone()) {
+                                        Some(key)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        };
+                        {
+                            let mut cache = proxy_cache_reload.borrow_mut();
+                            for (path, lut) in &clip_sources {
+                                cache.request(path, scale, lut.as_deref());
+                            }
+                        }
+                        let paths = proxy_cache_reload.borrow().proxies.clone();
+                        prog_player_reload.borrow_mut().update_proxy_paths(paths);
+                    }
+                }
+
                 let mut pp = prog_player_reload.borrow_mut();
                 pp.set_project_dimensions(proj_w, proj_h);
                 pp.load_clips(clips);
@@ -1325,50 +1363,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                 }
             });
-
-            // Request proxy generation for all clips if proxy mode is enabled.
-            // Do this right after the current callback returns so project load UI
-            // updates are not blocked by proxy request iteration.
-            {
-                let preferences_state = preferences_state.clone();
-                let project = project.clone();
-                let proxy_cache = proxy_cache.clone();
-                let prog_player = prog_player.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
-                    let prefs = preferences_state.borrow();
-                    if prefs.proxy_mode.is_enabled() {
-                        let scale = match prefs.proxy_mode {
-                            crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
-                            _ => crate::media::proxy_cache::ProxyScale::Half,
-                        };
-                        let clip_sources: Vec<(String, Option<String>)> = {
-                            let proj = project.borrow();
-                            let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-                            proj.tracks.iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter_map(|c| {
-                                    let key = (c.source_path.clone(), c.lut_path.clone());
-                                    if seen.insert(key.clone()) {
-                                        Some(key)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect()
-                        };
-                        {
-                            let mut cache = proxy_cache.borrow_mut();
-                            for (path, lut) in &clip_sources {
-                                cache.request(path, scale, lut.as_deref());
-                            }
-                        }
-                        // Disk-cached proxies are added to self.proxies synchronously by
-                        // request() above. Push them to the player immediately.
-                        let paths = proxy_cache.borrow().proxies.clone();
-                        prog_player.borrow_mut().update_proxy_paths(paths);
-                    }
-                });
-            }
 
             // Force immediate timeline redraw (don't wait for 100ms timer)
             if let Some(p) = panel_weak.upgrade() {
