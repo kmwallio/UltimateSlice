@@ -1228,12 +1228,22 @@ impl ProgramPlayer {
         gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     }
 
-    /// Block briefly until the paused pipeline produces a post-seek preroll frame.
+    /// Wait for decoder slots to reach their target state (typically Paused).
+    ///
+    /// Only waits on **decoder** elements — NOT the full pipeline.
+    /// `gtk4paintablesink` needs the GTK main context to complete Paused preroll
+    /// (`gdk_paintable_invalidate_contents`); calling `pipeline.state()` from the
+    /// main thread deadlocks once 3+ video tracks make decoding slow enough that
+    /// the sink hasn't prerolled before we block.  Decoder-level waits avoid the
+    /// deadlock while still ensuring frames are decoded and available at the
+    /// compositor inputs.  The display sink completes preroll asynchronously when
+    /// control returns to the GTK main loop.
     fn wait_for_paused_preroll(&self) {
-        // Accurate paused seeks (especially HEVC with long GOPs) can need >400ms
-        // to decode from keyframe to target frame before preroll completes.
-        let timeout_ms = if self.state == PlayerState::Playing { 400 } else { 2_000 };
-        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(timeout_ms));
+        let per_decoder_ms = if self.state == PlayerState::Playing { 150 } else { 500 };
+        let timeout = gst::ClockTime::from_mseconds(per_decoder_ms);
+        for slot in &self.slots {
+            let _ = slot.decoder.state(timeout);
+        }
     }
 
     fn seek_slot_decoder(
