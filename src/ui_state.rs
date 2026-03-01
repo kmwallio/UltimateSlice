@@ -125,7 +125,7 @@ pub enum PreviewQuality {
 
 impl Default for PreviewQuality {
     fn default() -> Self {
-        Self::Full
+        Self::Auto
     }
 }
 

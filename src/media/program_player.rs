@@ -692,26 +692,28 @@ impl ProgramPlayer {
 
     /// Re-apply compositor and black-source capsfilter caps from project
     /// dimensions and preview quality divisor.
+    ///
+    /// When preview_divisor > 1 the entire compositing pipeline runs at
+    /// reduced resolution, which drastically cuts per-frame CPU/GPU cost
+    /// (4× for half, 16× for quarter).
     fn apply_compositor_caps(&self) {
-        let comp_w = self.project_width.max(2) as i32;
-        let comp_h = self.project_height.max(2) as i32;
+        let out_w = (self.project_width / self.preview_divisor).max(2) as i32;
+        let out_h = (self.project_height / self.preview_divisor).max(2) as i32;
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", comp_w)
-            .field("height", comp_h)
+            .field("width", out_w)
+            .field("height", out_h)
             .field("framerate", gst::Fraction::new(30, 1))
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         self.comp_capsfilter.set_property("caps", &caps);
         let bg_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", comp_w)
-            .field("height", comp_h)
+            .field("width", out_w)
+            .field("height", out_h)
             .field("framerate", gst::Fraction::new(30, 1))
             .build();
         self.black_capsfilter.set_property("caps", &bg_caps);
-        let out_w = (self.project_width / self.preview_divisor).max(2) as i32;
-        let out_h = (self.project_height / self.preview_divisor).max(2) as i32;
         let out_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
             .field("width", out_w)
@@ -1252,6 +1254,7 @@ impl ProgramPlayer {
                 rotate,
                 flip_h,
                 flip_v,
+                self.preview_divisor,
             );
             if let Some(ref pad) = slot.compositor_pad {
                 Self::apply_zoom_to_slot(
@@ -1260,8 +1263,8 @@ impl ProgramPlayer {
                     scale,
                     position_x,
                     position_y,
-                    self.project_width,
-                    self.project_height,
+                    (self.project_width / self.preview_divisor).max(2),
+                    (self.project_height / self.preview_divisor).max(2),
                 );
             }
         }
@@ -1370,6 +1373,7 @@ impl ProgramPlayer {
                     rotate,
                     flip_h,
                     flip_v,
+                    self.preview_divisor,
                 );
                 if let Some(ref pad) = slot.compositor_pad {
                     Self::apply_zoom_to_slot(
@@ -1378,8 +1382,8 @@ impl ProgramPlayer {
                         scale,
                         position_x,
                         position_y,
-                        self.project_width,
-                        self.project_height,
+                        (self.project_width / self.preview_divisor).max(2),
+                        (self.project_height / self.preview_divisor).max(2),
                     );
                 }
             }
@@ -1899,20 +1903,27 @@ impl ProgramPlayer {
         rotate: i32,
         flip_h: bool,
         flip_v: bool,
+        preview_divisor: u32,
     ) {
+        // Scale crop values from project resolution to preview render resolution.
+        let d = preview_divisor.max(1) as i32;
+        let cl = (crop_left.max(0) / d).max(0);
+        let cr = (crop_right.max(0) / d).max(0);
+        let ct = (crop_top.max(0) / d).max(0);
+        let cb = (crop_bottom.max(0) / d).max(0);
         if let Some(ref vc) = slot.videocrop {
-            vc.set_property("left", crop_left.max(0));
-            vc.set_property("right", crop_right.max(0));
-            vc.set_property("top", crop_top.max(0));
-            vc.set_property("bottom", crop_bottom.max(0));
+            vc.set_property("left", cl);
+            vc.set_property("right", cr);
+            vc.set_property("top", ct);
+            vc.set_property("bottom", cb);
         }
         // Re-pad cropped edges with transparent borders so the compositor
         // reveals lower tracks through the cropped area.
         if let Some(ref vb) = slot.videobox_crop_alpha {
-            vb.set_property("left", -(crop_left.max(0)));
-            vb.set_property("right", -(crop_right.max(0)));
-            vb.set_property("top", -(crop_top.max(0)));
-            vb.set_property("bottom", -(crop_bottom.max(0)));
+            vb.set_property("left", -cl);
+            vb.set_property("right", -cr);
+            vb.set_property("top", -ct);
+            vb.set_property("bottom", -cb);
             vb.set_property("border-alpha", 0.0_f64);
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
@@ -2120,10 +2131,15 @@ impl ProgramPlayer {
     }
 
     /// Build a per-slot video effects bin and return it along with effect element refs.
+    ///
+    /// `render_width`/`render_height` are the resolution used for internal
+    /// processing (may be project resolution ÷ preview_divisor).  Crop pixels
+    /// are scaled accordingly so they match the render resolution.
     fn build_effects_bin(
         clip: &ProgramClip,
-        project_width: u32,
-        project_height: u32,
+        render_width: u32,
+        render_height: u32,
+        crop_scale_divisor: u32,
     ) -> (
         gst::Bin,
         Option<gst::Element>, // videobalance
@@ -2252,12 +2268,14 @@ impl ProgramPlayer {
             }
         }
 
-        // Set project resolution capsfilters.
-        // capsfilter_proj constrains to RGBA at project resolution (for effects).
+        // Set render resolution capsfilters.
+        // capsfilter_proj constrains to RGBA at render resolution (for effects).
+        // When preview_divisor > 1, this is smaller than full project resolution,
+        // reducing per-frame processing cost proportionally.
         let proj_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", project_width as i32)
-            .field("height", project_height as i32)
+            .field("width", render_width.max(2) as i32)
+            .field("height", render_height.max(2) as i32)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         if let Some(ref cf) = capsfilter_proj {
@@ -2473,7 +2491,12 @@ impl ProgramPlayer {
                 alpha_filter,
                 capsfilter_zoom,
                 videobox_zoom,
-            ) = Self::build_effects_bin(&clip, self.project_width, self.project_height);
+            ) = Self::build_effects_bin(
+                &clip,
+                (self.project_width / self.preview_divisor).max(2),
+                (self.project_height / self.preview_divisor).max(2),
+                self.preview_divisor,
+            );
 
             // Create uridecodebin for this clip.
             let decoder = match gst::ElementFactory::make("uridecodebin")
@@ -2715,6 +2738,7 @@ impl ProgramPlayer {
                 clip.rotate,
                 clip.flip_h,
                 clip.flip_v,
+                self.preview_divisor,
             );
             Self::apply_title_to_slot(
                 &slot_ref_for_transform,
@@ -2730,8 +2754,8 @@ impl ProgramPlayer {
                 clip.scale,
                 clip.position_x,
                 clip.position_y,
-                self.project_width,
-                self.project_height,
+                (self.project_width / self.preview_divisor).max(2),
+                (self.project_height / self.preview_divisor).max(2),
             );
 
             self.slots.push(VideoSlot {
