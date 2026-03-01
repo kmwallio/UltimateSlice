@@ -299,6 +299,182 @@ combined `videoconvertscale` element).
    from every connected sink pad. Send EOS on unlinked or stalled pads to
    prevent permanent pipeline stalls.
 
+8. **`GstAggregator` flush propagation is ALL-or-nothing**: Flush events
+   sent to individual aggregator sink pads are NOT propagated downstream
+   until ALL pads have received FLUSH_START. If one pad (e.g., a background
+   `videotestsrc`) is never flushed, downstream elements (tee, appsink)
+   never see the flush and retain stale data.
+
+9. **`uridecodebin` pad exposure depends on proxy file validity**: A zero-byte
+   proxy file causes the internal `decodebin2` to reach Paused but never
+   expose pads. Always validate proxy file size > 0, not just existence.
+
+10. **`glib::MainContext::iteration(false)` is NOT safe from GTK callbacks**:
+    Calling it from within a GTK signal handler or callback causes a
+    `RefCell` double-borrow panic. Use `glib::timeout_add_local` instead
+    to defer work to the next main loop iteration.
+
+---
+
+## Multi-Track Frozen-Frame Investigation (Feb–Mar 2026, Ongoing)
+
+### Problem
+
+After the above optimizations, paused scrubbing (MCP `seek_playhead` +
+`export_displayed_frame`) shows **frozen frames** — the same image at every
+timeline position when 3+ video tracks overlap.  1-track is inconsistent
+(sometimes frozen), 2-track is fixed, 3-track is reliably frozen.
+
+### Automated MCP Test Methodology
+
+A Python script (`test_multitrack_preview.py`) drives the app via `--mcp`
+(stdio JSON-RPC):
+
+1. Open `three-video-tracks.fcpxml`
+2. Seek to 7 positions across 1-track (2 s, 4 s), 2-track (7 s, 8 s),
+   and 3-track (10 s, 11 s, 12 s) regions
+3. Export 320×180 RGBA frames (PPM) at each position
+4. Compare SHA-256 hashes — distinct hashes mean distinct frames
+
+**Important**: A 5-second delay after `open_fcpxml` is needed for proxy
+resolution and pipeline construction to complete before seeking.
+
+### Root Cause Chain (Multi-layered)
+
+The frozen-frame bug has **three distinct root causes** that compound:
+
+#### Root Cause 1: Zero-Byte Proxy File (FIXED ✅)
+
+The proxy cache (`proxy_cache.rs`) checked only `Path::exists()` when
+validating pre-existing proxy files, accepting zero-byte files as valid.
+The Screencast file's `proxy_half.mp4` was 0 bytes (from a previously
+failed transcode), so `uridecodebin` was trying to decode an empty file,
+which can never produce a pad-added signal.
+
+**Fix**: Changed proxy validation to `std::fs::metadata(&p).map_or(false, |m| m.len() > 0)`.
+Also added post-transcode verification to delete zero-byte output files.
+
+This fix resolved the **3rd decoder pad-linking failure** — all 3 decoders
+now successfully fire `pad-added` and link video.
+
+#### Root Cause 2: GTK Main-Thread Deadlock (FIXED ✅)
+
+The "playing pulse" pattern (`set_state(Playing)` → `pipeline.state(timeout)` →
+`set_state(Paused)`) blocks the GTK main thread while waiting for the pipeline
+to reach Playing.  `gtk4paintablesink` needs the GTK main thread to complete
+its Paused-to-Playing preroll.  This creates a **deadlock**:
+
+```
+Main thread:  pipeline.state(300ms)  [BLOCKED waiting for all children → Playing]
+    ↓ needs
+gtk4paintablesink:  needs GTK main loop iteration to complete preroll
+    ↓ needs
+Main thread:  must return to GTK main loop [BLOCKED]
+```
+
+**Fix**: Split the playing pulse into two phases:
+- `start_playing_pulse()` — locks audio sink, sets Playing, returns immediately
+- `complete_playing_pulse()` — called from GTK timeout after main loop runs
+
+After this fix, the pipeline successfully reaches Playing for 3+ tracks.
+The `scope_frame_seq` counter now increments during playback pulses.
+
+#### Root Cause 3: Compositor Flush Propagation (UNDER INVESTIGATION)
+
+Even with all 3 decoders linked and the pipeline reaching Playing, the
+**compositor output is identical at different seek positions**.  The
+scope appsink receives preroll buffers with changing PTS values, but the
+actual pixel data (verified by content hashing in the appsink callback)
+is identical across seeks to 10s, 11s, and 12s.
+
+**Mechanism**: When individual decoders are flush-seeked, each sends
+`FLUSH_START`/`FLUSH_STOP` to its compositor pad.  However, the
+background `videotestsrc` pad (compositor pad 0) is never flushed.
+`GstAggregator` only propagates flush downstream when ALL sink pads are
+flushed.  Since the background pad is never flushed, the compositor never
+sends `FLUSH_START` downstream to the tee/appsink branch.  The appsink
+gets stale preroll data from the compositor's previous aggregation.
+
+**Complication**: Flushing the background `videotestsrc` alongside the
+decoders causes a regression — the compositor clears ALL retained buffers
+(including decoder frames in transit), resulting in black frames or
+re-using stale data.
+
+### Pipeline State Observations (from diagnostic logging)
+
+| Scenario | After rebuild | After seek + playing_pulse | Notes |
+|----------|--------------|---------------------------|-------|
+| 1 track | `Paused, seq=2` | `Playing→Paused, seq increments` | Works after proxy fix |
+| 2 tracks | `Paused, seq=4` | `Playing→Paused, seq increments` | Works |
+| 3 tracks | `Paused, seq=5` | `Playing→Paused, seq increments` | Seq increments but pixel data unchanged |
+
+### Audio Sink Contribution
+
+`autoaudiosink` (PulseAudio backend) is slow to connect during Ready→Paused,
+compounding the delay for 3+ tracks.  **Fix applied**: Lock audio sink state
+(`set_locked_state(true)`) during `playing_pulse` for 3+ tracks to remove
+PulseAudio from the critical path.
+
+### Experiments Attempted (20+)
+
+| # | Approach | Result |
+|---|----------|--------|
+| 1 | `thread::sleep(50ms)` replacing `pipeline.state()` | Blocks main thread, no state transition |
+| 2 | `glib::MainContext::iteration(false)` | Reentrancy crash (`RefCell` double-borrow) |
+| 3 | Bus `timed_pop_filtered(StateChanged)` | Returns on first StateChanged (not AsyncDone) |
+| 4 | Background videotestsrc flush + decoder flushes | 2-track regression (compositor clears ALL pad buffers) |
+| 5 | Async export with `glib::timeout_add_local` polling | 2-track improved, 3-track still frozen |
+| 6 | Force rebuild for 3+ track seeks | Black frames (Ready state kills videotestsrc preroll) |
+| 7 | Audio sink locking alone | Pipeline reaches Playing for ≤2, still stuck for 3+ |
+| 8 | Skip playing_pulse, spin-wait on `scope_frame_seq` | seq never increments (compositor doesn't re-preroll) |
+| 9 | Lock display sink + audio during playing_pulse | Pipeline still stuck at `Async(Ready→Playing)`, black frames |
+| 10 | Flush background videotestsrc alongside decoder seeks | Black frames; compositor clears all buffers |
+| 11 | `tee` with `allow-not-linked=true` | No effect — tee wasn't the blocker |
+| 12 | Non-blocking async playing pulse (Phase 0) | Pipeline reaches Playing ✅, but frames frozen (Root Cause 3) |
+| 13 | Increase `wait_for_video_links` timeout to 2500ms | 3rd decoder still stuck (was proxy issue, not timing) |
+| 14 | Queue between effects_bin and compositor | No effect on pad linking |
+| 15 | `uridecodebin3` swap | 3rd decoder reaches Paused but no pad-added (same proxy issue) |
+| 16 | Staggered decoder initialization (sequential Paused) | 3rd decoder still stuck at Ready→Paused (proxy issue) |
+| 17 | Set slot chain (effects_bin, queue) to Paused explicitly | No improvement — decoder itself stuck (proxy issue) |
+| 18 | Background flush AFTER decoder seeks in seek_slots_in_place | Regression — all positions produce same hash |
+| 19 | Restructured export: complete_playing_pulse before polling | Preroll fires but pixel data still identical |
+| 20 | Content hashing in appsink callbacks | Confirmed: all preroll buffers have identical pixel data |
+
+### What Works (After Fixes Applied)
+
+- **Zero-byte proxy validation** ✅ — all 3 decoders link correctly
+- **Non-blocking Playing pulse** ✅ — pipeline reaches Playing for 3+ tracks
+- **Audio sink locking** ✅ — removes PulseAudio from the critical path
+- **2-track compositing** ✅ — flush-seeking works correctly
+- **`wait_for_paused_preroll()`** ✅ — per-decoder waits avoid deadlock
+- **Scope appsink callbacks fire** ✅ — preroll and sample events arrive
+
+### What's Broken
+
+- **3-track seek produces identical pixel data** — the compositor output
+  doesn't reflect the new decoder positions after flush seeks.
+- **Root cause 3** (compositor flush propagation) is the remaining blocker.
+
+### Remaining Investigation Directions
+
+1. **Pipeline-level seek**: Instead of per-decoder flush seeks, seek the
+   entire pipeline — this sends FLUSH atomically through all elements
+   including the background videotestsrc.  Requires careful handling to
+   avoid clearing the compositor's retained buffers.
+2. **Segment event injection**: After per-decoder flush seeks, manually
+   inject a `FLUSH_START`/`FLUSH_STOP` event pair on the background pad
+   to trigger full downstream flush propagation without losing decoder
+   buffers.
+3. **Direct compositor pad probe**: Install a buffer probe on the
+   compositor `src` pad to capture the composited frame directly, bypassing
+   the tee/queue/appsink path.
+4. **Dedicated export pipeline**: Create a separate pipeline for frame
+   export without `gtk4paintablesink`, eliminating the main-thread
+   dependency entirely.
+5. **Pipeline-level flush seek**: Send a single FLUSH|ACCURATE seek on the
+   pipeline (not individual decoders), using a segment event with the
+   correct per-decoder offsets.
+
 ---
 
 ## Future Optimization Opportunities
@@ -317,14 +493,18 @@ combined `videoconvertscale` element).
 ## Reproducing the Profiling
 
 1. **Build release**: `cargo build --release`
-2. **Start with MCP**: launch the app and enable the MCP socket via
-   Preferences → General → Enable MCP Server.
-3. **Open the test project** via MCP:
+2. **Start with MCP**: `target/release/ultimate-slice --mcp`
+3. **Run the MCP test script**:
+   ```bash
+   python3 test_multitrack_preview.py
+   ```
+   Or manually via MCP JSON-RPC:
    ```python
    call('open_fcpxml', {'path': '.../Sample-Media/three-video-tracks.fcpxml'})
+   call('seek_playhead', {'timeline_pos_ns': 10_000_000_000})
+   call('export_displayed_frame', {'path': '/tmp/frame_10s.ppm'})
    ```
-4. **Seek to the 3-clip region** (~10 s) and play.
-5. **Observe** compositor frame throughput in the Program Monitor.
+4. **Compare frame hashes** — different SHA-256 = different frames.
 
 To re-add the `[PERF]` instrumentation, add `log::info!` timings around the
 `rebuild_pipeline_at()`, `build_effects_bin()`, and `poll()` methods in

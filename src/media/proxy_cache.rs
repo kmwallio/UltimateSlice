@@ -69,6 +69,8 @@ pub struct ProxyCache {
     pub proxies: HashMap<String, String>,
     /// Composite keys currently being transcoded or queued.
     pending: HashSet<String>,
+    /// Keys whose transcoding failed — never re-enqueue these.
+    failed: HashSet<String>,
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyResult>,
@@ -109,6 +111,7 @@ impl ProxyCache {
         Self {
             proxies: HashMap::new(),
             pending: HashSet::new(),
+            failed: HashSet::new(),
             total_requested: 0,
             result_rx,
             work_tx: Some(work_tx),
@@ -119,12 +122,12 @@ impl ProxyCache {
     /// No-op if already cached or pending for this exact (source, lut, scale) combination.
     pub fn request(&mut self, source_path: &str, scale: ProxyScale, lut_path: Option<&str>) {
         let key = proxy_key(source_path, lut_path);
-        if self.proxies.contains_key(&key) || self.pending.contains(&key) {
+        if self.proxies.contains_key(&key) || self.pending.contains(&key) || self.failed.contains(&key) {
             return;
         }
         // Check for pre-existing proxy on disk before spawning work.
         if let Some(p) = proxy_path_for(source_path, scale, lut_path) {
-            if Path::new(&p).exists() {
+            if std::fs::metadata(&p).map_or(false, |m| m.len() > 0) {
                 self.proxies.insert(key, p);
                 return;
             }
@@ -143,6 +146,8 @@ impl ProxyCache {
             self.pending.remove(&result.cache_key);
             if result.success {
                 self.proxies.insert(result.cache_key.clone(), result.proxy_path);
+            } else {
+                self.failed.insert(result.cache_key.clone());
             }
             resolved.push(result.cache_key);
         }
@@ -159,6 +164,7 @@ impl ProxyCache {
     pub fn invalidate_all(&mut self) {
         self.proxies.clear();
         self.pending.clear();
+        self.failed.clear();
         self.total_requested = 0;
     }
 
@@ -250,7 +256,15 @@ fn transcode_proxy(source_path: &str, scale: ProxyScale, lut_path: Option<&str>)
         .status();
 
     match status {
-        Ok(s) if s.success() => (proxy_path, true),
+        Ok(s) if s.success() => {
+            // Verify non-empty output; treat zero-byte files as failures.
+            if std::fs::metadata(&proxy_path).map_or(true, |m| m.len() == 0) {
+                let _ = std::fs::remove_file(&proxy_path);
+                (proxy_path, false)
+            } else {
+                (proxy_path, true)
+            }
+        }
         _ => {
             // Clean up partial file on failure.
             let _ = std::fs::remove_file(&proxy_path);

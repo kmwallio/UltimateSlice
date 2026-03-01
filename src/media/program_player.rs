@@ -18,6 +18,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+fn frame_hash_u64(data: &[u8]) -> u64 {
+    let mut h = 1469598103934665603u64;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+
 /// A single RGBA frame pulled from the scope appsink for colour scope analysis.
 #[derive(Clone)]
 pub struct ScopeFrame {
@@ -132,6 +141,11 @@ struct VideoSlot {
     alpha_filter: Option<gst::Element>,
     capsfilter_zoom: Option<gst::Element>,
     videobox_zoom: Option<gst::Element>,
+    /// Queue between effects_bin and compositor to decouple caps negotiation.
+    slot_queue: Option<gst::Element>,
+    /// Monotonic counter incremented when a buffer passes through queue→compositor.
+    /// Used to detect when post-seek buffers have reached the compositor.
+    comp_arrival_seq: Arc<AtomicU64>,
 }
 
 pub struct ProgramPlayer {
@@ -169,10 +183,14 @@ pub struct ProgramPlayer {
     jkl_rate: f64,
     /// Latest RGBA frame captured from the scope appsink.
     latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>>,
+    /// Latest RGBA frame captured from compositor src (before preview downscale).
+    latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>>,
     /// When false, the scope appsink callback skips frame allocation (scopes panel hidden).
     scope_enabled: Arc<AtomicBool>,
     /// Monotonic counter incremented whenever a new scope frame is captured.
     scope_frame_seq: Arc<AtomicU64>,
+    /// Monotonic counter incremented whenever a new compositor-src frame is captured.
+    compositor_frame_seq: Arc<AtomicU64>,
     /// Index of the top-priority clip for `current_clip_idx()` / effects queries.
     current_idx: Option<usize>,
     /// Video sink bin (display + scope). Kept to avoid early drop.
@@ -183,6 +201,18 @@ pub struct ProgramPlayer {
     black_capsfilter: gst::Element,
     /// Capsfilter on final monitor output after preview-quality downscaling.
     preview_capsfilter: gst::Element,
+    /// The autoaudiosink element in the main pipeline (needed for locked-state management).
+    audio_sink: gst::Element,
+    /// The glsinkbin (or gtk4paintablesink) display element.  Locked during
+    /// playing_pulse for 3+ tracks so the pipeline can reach Playing without
+    /// waiting for the GTK main thread to service the display sink's preroll.
+    display_sink: gst::Element,
+    /// The always-on black videotestsrc (compositor background pad).
+    /// Must be flushed along with decoders for 3+ tracks to trigger a fresh
+    /// compositor re-preroll (the aggregator clears ALL pad buffers on flush).
+    background_src: gst::Element,
+    /// Requested compositor sink pad for the always-on black background branch.
+    background_compositor_pad: gst::Pad,
     /// Current preview quality divisor.
     preview_divisor: u32,
     /// Wall-clock instant when playback last entered Playing state.
@@ -207,16 +237,22 @@ impl ProgramPlayer {
             Ok(s) => s,
             Err(_) => paintablesink.clone(),
         };
+        let display_sink_ref = video_sink_inner.clone();
 
         // Shared frame store for colour scope analysis.
         let latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
+        let latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
         // Flag set false when the scopes panel is hidden to skip the frame copy allocation.
         let scope_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
         let scope_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let compositor_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
         // Build tee-based sink bin: display + scope appsink (320x180 RGBA).
         let video_sink_bin: gst::Element = (|| {
-            let tee = gst::ElementFactory::make("tee").build().ok()?;
+            let tee = gst::ElementFactory::make("tee")
+                .property("allow-not-linked", true)
+                .build()
+                .ok()?;
             let q1 = gst::ElementFactory::make("queue").build().ok()?;
             let q2 = gst::ElementFactory::make("queue")
                 .property_from_str("leaky", "downstream")
@@ -252,7 +288,15 @@ impl ProgramPlayer {
                         }
                         if let Ok(sample) = appsink.pull_preroll() {
                             if let Some(buffer) = sample.buffer() {
+                                let pts = buffer.pts().map(|p| p.nseconds()).unwrap_or(0);
                                 if let Ok(map) = buffer.map_readable() {
+                                    let hash = frame_hash_u64(map.as_slice());
+                                    log::debug!(
+                                        "scope new_preroll: size={} pts={} hash={:x}",
+                                        map.size(),
+                                        pts,
+                                        hash
+                                    );
                                     if map.size() >= 320 * 180 * 4 {
                                         if let Ok(mut frame) = lsf_preroll.lock() {
                                             *frame = Some(ScopeFrame {
@@ -275,7 +319,15 @@ impl ProgramPlayer {
                         }
                         if let Ok(sample) = appsink.pull_sample() {
                             if let Some(buffer) = sample.buffer() {
+                                let pts = buffer.pts().map(|p| p.nseconds()).unwrap_or(0);
                                 if let Ok(map) = buffer.map_readable() {
+                                    let hash = frame_hash_u64(map.as_slice());
+                                    log::debug!(
+                                        "scope new_sample: size={} pts={} hash={:x}",
+                                        map.size(),
+                                        pts,
+                                        hash
+                                    );
                                     if map.size() >= 320 * 180 * 4 {
                                         if let Ok(mut frame) = lsf_sample.lock() {
                                             *frame = Some(ScopeFrame {
@@ -446,6 +498,45 @@ impl ProgramPlayer {
             &preview_capsfilter,
             &video_sink_bin,
         ])?;
+        // Diagnostic probe on compositor output (before preview downscale/sinks).
+        if let Some(comp_src_pad) = comp_capsfilter.static_pad("src") {
+            let lcf = latest_compositor_frame.clone();
+            let cseq = compositor_frame_seq.clone();
+            let scope_en = scope_enabled.clone();
+            let caps_pad = comp_src_pad.clone();
+            comp_src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                if !scope_en.load(Ordering::Relaxed) {
+                    return gst::PadProbeReturn::Ok;
+                }
+                if let Some(buffer) = info.buffer() {
+                    if let Ok(map) = buffer.map_readable() {
+                        let (w, h) = caps_pad
+                            .current_caps()
+                            .and_then(|caps| {
+                                let s = caps.structure(0)?;
+                                let w = s.get::<i32>("width").ok().unwrap_or(0).max(0) as usize;
+                                let h = s.get::<i32>("height").ok().unwrap_or(0).max(0) as usize;
+                                Some((w, h))
+                            })
+                            .unwrap_or((0, 0));
+                        if w > 0 && h > 0 {
+                            let data = map.as_slice().to_vec();
+                            log::debug!(
+                                "compositor src: pts={} wh={}x{} hash={:x}",
+                                buffer.pts().map(|p| p.nseconds()).unwrap_or(0),
+                                w, h,
+                                frame_hash_u64(&data),
+                            );
+                            if let Ok(mut frame) = lcf.lock() {
+                                *frame = Some(ScopeFrame { data, width: w, height: h });
+                                cseq.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
 
         // Link silence → audiomixer background pad
         gst::Element::link_many([&silence_src, &silence_caps])?;
@@ -513,13 +604,19 @@ impl ProgramPlayer {
                 audio_peak_db: [-60.0, -60.0],
                 jkl_rate: 0.0,
                 latest_scope_frame,
+                latest_compositor_frame,
                 scope_enabled,
                 scope_frame_seq,
+                compositor_frame_seq,
                 current_idx: None,
                 _video_sink_bin: video_sink_bin,
                 comp_capsfilter,
                 black_capsfilter: black_caps,
                 preview_capsfilter,
+                audio_sink,
+                display_sink: display_sink_ref,
+                background_src: black_src,
+                background_compositor_pad: comp_bg_pad,
                 preview_divisor: 1,
                 play_start: None,
             },
@@ -613,29 +710,25 @@ impl ProgramPlayer {
     pub fn export_displayed_frame_ppm(&self, path: &str) -> Result<()> {
         let start_seq = self.scope_frame_seq.load(Ordering::Relaxed);
         let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        log::info!(
+            "export_displayed_frame: start_seq={} slots={} current_idx={:?} state={:?} timeline_ns={}",
+            start_seq, self.slots.len(), self.current_idx, self.state, self.timeline_pos_ns
+        );
         let result = (|| -> Result<()> {
             if self.current_idx.is_some() && self.state != PlayerState::Playing {
-                self.reseek_slot_for_current();
+                self.reseek_all_slots_for_export();
             }
-            let deadline = Instant::now() + Duration::from_millis(500);
+            let after_reseek_seq = self.scope_frame_seq.load(Ordering::Relaxed);
+            let deadline = Instant::now() + Duration::from_millis(800);
             while self.scope_frame_seq.load(Ordering::Relaxed) <= start_seq && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let frame = self
-                .try_pull_scope_frame()
-                .ok_or_else(|| anyhow!("no displayed frame available yet"))?;
-            let pixel_count = frame.width.saturating_mul(frame.height);
-            let needed = pixel_count.saturating_mul(4);
-            if frame.data.len() < needed {
-                return Err(anyhow!("scope frame buffer is incomplete"));
-            }
-            let mut bytes = Vec::with_capacity(32 + pixel_count.saturating_mul(3));
-            write!(&mut bytes, "P6\n{} {}\n255\n", frame.width, frame.height)?;
-            for rgba in frame.data[..needed].chunks_exact(4) {
-                bytes.extend_from_slice(&rgba[..3]);
-            }
-            std::fs::write(path, bytes)?;
-            Ok(())
+            let end_seq = self.scope_frame_seq.load(Ordering::Relaxed);
+            log::info!(
+                "export_displayed_frame: after_reseek_seq={} end_seq={} seq_changed={}",
+                after_reseek_seq, end_seq, end_seq > start_seq
+            );
+            self.write_scope_frame_ppm(path)
         })();
         if !was_enabled {
             self.scope_enabled.store(false, Ordering::Relaxed);
@@ -643,8 +736,126 @@ impl ProgramPlayer {
         result
     }
 
+    /// Phase 1 of async export: enable scope capture, trigger re-seek on all
+    /// decoder slots + background, and return (start_seq, was_scope_enabled, left_playing).
+    /// The caller should release the borrow on ProgramPlayer after this call,
+    /// let the GTK main loop run (so gtk4paintablesink can complete its state
+    /// transition), and poll `scope_frame_seq` for a change.
+    /// When `left_playing` is true, the caller must call `set_paused_after_export()`
+    /// after the export completes.
+    pub fn prepare_export(&self) -> (u64, bool, bool) {
+        let start_seq = self.scope_frame_seq.load(Ordering::Relaxed);
+        let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        log::info!(
+            "prepare_export: start_seq={} slots={} current_idx={:?} state={:?} timeline_ns={}",
+            start_seq, self.slots.len(), self.current_idx, self.state, self.timeline_pos_ns
+        );
+        let left_playing = if self.current_idx.is_some() && self.state != PlayerState::Playing {
+            self.reseek_all_slots_for_export()
+        } else {
+            false
+        };
+        (start_seq, was_enabled, left_playing)
+    }
+
+    /// Monotonic counter for scope frame captures.  Clone it for polling from
+    /// an async glib timeout without holding the ProgramPlayer borrow.
+    pub fn scope_frame_seq_arc(&self) -> Arc<AtomicU64> {
+        self.scope_frame_seq.clone()
+    }
+
+    /// Monotonic counter for compositor-src frame captures.
+    pub fn compositor_frame_seq_arc(&self) -> Arc<AtomicU64> {
+        self.compositor_frame_seq.clone()
+    }
+
+    /// Phase 2 of async export: write the latest scope frame to disk as PPM
+    /// and optionally restore scope_enabled.
+    pub fn finish_export(
+        &self,
+        path: &str,
+        was_scope_enabled: bool,
+        start_scope_seq: u64,
+        start_compositor_seq: u64,
+    ) -> Result<()> {
+        let scope_now = self.scope_frame_seq.load(Ordering::Relaxed);
+        let comp_now = self.compositor_frame_seq.load(Ordering::Relaxed);
+        let result = if scope_now > start_scope_seq {
+            log::info!(
+                "finish_export: source=scope scope_seq {}->{} comp_seq {}->{}",
+                start_scope_seq,
+                scope_now,
+                start_compositor_seq,
+                comp_now
+            );
+            self.write_scope_frame_ppm(path)
+        } else if comp_now > start_compositor_seq {
+            log::info!(
+                "finish_export: source=compositor scope_seq {}->{} comp_seq {}->{}",
+                start_scope_seq,
+                scope_now,
+                start_compositor_seq,
+                comp_now
+            );
+            self.write_compositor_frame_ppm(path)
+        } else {
+            log::warn!(
+                "finish_export: no seq advance scope_seq {}->{} comp_seq {}->{}; falling back to scope",
+                start_scope_seq,
+                scope_now,
+                start_compositor_seq,
+                comp_now
+            );
+            self.write_scope_frame_ppm(path)
+        };
+        if !was_scope_enabled {
+            self.scope_enabled.store(false, Ordering::Relaxed);
+        }
+        result
+    }
+
+    /// Write the latest scope frame to a PPM (P6) file.
+    fn write_scope_frame_ppm(&self, path: &str) -> Result<()> {
+        let frame = self
+            .try_pull_scope_frame()
+            .ok_or_else(|| anyhow!("no displayed frame available yet"))?;
+        self.write_frame_ppm(path, &frame)
+    }
+
+    fn write_compositor_frame_ppm(&self, path: &str) -> Result<()> {
+        let frame = self
+            .latest_compositor_frame
+            .lock()
+            .ok()
+            .and_then(|f| f.clone())
+            .ok_or_else(|| anyhow!("no compositor frame available yet"))?;
+        self.write_frame_ppm(path, &frame)
+    }
+
+    fn write_frame_ppm(&self, path: &str, frame: &ScopeFrame) -> Result<()> {
+        let pixel_count = frame.width.saturating_mul(frame.height);
+        let needed = pixel_count.saturating_mul(4);
+        if frame.data.len() < needed {
+            return Err(anyhow!("frame buffer is incomplete"));
+        }
+        let mut bytes = Vec::with_capacity(32 + pixel_count.saturating_mul(3));
+        write!(&mut bytes, "P6\n{} {}\n255\n", frame.width, frame.height)?;
+        for rgba in frame.data[..needed].chunks_exact(4) {
+            bytes.extend_from_slice(&rgba[..3]);
+        }
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
     pub fn jkl_rate(&self) -> f64 {
         self.jkl_rate
+    }
+
+    /// Quick diagnostic: check pipeline + compositor GStreamer state (10ms timeout).
+    pub fn pipeline_state_debug(&self) -> String {
+        let (_, pipe_cur, pipe_pend) = self.pipeline.state(gst::ClockTime::from_mseconds(10));
+        let (_, comp_cur, comp_pend) = self.compositor.state(gst::ClockTime::from_mseconds(10));
+        format!("pipe={:?}/{:?} comp={:?}/{:?}", pipe_cur, pipe_pend, comp_cur, comp_pend)
     }
 
     pub fn state(&self) -> &PlayerState {
@@ -711,13 +922,17 @@ impl ProgramPlayer {
 
     // ── Transport controls ─────────────────────────────────────────────────
 
-    pub fn seek(&mut self, timeline_pos_ns: u64) {
+    /// Seek to `timeline_pos_ns`.  Returns `true` if a non-blocking Playing
+    /// pulse was started for 3+ tracks — the caller **must** schedule
+    /// `complete_playing_pulse()` via a GTK idle/timeout callback so the main
+    /// loop can run and `gtk4paintablesink` can complete its preroll.
+    pub fn seek(&mut self, timeline_pos_ns: u64) -> bool {
         let resume_playback = self.state == PlayerState::Playing;
         self.timeline_pos_ns = timeline_pos_ns;
         self.base_timeline_ns = timeline_pos_ns;
         self.play_start = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
-            return;
+            return false;
         }
         // Fast path: when paused with the same clips already loaded, seek the
         // existing decoders in-place instead of tearing down and rebuilding the
@@ -730,9 +945,9 @@ impl ProgramPlayer {
             && self.clips_match_current_slots(timeline_pos_ns)
         {
             self.current_idx = self.clip_at(timeline_pos_ns);
-            self.seek_slots_in_place(timeline_pos_ns);
+            let needs_async = self.seek_slots_in_place(timeline_pos_ns);
             self.sync_audio_to(timeline_pos_ns);
-            return;
+            return needs_async;
         }
         // Full rebuild: needed when the set of active clips has changed (e.g.
         // crossing a clip boundary), on cold start, or when resuming from playing.
@@ -741,15 +956,22 @@ impl ProgramPlayer {
         self.sync_audio_to(timeline_pos_ns);
         if resume_playback {
             self.play_start = Some(Instant::now());
+            false
         } else if self.current_idx.is_some() {
-            // After rebuilding through Ready state, the compositor's output is
-            // held back by the GStreamer PAUSED clock until Playing is entered.
-            // A brief Playing pulse flushes the composited frame all the way
-            // through to gtk4paintablesink so the paintable is actually updated.
-            let _ = self.pipeline.set_state(gst::State::Playing);
-            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
-            let _ = self.pipeline.set_state(gst::State::Paused);
-            self.wait_for_paused_preroll();
+            if self.slots.len() >= 3 {
+                // For 3+ tracks, start a non-blocking Playing pulse: lock the
+                // audio sink, set Playing, and return immediately so the GTK
+                // main loop can service gtk4paintablesink's preroll.  The caller
+                // must schedule complete_playing_pulse() via idle/timeout.
+                self.start_playing_pulse();
+                true
+            } else {
+                // ≤2 tracks: synchronous pulse works fine.
+                self.playing_pulse();
+                false
+            }
+        } else {
+            false
         }
     }
 
@@ -1246,11 +1468,129 @@ impl ProgramPlayer {
     /// deadlock while still ensuring frames are decoded and available at the
     /// compositor inputs.  The display sink completes preroll asynchronously when
     /// control returns to the GTK main loop.
+    ///
+    /// When 3+ slots are active, per-decoder timeouts are reduced to limit total
+    /// main-thread blocking time (which prevents gtk4paintablesink from completing
+    /// its preroll, causing a deadlock-like stall).
     fn wait_for_paused_preroll(&self) {
-        let per_decoder_ms = if self.state == PlayerState::Playing { 150 } else { 500 };
+        let base_ms = if self.state == PlayerState::Playing { 150 } else { 500 };
+        // Scale down per-decoder timeout when many slots are active to keep
+        // total blocking time under ~600ms. With 3+ heavy decode tracks the
+        // main thread must return to the GTK main loop promptly so the display
+        // sink can complete preroll.
+        let per_decoder_ms = if self.slots.len() >= 3 {
+            // Keep a generous per-decoder timeout for the paused case to
+            // ensure all decoders fully preroll.  With 3 heavy decode
+            // tracks doing ACCURATE seeks simultaneously, 166ms was not
+            // enough — the third decoder sometimes stayed in Ready.
+            (base_ms / self.slots.len() as u64).max(250)
+        } else {
+            base_ms
+        };
         let timeout = gst::ClockTime::from_mseconds(per_decoder_ms);
         for slot in &self.slots {
             let _ = slot.decoder.state(timeout);
+        }
+    }
+
+    /// Snapshot each slot's compositor-arrival counter.  Call this BEFORE
+    /// issuing per-decoder flush seeks.
+    fn snapshot_arrival_seqs(&self) -> Vec<u64> {
+        self.slots
+            .iter()
+            .map(|s| s.comp_arrival_seq.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    /// Spin-wait (with short sleeps) until every slot's compositor-arrival
+    /// counter has advanced beyond the snapshot taken before the seek.
+    /// Returns true if all slots advanced within the timeout, false otherwise.
+    fn wait_for_compositor_arrivals(&self, baseline: &[u64], timeout_ms: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let all_arrived = self.slots.iter().zip(baseline.iter()).all(|(slot, &base)| {
+                slot.comp_arrival_seq.load(Ordering::Relaxed) > base
+            });
+            if all_arrived {
+                log::info!("wait_for_compositor_arrivals: all {} slots arrived", self.slots.len());
+                return true;
+            }
+            if Instant::now() >= deadline {
+                let pending: Vec<usize> = self.slots.iter().zip(baseline.iter())
+                    .enumerate()
+                    .filter(|(_, (slot, &base))| slot.comp_arrival_seq.load(Ordering::Relaxed) <= base)
+                    .map(|(i, _)| i)
+                    .collect();
+                log::warn!("wait_for_compositor_arrivals: timeout {}ms, pending slots={:?}", timeout_ms, pending);
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Start phase 1 of a non-blocking Playing pulse for 3+ tracks.
+    /// Locks the audio sink, sets the pipeline to Playing, and returns
+    /// immediately.  The caller MUST let the GTK main loop run and then
+    /// call `complete_playing_pulse()` (typically via a timeout/idle callback).
+    pub fn start_playing_pulse(&self) {
+        if !self.audio_sink.is_locked_state() {
+            self.audio_sink.set_locked_state(true);
+        }
+        let _ = self.pipeline.set_state(gst::State::Playing);
+        log::info!(
+            "start_playing_pulse: slots={} seq={}",
+            self.slots.len(),
+            self.scope_frame_seq.load(Ordering::Relaxed)
+        );
+    }
+
+    /// Complete phase 2 of a non-blocking Playing pulse: wait briefly for the
+    /// pipeline to reach Playing (the GTK main loop has been running since
+    /// `start_playing_pulse` returned), then restore Paused and unlock audio.
+    pub fn complete_playing_pulse(&self) {
+        // Check if the pipeline reached Playing.
+        let (res, cur, pend) = self.pipeline.state(gst::ClockTime::from_mseconds(10));
+        log::info!(
+            "complete_playing_pulse: state_result={:?} cur={:?} pend={:?} seq={}",
+            res, cur, pend, self.scope_frame_seq.load(Ordering::Relaxed)
+        );
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        self.wait_for_paused_preroll();
+        if self.audio_sink.is_locked_state() {
+            self.audio_sink.set_locked_state(false);
+            let _ = self.audio_sink.sync_state_with_parent();
+        }
+    }
+
+    /// Execute a Playing pulse that flushes the compositor's paused frame
+    /// through to the display and scope sinks.
+    ///
+    /// For ≤2 tracks this works synchronously: `pipeline.state()` returns
+    /// before `gtk4paintablesink` blocks.  For 3+ tracks, use
+    /// `start_playing_pulse()` + `complete_playing_pulse()` instead.
+    fn playing_pulse(&self) {
+        // Lock the audio sink for 3+ track rebuilds so the pipeline can
+        // reach Playing without waiting for PulseAudio to connect.
+        let lock_audio = self.slots.len() >= 3 && !self.audio_sink.is_locked_state();
+        if lock_audio {
+            self.audio_sink.set_locked_state(true);
+        }
+        let timeout_ms = if self.slots.len() >= 3 { 300 } else { 150 };
+        let seq_before = self.scope_frame_seq.load(Ordering::Relaxed);
+        let _ = self.pipeline.set_state(gst::State::Playing);
+        let (res, cur, pend) = self.pipeline.state(gst::ClockTime::from_mseconds(timeout_ms));
+        let seq_after = self.scope_frame_seq.load(Ordering::Relaxed);
+        log::info!(
+            "playing_pulse: slots={} state_result={:?} cur={:?} pend={:?} seq={}->{}",
+            self.slots.len(), res, cur, pend, seq_before, seq_after
+        );
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        self.wait_for_paused_preroll();
+        let seq_final = self.scope_frame_seq.load(Ordering::Relaxed);
+        log::info!("playing_pulse: after_paused seq={}", seq_final);
+        if lock_audio {
+            self.audio_sink.set_locked_state(false);
+            let _ = self.audio_sink.sync_state_with_parent();
         }
     }
 
@@ -1275,6 +1615,10 @@ impl ProgramPlayer {
 
     fn seek_slot_decoder_paused(slot: &VideoSlot, clip: &ProgramClip, timeline_pos_ns: u64) -> bool {
         let source_ns = clip.source_pos_ns(timeline_pos_ns);
+        log::info!(
+            "seek_slot_decoder_paused: clip={} timeline_ns={} source_ns={}",
+            clip.id, timeline_pos_ns, source_ns
+        );
         slot.decoder
             .seek_simple(
                 Self::paused_seek_flags(),
@@ -1335,6 +1679,49 @@ impl ProgramPlayer {
         self.wait_for_paused_preroll();
     }
 
+    /// Re-seek ALL decoder slots so the compositor produces a fresh composited
+    /// frame from every video track.  Used by `export_displayed_frame_ppm` where
+    /// the full multi-track composite is needed, not just the top-priority clip.
+    ///
+    /// For 3+ tracks the audio sink may still be connecting to PulseAudio,
+    /// preventing the pipeline from reaching Paused (and therefore blocking
+    /// a Playing transition).  We temporarily lock the audio sink's state so
+    /// the pipeline can proceed without waiting for it.
+    ///
+    /// Returns `true` if a non-blocking Playing pulse was started (3+ tracks).
+    fn reseek_all_slots_for_export(&self) -> bool {
+        if self.slots.is_empty() {
+            return false;
+        }
+        let baseline = self.snapshot_arrival_seqs();
+        let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, self.timeline_pos_ns);
+        }
+        self.wait_for_paused_preroll();
+        self.wait_for_compositor_arrivals(&baseline, 3000);
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+        // Always use the async playing pulse path for exports.
+        // gtk4paintablesink requires the GTK main loop to complete its
+        // state transitions, so we MUST return to the caller (and let the
+        // main loop run) before the pipeline can actually reach Playing
+        // and push fresh frames through the compositor.
+        self.start_playing_pulse();
+        true
+    }
+
+    /// Restore pipeline to Paused after an async export that left it Playing.
+    pub fn set_paused_after_export(&self) {
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        self.wait_for_paused_preroll();
+        // Unlock audio sink and let it sync with the pipeline.
+        if self.audio_sink.is_locked_state() {
+            self.audio_sink.set_locked_state(false);
+            let _ = self.audio_sink.sync_state_with_parent();
+        }
+    }
+
     /// Returns true if the clips active at `timeline_pos_ns` exactly match the
     /// decoder slots currently loaded (same indices, same order).
     fn clips_match_current_slots(&self, timeline_pos_ns: u64) -> bool {
@@ -1344,30 +1731,42 @@ impl ProgramPlayer {
     }
 
     /// Seek all currently-loaded decoder slots to `timeline_pos_ns` without
-    /// rebuilding the pipeline.  Used when the same clips are active at the new
-    /// position — avoids the black-frame / first-frame flash caused by going
-    /// through Ready state and letting decoders preroll at position 0.
-    fn seek_slots_in_place(&mut self, timeline_pos_ns: u64) {
-        // Seek every decoder to the new source position.
+    /// rebuilding the pipeline.  Returns `true` if a non-blocking Playing pulse
+    /// was started (3+ tracks); the caller must schedule `complete_playing_pulse()`.
+    fn seek_slots_in_place(&mut self, timeline_pos_ns: u64) -> bool {
+        // Snapshot arrival counters BEFORE seeking so we can detect fresh buffers.
+        let baseline = self.snapshot_arrival_seqs();
+        // Atomically flush the compositor and ALL its sink pads (including
+        // downstream) by seeking the compositor itself.  This clears stale
+        // preroll frames that the compositor produced before decoder buffers
+        // arrived.  The per-decoder seeks below will then set each decoder
+        // to the correct source position.
+        let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        // Seek every decoder to the new source position.  These FLUSH seeks
+        // reset each compositor pad individually and position the decoders.
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos_ns);
         }
-        // Wait for decoders to decode the target frame and push it through
-        // the effects chain to the compositor.  The flush seek clears the
-        // compositor's input buffers; without this wait the Playing pulse
-        // below would fire before new frames arrive, producing a black frame.
+        // Wait for decoders to reach Paused (internal preroll).
         self.wait_for_paused_preroll();
-        // Playing pulse: per-decoder FLUSH events stop at the compositor's
-        // sink pads and are NOT forwarded downstream.  The display sink stays
-        // prerolled with its old frame.  Briefly entering Playing starts the
-        // clock so the sink consumes the pending compositor buffer; the
-        // subsequent Paused transition triggers a fresh preroll with the
-        // latest composited frame.
-        let _ = self.pipeline.set_state(gst::State::Playing);
-        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(150));
-        let _ = self.pipeline.set_state(gst::State::Paused);
-        self.wait_for_paused_preroll();
+        // Wait for post-seek buffers to actually arrive at the compositor.
+        // Without this, the compositor produces stale (background-only) frames
+        // because the decoder buffers are still in the effects/queue chain.
+        self.wait_for_compositor_arrivals(&baseline, 3000);
+        // Reset the pipeline's start_time so running_time begins at 0 in the
+        // next Playing transition.
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+        if self.slots.len() >= 3 {
+            // For 3+ tracks, start a non-blocking Playing pulse so the GTK
+            // main loop can service gtk4paintablesink's preroll.
+            self.start_playing_pulse();
+            true
+        } else {
+            // ≤2 tracks: synchronous pulse works fine.
+            self.playing_pulse();
+            false
+        }
     }
 
     fn apply_transform_to_slot(
@@ -1511,6 +1910,9 @@ impl ProgramPlayer {
             self.pipeline
                 .remove(slot.effects_bin.upcast_ref::<gst::Element>())
                 .ok();
+            if let Some(ref q) = slot.slot_queue {
+                self.pipeline.remove(q).ok();
+            }
             if let Some(ref ac) = slot.audio_conv {
                 self.pipeline.remove(ac).ok();
             }
@@ -1519,6 +1921,10 @@ impl ProgramPlayer {
             let _ = slot.decoder.state(gst::ClockTime::from_mseconds(100));
             let _ = slot.effects_bin.set_state(gst::State::Null);
             let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(100));
+            if let Some(ref q) = slot.slot_queue {
+                let _ = q.set_state(gst::State::Null);
+                let _ = q.state(gst::ClockTime::from_mseconds(100));
+            }
             if let Some(ref ac) = slot.audio_conv {
                 let _ = ac.set_state(gst::State::Null);
                 let _ = ac.state(gst::ClockTime::from_mseconds(100));
@@ -1538,7 +1944,10 @@ impl ProgramPlayer {
         if self.slots.is_empty() {
             return;
         }
-        let deadline = Instant::now() + Duration::from_millis(1_000);
+        // Scale the timeout with the number of slots.  With 3+ heavy decode
+        // tracks, uridecodebin may need longer to typefind and link pads.
+        let timeout_ms = 1_000 + (self.slots.len() as u64) * 500;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         while Instant::now() < deadline {
             if self
                 .slots
@@ -1554,7 +1963,23 @@ impl ProgramPlayer {
             .iter()
             .all(|slot| slot.video_linked.load(Ordering::Relaxed))
         {
+            for (i, slot) in self.slots.iter().enumerate() {
+                let linked = slot.video_linked.load(Ordering::Relaxed);
+                let clip = &self.clips[slot.clip_idx];
+                log::warn!(
+                    "ProgramPlayer: slot[{}] clip={} linked={} source={}",
+                    i, clip.id, linked, clip.source_path
+                );
+            }
             log::warn!("ProgramPlayer: timed out waiting for video pad links");
+            for (i, slot) in self.slots.iter().enumerate() {
+                let (_, cur, pend) = slot.decoder.state(gst::ClockTime::ZERO);
+                let clip = &self.clips[slot.clip_idx];
+                log::warn!(
+                    "ProgramPlayer: slot[{}] decoder state {:?}/{:?} source={}",
+                    i, cur, pend, clip.source_path
+                );
+            }
         }
     }
 
@@ -1858,6 +2283,7 @@ impl ProgramPlayer {
                 clip.source_path.clone()
             };
             let uri = format!("file://{}", effective_path);
+            log::info!("ProgramPlayer: slot {} uri={}", zorder_offset, uri);
 
             // Build per-slot effects bin.
             let (
@@ -1918,9 +2344,43 @@ impl ProgramPlayer {
             comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
             comp_pad.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
 
-            // Link effects_bin src → compositor pad.
+            // Link effects_bin → queue → compositor pad.
+            // The queue decouples caps negotiation between the effects chain
+            // and the compositor.  Without it, the 3rd+ decoder's effects_bin
+            // can deadlock during caps negotiation when the compositor's
+            // aggregator is waiting for buffers on earlier pads.
+            let slot_queue = gst::ElementFactory::make("queue")
+                .property("max-size-buffers", 1u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", 0u64)
+                .build()
+                .unwrap();
+            self.pipeline.add(&slot_queue).ok();
             if let Some(src) = effects_bin.static_pad("src") {
-                let _ = src.link(&comp_pad);
+                let q_sink = slot_queue.static_pad("sink").unwrap();
+                let _ = src.link(&q_sink);
+            }
+            let q_src = slot_queue.static_pad("src").unwrap();
+            let _ = q_src.link(&comp_pad);
+
+            // Diagnostic probe: log buffers arriving at the compositor from this decoder slot.
+            let comp_arrival_seq = Arc::new(AtomicU64::new(0));
+            {
+                let cid = clip.id.clone();
+                let ci = clip_idx;
+                let arrival_seq = comp_arrival_seq.clone();
+                q_src.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                    if let Some(buffer) = info.buffer() {
+                        log::debug!(
+                            "slot[{}] queue→comp: pts={} clip={}",
+                            ci,
+                            buffer.pts().map(|p| p.nseconds()).unwrap_or(u64::MAX),
+                            cid
+                        );
+                        arrival_seq.fetch_add(1, Ordering::Relaxed);
+                    }
+                    gst::PadProbeReturn::Ok
+                });
             }
 
             // Create audio path: audioconvert → audiomixer pad.
@@ -1948,15 +2408,23 @@ impl ProgramPlayer {
             let audio_sink = audio_conv.as_ref().and_then(|ac| ac.static_pad("sink"));
             let video_linked = Arc::new(AtomicBool::new(false));
             let video_linked_for_cb = video_linked.clone();
+            let clip_id_for_cb = clip.id.clone();
             decoder.connect_pad_added(move |_dec, pad| {
                 let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
                 if let Some(caps) = caps {
                     if let Some(s) = caps.structure(0) {
                         let name = s.name().to_string();
+                        log::info!("ProgramPlayer: pad-added clip={} caps={}", clip_id_for_cb, name);
                         if name.starts_with("video/") {
                             if let Some(ref sink) = effects_sink {
-                                if pad.link(sink).is_ok() {
-                                    video_linked_for_cb.store(true, Ordering::Relaxed);
+                                match pad.link(sink) {
+                                    Ok(_) => {
+                                        video_linked_for_cb.store(true, Ordering::Relaxed);
+                                        log::info!("ProgramPlayer: video linked clip={}", clip_id_for_cb);
+                                    }
+                                    Err(e) => {
+                                        log::warn!("ProgramPlayer: video link FAILED clip={} err={:?}", clip_id_for_cb, e);
+                                    }
                                 }
                             }
                         } else if name.starts_with("audio/") {
@@ -2001,12 +2469,13 @@ impl ProgramPlayer {
                 None
             });
 
-            // Sync element states with pipeline.
-            let _ = decoder.sync_state_with_parent();
+            // Sync all slot elements to the pipeline state.
             let _ = effects_bin.sync_state_with_parent();
+            let _ = slot_queue.sync_state_with_parent();
             if let Some(ref ac) = audio_conv {
                 let _ = ac.sync_state_with_parent();
             }
+            let _ = decoder.sync_state_with_parent();
 
             // Apply per-clip transform.
             let slot_ref_for_transform = VideoSlot {
@@ -2026,6 +2495,8 @@ impl ProgramPlayer {
                 alpha_filter: alpha_filter.clone(),
                 capsfilter_zoom: capsfilter_zoom.clone(),
                 videobox_zoom: videobox_zoom.clone(),
+                slot_queue: Some(slot_queue.clone()),
+                comp_arrival_seq: comp_arrival_seq.clone(),
             };
             Self::apply_transform_to_slot(
                 &slot_ref_for_transform,
@@ -2072,13 +2543,14 @@ impl ProgramPlayer {
                 alpha_filter,
                 capsfilter_zoom,
                 videobox_zoom,
+                slot_queue: Some(slot_queue),
+                comp_arrival_seq,
             });
         }
 
-        // Transition to Paused after all branches are added so decoder pad-linking
-        // and preroll happen in the same cycle as the seek passes below.
+        // Now that all decoders were started individually in the loop above,
+        // transition the rest of the pipeline (compositor, sinks, etc.) to Paused.
         let _ = self.pipeline.set_state(gst::State::Paused);
-        self.wait_for_video_links();
 
         // If any decoder's video pad didn't link in time, send EOS on its
         // compositor/audiomixer pads so the aggregator doesn't wait
@@ -2151,16 +2623,28 @@ impl ProgramPlayer {
         // In paused mode, perform a two-pass settle:
         // 1) wait once for initial decoder/linking work to settle,
         // 2) re-seek decoders after pads are likely linked,
-        // 3) wait again for a fresh preroll frame.
+        // 3) wait for post-seek buffers to reach compositor,
+        // 4) wait again for a fresh preroll frame.
         if !was_playing {
             self.wait_for_paused_preroll();
+            let baseline = self.snapshot_arrival_seqs();
+            // Flush the compositor atomically before per-decoder seeks to clear
+            // stale preroll frames produced before decoder pads were linked.
+            let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
             for slot in &self.slots {
                 let clip = &self.clips[slot.clip_idx];
                 let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
             }
             let _ = self.pipeline.set_state(gst::State::Paused);
             self.wait_for_paused_preroll();
+            self.wait_for_compositor_arrivals(&baseline, 3000);
             self.reseek_slot_for_current();
+            let (_, pipe_cur, pipe_pend) = self.pipeline.state(gst::ClockTime::ZERO);
+            log::info!(
+                "rebuild_pipeline_at: after_settle slots={} pipe={:?}/{:?} seq={}",
+                self.slots.len(), pipe_cur, pipe_pend,
+                self.scope_frame_seq.load(Ordering::Relaxed)
+            );
         }
 
         // Restore pipeline state.

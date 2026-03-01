@@ -161,6 +161,7 @@ Tracking docs:
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
    - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
+    - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops
     - [x] Ensure paused timeline seek in compositor preview re-prerolls after decoder seek so Program Monitor/transform overlay frame refresh remains reliable while scrubbing
     - [x] Stabilize paused scrub rebuild ordering so active decoder branches are added before paused preroll/seek, preventing persistent black preview frames after playhead moves
     - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0

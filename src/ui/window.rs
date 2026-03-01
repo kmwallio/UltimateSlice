@@ -49,6 +49,43 @@ fn auto_preview_divisor(
     }
 }
 
+fn proxy_scale_for_mode(mode: &crate::ui_state::ProxyMode) -> crate::media::proxy_cache::ProxyScale {
+    match mode {
+        crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+        _ => crate::media::proxy_cache::ProxyScale::Half,
+    }
+}
+
+fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    project
+        .tracks
+        .iter()
+        .flat_map(|t| t.clips.iter())
+        .filter_map(|c| {
+            let key = (c.source_path.clone(), c.lut_path.clone());
+            if seen.insert(key.clone()) {
+                Some(key)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn active_video_track_count(project: &Project, timeline_pos_ns: u64) -> usize {
+    project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video)
+        .filter(|t| {
+            t.clips.iter().any(|c| {
+                timeline_pos_ns >= c.timeline_start && timeline_pos_ns < c.timeline_end()
+            })
+        })
+        .count()
+}
+
 /// Build and show the main application window.
 pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let window = ApplicationWindow::builder()
@@ -93,6 +130,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
+    let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
+    let effective_proxy_scale_divisor = Rc::new(Cell::new(match initial_proxy_mode {
+        crate::ui_state::ProxyMode::QuarterRes => 4,
+        _ => 2,
+    }));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
     timeline_state.borrow_mut().show_waveform_on_video = initial_show_waveform_on_video;
@@ -376,7 +418,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let player = player.clone();
         let prog_player = prog_player.clone();
         timeline_state.borrow_mut().on_seek = Some(Rc::new(move |ns| {
-            prog_player.borrow_mut().seek(ns);
+            let needs_async = prog_player.borrow_mut().seek(ns);
+            if needs_async {
+                // The pipeline is in Playing; let the GTK main loop run so
+                // gtk4paintablesink can complete its preroll, then restore Paused.
+                let pp = prog_player.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                    pp.borrow().complete_playing_pulse();
+                });
+            }
         }));
     }
     {
@@ -674,6 +724,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let preferences_state = preferences_state.clone();
         let project = project.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
+        let proxy_cache = proxy_cache.clone();
+        let effective_proxy_enabled = effective_proxy_enabled.clone();
+        let effective_proxy_scale_divisor = effective_proxy_scale_divisor.clone();
         let last_auto_check_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_auto_check_us_c = last_auto_check_us.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
@@ -682,7 +735,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let now_us = glib::monotonic_time();
                 if now_us - last_auto_check_us_c.get() >= 250_000 {
                     last_auto_check_us_c.set(now_us);
-                    let preview_quality = preferences_state.borrow().preview_quality.clone();
+                    let (preview_quality, proxy_mode) = {
+                        let prefs = preferences_state.borrow();
+                        (prefs.preview_quality.clone(), prefs.proxy_mode.clone())
+                    };
                     let divisor = match preview_quality {
                         crate::ui_state::PreviewQuality::Auto => {
                             let (pw, ph) = {
@@ -700,6 +756,56 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         _ => preview_quality.divisor(),
                     };
                     player.set_preview_quality(divisor);
+
+                    // Auto-assist for heavy timelines: when manual proxy mode is Off,
+                    // enable proxies automatically when 3+ video tracks overlap.
+                    let overlap_tracks = {
+                        let proj = project.borrow();
+                        active_video_track_count(&proj, player.timeline_pos_ns)
+                    };
+                    let (desired_proxy_enabled, desired_scale) = if proxy_mode.is_enabled() {
+                        (true, proxy_scale_for_mode(&proxy_mode))
+                    } else if overlap_tracks >= 3 {
+                        (
+                            true,
+                            if divisor >= 4 {
+                                crate::media::proxy_cache::ProxyScale::Quarter
+                            } else {
+                                crate::media::proxy_cache::ProxyScale::Half
+                            },
+                        )
+                    } else {
+                        (false, crate::media::proxy_cache::ProxyScale::Half)
+                    };
+                    let desired_scale_divisor = if matches!(
+                        desired_scale,
+                        crate::media::proxy_cache::ProxyScale::Quarter
+                    ) {
+                        4
+                    } else {
+                        2
+                    };
+                    if effective_proxy_enabled.get() != desired_proxy_enabled
+                        || effective_proxy_scale_divisor.get() != desired_scale_divisor
+                    {
+                        player.set_proxy_enabled(desired_proxy_enabled);
+                        effective_proxy_enabled.set(desired_proxy_enabled);
+                        effective_proxy_scale_divisor.set(desired_scale_divisor);
+                    }
+                    if desired_proxy_enabled {
+                        let clip_sources = {
+                            let proj = project.borrow();
+                            collect_unique_clip_sources(&proj)
+                        };
+                        {
+                            let mut cache = proxy_cache.borrow_mut();
+                            for (path, lut) in &clip_sources {
+                                cache.request(path, desired_scale, lut.as_deref());
+                            }
+                        }
+                        let paths = proxy_cache.borrow().proxies.clone();
+                        player.update_proxy_paths(paths);
+                    }
                 }
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
@@ -1351,7 +1457,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 if !pp.clips.is_empty() {
                     if was_playing {
                         // Preserve playback behavior after clip reloads.
-                        pp.seek(prev_pos);
+                        let _ = pp.seek(prev_pos);
                         pp.play();
                     } else {
                         // Rebuild the pipeline at the previous position so the
@@ -1359,7 +1465,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         // Without this, load_clips() leaves the pipeline in Ready
                         // (no decoder slots) and the monitor stays black.
                         let pos = prev_pos.min(pp.timeline_dur_ns);
-                        pp.seek(pos);
+                        let needs_async = pp.seek(pos);
+                        if needs_async {
+                            drop(pp);
+                            let pp2 = prog_player_reload.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(250),
+                                move || { pp2.borrow().complete_playing_pulse(); },
+                            );
+                        }
                     }
                 }
             });
@@ -1482,21 +1596,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     {
         let proxy_cache = proxy_cache.clone();
         let prog_player = prog_player.clone();
-        let preferences_state = preferences_state.clone();
+        let effective_proxy_enabled = effective_proxy_enabled.clone();
         let status_bar = status_bar.clone();
         let status_label = status_label.clone();
         let status_progress = status_progress.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
-            // Always sync proxy paths when proxy mode is enabled — disk-cached proxies
+            // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
             // are added synchronously by request() and never appear in `resolved`.
-            {
-                let prefs = preferences_state.borrow();
-                if prefs.proxy_mode.is_enabled() {
-                    if !resolved.is_empty() || !proxy_cache.borrow().proxies.is_empty() {
-                        let paths = proxy_cache.borrow().proxies.clone();
-                        prog_player.borrow_mut().update_proxy_paths(paths);
-                    }
+            if effective_proxy_enabled.get() {
+                if !resolved.is_empty() || !proxy_cache.borrow().proxies.is_empty() {
+                    let paths = proxy_cache.borrow().proxies.clone();
+                    prog_player.borrow_mut().update_proxy_paths(paths);
                 }
             }
             let progress = proxy_cache.borrow().progress();
@@ -2511,18 +2622,100 @@ fn handle_mcp_command(
 
         McpCommand::SeekPlayhead { timeline_pos_ns, reply } => {
             timeline_state.borrow_mut().playhead_ns = timeline_pos_ns;
-            prog_player.borrow_mut().seek(timeline_pos_ns);
-            reply.send(json!({"ok": true, "timeline_pos_ns": timeline_pos_ns})).ok();
+            let needs_async = prog_player.borrow_mut().seek(timeline_pos_ns);
+            if needs_async {
+                // 3+ tracks: the pipeline is in Playing.  Let the GTK main
+                // loop run so gtk4paintablesink can complete its preroll, then
+                // restore Paused and reply.
+                let pp = prog_player.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+                    pp.borrow().complete_playing_pulse();
+                    reply.send(json!({"ok": true, "timeline_pos_ns": timeline_pos_ns})).ok();
+                });
+            } else {
+                reply.send(json!({"ok": true, "timeline_pos_ns": timeline_pos_ns})).ok();
+            }
         }
 
         McpCommand::ExportDisplayedFrame { path, reply } => {
             if path.is_empty() {
                 reply.send(json!({"ok": false, "error": "path is required"})).ok();
             } else {
-                match prog_player.borrow().export_displayed_frame_ppm(&path) {
-                    Ok(()) => reply.send(json!({"ok": true, "path": path, "format": "ppm"})).ok(),
-                    Err(e) => reply.send(json!({"ok": false, "error": e.to_string()})).ok(),
+                // Phase 1: trigger re-seek + async playing pulse (brief borrow).
+                let (
+                    start_scope_seq,
+                    start_compositor_seq,
+                    was_enabled,
+                    left_playing,
+                    scope_seq_arc,
+                    compositor_seq_arc,
+                ) = {
+                    let pp = prog_player.borrow();
+                    let (start_scope_seq, was_enabled, left_playing) = pp.prepare_export();
+                    let scope_seq_arc = pp.scope_frame_seq_arc();
+                    let compositor_seq_arc = pp.compositor_frame_seq_arc();
+                    let start_compositor_seq =
+                        compositor_seq_arc.load(std::sync::atomic::Ordering::Relaxed);
+                    (
+                        start_scope_seq,
+                        start_compositor_seq,
+                        was_enabled,
+                        left_playing,
+                        scope_seq_arc,
+                        compositor_seq_arc,
+                    )
                 };
+                let prog_player = prog_player.clone();
+                if left_playing {
+                    // Phase 2a: The pipeline is Playing.  Give the main loop
+                    // 250ms to service gtk4paintablesink, then complete the
+                    // pulse (Playing→Paused triggers compositor preroll).
+                    // Phase 2b: After the pulse completes, poll for the new
+                    // preroll frame from the appsink.
+                    let pulse_delay = std::time::Duration::from_millis(250);
+                    glib::timeout_add_local_once(pulse_delay, move || {
+                        {
+                            let pp = prog_player.borrow();
+                            pp.complete_playing_pulse();
+                        }
+                        // Now poll for the new scope frame.
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+                        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+                            let scope_now = scope_seq_arc.load(std::sync::atomic::Ordering::Relaxed);
+                            let comp_now = compositor_seq_arc.load(std::sync::atomic::Ordering::Relaxed);
+                            if scope_now > start_scope_seq
+                                || comp_now > start_compositor_seq
+                                || std::time::Instant::now() >= deadline
+                            {
+                                let pp = prog_player.borrow();
+                                match pp.finish_export(
+                                    &path,
+                                    was_enabled,
+                                    start_scope_seq,
+                                    start_compositor_seq,
+                                ) {
+                                    Ok(()) => reply.send(json!({"ok": true, "path": path, "format": "ppm"})).ok(),
+                                    Err(e) => reply.send(json!({"ok": false, "error": e.to_string()})).ok(),
+                                };
+                                return glib::ControlFlow::Break;
+                            }
+                            glib::ControlFlow::Continue
+                        });
+                    });
+                } else {
+                    // ≤2 tracks: the pulse already completed synchronously.
+                    // The frame should already be available.
+                    let pp = prog_player.borrow();
+                    match pp.finish_export(
+                        &path,
+                        was_enabled,
+                        start_scope_seq,
+                        start_compositor_seq,
+                    ) {
+                        Ok(()) => reply.send(json!({"ok": true, "path": path, "format": "ppm"})).ok(),
+                        Err(e) => reply.send(json!({"ok": false, "error": e.to_string()})).ok(),
+                    };
+                }
             }
         }
 

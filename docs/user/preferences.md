@@ -39,6 +39,8 @@ Preferences are grouped by category in a sidebar:
   - `Off` (default): uses original source media.
   - `Half Res`: generates half-resolution H.264 proxies.
   - `Quarter Res`: generates quarter-resolution H.264 proxies.
+- When Proxy mode is `Off`, UltimateSlice now auto-enables proxies during heavy live-preview regions (3+ overlapping video tracks) to keep playback responsive, then returns to original media when overlap drops below that threshold.
+- Auto-enabled proxy scale follows current preview pressure: Half-res by default, Quarter-res when preview quality is reduced to Quarter.
 - Proxy files are transcoded in the background via ffmpeg and stored in `.ultimateslice_proxies/` next to the source files.
 - A yellow progress bar appears at the bottom of the window during proxy generation.
 - **Changing the proxy size** (e.g. from Half Res to Quarter Res) automatically invalidates existing proxies and re-generates them at the new resolution.
