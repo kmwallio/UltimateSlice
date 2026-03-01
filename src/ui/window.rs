@@ -1609,6 +1609,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             opacity: c.opacity,
                             position_x: c.position_x,
                             position_y: c.position_y,
+                            has_audio: true, // default; overridden by probe cache below
                         })
                     })
                     .collect();

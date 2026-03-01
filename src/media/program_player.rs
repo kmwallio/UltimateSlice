@@ -90,6 +90,8 @@ pub struct ProgramClip {
     pub position_x: f64,
     /// Vertical position offset: −1.0 (top) to 1.0 (bottom). Default 0.0.
     pub position_y: f64,
+    /// Whether the source file contains an audio stream.
+    pub has_audio: bool,
 }
 
 impl ProgramClip {
@@ -254,7 +256,11 @@ impl ProgramPlayer {
                 .property("allow-not-linked", true)
                 .build()
                 .ok()?;
-            let q1 = gst::ElementFactory::make("queue").build().ok()?;
+            let q1 = gst::ElementFactory::make("queue")
+                .property_from_str("leaky", "downstream")
+                .property("max-size-buffers", 2u32)
+                .build()
+                .ok()?;
             let q2 = gst::ElementFactory::make("queue")
                 .property_from_str("leaky", "downstream")
                 .property("max-size-buffers", 1u32)
@@ -386,6 +392,7 @@ impl ProgramPlayer {
                     .field("format", "RGBA")
                     .field("width", 1920i32)
                     .field("height", 1080i32)
+                    .field("framerate", gst::Fraction::new(30, 1))
                     .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                     .build(),
             )
@@ -405,6 +412,7 @@ impl ProgramPlayer {
                     .field("format", "RGBA")
                     .field("width", 1920i32)
                     .field("height", 1080i32)
+                    .field("framerate", gst::Fraction::new(30, 1))
                     .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                     .build(),
             )
@@ -412,8 +420,14 @@ impl ProgramPlayer {
             .map_err(|_| anyhow!("capsfilter not available"))?;
 
         // Always-on black background so compositor has at least one input.
+        // is-live=true makes the compositor (GstAggregator) operate in live mode,
+        // pacing output at 30 FPS by the system clock instead of running as fast
+        // as possible.  Without this, the non-live pipeline produces 1000+ FPS
+        // through the compositor; the leaky display queue drops 99%+ of frames,
+        // leaving gtk4paintablesink with near-zero FPS.
         let black_src = gst::ElementFactory::make("videotestsrc")
             .property_from_str("pattern", "black")
+            .property("is-live", true)
             .build()
             .map_err(|_| anyhow!("videotestsrc not available"))?;
         let black_caps = gst::ElementFactory::make("capsfilter")
@@ -434,8 +448,11 @@ impl ProgramPlayer {
             .map_err(|_| anyhow!("audiomixer element not available"))?;
 
         // Silent background so audiomixer always has input.
+        // is-live=true makes the audiomixer aggregate in live mode (clock-paced),
+        // so it won't stall waiting for unlinked pads from audio-less clips.
         let silence_src = gst::ElementFactory::make("audiotestsrc")
             .property_from_str("wave", "silence")
+            .property("is-live", true)
             .build()
             .map_err(|_| anyhow!("audiotestsrc not available"))?;
         let silence_caps = gst::ElementFactory::make("capsfilter")
@@ -506,6 +523,7 @@ impl ProgramPlayer {
             let scope_en = scope_enabled.clone();
             let caps_pad = comp_src_pad.clone();
             comp_src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                cseq.fetch_add(1, Ordering::Relaxed);
                 if !scope_en.load(Ordering::Relaxed) {
                     return gst::PadProbeReturn::Ok;
                 }
@@ -681,6 +699,7 @@ impl ProgramPlayer {
             .field("format", "RGBA")
             .field("width", comp_w)
             .field("height", comp_h)
+            .field("framerate", gst::Fraction::new(30, 1))
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         self.comp_capsfilter.set_property("caps", &caps);
@@ -697,6 +716,7 @@ impl ProgramPlayer {
             .field("format", "RGBA")
             .field("width", out_w)
             .field("height", out_h)
+            .field("framerate", gst::Fraction::new(30, 1))
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         self.preview_capsfilter.set_property("caps", &out_caps);
@@ -2349,6 +2369,29 @@ impl ProgramPlayer {
         )
     }
 
+    /// Quick check whether a media file contains an audio stream.
+    /// Uses GStreamer Discoverer with a short timeout. Defaults to `true` on error.
+    fn probe_has_audio_stream(path: &str) -> bool {
+        use gstreamer_pbutils::prelude::*;
+        use gstreamer_pbutils::Discoverer;
+        let uri = if path.starts_with("file://") {
+            path.to_string()
+        } else {
+            format!("file://{}", path)
+        };
+        let Ok(disc) = Discoverer::new(gst::ClockTime::from_seconds(2)) else {
+            return true;
+        };
+        match disc.discover_uri(&uri) {
+            Ok(info) => {
+                let has = !info.audio_streams().is_empty();
+                log::info!("ProgramPlayer: probe_has_audio_stream({}) = {}", path, has);
+                has
+            }
+            Err(_) => true,
+        }
+    }
+
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         let was_playing = self.state == PlayerState::Playing;
@@ -2407,6 +2450,15 @@ impl ProgramPlayer {
             };
             let uri = format!("file://{}", effective_path);
             log::info!("ProgramPlayer: slot {} uri={}", zorder_offset, uri);
+
+            // Detect whether the source file has an audio stream.
+            // Use `has_audio` from clip metadata if explicitly set to false,
+            // otherwise probe the actual file.
+            let clip_has_audio = if !clip.has_audio {
+                false
+            } else {
+                Self::probe_has_audio_stream(&effective_path)
+            };
 
             // Build per-slot effects bin.
             let (
@@ -2473,8 +2525,16 @@ impl ProgramPlayer {
             // and the compositor.  Without it, the 3rd+ decoder's effects_bin
             // can deadlock during caps negotiation when the compositor's
             // aggregator is waiting for buffers on earlier pads.
+            //
+            // The queue decouples each decoder's streaming thread from the
+            // compositor aggregator.  A small buffer count (2) keeps latency
+            // low while still absorbing minor scheduling jitter.
+            // NOTE: these queues must NOT be leaky — frame drops here cause
+            // visible stutter on 1–2 track projects.  The downstream display
+            // queue (q1, leaky) is the correct place to absorb backpressure
+            // from the GTK render thread.
             let slot_queue = gst::ElementFactory::make("queue")
-                .property("max-size-buffers", 1u32)
+                .property("max-size-buffers", 2u32)
                 .property("max-size-bytes", 0u32)
                 .property("max-size-time", 0u64)
                 .build()
@@ -2508,23 +2568,35 @@ impl ProgramPlayer {
             }
 
             // Create audio path: audioconvert → audiomixer pad.
-            let audio_conv = gst::ElementFactory::make("audioconvert").build().ok();
-            let amix_pad = if let Some(ref ac) = audio_conv {
-                if self.pipeline.add(ac).is_ok() {
-                    if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
-                        mp.set_property("volume", clip.volume.clamp(0.0, 2.0));
-                        if let Some(ac_src) = ac.static_pad("src") {
-                            let _ = ac_src.link(&mp);
+            // Skip entirely for clips without an audio stream to prevent
+            // the audiomixer from waiting on an unlinked pad.
+            let skip_audio = !clip_has_audio;
+            let (audio_conv, amix_pad) = if !skip_audio {
+                let ac = gst::ElementFactory::make("audioconvert").build().ok();
+                let pad = if let Some(ref ac) = ac {
+                    if self.pipeline.add(ac).is_ok() {
+                        if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
+                            mp.set_property("volume", clip.volume.clamp(0.0, 2.0));
+                            if let Some(ac_src) = ac.static_pad("src") {
+                                let _ = ac_src.link(&mp);
+                            }
+                            Some(mp)
+                        } else {
+                            None
                         }
-                        Some(mp)
                     } else {
                         None
                     }
                 } else {
                     None
-                }
+                };
+                (ac, pad)
             } else {
-                None
+                log::info!(
+                    "ProgramPlayer: skipping audio path for clip {} (no audio)",
+                    clip.id
+                );
+                (None, None)
             };
 
             // Connect uridecodebin pad-added for dynamic linking.
@@ -2707,15 +2779,12 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Paused);
         log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
         self.wait_for_paused_preroll();
-        log::debug!("rebuild_pipeline_at: paused preroll done");
 
         // Atomically flush the compositor and ALL downstream (tee, sinks).
         let baseline = self.snapshot_arrival_seqs();
-        log::debug!("rebuild_pipeline_at: compositor flush...");
         let _ = self
             .compositor
             .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
-        log::debug!("rebuild_pipeline_at: compositor flush done");
 
         // Seek each decoder to its source position with stop boundary.
         //
@@ -2723,11 +2792,6 @@ impl ProgramPlayer {
         // KEY_UNIT seeks can snap long-GOP proxy media back to the nearest
         // keyframe (often 0s), which looks like lower-track clips restarting
         // when another track enters/exits and triggers a rebuild.
-        log::debug!(
-            "rebuild_pipeline_at: seeking {} decoders (was_playing={})",
-            self.slots.len(),
-            was_playing
-        );
         let seek_flags = if was_playing {
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
         } else {
@@ -2750,15 +2814,11 @@ impl ProgramPlayer {
                 let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
             }
         }
-        log::debug!("rebuild_pipeline_at: decoder seeks done");
 
         // Post-seek settle
         if was_playing {
-            log::debug!("rebuild_pipeline_at: post-seek wait_for_paused_preroll...");
             self.wait_for_paused_preroll();
-            log::debug!("rebuild_pipeline_at: post-seek wait_for_compositor_arrivals (1500ms)...");
             self.wait_for_compositor_arrivals(&baseline, 1500);
-            log::debug!("rebuild_pipeline_at: post-seek arrivals done");
         }
 
         // In paused mode, perform a two-pass settle:
