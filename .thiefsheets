@@ -1,0 +1,25 @@
+{
+  "sheet-order" : [
+    "features.md",
+    "index.md"
+  ],
+  "hidden-folders" : [
+    "vendor",
+    "_site",
+    "_includes",
+    "assets"
+  ],
+  "folder-order" : [
+    "vendor",
+    "_site",
+    "_includes",
+    "_docs",
+    "_layouts",
+    "blog",
+    "_posts",
+    "docs",
+    "assets"
+  ],
+  "notes" : "",
+  "icon" : ""
+}
