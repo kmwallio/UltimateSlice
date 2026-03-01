@@ -1481,13 +1481,6 @@ impl ProgramPlayer {
         } else {
             self.audio_sink.set_locked_state(true);
         }
-        // Lock decoders so video frames stay frozen during drag.
-        // The compositor in live mode re-uses each pad's last prepared_frame,
-        // so property changes on compositor pads (scale, position) still
-        // take effect without new decoded frames.
-        for slot in &self.slots {
-            slot.decoder.set_locked_state(true);
-        }
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.transform_live = true;
     }
@@ -1501,11 +1494,6 @@ impl ProgramPlayer {
         }
         log::info!("exit_transform_live_mode");
         let _ = self.pipeline.set_state(gst::State::Paused);
-        // Unlock decoders before restoring audio.
-        for slot in &self.slots {
-            slot.decoder.set_locked_state(false);
-            let _ = slot.decoder.sync_state_with_parent();
-        }
         // Restore audio output.
         if self.audio_sink.find_property("mute").is_some() {
             self.audio_sink.set_property("mute", false);
