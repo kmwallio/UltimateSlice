@@ -252,7 +252,7 @@ flatpak run io.github.ultimateslice --mcp
 ```
 
 > **Flatpak build:** Run `python3 flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json`
-> then `flatpak-builder --user --install --force-clean flatpak-build io.github.ultimateslice.yml`
+> then `flatpak-builder --user --install --force-clean flatpak-build io.github.kmwallio.ultimateslice.yml`
 > after any dependency changes (Cargo.lock update) to regenerate `cargo-sources.json`.
 
 > **Single-instance enforcement for `--mcp`:** Only one MCP-enabled instance may

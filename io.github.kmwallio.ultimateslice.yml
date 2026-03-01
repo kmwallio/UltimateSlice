@@ -1,4 +1,4 @@
-app-id: io.github.ultimateslice
+app-id: io.github.kmwallio.ultimateslice
 runtime: org.gnome.Platform
 runtime-version: "49"
 sdk: org.gnome.Sdk

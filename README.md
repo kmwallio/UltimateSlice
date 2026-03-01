@@ -75,10 +75,10 @@ See `docs/user/python-mcp.md` for complete command examples.
 
 ## Flatpak
 
-A Flatpak manifest is provided at `io.github.ultimateslice.yml`.
+A Flatpak manifest is provided at `io.github.kmwallio.ultimateslice.yml`.
 
 ```/dev/null/bash#L1-3
-flatpak-builder build-dir io.github.ultimateslice.yml --user --install --force-clean
+flatpak-builder build-dir io.github.kmwallio.ultimateslice.yml --user --install --force-clean
 flatpak run io.github.ultimateslice
 ```
 
