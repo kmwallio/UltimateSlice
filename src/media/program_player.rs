@@ -1479,11 +1479,15 @@ impl ProgramPlayer {
         // main thread must return to the GTK main loop promptly so the display
         // sink can complete preroll.
         let per_decoder_ms = if self.slots.len() >= 3 {
-            // Keep a generous per-decoder timeout for the paused case to
-            // ensure all decoders fully preroll.  With 3 heavy decode
-            // tracks doing ACCURATE seeks simultaneously, 166ms was not
-            // enough — the third decoder sometimes stayed in Ready.
-            (base_ms / self.slots.len() as u64).max(250)
+            if self.state == PlayerState::Playing {
+                // Playback boundary rebuilds run on the GTK main thread; keep
+                // per-decoder waits short to reduce handoff stutter.
+                (base_ms / self.slots.len() as u64).max(120)
+            } else {
+                // Keep a generous timeout for paused seeks where frame
+                // correctness is prioritized over responsiveness.
+                (base_ms / self.slots.len() as u64).max(250)
+            }
         } else {
             base_ms
         };
@@ -2552,10 +2556,6 @@ impl ProgramPlayer {
             });
         }
 
-        // Now that all decoders were started individually in the loop above,
-        // transition the rest of the pipeline (compositor, sinks, etc.) to Paused.
-        let _ = self.pipeline.set_state(gst::State::Paused);
-
         // If any decoder's video pad didn't link in time, send EOS on its
         // compositor/audiomixer pads so the aggregator doesn't wait
         // indefinitely for buffers that will never arrive.
@@ -2576,12 +2576,6 @@ impl ProgramPlayer {
         log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
         self.wait_for_paused_preroll();
         log::debug!("rebuild_pipeline_at: paused preroll done");
-
-        // Ensure decoders have reached Paused before issuing seeks.
-        for slot in &self.slots {
-            let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
-        }
-        log::debug!("rebuild_pipeline_at: decoder state checks done");
 
         // Atomically flush the compositor and ALL downstream (tee, sinks).
         let baseline = self.snapshot_arrival_seqs();

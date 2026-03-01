@@ -71,6 +71,7 @@ or outside the export frame.
 ## Playhead Accuracy
 
 - When you seek and then press Play, UltimateSlice rebuilds the compositor pipeline for the active clips at the playhead position and waits for post-seek preroll (up to ~2 seconds in paused accurate mode for long-GOP media) before transitioning back to Playing. This ensures playback starts from the correct frame rather than jumping to position 0.
+- During active playback boundary handoffs, preroll waits are tuned for responsiveness (shorter than paused scrubbing waits) to reduce visible stutter while preserving accurate clip positioning.
 
 ## Speed Change Preview
 
