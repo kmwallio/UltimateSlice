@@ -17,6 +17,7 @@ pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     on_project_changed: impl Fn() + 'static + Clone,
+    on_project_reloaded: impl Fn() + 'static + Clone,
 ) -> HeaderBar {
     let header = HeaderBar::new();
 
@@ -31,6 +32,7 @@ pub fn build_toolbar(
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
+        let on_project_reloaded = on_project_reloaded.clone();
         btn_new.connect_clicked(move |_| {
             *project.borrow_mut() = Project::new("Untitled");
             {
@@ -41,6 +43,7 @@ pub fn build_toolbar(
                 st.selected_clip_id = None;
                 st.selected_track_id = None;
             }
+            on_project_reloaded();
             on_project_changed();
         });
     }
@@ -53,6 +56,7 @@ pub fn build_toolbar(
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
+        let on_project_reloaded = on_project_reloaded.clone();
         btn_open.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Open FCPXML Project");
@@ -67,6 +71,7 @@ pub fn build_toolbar(
 
             let project = project.clone();
             let on_project_changed = on_project_changed.clone();
+            let on_project_reloaded = on_project_reloaded.clone();
             let timeline_state_cb = timeline_state.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
@@ -88,6 +93,7 @@ pub fn build_toolbar(
                         });
                         let project = project.clone();
                         let on_project_changed = on_project_changed.clone();
+                        let on_project_reloaded = on_project_reloaded.clone();
                         let timeline_state_cb = timeline_state_cb.clone();
                         // Suppress timeline interaction while loading.
                         timeline_state_cb.borrow_mut().loading = true;
@@ -106,6 +112,7 @@ pub fn build_toolbar(
                                         st.selected_track_id = None;
                                         st.loading = false;
                                     }
+                                    on_project_reloaded();
                                     on_project_changed();
                                     glib::ControlFlow::Break
                                 }
@@ -138,6 +145,7 @@ pub fn build_toolbar(
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
+        let on_project_reloaded = on_project_reloaded.clone();
 
         // Build the popover upfront so MenuButton can show it immediately.
         // Repopulate the inner box each time the popover opens (connect_show)
@@ -184,6 +192,7 @@ pub fn build_toolbar(
                     let project = project.clone();
                     let timeline_state = timeline_state.clone();
                     let on_project_changed = on_project_changed.clone();
+                    let on_project_reloaded = on_project_reloaded.clone();
                     let pop_weak = pop.downgrade();
                     row.connect_clicked(move |_| {
                         if let Some(pop) = pop_weak.upgrade() {
@@ -204,6 +213,7 @@ pub fn build_toolbar(
                         let project = project.clone();
                         let timeline_state = timeline_state.clone();
                         let on_project_changed = on_project_changed.clone();
+                        let on_project_reloaded = on_project_reloaded.clone();
                         let path_owned = path_owned.clone();
                         // Suppress timeline interaction while loading.
                         timeline_state.borrow_mut().loading = true;
@@ -222,6 +232,7 @@ pub fn build_toolbar(
                                         st.selected_track_id = None;
                                         st.loading = false;
                                     }
+                                    on_project_reloaded();
                                     on_project_changed();
                                     glib::ControlFlow::Break
                                 }

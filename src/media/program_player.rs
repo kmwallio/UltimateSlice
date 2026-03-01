@@ -178,6 +178,8 @@ pub struct ProgramPlayer {
     playback_priority: PlaybackPriority,
     proxy_enabled: bool,
     proxy_paths: HashMap<String, String>,
+    /// Cache for per-path audio-stream probe results.
+    audio_stream_probe_cache: HashMap<String, bool>,
     /// GStreamer `level` element on audiomixer output for metering.
     level_element: Option<gst::Element>,
     /// GStreamer `level` element on the audio-only pipeline for metering.
@@ -621,6 +623,7 @@ impl ProgramPlayer {
                 playback_priority: PlaybackPriority::default(),
                 proxy_enabled: false,
                 proxy_paths: HashMap::new(),
+                audio_stream_probe_cache: HashMap::new(),
                 level_element,
                 level_element_audio,
                 audio_peak_db: [-60.0, -60.0],
@@ -668,6 +671,7 @@ impl ProgramPlayer {
 
     pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
         self.proxy_paths = paths;
+        self.audio_stream_probe_cache.clear();
     }
 
     pub fn set_project_dimensions(&mut self, width: u32, height: u32) {
@@ -934,6 +938,7 @@ impl ProgramPlayer {
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
         self.clips = video;
+        self.audio_stream_probe_cache.clear();
         let vdur = self
             .clips
             .iter()
@@ -950,7 +955,10 @@ impl ProgramPlayer {
         self.current_idx = None;
         self.audio_current_idx = None;
         self.teardown_slots();
-        let _ = self.pipeline.set_state(gst::State::Ready);
+        // Keep the main pipeline in Paused here; moving to Ready can block on
+        // pad deactivation while slot teardown is still settling on some media.
+        // The next seek/rebuild path will perform a safe Ready reset after this.
+        let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Null);
         self.audio_pipeline.set_property("uri", "");
         let _ = self.audio_pipeline.set_state(gst::State::Ready);
@@ -967,13 +975,20 @@ impl ProgramPlayer {
     /// `complete_playing_pulse()` via a GTK idle/timeout callback so the main
     /// loop can run and `gtk4paintablesink` can complete its preroll.
     pub fn seek(&mut self, timeline_pos_ns: u64) -> bool {
+        let seek_started = Instant::now();
         let resume_playback = self.state == PlayerState::Playing;
         self.timeline_pos_ns = timeline_pos_ns;
         self.base_timeline_ns = timeline_pos_ns;
         self.play_start = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
+            log::debug!(
+                "seek: no clips timeline_pos={} elapsed_ms={}",
+                timeline_pos_ns,
+                seek_started.elapsed().as_millis()
+            );
             return false;
         }
+        let mut fast_path = false;
         // Fast path: when paused with the same clips already loaded, seek the
         // existing decoders in-place instead of tearing down and rebuilding the
         // pipeline.  Rebuilding always goes through Ready state (black background
@@ -984,9 +999,18 @@ impl ProgramPlayer {
             && !self.slots.is_empty()
             && self.clips_match_current_slots(timeline_pos_ns)
         {
+            fast_path = true;
             self.current_idx = self.clip_at(timeline_pos_ns);
             let needs_async = self.seek_slots_in_place(timeline_pos_ns);
             self.sync_audio_to(timeline_pos_ns);
+            log::info!(
+                "seek: done timeline_pos={} fast_path={} needs_async={} slots={} elapsed_ms={}",
+                timeline_pos_ns,
+                fast_path,
+                needs_async,
+                self.slots.len(),
+                seek_started.elapsed().as_millis()
+            );
             return needs_async;
         }
         // Full rebuild: needed when the set of active clips has changed (e.g.
@@ -994,7 +1018,7 @@ impl ProgramPlayer {
         self.rebuild_pipeline_at(timeline_pos_ns);
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
-        if resume_playback {
+        let needs_async = if resume_playback {
             self.play_start = Some(Instant::now());
             false
         } else if self.current_idx.is_some() {
@@ -1012,7 +1036,16 @@ impl ProgramPlayer {
             }
         } else {
             false
-        }
+        };
+        log::info!(
+            "seek: done timeline_pos={} fast_path={} needs_async={} slots={} elapsed_ms={}",
+            timeline_pos_ns,
+            fast_path,
+            needs_async,
+            self.slots.len(),
+            seek_started.elapsed().as_millis()
+        );
+        needs_async
     }
 
     pub fn play(&mut self) {
@@ -1457,14 +1490,16 @@ impl ProgramPlayer {
     ///
     /// Sets `is-live=true` on the background source so the compositor enters
     /// live aggregation (clock-paced ~30fps output), makes the display queue
-    /// leaky so the compositor never blocks on backpressure, locks decoder
-    /// slots in their current state (preventing frame advancement), and sets
-    /// the pipeline to Playing.
+    /// leaky so the compositor never blocks on backpressure, and keeps the
+    /// pipeline paused so transform interaction does not advance playback.
     ///
     /// Call `exit_transform_live_mode()` when the drag ends.
     pub fn enter_transform_live_mode(&mut self) {
-        if self.transform_live || self.state == PlayerState::Playing {
+        if self.transform_live {
             return;
+        }
+        if self.state == PlayerState::Playing {
+            self.pause();
         }
         log::info!("enter_transform_live_mode: slots={}", self.slots.len());
         self.background_src.set_property("is-live", true);
@@ -1481,7 +1516,7 @@ impl ProgramPlayer {
         } else {
             self.audio_sink.set_locked_state(true);
         }
-        let _ = self.pipeline.set_state(gst::State::Playing);
+        let _ = self.pipeline.set_state(gst::State::Paused);
         self.transform_live = true;
     }
 
@@ -1637,6 +1672,18 @@ impl ProgramPlayer {
         gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     }
 
+    fn should_prioritize_ui_responsiveness(&self) -> bool {
+        self.state != PlayerState::Playing && self.slots.len() >= 3
+    }
+
+    fn effective_wait_timeout_ms(&self, requested_ms: u64) -> u64 {
+        if self.should_prioritize_ui_responsiveness() {
+            requested_ms.min(220)
+        } else {
+            requested_ms
+        }
+    }
+
     /// Wait for decoder slots to reach their target state (typically Paused).
     ///
     /// Only waits on **decoder** elements — NOT the full pipeline.
@@ -1652,27 +1699,21 @@ impl ProgramPlayer {
     /// main-thread blocking time (which prevents gtk4paintablesink from completing
     /// its preroll, causing a deadlock-like stall).
     fn wait_for_paused_preroll(&self) {
-        let base_ms = if self.state == PlayerState::Playing {
-            150
-        } else {
-            500
-        };
-        // Scale down per-decoder timeout when many slots are active to keep
-        // total blocking time under ~600ms. With 3+ heavy decode tracks the
-        // main thread must return to the GTK main loop promptly so the display
-        // sink can complete preroll.
-        let per_decoder_ms = if self.slots.len() >= 3 {
-            if self.state == PlayerState::Playing {
+        let per_decoder_ms = if self.state == PlayerState::Playing {
+            let base_ms = 150;
+            if self.slots.len() >= 3 {
                 // Playback boundary rebuilds run on the GTK main thread; keep
                 // per-decoder waits short to reduce handoff stutter.
                 (base_ms / self.slots.len() as u64).max(120)
             } else {
-                // Keep a generous timeout for paused seeks where frame
-                // correctness is prioritized over responsiveness.
-                (base_ms / self.slots.len() as u64).max(250)
+                base_ms
             }
+        } else if self.should_prioritize_ui_responsiveness() {
+            // Responsiveness-first paused seeks: keep each per-decoder wait tiny
+            // so the GTK main loop regains control quickly.
+            (self.effective_wait_timeout_ms(220) / self.slots.len() as u64).max(45)
         } else {
-            base_ms
+            500
         };
         let timeout = gst::ClockTime::from_mseconds(per_decoder_ms);
         for slot in &self.slots {
@@ -1693,7 +1734,8 @@ impl ProgramPlayer {
     /// counter has advanced beyond the snapshot taken before the seek.
     /// Returns true if all slots advanced within the timeout, false otherwise.
     fn wait_for_compositor_arrivals(&self, baseline: &[u64], timeout_ms: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let effective_timeout_ms = self.effective_wait_timeout_ms(timeout_ms);
+        let deadline = Instant::now() + Duration::from_millis(effective_timeout_ms);
         loop {
             let all_arrived = self
                 .slots
@@ -1719,7 +1761,8 @@ impl ProgramPlayer {
                     .map(|(i, _)| i)
                     .collect();
                 log::warn!(
-                    "wait_for_compositor_arrivals: timeout {}ms, pending slots={:?}",
+                    "wait_for_compositor_arrivals: timeout {}ms (requested {}ms), pending slots={:?}",
+                    effective_timeout_ms,
                     timeout_ms,
                     pending
                 );
@@ -2513,8 +2556,21 @@ impl ProgramPlayer {
         }
     }
 
+    /// Return whether the media at `path` has an audio stream, using a small
+    /// per-player cache to avoid repeated Discoverer work during rebuilds.
+    fn probe_has_audio_stream_cached(&mut self, path: &str) -> bool {
+        if let Some(&has_audio) = self.audio_stream_probe_cache.get(path) {
+            return has_audio;
+        }
+        let has_audio = Self::probe_has_audio_stream(path);
+        self.audio_stream_probe_cache
+            .insert(path.to_string(), has_audio);
+        has_audio
+    }
+
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
+        let rebuild_started = Instant::now();
         let was_playing = self.state == PlayerState::Playing;
         log::debug!(
             "rebuild_pipeline_at: START was_playing={} timeline_pos={}ns slots={}",
@@ -2530,14 +2586,11 @@ impl ProgramPlayer {
         // its transition).
         self.teardown_slots();
 
-        // Go through Ready to reset the pipeline's base-time / running-time.
-        // Without this, the always-on videotestsrc accumulates running-time
-        // while newly-created decoders start at running-time 0 after their
-        // flush seek.  The compositor waits for the decoders to catch up,
-        // deadlocking the pipeline and freezing the playhead.
-        // Now that slots are torn down, only the lightweight background
-        // sources (videotestsrc, audiotestsrc) remain — this is fast and safe.
-        let _ = self.pipeline.set_state(gst::State::Ready);
+        // Avoid pipeline-wide Ready transitions here: in some media/layout
+        // combinations this can deadlock in gst_pad_set_active while pads are
+        // being reconfigured. Reset start_time instead so the next Playing
+        // pulse starts from a clean running-time baseline.
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
 
         let active = self.clips_active_at(timeline_pos);
         if active.is_empty() {
@@ -2547,6 +2600,11 @@ impl ProgramPlayer {
             if was_playing {
                 let _ = self.pipeline.set_state(gst::State::Playing);
             }
+            log::info!(
+                "rebuild_pipeline_at: END timeline_pos={}ns slots=0 elapsed_ms={}",
+                timeline_pos,
+                rebuild_started.elapsed().as_millis()
+            );
             return;
         }
 
@@ -2576,7 +2634,7 @@ impl ProgramPlayer {
             let clip_has_audio = if !clip.has_audio {
                 false
             } else {
-                Self::probe_has_audio_stream(&effective_path)
+                self.probe_has_audio_stream_cached(&effective_path)
             };
 
             // Build per-slot effects bin.
@@ -2756,7 +2814,7 @@ impl ProgramPlayer {
             // Tune inner elements created by uridecodebin for local-file playback:
             // – cap decoder thread count to avoid thread explosion across 3+ tracks
             // – keep multiqueue limits seek-safe while paused scrubbing
-            let tune_playback_pipeline = was_playing;
+            let tune_multiqueue = was_playing;
             decoder.connect("deep-element-added", false, move |args| {
                 // deep-element-added: args[0]=uridecodebin, args[1]=parent_bin, args[2]=element
                 let child = args[2].get::<gst::Element>().ok()?;
@@ -2765,17 +2823,14 @@ impl ProgramPlayer {
                     .map(|f| f.name().to_string())
                     .unwrap_or_default();
                 // Cap H.264/HEVC/VP9 decoder threads (avdec_* defaults to num_cpus).
-                if tune_playback_pipeline
-                    && (factory_name.starts_with("avdec_h264")
-                        || factory_name.starts_with("avdec_vp8"))
+                if factory_name.starts_with("avdec_h264") || factory_name.starts_with("avdec_vp8")
                 {
                     child.set_property("max-threads", 2i32);
-                } else if tune_playback_pipeline
-                    && (factory_name.starts_with("avdec_h265")
-                        || factory_name.starts_with("avdec_vp9"))
+                } else if factory_name.starts_with("avdec_h265")
+                    || factory_name.starts_with("avdec_vp9")
                 {
                     child.set_property("max-threads", 4i32);
-                } else if tune_playback_pipeline && factory_name == "multiqueue" {
+                } else if tune_multiqueue && factory_name == "multiqueue" {
                     // Keep paused scrubbing seek-safe: ACCURATE seeks may need to decode
                     // a full GOP before reaching the target frame, so paused rebuilds keep
                     // default multiqueue behavior. During active playback, keep a 10MB
@@ -2878,7 +2933,14 @@ impl ProgramPlayer {
         // We cannot do a full wait_for_paused_preroll here because the
         // compositor might be waiting on an unlinked pad.  Use a short
         // timeout to let decoders link, then EOS any that didn't.
-        let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
+        let link_wait_ms = if was_playing {
+            400
+        } else {
+            self.effective_wait_timeout_ms(400)
+        };
+        let _ = self
+            .pipeline
+            .state(gst::ClockTime::from_mseconds(link_wait_ms));
 
         // If any decoder's video pad didn't link in time, send EOS on its
         // compositor/audiomixer pads so the aggregator doesn't wait
@@ -2953,26 +3015,46 @@ impl ProgramPlayer {
             log::debug!("rebuild_pipeline_at: post-seek arrivals done");
         }
 
-        // In paused mode, perform a two-pass settle:
-        // 1) wait once for initial decoder/linking work to settle,
-        // 2) re-seek decoders after pads are likely linked,
-        // 3) wait for post-seek buffers to reach compositor,
-        // 4) wait again for a fresh preroll frame.
+        // In paused mode, first try a single settle pass. Fall back to a
+        // second reseek pass only when links/arrivals are incomplete.
         if !was_playing {
             self.wait_for_paused_preroll();
-            let baseline = self.snapshot_arrival_seqs();
-            // Flush the compositor atomically before per-decoder seeks to clear
-            // stale preroll frames produced before decoder pads were linked.
-            let _ = self
-                .compositor
-                .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
-            for slot in &self.slots {
-                let clip = &self.clips[slot.clip_idx];
-                let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+            let all_video_linked = self
+                .slots
+                .iter()
+                .all(|slot| slot.video_linked.load(Ordering::Relaxed));
+            let first_pass_arrived = self.wait_for_compositor_arrivals(&baseline, 1200);
+
+            if !all_video_linked || !first_pass_arrived {
+                if self.should_prioritize_ui_responsiveness() {
+                    log::warn!(
+                        "rebuild_pipeline_at: skipping second paused settle pass for responsiveness (linked={} arrived={})",
+                        all_video_linked,
+                        first_pass_arrived
+                    );
+                } else {
+                    log::debug!(
+                        "rebuild_pipeline_at: running second paused settle pass (linked={} arrived={})",
+                        all_video_linked,
+                        first_pass_arrived
+                    );
+                    let baseline = self.snapshot_arrival_seqs();
+                    // Flush the compositor atomically before per-decoder seeks to clear
+                    // stale preroll frames produced before decoder pads were linked.
+                    let _ = self
+                        .compositor
+                        .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+                    for slot in &self.slots {
+                        let clip = &self.clips[slot.clip_idx];
+                        let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+                    }
+                    let _ = self.pipeline.set_state(gst::State::Paused);
+                    self.wait_for_paused_preroll();
+                    self.wait_for_compositor_arrivals(&baseline, 3000);
+                }
+            } else {
+                log::debug!("rebuild_pipeline_at: skipping second paused settle pass");
             }
-            let _ = self.pipeline.set_state(gst::State::Paused);
-            self.wait_for_paused_preroll();
-            self.wait_for_compositor_arrivals(&baseline, 3000);
             let (_, pipe_cur, pipe_pend) = self.pipeline.state(gst::ClockTime::ZERO);
             log::info!(
                 "rebuild_pipeline_at: after_settle slots={} pipe={:?}/{:?} seq={}",
@@ -2987,6 +3069,12 @@ impl ProgramPlayer {
         if was_playing {
             let _ = self.pipeline.set_state(gst::State::Playing);
         }
+        log::info!(
+            "rebuild_pipeline_at: END timeline_pos={}ns slots={} elapsed_ms={}",
+            timeline_pos,
+            self.slots.len(),
+            rebuild_started.elapsed().as_millis()
+        );
     }
 
     // ── Bus / metering ─────────────────────────────────────────────────────

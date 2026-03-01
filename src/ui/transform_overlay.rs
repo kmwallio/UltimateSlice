@@ -83,6 +83,7 @@ impl TransformOverlay {
     pub fn new(
         on_change: impl Fn(f64, f64, f64) + 'static,
         on_crop_change: impl Fn(i32, i32, i32, i32) + 'static,
+        on_drag_begin: impl Fn() + 'static,
         on_drag_end: impl Fn() + 'static,
     ) -> Self {
         let scale = Rc::new(Cell::new(1.0_f64));
@@ -158,6 +159,7 @@ impl TransformOverlay {
         let drag_state: Rc<RefCell<Option<DragState>>> = Rc::new(RefCell::new(None));
         let on_change = Rc::new(on_change);
         let on_crop_change = Rc::new(on_crop_change);
+        let on_drag_begin = Rc::new(on_drag_begin);
 
         let gesture = gtk::GestureDrag::new();
         gesture.set_button(1); // left button only
@@ -176,6 +178,7 @@ impl TransformOverlay {
             let proj_h = proj_h.clone();
             let picture = picture.clone();
             let drag_state = drag_state.clone();
+            let on_drag_begin = on_drag_begin.clone();
             let da_ref = da.clone();
             let canvas_widget = canvas_widget.clone();
 
@@ -272,6 +275,7 @@ impl TransformOverlay {
                 }
 
                 if handle != Handle::None {
+                    on_drag_begin();
                     *drag_state.borrow_mut() = Some(DragState {
                         handle,
                         start_wx: sx,

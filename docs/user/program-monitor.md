@@ -52,6 +52,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - **Center drag**: pan (Position X/Y).
 - **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
 - Keyboard nudges work when the overlay has focus (click the monitor once).
+- Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
 
 ## Playback Behaviour
 
@@ -77,8 +78,12 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - The program monitor seeks to the correct source position within the appropriate clip, accounting for clip speed.
 - When scrubbing within the same clip, the existing decoder is seeked in-place (no pipeline rebuild) so the monitor shows the frame at the exact playhead position without a black-screen or first-frame flash.
 - When the playhead crosses a clip boundary (different clips become active), the pipeline is briefly rebuilt for the new set of active clips.
+- Opening a project and seeking immediately now follows the same safe paused rebuild/seek flow, avoiding intermittent monitor freezes during initial interaction.
+- Opening/creating a project does not auto-start playback; Program Monitor remains paused until you explicitly press Play.
+- Project reload + first seek now run as short staged callbacks (load first, then seek), and stale pending seek/reload requests are coalesced so rapid edits/scrubs don't queue long back-to-back main-thread work.
 - During paused scrubbing, UltimateSlice waits for a fresh post-seek preroll frame so the Program Monitor and transform overlay update to the new playhead frame instead of showing black.
 - During paused scrubbing, active clip decoder branches are created before preroll/seek settle so the monitor does not remain stuck on a black frame after moving the playhead.
+- With 3+ active video tracks, paused settle waits are budget-capped to keep the UI responsive; if the full second-pass settle would exceed the budget it is skipped in favor of immediate interactivity.
 - Manual timeline seeks use the paused accurate-seek path and then resume playback if it was active, so the frame shown at the playhead is updated before playback continues.
 - While paused, the monitor is repainted continuously so delayed post-seek frame updates still appear without requiring playback to resume.
 
