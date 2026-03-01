@@ -90,6 +90,8 @@ pub struct ProgramClip {
     pub position_x: f64,
     /// Vertical position offset: −1.0 (top) to 1.0 (bottom). Default 0.0.
     pub position_y: f64,
+    /// Whether the source file contains an audio stream.
+    pub has_audio: bool,
 }
 
 impl ProgramClip {
@@ -192,6 +194,9 @@ pub struct ProgramPlayer {
     scope_frame_seq: Arc<AtomicU64>,
     /// Monotonic counter incremented whenever a new compositor-src frame is captured.
     compositor_frame_seq: Arc<AtomicU64>,
+    /// When true the compositor probe copies full-res frames into latest_compositor_frame.
+    /// Default false — only enabled during MCP frame export to avoid ~250 MB/s of copies.
+    compositor_capture_enabled: Arc<AtomicBool>,
     /// Index of the top-priority clip for `current_clip_idx()` / effects queries.
     current_idx: Option<usize>,
     /// Video sink bin (display + scope). Kept to avoid early drop.
@@ -247,6 +252,7 @@ impl ProgramPlayer {
         let scope_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
         let scope_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let compositor_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let compositor_capture_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         // Build tee-based sink bin: display + scope appsink (320x180 RGBA).
         let video_sink_bin: gst::Element = (|| {
@@ -254,7 +260,12 @@ impl ProgramPlayer {
                 .property("allow-not-linked", true)
                 .build()
                 .ok()?;
-            let q1 = gst::ElementFactory::make("queue").build().ok()?;
+            let q1 = gst::ElementFactory::make("queue")
+                .property("max-size-buffers", 3u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", 0u64)
+                .build()
+                .ok()?;
             let q2 = gst::ElementFactory::make("queue")
                 .property_from_str("leaky", "downstream")
                 .property("max-size-buffers", 1u32)
@@ -434,8 +445,11 @@ impl ProgramPlayer {
             .map_err(|_| anyhow!("audiomixer element not available"))?;
 
         // Silent background so audiomixer always has input.
+        // is-live=true makes the audiomixer aggregate in live mode (clock-paced),
+        // so it won't stall waiting for unlinked pads from audio-less clips.
         let silence_src = gst::ElementFactory::make("audiotestsrc")
             .property_from_str("wave", "silence")
+            .property("is-live", true)
             .build()
             .map_err(|_| anyhow!("audiotestsrc not available"))?;
         let silence_caps = gst::ElementFactory::make("capsfilter")
@@ -499,14 +513,18 @@ impl ProgramPlayer {
             &preview_capsfilter,
             &video_sink_bin,
         ])?;
-        // Diagnostic probe on compositor output (before preview downscale/sinks).
+        // Probe on compositor output: always increments cseq (cheap) but only
+        // copies the full-res frame when compositor_capture_enabled is set (during
+        // MCP frame export).  This avoids ~250 MB/s of unnecessary memcpy during
+        // normal playback.
         if let Some(comp_src_pad) = comp_capsfilter.static_pad("src") {
             let lcf = latest_compositor_frame.clone();
             let cseq = compositor_frame_seq.clone();
-            let scope_en = scope_enabled.clone();
+            let capture_en = compositor_capture_enabled.clone();
             let caps_pad = comp_src_pad.clone();
             comp_src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
-                if !scope_en.load(Ordering::Relaxed) {
+                cseq.fetch_add(1, Ordering::Relaxed);
+                if !capture_en.load(Ordering::Relaxed) {
                     return gst::PadProbeReturn::Ok;
                 }
                 if let Some(buffer) = info.buffer() {
@@ -522,20 +540,12 @@ impl ProgramPlayer {
                             .unwrap_or((0, 0));
                         if w > 0 && h > 0 {
                             let data = map.as_slice().to_vec();
-                            log::debug!(
-                                "compositor src: pts={} wh={}x{} hash={:x}",
-                                buffer.pts().map(|p| p.nseconds()).unwrap_or(0),
-                                w,
-                                h,
-                                frame_hash_u64(&data),
-                            );
                             if let Ok(mut frame) = lcf.lock() {
                                 *frame = Some(ScopeFrame {
                                     data,
                                     width: w,
                                     height: h,
                                 });
-                                cseq.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
@@ -614,6 +624,7 @@ impl ProgramPlayer {
                 scope_enabled,
                 scope_frame_seq,
                 compositor_frame_seq,
+                compositor_capture_enabled,
                 current_idx: None,
                 _video_sink_bin: video_sink_bin,
                 comp_capsfilter,
@@ -756,6 +767,8 @@ impl ProgramPlayer {
     pub fn prepare_export(&self) -> (u64, bool, bool) {
         let start_seq = self.scope_frame_seq.load(Ordering::Relaxed);
         let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        self.compositor_capture_enabled
+            .store(true, Ordering::Relaxed);
         log::info!(
             "prepare_export: start_seq={} slots={} current_idx={:?} state={:?} timeline_ns={}",
             start_seq,
@@ -825,6 +838,8 @@ impl ProgramPlayer {
         if !was_scope_enabled {
             self.scope_enabled.store(false, Ordering::Relaxed);
         }
+        self.compositor_capture_enabled
+            .store(false, Ordering::Relaxed);
         result
     }
 
@@ -2349,6 +2364,29 @@ impl ProgramPlayer {
         )
     }
 
+    /// Quick check whether a media file contains an audio stream.
+    /// Uses GStreamer Discoverer with a short timeout. Defaults to `true` on error.
+    fn probe_has_audio_stream(path: &str) -> bool {
+        use gstreamer_pbutils::prelude::*;
+        use gstreamer_pbutils::Discoverer;
+        let uri = if path.starts_with("file://") {
+            path.to_string()
+        } else {
+            format!("file://{}", path)
+        };
+        let Ok(disc) = Discoverer::new(gst::ClockTime::from_seconds(2)) else {
+            return true;
+        };
+        match disc.discover_uri(&uri) {
+            Ok(info) => {
+                let has = !info.audio_streams().is_empty();
+                log::info!("ProgramPlayer: probe_has_audio_stream({}) = {}", path, has);
+                has
+            }
+            Err(_) => true,
+        }
+    }
+
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         let was_playing = self.state == PlayerState::Playing;
@@ -2407,6 +2445,13 @@ impl ProgramPlayer {
             };
             let uri = format!("file://{}", effective_path);
             log::info!("ProgramPlayer: slot {} uri={}", zorder_offset, uri);
+
+            // Detect whether the source file has an audio stream.
+            let clip_has_audio = if !clip.has_audio {
+                false
+            } else {
+                Self::probe_has_audio_stream(&effective_path)
+            };
 
             // Build per-slot effects bin.
             let (
@@ -2508,23 +2553,34 @@ impl ProgramPlayer {
             }
 
             // Create audio path: audioconvert → audiomixer pad.
-            let audio_conv = gst::ElementFactory::make("audioconvert").build().ok();
-            let amix_pad = if let Some(ref ac) = audio_conv {
-                if self.pipeline.add(ac).is_ok() {
-                    if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
-                        mp.set_property("volume", clip.volume.clamp(0.0, 2.0));
-                        if let Some(ac_src) = ac.static_pad("src") {
-                            let _ = ac_src.link(&mp);
+            // Skip entirely for clips without an audio stream to prevent
+            // the audiomixer from waiting on an unlinked pad.
+            let (audio_conv, amix_pad) = if clip_has_audio {
+                let ac = gst::ElementFactory::make("audioconvert").build().ok();
+                let pad = if let Some(ref ac) = ac {
+                    if self.pipeline.add(ac).is_ok() {
+                        if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
+                            mp.set_property("volume", clip.volume.clamp(0.0, 2.0));
+                            if let Some(ac_src) = ac.static_pad("src") {
+                                let _ = ac_src.link(&mp);
+                            }
+                            Some(mp)
+                        } else {
+                            None
                         }
-                        Some(mp)
                     } else {
                         None
                     }
                 } else {
                     None
-                }
+                };
+                (ac, pad)
             } else {
-                None
+                log::info!(
+                    "ProgramPlayer: skipping audio path for clip {} (no audio)",
+                    clip.id
+                );
+                (None, None)
             };
 
             // Connect uridecodebin pad-added for dynamic linking.

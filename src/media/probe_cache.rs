@@ -6,6 +6,7 @@ pub struct ProbeResult {
     pub path: String,
     pub duration_ns: u64,
     pub is_audio_only: bool,
+    pub has_audio: bool,
 }
 
 /// Asynchronous media probe cache.
@@ -35,12 +36,13 @@ impl MediaProbeCache {
         std::thread::spawn(move || {
             while let Ok(path) = work_rx.recv() {
                 let uri = format!("file://{path}");
-                let (duration_ns, is_audio_only) = probe_media_bg(&uri);
+                let (duration_ns, is_audio_only, has_audio) = probe_media_bg(&uri);
                 if tx
                     .send(ProbeResult {
                         path,
                         duration_ns,
                         is_audio_only,
+                        has_audio,
                     })
                     .is_err()
                 {
@@ -87,11 +89,11 @@ impl MediaProbeCache {
     }
 }
 
-/// Single Discoverer call that returns both duration and audio-only flag.
-fn probe_media_bg(uri: &str) -> (u64, bool) {
+/// Single Discoverer call that returns duration, audio-only flag, and has-audio flag.
+fn probe_media_bg(uri: &str) -> (u64, bool, bool) {
     use gstreamer_pbutils::prelude::*;
     use gstreamer_pbutils::Discoverer;
-    let fallback = (10 * 1_000_000_000, false);
+    let fallback = (10 * 1_000_000_000, false, true);
     let Ok(()) = gstreamer::init() else {
         return fallback;
     };
@@ -103,5 +105,6 @@ fn probe_media_bg(uri: &str) -> (u64, bool) {
     };
     let duration_ns = info.duration().map(|d| d.nseconds()).unwrap_or(fallback.0);
     let is_audio_only = info.video_streams().is_empty();
-    (duration_ns, is_audio_only)
+    let has_audio = !info.audio_streams().is_empty();
+    (duration_ns, is_audio_only, has_audio)
 }
