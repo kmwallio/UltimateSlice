@@ -260,6 +260,7 @@ Tracking docs:
 ### Polish
 - [x] Keyboard shortcut reference overlay (? or / key opens a modal dialog)
 - [x] Preferences dialog with categorized sections + hardware acceleration toggle wired to source preview playback
+- [x] About dialog in Preferences (General page) with third-party crate/library credits and license notices
 - [x] GTK renderer preference (Auto / Cairo / OpenGL / Vulkan) for low-memory devices
 - [ ] Accessibility: keyboard navigation in all panels
 - [ ] Welcome window for choosing recent project or new one

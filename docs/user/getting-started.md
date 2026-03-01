@@ -57,6 +57,7 @@ The application opens with an **Untitled** project containing one Video track an
 
 - Click **New** in the toolbar (or press `Ctrl+N`).
 - Click **⚙ Settings** to configure canvas resolution and frame rate.
+- Open **Preferences** (`Ctrl+,`) and use the **General** page's **About & Open-source credits** button to view third-party crate/library credits and license notices.
 - Use **Save…** (`Ctrl+S`) to save as FCPXML at any point.
 
 ## Opening an Existing Project

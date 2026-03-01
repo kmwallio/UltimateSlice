@@ -10,9 +10,15 @@ The **Preferences** window contains application-level settings (not per-project 
 
 Preferences are grouped by category in a sidebar:
 
-- **General** — placeholder for upcoming general settings.
+- **General** — application information and credits.
 - **Playback** — performance-related settings.
 - **Timeline** — timeline display and analysis overlays.
+
+## About & Open-source Credits (General)
+
+- In **General**, click **About & Open-source credits** to open the About dialog.
+- The dialog lists major third-party crates/libraries used by UltimateSlice and their license families.
+- It also includes a license notice and pointers to `Cargo.toml`, `Cargo.lock`, and the Flatpak manifest for full dependency/license details.
 
 ## Hardware Acceleration (Playback)
 

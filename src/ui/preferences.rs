@@ -3,6 +3,26 @@ use gtk4::{self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, Re
 use std::rc::Rc;
 use crate::ui_state::{GskRenderer, PlaybackPriority, PreviewQuality, ProxyMode, PreferencesState};
 
+const THIRD_PARTY_COMPONENTS: &str = "\
+Third-party crates and libraries:\n\
+• gtk4-rs / gdk4 / gio / glib — LGPL-2.1-or-later\n\
+• GStreamer + gstreamer-rs bindings — LGPL-2.1-or-later\n\
+• quick-xml — MIT\n\
+• serde / serde_json — MIT OR Apache-2.0\n\
+• uuid — MIT OR Apache-2.0\n\
+• anyhow / thiserror / log / env_logger — MIT OR Apache-2.0\n\
+• FFmpeg (export/runtime tooling) — LGPL-2.1-or-later (built with GPL options in Flatpak)\n\
+• x264 (Flatpak build) — GPL-2.0-or-later\n\
+\n\
+See Cargo.toml/Cargo.lock and io.github.kmwallio.ultimateslice.yml for full dependency details.";
+
+const LICENSE_NOTICE: &str = "\
+UltimateSlice project license: TBD.\n\
+\n\
+This application uses third-party open-source crates and libraries.\n\
+Please review each dependency license in Cargo.lock, the Flatpak manifest,\n\
+and upstream project repositories for complete terms and notices.";
+
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
     current: PreferencesState,
@@ -47,6 +67,28 @@ pub fn show_preferences_dialog(
     let general_label = Label::new(Some("General preferences will appear here."));
     general_label.set_halign(gtk::Align::Start);
     general_box.append(&general_label);
+    let about_btn = gtk::Button::with_label("About & Open-source credits");
+    about_btn.set_halign(gtk::Align::Start);
+    {
+        let dialog_weak = dialog.downgrade();
+        about_btn.connect_clicked(move |_| {
+            let about = gtk::AboutDialog::builder()
+                .program_name("UltimateSlice")
+                .version(env!("CARGO_PKG_VERSION"))
+                .comments(THIRD_PARTY_COMPONENTS)
+                .license_type(gtk::License::Custom)
+                .build();
+            about.set_license(Some(LICENSE_NOTICE));
+            about.set_authors(&["UltimateSlice contributors"]);
+            about.set_website(Some("https://github.com/kmwallio/UltimateSlice"));
+            if let Some(parent) = dialog_weak.upgrade() {
+                about.set_transient_for(Some(&parent));
+            }
+            about.set_modal(true);
+            about.present();
+        });
+    }
+    general_box.append(&about_btn);
     stack.add_titled(&general_box, Some("general"), "General");
 
     let playback_box = GBox::new(Orientation::Vertical, 10);

@@ -21,6 +21,21 @@ Built in MCP server allows for AI collaboration.
 - FCPXML 1.10 import/export
 - Optional MCP server (`--mcp`) for JSON-RPC control
 
+## Third-Party Crates and Libraries
+
+UltimateSlice uses open-source crates and runtime libraries, including:
+
+- `gtk4-rs` / `gdk4` / `gio` / `glib` — LGPL-2.1-or-later
+- `gstreamer-rs` + GStreamer — LGPL-2.1-or-later
+- `quick-xml` — MIT
+- `serde` / `serde_json` — MIT OR Apache-2.0
+- `uuid` — MIT OR Apache-2.0
+- `anyhow` / `thiserror` / `log` / `env_logger` — MIT OR Apache-2.0
+- FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
+- x264 (Flatpak build dependency) — GPL-2.0-or-later
+
+For exact versions and full dependency tree, see `Cargo.toml`, `Cargo.lock`, and `io.github.kmwallio.ultimateslice.yml`.
+
 ### 🔜 Planned
 See `ROADMAP.md` for upcoming features like thumbnails, audio waveforms, multi-track editing, transitions, and a program monitor.
 
