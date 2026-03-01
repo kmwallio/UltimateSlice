@@ -227,6 +227,9 @@ pub struct ProgramPlayer {
     /// True when the transform tool has temporarily set the pipeline to live
     /// mode for interactive preview during drag.
     transform_live: bool,
+    /// Pad probes installed during transform live mode to drop slot buffers,
+    /// keeping the compositor's prepared_frames frozen.
+    transform_probes: Vec<(gst::Pad, gst::PadProbeId)>,
     /// Wall-clock instant when playback last entered Playing state.
     play_start: Option<Instant>,
 }
@@ -643,6 +646,7 @@ impl ProgramPlayer {
                 preview_divisor: 1,
                 display_queue,
                 transform_live: false,
+                transform_probes: Vec::new(),
                 play_start: None,
             },
             paintable,
@@ -1481,6 +1485,23 @@ impl ProgramPlayer {
         } else {
             self.audio_sink.set_locked_state(true);
         }
+        // Install buffer-dropping probes on each slot's queue src pad BEFORE
+        // going Playing.  The compositor keeps its prepared_frames from
+        // preroll, so the displayed video content stays frozen while pad
+        // property changes (position/scale) take effect.
+        for slot in &self.slots {
+            if let Some(ref q) = slot.slot_queue {
+                if let Some(src_pad) = q.static_pad("src") {
+                    if let Some(probe_id) = src_pad
+                        .add_probe(gst::PadProbeType::BUFFER, |_pad, _info| {
+                            gst::PadProbeReturn::Drop
+                        })
+                    {
+                        self.transform_probes.push((src_pad, probe_id));
+                    }
+                }
+            }
+        }
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.transform_live = true;
     }
@@ -1494,6 +1515,10 @@ impl ProgramPlayer {
         }
         log::info!("exit_transform_live_mode");
         let _ = self.pipeline.set_state(gst::State::Paused);
+        // Remove buffer-dropping probes so decoder frames can flow again.
+        for (pad, probe_id) in self.transform_probes.drain(..) {
+            pad.remove_probe(probe_id);
+        }
         // Restore audio output.
         if self.audio_sink.find_property("mute").is_some() {
             self.audio_sink.set_property("mute", false);
