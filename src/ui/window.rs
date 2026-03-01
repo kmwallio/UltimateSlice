@@ -71,6 +71,7 @@ fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>
     project
         .tracks
         .iter()
+        .filter(|t| t.kind == TrackKind::Video)
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
             let key = (c.source_path.clone(), c.lut_path.clone());
