@@ -1,31 +1,38 @@
 ---
 layout: doc
-title: Introduction
+title: Documentation
 permalink: /docs/
 ---
 
-# Introduction to UltimateSlice
+# UltimateSlice — User Documentation
 
-Welcome to the official documentation for **UltimateSlice**. 
+Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor built with GTK4 and Rust.
 
-UltimateSlice is a modern, high-performance video editor designed for creators who value speed, aesthetics, and power. Whether you're making a quick TikTok or a feature-length film, UltimateSlice has the tools you need to get the job done.
+---
 
-### Key Concepts
+## Feature Guides
 
-Before you dive in, it's helpful to understand some of the core concepts behind UltimateSlice.
+| Document | What it covers |
+|---|---|
+| [Getting Started](getting-started) | Installation, first launch, creating your first project |
+| [Media Library](media-library) | Importing media, browsing clips, appending to timeline |
+| [Source Monitor](source-monitor) | Previewing clips, setting In/Out points, shuttle controls |
+| [Timeline](timeline) | Arranging clips, trimming, splitting, markers, zoom/pan |
+| [Inspector](inspector) | Color correction, effects, audio, transform, titles, speed |
+| [Color Scopes](color-scopes) | Waveform, histogram, RGB parade, vectorscope |
+| [Preferences](preferences) | Application-level settings and performance preferences |
+| [Program Monitor](program-monitor) | Previewing the assembled timeline |
+| [Export](export) | Advanced export: codecs, resolution, audio options |
+| [Project Settings](project-settings) | Canvas size, frame rate, FCPXML save/load |
+| [Shortcuts](shortcuts) | Complete keyboard shortcut reference |
 
-- **The Non-Linear Workflow**: Everything you do is non-destructive. You can always go back and change your edits.
-- **The Node-Based Engine**: Under the hood, UltimateSlice uses a powerful node-based system for effects and rendering.
-- **Project Portability**: Save your projects to the cloud and pick up right where you left off on any device.
+---
 
-### How to use this documentation
+## Quick-Start Summary
 
-On the left side of the screen, you'll find the navigation sidebar. It's organized into sections to help you find what you're looking for quickly.
-
-- **Getting Started**: For new users who want to get up and running as fast as possible.
-- **Features**: Deep dives into specific tools like the Timeline, Color Wheels, and AI assistance.
-- **Advanced**: For power users who want to extend UltimateSlice with scripts and custom plugins.
-
-### Getting Help
-
-If you can't find what you're looking for, feel free to reach out to our community on [Discord](https://discord.gg/ultimateslice) or [GitHub](https://github.com/ultimateslice).
+1. **Import media** — click **Import Media** in the Media Library panel.
+2. **Mark your clip** — select it in the library; use **I** / **O** to set In/Out points in the Source Monitor.
+3. **Append to timeline** — click **Append to Timeline** or drag the clip from the library onto the timeline.
+4. **Arrange** — drag clips to reposition; drag their edges to trim; press **B** for the Razor tool to split.
+5. **Adjust** — select a clip and use the Inspector panel (right side) for color, audio, speed, and titles.
+6. **Export** — click **Export…** in the toolbar and choose your codec, resolution, and output file.

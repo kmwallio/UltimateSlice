@@ -6,41 +6,48 @@ permalink: /features/
 
 <div class="hero" style="padding-bottom: 40px;">
   <h1>Features</h1>
-  <p>The power you need, the simplicity you want.</p>
+  <p>Powerful editing with an open heart.</p>
 </div>
 
 <div class="features-grid">
   <div class="feature-card">
-    <h3>Advanced Rendering</h3>
-    <p>UltimateSlice uses the **Nova Engine** for hardware-accelerated exports. Supports 8K ProRes and beyond.</p>
+    <h3>Professional Timeline</h3>
+    <p>Multi-track rows, ripple-aware trimming, razor tool, and standard keyboard shortcuts (J/K/L, I/O).</p>
   </div>
   <div class="feature-card">
-    <h3>AI-Powered Cuts</h3>
-    <p>Let our AI assist you with scene detection, automated color grading, and silence removal.</p>
+    <h3>Native Performance</h3>
+    <p>Built with GTK4 and Rust for a smooth, high-frame-rate editing experience on any desktop.</p>
   </div>
   <div class="feature-card">
-    <h3>Multi-Platform</h3>
-    <p>Available on Linux, macOS, and Windows. A consistent experience no matter your OS.</p>
+    <h3>FCPXML Interchange</h3>
+    <p>Import and export projects from Final Cut Pro. Seamless transition for professional workflows.</p>
   </div>
   <div class="feature-card">
-    <h3>Social Integration</h3>
-    <p>Direct upload to YouTube, Vimeo, and Facebook. Connect your accounts and publish with one click.</p>
+    <h3>MCP AI Server</h3>
+    <p>Control the editor, list tracks, and add clips via AI agents using the Model Context Protocol.</p>
   </div>
 </div>
 
 <div class="wrapper" markdown="1" style="max-width: 1100px; margin: 0 auto; padding: 40px 20px;">
 
-## Detailed Breakdown
+## Implemented Features
 
-Our goal with UltimateSlice is to provide a comprehensive suite of tools for both beginners and professionals.
+Our current stable development branch (`main`) features:
 
-### 🎥 The Timeline
-The UltimateSlice timeline is designed to be reactive. It supports infinite tracks, non-destructive editing, and nested sequences.
+- **GTK4 UI Scaffold**: A modern, dark-themed interface following GNOME HIG.
+- **Media Library Browser**: Import videos, audio, and images with automatic duration probing.
+- **Source & Program Monitors**: Frame-accurate playback, scrubbing, and in/out markers.
+- **Multi-track Timeline**: Flexible editing with support for video and audio tracks.
+- **Advanced Trimming**: Adjust clips by dragging their edges, with undo/redo support.
+- **Project Serialization**: Save and load projects in standard FCPXML format.
+- **Background Rendering**: High-quality MP4/H.264 exports via GStreamer/FFmpeg.
 
-### 🎨 Color Correction
-Professional-grade color wheels, curves, and LUT support. Get that cinematic look without the learning curve.
+## Planned Roadmap
 
-### 🎹 Audio Suite
-Full multitrack audio mixer, built-in noise reduction, and support for VST/AU plugins.
+Check out our [ROADMAP.md](https://github.com/ultimateslice/UltimateSlice/blob/main/ROADMAP.md) for upcoming features:
+- **Audio Waveforms**: See your sound directly on the timeline.
+- **Filmstrip Thumbnails**: Visual cues for your video clips.
+- **Real-time Effects**: Color correction, transforms, and transitions.
+- **Smart Script-to-Timeline**: AI-powered assembly from scripts.
 
 </div>
