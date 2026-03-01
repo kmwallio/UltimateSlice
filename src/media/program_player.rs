@@ -1486,15 +1486,21 @@ impl ProgramPlayer {
             self.audio_sink.set_locked_state(true);
         }
         // Install buffer-dropping probes on each slot's queue src pad BEFORE
-        // going Playing.  The compositor keeps its prepared_frames from
-        // preroll, so the displayed video content stays frozen while pad
-        // property changes (position/scale) take effect.
+        // going Playing.  Let the first buffer through so the compositor
+        // establishes a prepared_frame in Playing mode, then drop all
+        // subsequent buffers to freeze the displayed video content.
         for slot in &self.slots {
             if let Some(ref q) = slot.slot_queue {
                 if let Some(src_pad) = q.static_pad("src") {
-                    if let Some(probe_id) = src_pad
-                        .add_probe(gst::PadProbeType::BUFFER, |_pad, _info| {
-                            gst::PadProbeReturn::Drop
+                    let passed = Arc::new(AtomicBool::new(false));
+                    let p = passed.clone();
+                    if let Some(probe_id) =
+                        src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                            if !p.swap(true, Ordering::Relaxed) {
+                                gst::PadProbeReturn::Ok
+                            } else {
+                                gst::PadProbeReturn::Drop
+                            }
                         })
                     {
                         self.transform_probes.push((src_pad, probe_id));
