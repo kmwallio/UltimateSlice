@@ -1,0 +1,38 @@
+title: UltimateSlice
+email: hello@ultimateslice.app
+description: >- # this means to ignore newlines until "baseurl:"
+  UltimateSlice is the next-generation video editor. Modern, powerful, and
+  built for the future. Like Apple, GNOME, and Facebook had a baby.
+baseurl: "" # the subpath of your site, e.g. /blog
+url: "" # the base hostname & protocol for your site, e.g. http://example.com
+twitter_username: ultimateslice
+github_username: ultimateslice
+
+# Build settings
+markdown: kramdown
+theme: null # We'll build our own theme or use a simple base.
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+# Collections for documentation and blog
+collections:
+  docs:
+    output: true
+    permalink: /docs/:path/
+  posts:
+    output: true
+    permalink: /blog/:year/:month/:day/:title/
+
+defaults:
+  - scope:
+      path: ""
+      type: "posts"
+    values:
+      layout: "post"
+  - scope:
+      path: ""
+      type: "docs"
+    values:
+      layout: "doc"

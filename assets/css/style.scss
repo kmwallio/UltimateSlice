@@ -1,0 +1,193 @@
+---
+# Only the main Sass file needs front matter (the dashes are enough)
+---
+
+ // Or just write our own from scratch.
+
+/* 
+   Apple + GNOME + Facebook Hybrid Theme 
+   UltimateSlice Video Editor
+*/
+
+:root {
+    --accent-color: #007aff; /* Apple Blue */
+    --bg-color: #ffffff;
+    --text-color: #1d1d1f; /* Apple gray */
+    --header-bg: rgba(245, 245, 247, 0.8); /* Apple frosted glass */
+    --gnome-header-bg: #f6f6f6;
+    --gnome-border: #dcdcdc;
+    --fb-bg: #f0f2f5;
+    --fb-sidebar: #ffffff;
+    --border-radius: 12px; /* Apple/GNOME style */
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg-color: #000000;
+        --text-color: #f5f5f7;
+        --header-bg: rgba(29, 29, 31, 0.8);
+        --gnome-header-bg: #242424;
+        --gnome-border: #353535;
+        --fb-bg: #18191a;
+        --fb-sidebar: #242526;
+    }
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    margin: 0;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+header.site-header {
+    background: var(--header-bg);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid var(--gnome-border);
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    height: 60px;
+}
+
+.header-bar {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.site-title {
+    font-weight: 600;
+    font-size: 1.2rem;
+    text-decoration: none;
+    color: var(--text-color);
+    display: flex;
+    align-items: center;
+}
+
+.site-nav {
+    margin-left: auto;
+}
+
+.site-nav a {
+    color: var(--text-color);
+    text-decoration: none;
+    margin-left: 24px;
+    font-size: 0.95rem;
+    opacity: 0.8;
+    transition: opacity 0.2s;
+}
+
+.site-nav a:hover {
+    opacity: 1;
+}
+
+.btn-primary {
+    background-color: var(--accent-color);
+    color: white !important;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-weight: 500;
+    opacity: 1 !important;
+}
+
+/* Landing Page Hero */
+.hero {
+    padding: 100px 20px;
+    text-align: center;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.hero h1 {
+    font-size: 4rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 10px;
+}
+
+.hero p {
+    font-size: 1.5rem;
+    color: #86868b;
+    margin-bottom: 40px;
+}
+
+/* Features Section */
+.features-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 30px;
+    padding: 60px 20px;
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+.feature-card {
+    background: var(--fb-sidebar);
+    border-radius: var(--border-radius);
+    padding: 30px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    border: 1px solid var(--gnome-border);
+    transition: transform 0.3s ease;
+}
+
+.feature-card:hover {
+    transform: translateY(-5px);
+}
+
+/* Documentation Layout */
+.docs-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: calc(100vh - 60px);
+}
+
+.docs-sidebar {
+    border-right: 1px solid var(--gnome-border);
+    padding: 40px 20px;
+    background: var(--fb-sidebar);
+}
+
+.docs-content {
+    padding: 40px 60px;
+    max-width: 800px;
+}
+
+/* Blog Feed Layout */
+.blog-feed {
+    background: var(--fb-bg);
+    padding: 40px 20px;
+}
+
+.post-card {
+    background: var(--fb-sidebar);
+    border-radius: var(--border-radius);
+    max-width: 680px;
+    margin: 0 auto 20px;
+    padding: 20px;
+    border: 1px solid var(--gnome-border);
+}
+
+/* Markdown Content Styling */
+.markdown-body h1, .markdown-body h2 { border-bottom: none; }
+.markdown-body img { border-radius: 8px; }
+
+footer {
+    padding: 60px 20px;
+    background: var(--gnome-header-bg);
+    border-top: 1px solid var(--gnome-border);
+    text-align: center;
+    font-size: 0.9rem;
+    color: #86868b;
+}
