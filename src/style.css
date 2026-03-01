@@ -233,6 +233,19 @@ entry:focus {
     letter-spacing: 0.8px;
 }
 
+.browser-header-import {
+    padding: 2px 4px;
+    min-width: 0;
+    background-color: transparent;
+    border-color: transparent;
+    color: #b8b8c0;
+}
+
+.browser-header-import:hover {
+    background-color: #333338;
+    border-color: #555560;
+}
+
 .media-list row {
     border-bottom: 1px solid #2a2a2e;
 }

@@ -26,15 +26,32 @@ pub fn build_media_browser(
     let vbox = GBox::new(Orientation::Vertical, 4);
     vbox.set_width_request(240);
 
+    // Header row: "Media Library" title + compact "+" button (shown when library is non-empty).
+    let header_row = GBox::new(Orientation::Horizontal, 0);
+    header_row.set_margin_top(8);
+    header_row.set_margin_bottom(4);
+    header_row.set_margin_start(8);
+    header_row.set_margin_end(8);
+
     let header = Label::new(Some("Media Library"));
     header.add_css_class("browser-header");
-    header.set_margin_top(8);
-    header.set_margin_bottom(4);
-    vbox.append(&header);
+    header.set_hexpand(true);
+    header.set_halign(gtk::Align::Start);
+    header_row.append(&header);
 
+    let header_import_btn = Button::from_icon_name("list-add-symbolic");
+    header_import_btn.add_css_class("browser-header-import");
+    header_import_btn.set_tooltip_text(Some("Import Media…"));
+    header_import_btn.set_visible(!library.borrow().is_empty());
+    header_row.append(&header_import_btn);
+
+    vbox.append(&header_row);
+
+    // Big import button — shown only when the library is empty.
     let import_btn = Button::with_label("+ Import Media…");
     import_btn.set_margin_start(8);
     import_btn.set_margin_end(8);
+    import_btn.set_visible(library.borrow().is_empty());
     vbox.append(&import_btn);
 
     let empty_hint = Label::new(Some("Import media or drag files here to start editing."));
@@ -112,6 +129,8 @@ pub fn build_media_browser(
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
         let empty_hint = empty_hint.clone();
+        let import_btn = import_btn.clone();
+        let header_import_btn = header_import_btn.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
             // Drain completed probe results → update library items (lightweight).
             let resolved = probe_cache.borrow_mut().poll();
@@ -161,6 +180,8 @@ pub fn build_media_browser(
 
             let lib = library.borrow();
             empty_hint.set_visible(lib.is_empty());
+            import_btn.set_visible(lib.is_empty());
+            header_import_btn.set_visible(!lib.is_empty());
             let count = flowbox_child_count(&flow_box);
             if count != lib.len() {
                 rebuild_flowbox(&flow_box, &lib, &thumb_cache);
@@ -179,14 +200,14 @@ pub fn build_media_browser(
         });
     }
 
-    // Import button → file chooser, adds to library and inserts grid cell.
-    {
+    // Shared import handler: opens the file-chooser dialog for both import buttons.
+    let do_import: Rc<dyn Fn(&Button)> = {
         let library = library.clone();
         let flow_box = flow_box.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
 
-        import_btn.connect_clicked(move |btn| {
+        Rc::new(move |btn: &Button| {
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Import Media");
 
@@ -225,7 +246,16 @@ pub fn build_media_browser(
                     }
                 }
             });
-        });
+        })
+    };
+
+    {
+        let do_import = do_import.clone();
+        import_btn.connect_clicked(move |btn| do_import(btn));
+    }
+    {
+        let do_import = do_import.clone();
+        header_import_btn.connect_clicked(move |btn| do_import(btn));
     }
 
     // External drag-and-drop import into media pane (e.g. from file manager).
