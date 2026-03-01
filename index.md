@@ -11,6 +11,10 @@ title: Home
   </div>
 </section>
 
+<div class="screenshot-container">
+  <img src="{{ "/assets/images/ultimateslice.png" | relative_url }}" alt="UltimateSlice Video Editor Screenshot">
+</div>
+
 <section class="features-grid">
   <div class="feature-card">
     <h3>Rust + GTK4</h3>

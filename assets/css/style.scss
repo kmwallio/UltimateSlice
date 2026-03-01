@@ -121,6 +121,21 @@ header.site-header {
     margin-bottom: 40px;
 }
 
+.screenshot-container {
+    max-width: 1000px;
+    margin: 0 auto 80px;
+    padding: 0 20px;
+    text-align: center;
+}
+
+.screenshot-container img {
+    border-radius: 12px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--gnome-border);
+    max-width: 100%;
+    height: auto;
+}
+
 /* Features Section */
 .features-grid {
     display: grid;
