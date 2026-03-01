@@ -2566,15 +2566,14 @@ impl ProgramPlayer {
             }
         }
 
-        // Wait for pipeline to preroll so seeks are accepted.
-        // When paused (scrubbing), always wait — we need a decoded frame for
-        // the preview.  When playing, respect the playback priority to avoid
-        // stutter during clip boundary crossings.
-        if !was_playing || self.should_block_preroll() {
-            self.wait_for_paused_preroll();
-        }
+        // Transition pipeline to Paused so decoders preroll and can accept seeks.
+        // The pipeline is currently in Ready (set above to reset base-time).
+        // Without this, decoder seeks silently fail and decoders preroll at
+        // position 0 when the pipeline eventually transitions to Playing.
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        self.wait_for_paused_preroll();
 
-        // Ensure decoders have reached their parent state before issuing seeks.
+        // Ensure decoders have reached Paused before issuing seeks.
         for slot in &self.slots {
             let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
         }
