@@ -194,6 +194,9 @@ pub struct ProgramPlayer {
     scope_frame_seq: Arc<AtomicU64>,
     /// Monotonic counter incremented whenever a new compositor-src frame is captured.
     compositor_frame_seq: Arc<AtomicU64>,
+    /// When true the compositor probe copies full-res frames into latest_compositor_frame.
+    /// Default false — only enabled during MCP frame export to avoid ~250 MB/s of copies.
+    compositor_capture_enabled: Arc<AtomicBool>,
     /// Index of the top-priority clip for `current_clip_idx()` / effects queries.
     current_idx: Option<usize>,
     /// Video sink bin (display + scope). Kept to avoid early drop.
@@ -249,6 +252,7 @@ impl ProgramPlayer {
         let scope_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
         let scope_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let compositor_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let compositor_capture_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         // Build tee-based sink bin: display + scope appsink (320x180 RGBA).
         let video_sink_bin: gst::Element = (|| {
@@ -256,7 +260,12 @@ impl ProgramPlayer {
                 .property("allow-not-linked", true)
                 .build()
                 .ok()?;
-            let q1 = gst::ElementFactory::make("queue").build().ok()?;
+            let q1 = gst::ElementFactory::make("queue")
+                .property("max-size-buffers", 3u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", 0u64)
+                .build()
+                .ok()?;
             let q2 = gst::ElementFactory::make("queue")
                 .property_from_str("leaky", "downstream")
                 .property("max-size-buffers", 1u32)
@@ -504,14 +513,18 @@ impl ProgramPlayer {
             &preview_capsfilter,
             &video_sink_bin,
         ])?;
-        // Diagnostic probe on compositor output (before preview downscale/sinks).
+        // Probe on compositor output: always increments cseq (cheap) but only
+        // copies the full-res frame when compositor_capture_enabled is set (during
+        // MCP frame export).  This avoids ~250 MB/s of unnecessary memcpy during
+        // normal playback.
         if let Some(comp_src_pad) = comp_capsfilter.static_pad("src") {
             let lcf = latest_compositor_frame.clone();
             let cseq = compositor_frame_seq.clone();
-            let scope_en = scope_enabled.clone();
+            let capture_en = compositor_capture_enabled.clone();
             let caps_pad = comp_src_pad.clone();
             comp_src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
-                if !scope_en.load(Ordering::Relaxed) {
+                cseq.fetch_add(1, Ordering::Relaxed);
+                if !capture_en.load(Ordering::Relaxed) {
                     return gst::PadProbeReturn::Ok;
                 }
                 if let Some(buffer) = info.buffer() {
@@ -527,20 +540,12 @@ impl ProgramPlayer {
                             .unwrap_or((0, 0));
                         if w > 0 && h > 0 {
                             let data = map.as_slice().to_vec();
-                            log::debug!(
-                                "compositor src: pts={} wh={}x{} hash={:x}",
-                                buffer.pts().map(|p| p.nseconds()).unwrap_or(0),
-                                w,
-                                h,
-                                frame_hash_u64(&data),
-                            );
                             if let Ok(mut frame) = lcf.lock() {
                                 *frame = Some(ScopeFrame {
                                     data,
                                     width: w,
                                     height: h,
                                 });
-                                cseq.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
@@ -619,6 +624,7 @@ impl ProgramPlayer {
                 scope_enabled,
                 scope_frame_seq,
                 compositor_frame_seq,
+                compositor_capture_enabled,
                 current_idx: None,
                 _video_sink_bin: video_sink_bin,
                 comp_capsfilter,
@@ -761,6 +767,8 @@ impl ProgramPlayer {
     pub fn prepare_export(&self) -> (u64, bool, bool) {
         let start_seq = self.scope_frame_seq.load(Ordering::Relaxed);
         let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        self.compositor_capture_enabled
+            .store(true, Ordering::Relaxed);
         log::info!(
             "prepare_export: start_seq={} slots={} current_idx={:?} state={:?} timeline_ns={}",
             start_seq,
@@ -830,6 +838,8 @@ impl ProgramPlayer {
         if !was_scope_enabled {
             self.scope_enabled.store(false, Ordering::Relaxed);
         }
+        self.compositor_capture_enabled
+            .store(false, Ordering::Relaxed);
         result
     }
 
