@@ -4,6 +4,9 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Changed
+- **New app icon**: Replaced the previous katana-and-cinema-camera icon with a GNOME HIG-compliant design. The new icon (`data/io.github.ultimateslice.svg`) shows a camera body on a warm caramel squircle background; a kitchen knife cuts diagonally across the camera, revealing horizontal layers of sponge cake and cream inside — making the "UltimateSlice" wordplay literal. Uses GNOME colour palette (Orange 3–5 background, Dark 2–4 camera body, Blue 2–5 lens, Red 4 record button). Readable at all sizes from 16 px to 512 px.
+
 ### Planned (Roadmap additions)
 - **Script-to-Timeline**: Added roadmap feature — "Create Project from Script & Clips". Users will be able to import a Final Draft (FDX) or Fountain screenplay alongside a folder of media clips. Each clip is transcribed via speech-to-text (Whisper); transcripts are fuzzy-aligned against the script to find the best-matching scene position. Clips are then placed on the timeline in screenplay order, with sub-clip splits at scene boundaries where a single clip spans multiple scenes. Includes a multi-step wizard with a background STT+alignment pass, confidence indicators for low-confidence matches, an unmatched-clips bin, a re-order-by-script command, and FCPXML persistence for script path, scene IDs, and transcript cache.
 

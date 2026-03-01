@@ -14,6 +14,7 @@ Tracking docs:
 - [x] GTK4 + Rust project scaffold (`gtk4-rs 0.11`, `gstreamer-rs 0.25`, `glib 0.22`)
 - [x] Dark theme via custom CSS (`src/style.css`)
 - [x] GApplication entry point with CSS loading
+- [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 
 ### Data Model
 - [x] `Clip` — source path, source in/out (ns), timeline position, label, kind
