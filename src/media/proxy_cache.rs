@@ -58,7 +58,7 @@ pub fn proxy_key(source_path: &str, lut_path: Option<&str>) -> String {
 /// into lightweight H.264 proxy files via ffmpeg. Follows the same
 /// request/poll/get pattern as `MediaProbeCache` and `ThumbnailCache`.
 ///
-/// Proxy files are stored in a `.ultimateslice_proxies/` directory next to
+/// Proxy files are stored in a `UltimateSlice.cache/` directory next to
 /// the source file.
 ///
 /// The map key is a composite of source path + optional LUT path (via
@@ -201,12 +201,12 @@ fn lut_hash(lut_path: &str) -> String {
 }
 
 /// Compute the proxy output path for a given source path, scale, and optional LUT.
-/// Pattern: `<parent>/.ultimateslice_proxies/<stem>.proxy_<scale>[_lut<hash>].mp4`
+/// Pattern: `<parent>/UltimateSlice.cache/<stem>.proxy_<scale>[_lut<hash>].mp4`
 fn proxy_path_for(source_path: &str, scale: ProxyScale, lut_path: Option<&str>) -> Option<String> {
     let src = Path::new(source_path);
     let parent = src.parent()?;
     let stem = src.file_stem()?.to_str()?;
-    let proxy_dir = parent.join(".ultimateslice_proxies");
+    let proxy_dir = parent.join("UltimateSlice.cache");
     let lut_suffix = match lut_path {
         Some(lut) if !lut.is_empty() => format!("_lut{}", lut_hash(lut)),
         _ => String::new(),

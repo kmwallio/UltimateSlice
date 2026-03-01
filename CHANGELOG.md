@@ -360,7 +360,7 @@ All notable project changes and progress should be recorded here.
 - **Proxy preview mode**:
   - Background proxy transcoding: generates lightweight half- or quarter-resolution H.264 proxy files via ffmpeg for smoother preview playback with heavy/4K media.
   - Added `ProxyMode` preference (`Off`, `Half Res`, `Quarter Res`) in Preferences → Playback.
-  - Proxy files stored in `.ultimateslice_proxies/` next to source files; export always uses originals.
+  - Proxy files stored in `UltimateSlice.cache/` next to source files; export always uses originals.
   - Added MCP tool `set_proxy_mode`; `get_preferences` now includes `proxy_mode`.
   - Yellow progress bar status bar at bottom of window shows proxy generation progress.
   - **Bug fix**: Changing the proxy size (half ↔ quarter) in Preferences now invalidates existing proxies and re-generates them at the new resolution. Previously the old-resolution proxy was reused.
