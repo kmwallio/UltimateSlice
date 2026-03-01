@@ -14,6 +14,7 @@ Tracking docs:
 - [x] GTK4 + Rust project scaffold (`gtk4-rs 0.11`, `gstreamer-rs 0.25`, `glib 0.22`)
 - [x] Dark theme via custom CSS (`src/style.css`)
 - [x] GApplication entry point with CSS loading
+- [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 
 ### Data Model
 - [x] `Clip` — source path, source in/out (ns), timeline position, label, kind
@@ -100,6 +101,7 @@ Tracking docs:
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
+- [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
 
 ---
 

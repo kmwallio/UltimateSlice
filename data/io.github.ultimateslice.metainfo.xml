@@ -16,7 +16,20 @@
   <releases>
     <release version="0.1.0" date="2026-02-25">
       <description>
-        <p>Initial release.</p>
+        <p>Initial release featuring:</p>
+        <ul>
+          <li>GTK4 application with dark theme styling</li>
+          <li>Media library import with duration probing for video, audio, and images</li>
+          <li>Source monitor with playback, scrubber, in/out marks, and timecode display</li>
+          <li>Timeline with multi-track rows, zoom/pan, clip selection, trim, move, and razor tool</li>
+          <li>Undo/Redo command history</li>
+          <li>Inspector panel for selected clip properties</li>
+          <li>MP4/H.264 export via GStreamer pipeline</li>
+          <li>FCPXML 1.10 import and export</li>
+          <li>Proxy generation for smoother editing of high-resolution media</li>
+          <li>Basic transitions between clips on the timeline</li>
+          <li>Optional MCP server (--mcp) for JSON-RPC AI collaboration</li>
+        </ul>
       </description>
     </release>
   </releases>

@@ -557,6 +557,11 @@ fn tools_list() -> Value {
             "name": "stop",
             "description": "Stop program monitor playback and return the playhead to the beginning.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "take_screenshot",
+            "description": "Capture a PNG screenshot of the full application window using the GTK snapshot and renderer. The PNG is written to the current working directory with a timestamped filename and the path is returned.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ]})
 }
@@ -749,6 +754,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
+        "take_screenshot" => McpCommand::TakeScreenshot { reply: tx },
 
         _ => return err(id.clone(), -32602, &format!("Unknown tool: '{name}'")),
     };

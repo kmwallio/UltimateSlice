@@ -95,3 +95,4 @@ When a clip has a speed multiplier set (see [inspector.md](inspector.md)), the p
 
 - `seek_playhead` seeks the timeline/program-monitor playhead to an absolute nanosecond position.
 - `export_displayed_frame` exports the current displayed frame to a binary PPM (`P6`) image file.
+- `take_screenshot` captures a PNG screenshot of the full application window using the GTK snapshot API and GSK `CairoRenderer`. The PNG is written to the current working directory as `ultimateslice-screenshot-<unix_epoch>.png`.
