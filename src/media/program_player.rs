@@ -2867,11 +2867,28 @@ impl ProgramPlayer {
             });
         }
 
+        // Transition pipeline to Paused so decoders preroll and can accept seeks.
+        log::debug!(
+            "rebuild_pipeline_at: setting Paused for preroll (was_playing={})",
+            was_playing
+        );
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
+        // Give decoders time to discover streams and link pads (up to 5s).
+        // We cannot do a full wait_for_paused_preroll here because the
+        // compositor might be waiting on an unlinked pad.  Use a short
+        // timeout to let decoders link, then EOS any that didn't.
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
+
         // If any decoder's video pad didn't link in time, send EOS on its
         // compositor/audiomixer pads so the aggregator doesn't wait
         // indefinitely for buffers that will never arrive.
         for slot in &self.slots {
             if !slot.video_linked.load(Ordering::Relaxed) {
+                log::warn!(
+                    "rebuild_pipeline_at: slot clip_idx={} video not linked, sending EOS",
+                    slot.clip_idx
+                );
                 if let Some(ref pad) = slot.compositor_pad {
                     let _ = pad.send_event(gst::event::Eos::new());
                 }
@@ -2881,13 +2898,6 @@ impl ProgramPlayer {
             }
         }
 
-        // Transition pipeline to Paused so decoders preroll and can accept seeks.
-        log::debug!(
-            "rebuild_pipeline_at: setting Paused for preroll (was_playing={})",
-            was_playing
-        );
-        let _ = self.pipeline.set_state(gst::State::Paused);
-        log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
         self.wait_for_paused_preroll();
         log::debug!("rebuild_pipeline_at: paused preroll done");
 
