@@ -153,6 +153,11 @@
       "command": "cargo",
       "args": ["run", "--", "--mcp-attach"],
       "cwd": "UltimateSlice"
+    },
+    "ultimate-slice-python-socket": {
+      "command": "python3",
+      "args": ["tools/mcp_socket_client.py"],
+      "cwd": "UltimateSlice"
     }
   }
 }

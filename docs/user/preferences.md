@@ -101,4 +101,5 @@ Preferences are grouped by category in a sidebar:
 - The toggle takes effect immediately — no restart required.
 - Only one agent can be connected at a time; additional connections are rejected.
 - Agents using the `.mcp.json` `ultimate-slice-attach` server entry connect via `--mcp-attach`, which bridges stdio to the socket.
+- A Python socket client is also available: `python3 tools/mcp_socket_client.py` (see `docs/user/python-mcp.md`).
 - The setting is persisted across launches.

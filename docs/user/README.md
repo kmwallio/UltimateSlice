@@ -15,6 +15,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [inspector.md](inspector.md) | Color correction, effects, audio, transform, titles, speed |
 | [color-scopes.md](color-scopes.md) | Waveform, histogram, RGB parade, vectorscope |
 | [preferences.md](preferences.md) | Application-level settings and performance preferences |
+| [python-mcp.md](python-mcp.md) | Python socket client commands for MCP |
 | [program-monitor.md](program-monitor.md) | Previewing the assembled timeline |
 | [export.md](export.md) | Advanced export: codecs, resolution, audio options |
 | [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load |

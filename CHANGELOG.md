@@ -35,6 +35,7 @@ All notable project changes and progress should be recorded here.
   3. **Fast-path display pulse**: The in-place seek fast path now also performs a `Playing → Paused` pulse after seeking decoders. Per-decoder FLUSH events stop at the compositor's sink pads and are not forwarded downstream, so the display sink stays prerolled with its old frame; the pulse starts the clock briefly to flush the new composited frame through to `gtk4paintablesink`.
 
 ### Added
+- **Python MCP socket client commands**: Added `tools/mcp_socket_client.py`, a Python stdio↔Unix-socket bridge for MCP, plus a new `.mcp.json` server entry (`ultimate-slice-python-socket`). Added user docs for Python commands in `docs/user/python-mcp.md` and linked usage from `README.md` and Preferences docs.
 - **Agent verification rule**: `docs/ARCHITECTURE.md` now explicitly requires MCP completion checks before declaring tasks done: new-project import, existing-project open, and MCP validation of new/modified functionality when feasible.
 - **MCP transport controls**: `play`, `pause`, and `stop` commands added to the MCP server, allowing external clients and automation scripts to control program monitor playback.
 - **MCP seek and frame export tools**:

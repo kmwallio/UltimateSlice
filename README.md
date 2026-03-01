@@ -56,6 +56,23 @@ To run with MCP server enabled:
 cargo run -- --mcp
 ```
 
+## Python MCP Socket Client
+
+When using the MCP socket transport (running instance), you can use the Python bridge client:
+
+```/dev/null/bash#L1-2
+python3 tools/mcp_socket_client.py
+```
+
+Optional socket override:
+
+```/dev/null/bash#L1-2
+python3 tools/mcp_socket_client.py --socket /tmp/ultimateslice-mcp.sock
+```
+
+The client reads JSON-RPC lines from stdin and writes responses to stdout.
+See `docs/user/python-mcp.md` for complete command examples.
+
 ## Flatpak
 
 A Flatpak manifest is provided at `io.github.ultimateslice.yml`.
