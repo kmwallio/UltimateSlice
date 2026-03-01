@@ -1493,7 +1493,7 @@ impl ProgramPlayer {
         }
         self.background_src.set_property("is-live", false);
         if let Some(ref q) = self.display_queue {
-            q.set_property_from_str("leaky", "never");
+            q.set_property_from_str("leaky", "no");
             q.set_property("max-size-buffers", 3u32);
         }
         self.transform_live = false;
