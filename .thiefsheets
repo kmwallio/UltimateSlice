@@ -1,7 +1,8 @@
 {
   "sheet-order" : [
     "features.md",
-    "index.md"
+    "index.md",
+    "credits.md"
   ],
   "hidden-folders" : [
     "vendor",

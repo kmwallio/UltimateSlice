@@ -40,6 +40,6 @@ We rely on many excellent crates from the Rust ecosystem:
 ---
 
 ### License Note
-This project attributes these components in accordance with their respective licenses. If you believe an attribution is missing or incorrect, please [open an issue on GitHub](https://github.com/ultimateslice/UltimateSlice/issues).
+This project attributes these components in accordance with their respective licenses. If you believe an attribution is missing or incorrect, please [open an issue on GitHub](https://github.com/kmwallio/UltimateSlice/issues).
 
 </div>
