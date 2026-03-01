@@ -1906,21 +1906,25 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let proxy_cache = proxy_cache.clone();
         let on_close_preview = on_close_preview.clone();
         let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
         glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
             while let Ok(cmd) = mcp_receiver.try_recv() {
-                handle_mcp_command(
-                    cmd,
-                    &project,
-                    &library,
-                    &player,
-                    &prog_player,
-                    &timeline_state,
-                    &preferences_state,
-                    &proxy_cache,
-                    &on_close_preview,
-                    &on_project_changed,
-                );
+                if let Some(win) = window_weak.upgrade() {
+                    handle_mcp_command(
+                        cmd,
+                        &win,
+                        &project,
+                        &library,
+                        &player,
+                        &prog_player,
+                        &timeline_state,
+                        &preferences_state,
+                        &proxy_cache,
+                        &on_close_preview,
+                        &on_project_changed,
+                    );
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -2107,6 +2111,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
 fn handle_mcp_command(
     cmd: crate::mcp::McpCommand,
+    window: &gtk::ApplicationWindow,
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<Vec<MediaItem>>>,
     player: &Rc<RefCell<Player>>,
@@ -3254,6 +3259,56 @@ fn handle_mcp_command(
             }
             prog_player.borrow_mut().stop();
             reply.send(json!({"ok": true})).ok();
+        }
+
+        McpCommand::TakeScreenshot { reply } => {
+            // Generate a timestamped filename in the current working directory.
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let filename = format!("ultimateslice-screenshot-{timestamp}.png");
+            let path = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(&filename);
+
+            // Snapshot the window widget using GTK snapshot + GSK CairoRenderer.
+            let w = window.width().max(1);
+            let h = window.height().max(1);
+            let paintable = gtk::WidgetPaintable::new(Some(window));
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, w as f64, h as f64);
+
+            match snapshot.to_node() {
+                Some(node) => {
+                    let renderer = gtk::gsk::CairoRenderer::new();
+                    match renderer.realize(None::<&gdk4::Surface>) {
+                        Ok(()) => {
+                            let bounds = gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+                            let texture = renderer.render_texture(&node, Some(&bounds));
+                            renderer.unrealize();
+                            match texture.save_to_png(&path) {
+                                Ok(()) => reply
+                                    .send(json!({"ok": true, "path": path.to_string_lossy()}))
+                                    .ok(),
+                                Err(e) => reply
+                                    .send(json!({"ok": false, "error": e.to_string()}))
+                                    .ok(),
+                            };
+                        }
+                        Err(e) => {
+                            reply
+                                .send(json!({"ok": false, "error": format!("Renderer realize failed: {e}")}))
+                                .ok();
+                        }
+                    }
+                }
+                None => {
+                    reply
+                        .send(json!({"ok": false, "error": "Window produced no render node"}))
+                        .ok();
+                }
+            }
         }
     }
 }

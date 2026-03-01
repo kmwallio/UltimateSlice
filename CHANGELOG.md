@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **MCP `take_screenshot` tool**: New MCP server command that captures a PNG screenshot of the full application window using the GTK snapshot API and GSK `CairoRenderer`. The PNG is written to the current working directory with a timestamped filename (`ultimateslice-screenshot-<unix_epoch>.png`). The tool returns `{"ok": true, "path": "..."}` on success.
 - **License**: Added `LICENSE` file (GPL-3.0-or-later). This license is required for Flatpak distribution because the build includes x264 (GPL-2.0-or-later) and FFmpeg compiled with `--enable-gpl` (which enables GPL-licensed components such as libx264). GPL-3.0-or-later is compatible with GPL-2.0-or-later and with all MIT/Apache-2.0 Rust crate dependencies. The `Cargo.toml` package manifest now also declares `license = "GPL-3.0-or-later"`.
 
 ### Changed
