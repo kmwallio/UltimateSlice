@@ -256,11 +256,7 @@ impl ProgramPlayer {
                 .property("allow-not-linked", true)
                 .build()
                 .ok()?;
-            let q1 = gst::ElementFactory::make("queue")
-                .property_from_str("leaky", "downstream")
-                .property("max-size-buffers", 2u32)
-                .build()
-                .ok()?;
+            let q1 = gst::ElementFactory::make("queue").build().ok()?;
             let q2 = gst::ElementFactory::make("queue")
                 .property_from_str("leaky", "downstream")
                 .property("max-size-buffers", 1u32)
@@ -392,7 +388,6 @@ impl ProgramPlayer {
                     .field("format", "RGBA")
                     .field("width", 1920i32)
                     .field("height", 1080i32)
-                    .field("framerate", gst::Fraction::new(30, 1))
                     .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                     .build(),
             )
@@ -412,7 +407,6 @@ impl ProgramPlayer {
                     .field("format", "RGBA")
                     .field("width", 1920i32)
                     .field("height", 1080i32)
-                    .field("framerate", gst::Fraction::new(30, 1))
                     .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                     .build(),
             )
@@ -420,14 +414,8 @@ impl ProgramPlayer {
             .map_err(|_| anyhow!("capsfilter not available"))?;
 
         // Always-on black background so compositor has at least one input.
-        // is-live=true makes the compositor (GstAggregator) operate in live mode,
-        // pacing output at 30 FPS by the system clock instead of running as fast
-        // as possible.  Without this, the non-live pipeline produces 1000+ FPS
-        // through the compositor; the leaky display queue drops 99%+ of frames,
-        // leaving gtk4paintablesink with near-zero FPS.
         let black_src = gst::ElementFactory::make("videotestsrc")
             .property_from_str("pattern", "black")
-            .property("is-live", true)
             .build()
             .map_err(|_| anyhow!("videotestsrc not available"))?;
         let black_caps = gst::ElementFactory::make("capsfilter")
@@ -523,7 +511,6 @@ impl ProgramPlayer {
             let scope_en = scope_enabled.clone();
             let caps_pad = comp_src_pad.clone();
             comp_src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
-                cseq.fetch_add(1, Ordering::Relaxed);
                 if !scope_en.load(Ordering::Relaxed) {
                     return gst::PadProbeReturn::Ok;
                 }
@@ -692,33 +679,29 @@ impl ProgramPlayer {
 
     /// Re-apply compositor and black-source capsfilter caps from project
     /// dimensions and preview quality divisor.
-    ///
-    /// When preview_divisor > 1 the entire compositing pipeline runs at
-    /// reduced resolution, which drastically cuts per-frame CPU/GPU cost
-    /// (4× for half, 16× for quarter).
     fn apply_compositor_caps(&self) {
-        let out_w = (self.project_width / self.preview_divisor).max(2) as i32;
-        let out_h = (self.project_height / self.preview_divisor).max(2) as i32;
+        let comp_w = self.project_width.max(2) as i32;
+        let comp_h = self.project_height.max(2) as i32;
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", out_w)
-            .field("height", out_h)
-            .field("framerate", gst::Fraction::new(30, 1))
+            .field("width", comp_w)
+            .field("height", comp_h)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         self.comp_capsfilter.set_property("caps", &caps);
         let bg_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", out_w)
-            .field("height", out_h)
+            .field("width", comp_w)
+            .field("height", comp_h)
             .field("framerate", gst::Fraction::new(30, 1))
             .build();
         self.black_capsfilter.set_property("caps", &bg_caps);
+        let out_w = (self.project_width / self.preview_divisor).max(2) as i32;
+        let out_h = (self.project_height / self.preview_divisor).max(2) as i32;
         let out_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
             .field("width", out_w)
             .field("height", out_h)
-            .field("framerate", gst::Fraction::new(30, 1))
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         self.preview_capsfilter.set_property("caps", &out_caps);
@@ -1254,7 +1237,6 @@ impl ProgramPlayer {
                 rotate,
                 flip_h,
                 flip_v,
-                self.preview_divisor,
             );
             if let Some(ref pad) = slot.compositor_pad {
                 Self::apply_zoom_to_slot(
@@ -1263,8 +1245,8 @@ impl ProgramPlayer {
                     scale,
                     position_x,
                     position_y,
-                    (self.project_width / self.preview_divisor).max(2),
-                    (self.project_height / self.preview_divisor).max(2),
+                    self.project_width,
+                    self.project_height,
                 );
             }
         }
@@ -1373,7 +1355,6 @@ impl ProgramPlayer {
                     rotate,
                     flip_h,
                     flip_v,
-                    self.preview_divisor,
                 );
                 if let Some(ref pad) = slot.compositor_pad {
                     Self::apply_zoom_to_slot(
@@ -1382,8 +1363,8 @@ impl ProgramPlayer {
                         scale,
                         position_x,
                         position_y,
-                        (self.project_width / self.preview_divisor).max(2),
-                        (self.project_height / self.preview_divisor).max(2),
+                        self.project_width,
+                        self.project_height,
                     );
                 }
             }
@@ -1903,27 +1884,20 @@ impl ProgramPlayer {
         rotate: i32,
         flip_h: bool,
         flip_v: bool,
-        preview_divisor: u32,
     ) {
-        // Scale crop values from project resolution to preview render resolution.
-        let d = preview_divisor.max(1) as i32;
-        let cl = (crop_left.max(0) / d).max(0);
-        let cr = (crop_right.max(0) / d).max(0);
-        let ct = (crop_top.max(0) / d).max(0);
-        let cb = (crop_bottom.max(0) / d).max(0);
         if let Some(ref vc) = slot.videocrop {
-            vc.set_property("left", cl);
-            vc.set_property("right", cr);
-            vc.set_property("top", ct);
-            vc.set_property("bottom", cb);
+            vc.set_property("left", crop_left.max(0));
+            vc.set_property("right", crop_right.max(0));
+            vc.set_property("top", crop_top.max(0));
+            vc.set_property("bottom", crop_bottom.max(0));
         }
         // Re-pad cropped edges with transparent borders so the compositor
         // reveals lower tracks through the cropped area.
         if let Some(ref vb) = slot.videobox_crop_alpha {
-            vb.set_property("left", -cl);
-            vb.set_property("right", -cr);
-            vb.set_property("top", -ct);
-            vb.set_property("bottom", -cb);
+            vb.set_property("left", -(crop_left.max(0)));
+            vb.set_property("right", -(crop_right.max(0)));
+            vb.set_property("top", -(crop_top.max(0)));
+            vb.set_property("bottom", -(crop_bottom.max(0)));
             vb.set_property("border-alpha", 0.0_f64);
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
@@ -2131,15 +2105,10 @@ impl ProgramPlayer {
     }
 
     /// Build a per-slot video effects bin and return it along with effect element refs.
-    ///
-    /// `render_width`/`render_height` are the resolution used for internal
-    /// processing (may be project resolution ÷ preview_divisor).  Crop pixels
-    /// are scaled accordingly so they match the render resolution.
     fn build_effects_bin(
         clip: &ProgramClip,
-        render_width: u32,
-        render_height: u32,
-        crop_scale_divisor: u32,
+        project_width: u32,
+        project_height: u32,
     ) -> (
         gst::Bin,
         Option<gst::Element>, // videobalance
@@ -2268,14 +2237,12 @@ impl ProgramPlayer {
             }
         }
 
-        // Set render resolution capsfilters.
-        // capsfilter_proj constrains to RGBA at render resolution (for effects).
-        // When preview_divisor > 1, this is smaller than full project resolution,
-        // reducing per-frame processing cost proportionally.
+        // Set project resolution capsfilters.
+        // capsfilter_proj constrains to RGBA at project resolution (for effects).
         let proj_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", render_width.max(2) as i32)
-            .field("height", render_height.max(2) as i32)
+            .field("width", project_width as i32)
+            .field("height", project_height as i32)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         if let Some(ref cf) = capsfilter_proj {
@@ -2470,8 +2437,6 @@ impl ProgramPlayer {
             log::info!("ProgramPlayer: slot {} uri={}", zorder_offset, uri);
 
             // Detect whether the source file has an audio stream.
-            // Use `has_audio` from clip metadata if explicitly set to false,
-            // otherwise probe the actual file.
             let clip_has_audio = if !clip.has_audio {
                 false
             } else {
@@ -2491,12 +2456,7 @@ impl ProgramPlayer {
                 alpha_filter,
                 capsfilter_zoom,
                 videobox_zoom,
-            ) = Self::build_effects_bin(
-                &clip,
-                (self.project_width / self.preview_divisor).max(2),
-                (self.project_height / self.preview_divisor).max(2),
-                self.preview_divisor,
-            );
+            ) = Self::build_effects_bin(&clip, self.project_width, self.project_height);
 
             // Create uridecodebin for this clip.
             let decoder = match gst::ElementFactory::make("uridecodebin")
@@ -2548,16 +2508,8 @@ impl ProgramPlayer {
             // and the compositor.  Without it, the 3rd+ decoder's effects_bin
             // can deadlock during caps negotiation when the compositor's
             // aggregator is waiting for buffers on earlier pads.
-            //
-            // The queue decouples each decoder's streaming thread from the
-            // compositor aggregator.  A small buffer count (2) keeps latency
-            // low while still absorbing minor scheduling jitter.
-            // NOTE: these queues must NOT be leaky — frame drops here cause
-            // visible stutter on 1–2 track projects.  The downstream display
-            // queue (q1, leaky) is the correct place to absorb backpressure
-            // from the GTK render thread.
             let slot_queue = gst::ElementFactory::make("queue")
-                .property("max-size-buffers", 2u32)
+                .property("max-size-buffers", 1u32)
                 .property("max-size-bytes", 0u32)
                 .property("max-size-time", 0u64)
                 .build()
@@ -2593,8 +2545,7 @@ impl ProgramPlayer {
             // Create audio path: audioconvert → audiomixer pad.
             // Skip entirely for clips without an audio stream to prevent
             // the audiomixer from waiting on an unlinked pad.
-            let skip_audio = !clip_has_audio;
-            let (audio_conv, amix_pad) = if !skip_audio {
+            let (audio_conv, amix_pad) = if clip_has_audio {
                 let ac = gst::ElementFactory::make("audioconvert").build().ok();
                 let pad = if let Some(ref ac) = ac {
                     if self.pipeline.add(ac).is_ok() {
@@ -2738,7 +2689,6 @@ impl ProgramPlayer {
                 clip.rotate,
                 clip.flip_h,
                 clip.flip_v,
-                self.preview_divisor,
             );
             Self::apply_title_to_slot(
                 &slot_ref_for_transform,
@@ -2754,8 +2704,8 @@ impl ProgramPlayer {
                 clip.scale,
                 clip.position_x,
                 clip.position_y,
-                (self.project_width / self.preview_divisor).max(2),
-                (self.project_height / self.preview_divisor).max(2),
+                self.project_width,
+                self.project_height,
             );
 
             self.slots.push(VideoSlot {
@@ -2803,12 +2753,15 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Paused);
         log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
         self.wait_for_paused_preroll();
+        log::debug!("rebuild_pipeline_at: paused preroll done");
 
         // Atomically flush the compositor and ALL downstream (tee, sinks).
         let baseline = self.snapshot_arrival_seqs();
+        log::debug!("rebuild_pipeline_at: compositor flush...");
         let _ = self
             .compositor
             .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        log::debug!("rebuild_pipeline_at: compositor flush done");
 
         // Seek each decoder to its source position with stop boundary.
         //
@@ -2816,6 +2769,11 @@ impl ProgramPlayer {
         // KEY_UNIT seeks can snap long-GOP proxy media back to the nearest
         // keyframe (often 0s), which looks like lower-track clips restarting
         // when another track enters/exits and triggers a rebuild.
+        log::debug!(
+            "rebuild_pipeline_at: seeking {} decoders (was_playing={})",
+            self.slots.len(),
+            was_playing
+        );
         let seek_flags = if was_playing {
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
         } else {
@@ -2838,11 +2796,15 @@ impl ProgramPlayer {
                 let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
             }
         }
+        log::debug!("rebuild_pipeline_at: decoder seeks done");
 
         // Post-seek settle
         if was_playing {
+            log::debug!("rebuild_pipeline_at: post-seek wait_for_paused_preroll...");
             self.wait_for_paused_preroll();
+            log::debug!("rebuild_pipeline_at: post-seek wait_for_compositor_arrivals (1500ms)...");
             self.wait_for_compositor_arrivals(&baseline, 1500);
+            log::debug!("rebuild_pipeline_at: post-seek arrivals done");
         }
 
         // In paused mode, perform a two-pass settle:
