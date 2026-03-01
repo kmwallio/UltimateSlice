@@ -39,8 +39,9 @@ pub fn build_media_browser(
     header.set_halign(gtk::Align::Start);
     header_row.append(&header);
 
-    let header_import_btn = Button::with_label("+");
+    let header_import_btn = Button::from_icon_name("list-add-symbolic");
     header_import_btn.add_css_class("browser-header-import");
+    header_import_btn.set_tooltip_text(Some("Import Media…"));
     header_import_btn.set_visible(!library.borrow().is_empty());
     header_row.append(&header_import_btn);
 

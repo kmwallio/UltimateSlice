@@ -234,13 +234,16 @@ entry:focus {
 }
 
 .browser-header-import {
-    padding: 1px 6px;
+    padding: 2px 4px;
     min-width: 0;
-    font-size: 14px;
-    font-weight: bold;
     background-color: transparent;
-    border-color: #555560;
+    border-color: transparent;
     color: #b8b8c0;
+}
+
+.browser-header-import:hover {
+    background-color: #333338;
+    border-color: #555560;
 }
 
 .media-list row {
