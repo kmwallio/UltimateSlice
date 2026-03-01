@@ -1472,9 +1472,8 @@ impl ProgramPlayer {
             q.set_property_from_str("leaky", "downstream");
             q.set_property("max-size-buffers", 2u32);
         }
-        for slot in &self.slots {
-            slot.decoder.set_locked_state(true);
-        }
+        // Mute audio by locking the audio sink to Paused.
+        self.audio_sink.set_locked_state(true);
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.transform_live = true;
     }
@@ -1488,9 +1487,9 @@ impl ProgramPlayer {
         }
         log::info!("exit_transform_live_mode");
         let _ = self.pipeline.set_state(gst::State::Paused);
-        for slot in &self.slots {
-            slot.decoder.set_locked_state(false);
-        }
+        // Restore audio sink.
+        self.audio_sink.set_locked_state(false);
+        let _ = self.audio_sink.sync_state_with_parent();
         self.background_src.set_property("is-live", false);
         if let Some(ref q) = self.display_queue {
             q.set_property_from_str("leaky", "no");
