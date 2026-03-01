@@ -4,6 +4,9 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Added
+- **License**: Added `LICENSE` file (GPL-3.0-or-later). This license is required for Flatpak distribution because the build includes x264 (GPL-2.0-or-later) and FFmpeg compiled with `--enable-gpl` (which enables GPL-licensed components such as libx264). GPL-3.0-or-later is compatible with GPL-2.0-or-later and with all MIT/Apache-2.0 Rust crate dependencies. The `Cargo.toml` package manifest now also declares `license = "GPL-3.0-or-later"`.
+
 ### Changed
 - **New app icon**: Replaced the previous katana-and-cinema-camera icon with a GNOME HIG-compliant design. The new icon (`data/io.github.ultimateslice.svg`) shows a camera body on a warm caramel squircle background; a kitchen knife cuts diagonally across the camera, revealing horizontal layers of sponge cake and cream inside — making the "UltimateSlice" wordplay literal. Uses GNOME colour palette (Orange 3–5 background, Dark 2–4 camera body, Blue 2–5 lens, Red 4 record button). Readable at all sizes from 16 px to 512 px.
 
