@@ -348,6 +348,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `play` | Start program monitor playback |
 | `pause` | Pause program monitor playback |
 | `stop` | Stop program monitor playback and return playhead to start |
+| `take_screenshot` | Capture a PNG screenshot of the full application window (GTK snapshot + GSK CairoRenderer); saved to CWD as `ultimateslice-screenshot-<epoch>.png` |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_project_title` | Rename the project |

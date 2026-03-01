@@ -179,6 +179,9 @@ pub enum McpCommand {
         track_index: Option<usize>,
         reply: SyncSender<Value>,
     },
+    TakeScreenshot {
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.
