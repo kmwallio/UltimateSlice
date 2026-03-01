@@ -26,6 +26,8 @@
           <li>Inspector panel for selected clip properties</li>
           <li>MP4/H.264 export via GStreamer pipeline</li>
           <li>FCPXML 1.10 import and export</li>
+          <li>Proxy generation for smoother editing of high-resolution media</li>
+          <li>Basic transitions between clips on the timeline</li>
           <li>Optional MCP server (--mcp) for JSON-RPC AI collaboration</li>
         </ul>
       </description>
