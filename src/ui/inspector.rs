@@ -52,6 +52,7 @@ pub struct InspectorView {
     pub updating: Rc<RefCell<bool>>,
     // Section containers for show/hide per clip kind
     pub content_box: GBox,
+    pub empty_state_label: Label,
     pub color_section: GBox,
     pub audio_section: GBox,
     pub transform_section: GBox,
@@ -71,8 +72,11 @@ impl InspectorView {
                 .find(|c| c.id == id)
         });
 
-        // Gray out all controls when nothing is selected
-        self.content_box.set_sensitive(clip_id.is_some());
+        // Show content only when a clip is selected; otherwise show empty-state guidance.
+        let has_clip = clip_id.is_some();
+        self.content_box.set_sensitive(has_clip);
+        self.content_box.set_visible(has_clip);
+        self.empty_state_label.set_visible(!has_clip);
 
         // Suppress slider value-changed signals while we set values programmatically
         *self.updating.borrow_mut() = true;
@@ -194,7 +198,7 @@ pub fn build_inspector(
     on_opacity_changed: impl Fn(f64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
-    vbox.set_width_request(200);
+    vbox.set_width_request(260);
     vbox.set_margin_start(8);
     vbox.set_margin_end(8);
     vbox.set_margin_top(8);
@@ -203,9 +207,17 @@ pub fn build_inspector(
     title.add_css_class("browser-header");
     vbox.append(&title);
 
-    // content_box holds everything below the header; grayed out when no clip is selected
+    let empty_state_label = Label::new(Some("Select a clip in the timeline to edit its properties."));
+    empty_state_label.set_halign(gtk::Align::Start);
+    empty_state_label.set_xalign(0.0);
+    empty_state_label.set_wrap(true);
+    empty_state_label.add_css_class("panel-empty-state");
+    vbox.append(&empty_state_label);
+
+    // content_box holds everything below the header; shown when a clip is selected
     let content_box = GBox::new(Orientation::Vertical, 8);
     content_box.set_sensitive(false);
+    content_box.set_visible(false);
     vbox.append(&content_box);
 
     content_box.append(&Separator::new(Orientation::Horizontal));
@@ -306,7 +318,7 @@ pub fn build_inspector(
 
     audio_section.append(&Separator::new(Orientation::Horizontal));
     let audio_expander = Expander::new(Some("Audio"));
-    audio_expander.set_expanded(true);
+    audio_expander.set_expanded(false);
     audio_section.append(&audio_expander);
     let audio_inner = GBox::new(Orientation::Vertical, 8);
     audio_expander.set_child(Some(&audio_inner));
@@ -333,7 +345,7 @@ pub fn build_inspector(
 
     transform_section.append(&Separator::new(Orientation::Horizontal));
     let transform_expander = Expander::new(Some("Transform"));
-    transform_expander.set_expanded(true);
+    transform_expander.set_expanded(false);
     transform_section.append(&transform_expander);
     let transform_inner = GBox::new(Orientation::Vertical, 8);
     transform_expander.set_child(Some(&transform_inner));
@@ -462,7 +474,7 @@ pub fn build_inspector(
 
     speed_section_box.append(&Separator::new(Orientation::Horizontal));
     let speed_expander = Expander::new(Some("Speed"));
-    speed_expander.set_expanded(true);
+    speed_expander.set_expanded(false);
     speed_section_box.append(&speed_expander);
     let speed_inner = GBox::new(Orientation::Vertical, 8);
     speed_expander.set_child(Some(&speed_inner));
@@ -1269,6 +1281,7 @@ pub fn build_inspector(
         lut_clear_btn,
         updating,
         content_box,
+        empty_state_label,
         color_section,
         audio_section,
         transform_section,

@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Button, HeaderBar, Label, ToggleButton};
+use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
 use gio;
 use glib;
 use std::cell::RefCell;
@@ -599,6 +599,10 @@ pub fn build_toolbar(
     }
     header.pack_end(&btn_export);
 
+    let sep_history = Separator::new(gtk::Orientation::Vertical);
+    sep_history.add_css_class("toolbar-separator");
+    header.pack_start(&sep_history);
+
     // ── Undo / Redo ─────────────────────────────────────────────────────
     let btn_undo = Button::with_label("↩ Undo");
     btn_undo.set_tooltip_text(Some("Undo (Ctrl+Z)"));
@@ -623,6 +627,10 @@ pub fn build_toolbar(
         });
     }
     header.pack_start(&btn_redo);
+
+    let sep_tools = Separator::new(gtk::Orientation::Vertical);
+    sep_tools.add_css_class("toolbar-separator");
+    header.pack_start(&sep_tools);
 
     // ── Tool selector: Select / Razor ───────────────────────────────────
     let btn_select = ToggleButton::with_label("↖ Select");

@@ -16,6 +16,10 @@ When making changes, update these files as part of the same work:
    - Add or update keyboard shortcuts in both the feature file **and** `docs/user/shortcuts.md`.
    - Keep `docs/user/README.md` table of contents accurate.
 4. MCP coverage — when adding a new user-facing feature, also add/update an MCP tool for it if one does not already exist and the feature is automatable via MCP. Test each feature using the MCP server.
+5. Dependency/license coverage — when adding a new crate to `Cargo.toml`:
+   - Verify the crate license is compatible with the project.
+   - Add/update the crate listing in the in-app **About & Open-source credits** view.
+   - Add/update the crate listing in `README.md`.
 
 Do this continuously as work is completed (not only at the end of large efforts).
 

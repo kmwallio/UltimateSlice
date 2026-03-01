@@ -21,7 +21,7 @@ pub fn build_media_browser(
     on_source_selected: Rc<dyn Fn(String, u64)>,
 ) -> (GBox, Rc<dyn Fn()>) {
     let vbox = GBox::new(Orientation::Vertical, 4);
-    vbox.set_width_request(190);
+    vbox.set_width_request(240);
 
     let header = Label::new(Some("Media Library"));
     header.add_css_class("browser-header");
@@ -33,6 +33,16 @@ pub fn build_media_browser(
     import_btn.set_margin_start(8);
     import_btn.set_margin_end(8);
     vbox.append(&import_btn);
+
+    let empty_hint = Label::new(Some("Import media or drag files here to start editing."));
+    empty_hint.set_halign(gtk::Align::Start);
+    empty_hint.set_xalign(0.0);
+    empty_hint.set_wrap(true);
+    empty_hint.set_margin_start(8);
+    empty_hint.set_margin_end(8);
+    empty_hint.add_css_class("panel-empty-state");
+    empty_hint.set_visible(library.borrow().is_empty());
+    vbox.append(&empty_hint);
 
     let scroll = ScrolledWindow::new();
     scroll.set_vexpand(true);
@@ -93,6 +103,7 @@ pub fn build_media_browser(
         let flow_box = flow_box.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
+        let empty_hint = empty_hint.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
             // Drain completed probe results → update library items (lightweight).
             let resolved = probe_cache.borrow_mut().poll();
@@ -141,6 +152,7 @@ pub fn build_media_browser(
             }
 
             let lib = library.borrow();
+            empty_hint.set_visible(lib.is_empty());
             let count = flowbox_child_count(&flow_box);
             if count != lib.len() {
                 rebuild_flowbox(&flow_box, &lib, &thumb_cache);

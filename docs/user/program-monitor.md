@@ -2,6 +2,8 @@
 
 The **Program Monitor** shows the assembled timeline played back in real time, clip by clip.
 
+When no timeline clips are present, the monitor area shows a short first-use hint to import media and append/insert clips.
+
 ## Canvas Aspect Ratio
 
 The program monitor constrains its video display area to the **project canvas ratio**

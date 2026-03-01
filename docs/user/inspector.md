@@ -116,4 +116,5 @@ Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacki
 
 - All Inspector values are **persisted in the FCPXML** project file.
 - There is no keyboard shortcut to focus the Inspector; use mouse/Tab navigation.
-- The Inspector is empty when no clip is selected.
+- When no clip is selected, the Inspector shows an instructional message and hides edit controls.
+- To reduce first-use visual density, **Audio**, **Transform**, and **Speed** sections start collapsed by default.

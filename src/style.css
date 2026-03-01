@@ -228,9 +228,9 @@ entry:focus {
 /* ── Media browser ──────────────────────────────────────────────────────── */
 .browser-header {
     font-weight: bold;
-    color: #aaaaaa;
-    font-size: 11px;
-    letter-spacing: 1px;
+    color: #b8b8c0;
+    font-size: 12px;
+    letter-spacing: 0.8px;
 }
 
 .media-list row {
@@ -311,8 +311,20 @@ entry:focus {
 
 /* ── dim-label helper ───────────────────────────────────────────────────── */
 .dim-label {
-    color: #aaaaaa;
-    font-size: 11px;
+    color: #b8b8c0;
+    font-size: 12px;
+}
+
+.panel-empty-state {
+    color: #b8b8c0;
+    font-size: 12px;
+}
+
+.toolbar-separator {
+    margin-left: 6px;
+    margin-right: 6px;
+    min-height: 20px;
+    opacity: 0.55;
 }
 
 /* ── Source monitor marks bar ──────────────────────────────────────────── */

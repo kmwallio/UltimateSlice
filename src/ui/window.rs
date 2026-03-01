@@ -451,7 +451,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let root_hpaned = Paned::new(Orientation::Horizontal);
     root_hpaned.set_hexpand(true);
     root_hpaned.set_vexpand(true);
-    root_hpaned.set_position(1200);
+    root_hpaned.set_position(1120);
 
     let root_vpaned = Paned::new(Orientation::Vertical);
     root_vpaned.set_vexpand(true);
@@ -461,7 +461,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let top_paned = Paned::new(Orientation::Horizontal);
     top_paned.set_hexpand(true);
     top_paned.set_vexpand(true);
-    top_paned.set_position(280);
+    top_paned.set_position(320);
 
     // ── Build preview first so we have source_marks ───────────────────────
     // on_append stub: real impl filled in below after source_marks is available.
@@ -892,6 +892,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
         prog_monitor_host.append(&scopes_btn);
     }
+    let program_empty_hint = gtk::Label::new(Some(
+        "Import media, then append or insert a clip to preview your timeline here.",
+    ));
+    program_empty_hint.set_halign(gtk::Align::Start);
+    program_empty_hint.set_xalign(0.0);
+    program_empty_hint.set_wrap(true);
+    program_empty_hint.set_margin_start(8);
+    program_empty_hint.set_margin_end(8);
+    program_empty_hint.set_margin_bottom(6);
+    program_empty_hint.add_css_class("panel-empty-state");
+    program_empty_hint.set_visible(true);
+    prog_monitor_host.append(&program_empty_hint);
     prog_monitor_host.append(&docked_scopes_paned);
     top_paned.set_end_child(Some(&prog_monitor_host));
 
@@ -1304,6 +1316,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let panel_weak = timeline_area.downgrade();
         let transform_overlay_cell = transform_overlay_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
+        let program_empty_hint = program_empty_hint.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Update window title
@@ -1389,6 +1402,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .collect();
                 (clips, media, (proj.width, proj.height))
             }; // proj borrow dropped here — safe to call GStreamer below
+            program_empty_hint.set_visible(clips.is_empty());
 
             {
                 let mut lib = library.borrow_mut();

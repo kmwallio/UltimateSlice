@@ -38,3 +38,4 @@ Supported formats depend on your installed GStreamer plugins (any format `playbi
 - Importing a clip does **not** automatically add it to the timeline.
 - Deleting a clip from the timeline does not remove it from the library.
 - The library list is saved as part of the FCPXML project file.
+- When the library is empty, the panel shows a short hint reminding you that you can import or drag files to begin.
