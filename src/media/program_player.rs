@@ -2235,6 +2235,10 @@ impl ProgramPlayer {
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         let was_playing = self.state == PlayerState::Playing;
+        log::debug!(
+            "rebuild_pipeline_at: START was_playing={} timeline_pos={}ns slots={}",
+            was_playing, timeline_pos, self.slots.len()
+        );
 
         // Tear down existing slots FIRST — each decoder is set to Null
         // individually, which avoids a pipeline-wide state change on
@@ -2567,18 +2571,26 @@ impl ProgramPlayer {
         }
 
         // Transition pipeline to Paused so decoders preroll and can accept seeks.
-        // The pipeline is currently in Ready (set above to reset base-time).
-        // Without this, decoder seeks silently fail and decoders preroll at
-        // position 0 when the pipeline eventually transitions to Playing.
+        log::debug!("rebuild_pipeline_at: setting Paused for preroll (was_playing={})", was_playing);
         let _ = self.pipeline.set_state(gst::State::Paused);
+        log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
         self.wait_for_paused_preroll();
+        log::debug!("rebuild_pipeline_at: paused preroll done");
 
         // Ensure decoders have reached Paused before issuing seeks.
         for slot in &self.slots {
             let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
         }
+        log::debug!("rebuild_pipeline_at: decoder state checks done");
+
+        // Atomically flush the compositor and ALL downstream (tee, sinks).
+        let baseline = self.snapshot_arrival_seqs();
+        log::debug!("rebuild_pipeline_at: compositor flush...");
+        let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        log::debug!("rebuild_pipeline_at: compositor flush done");
 
         // Seek each decoder to its source position with stop boundary.
+        log::debug!("rebuild_pipeline_at: seeking {} decoders (was_playing={})", self.slots.len(), was_playing);
         let seek_flags = self.clip_seek_flags();
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
@@ -2589,10 +2601,8 @@ impl ProgramPlayer {
                     timeline_pos,
                     seek_flags,
                 );
-                // A failed seek leaves the decoder in a flushing state where
-                // it will never produce a buffer.  Send EOS on its aggregator
-                // pads so the compositor / audiomixer don't stall.
                 if !ok {
+                    log::warn!("rebuild_pipeline_at: seek FAILED for clip {}", clip.id);
                     if let Some(ref pad) = slot.compositor_pad {
                         let _ = pad.send_event(gst::event::Eos::new());
                     }
@@ -2604,19 +2614,15 @@ impl ProgramPlayer {
                 let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
             }
         }
+        log::debug!("rebuild_pipeline_at: decoder seeks done");
 
-        // Post-seek settle for the playing path.
-        // The flush seeks above reset each decoder's internal preroll state
-        // (the multiqueue inside uridecodebin needs a new buffer on every
-        // pad before it considers itself prerolled again).  Waiting here
-        // ensures post-seek frames have propagated through the 18-element
-        // effects chains to the compositor *before* the clock starts.
-        // Without this the compositor enters Playing with empty input pads
-        // and stalls — displaying a frozen frame.
+        // Post-seek settle
         if was_playing {
-            for slot in &self.slots {
-                let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
-            }
+            log::debug!("rebuild_pipeline_at: post-seek wait_for_paused_preroll...");
+            self.wait_for_paused_preroll();
+            log::debug!("rebuild_pipeline_at: post-seek wait_for_compositor_arrivals (1500ms)...");
+            self.wait_for_compositor_arrivals(&baseline, 1500);
+            log::debug!("rebuild_pipeline_at: post-seek arrivals done");
         }
 
         // In paused mode, perform a two-pass settle:
