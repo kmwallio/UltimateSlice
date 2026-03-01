@@ -2590,8 +2590,17 @@ impl ProgramPlayer {
         log::debug!("rebuild_pipeline_at: compositor flush done");
 
         // Seek each decoder to its source position with stop boundary.
+        //
+        // During active playback rebuilds we must use ACCURATE seeks here.
+        // KEY_UNIT seeks can snap long-GOP proxy media back to the nearest
+        // keyframe (often 0s), which looks like lower-track clips restarting
+        // when another track enters/exits and triggers a rebuild.
         log::debug!("rebuild_pipeline_at: seeking {} decoders (was_playing={})", self.slots.len(), was_playing);
-        let seek_flags = self.clip_seek_flags();
+        let seek_flags = if was_playing {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+        } else {
+            self.clip_seek_flags()
+        };
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             if was_playing {
