@@ -66,6 +66,11 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
 
+Program Monitor overlay integration:
+- Drag **corner handles** to scale (hold **Shift** for constrained scaling).
+- Drag **edge midpoint handles** to adjust crop left/right/top/bottom directly in preview.
+- Use keyboard nudges in the Program Monitor overlay for fine position/scale adjustments.
+
 ---
 
 ## Title / Text Overlay

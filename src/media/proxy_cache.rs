@@ -1,6 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -88,22 +88,28 @@ impl ProxyCache {
         for _ in 0..num_workers {
             let rx = work_rx.clone();
             let tx = result_tx.clone();
-            std::thread::spawn(move || {
-                loop {
-                    let item = {
-                        let lock = rx.lock().unwrap();
-                        lock.recv()
-                    };
-                    match item {
-                        Ok((source_path, scale, lut_path)) => {
-                            let key = proxy_key(&source_path, lut_path.as_deref());
-                            let (proxy_path, success) = transcode_proxy(&source_path, scale, lut_path.as_deref());
-                            if tx.send(ProxyResult { cache_key: key, proxy_path, success }).is_err() {
-                                break;
-                            }
+            std::thread::spawn(move || loop {
+                let item = {
+                    let lock = rx.lock().unwrap();
+                    lock.recv()
+                };
+                match item {
+                    Ok((source_path, scale, lut_path)) => {
+                        let key = proxy_key(&source_path, lut_path.as_deref());
+                        let (proxy_path, success) =
+                            transcode_proxy(&source_path, scale, lut_path.as_deref());
+                        if tx
+                            .send(ProxyResult {
+                                cache_key: key,
+                                proxy_path,
+                                success,
+                            })
+                            .is_err()
+                        {
+                            break;
                         }
-                        Err(_) => break,
                     }
+                    Err(_) => break,
                 }
             });
         }
@@ -122,7 +128,10 @@ impl ProxyCache {
     /// No-op if already cached or pending for this exact (source, lut, scale) combination.
     pub fn request(&mut self, source_path: &str, scale: ProxyScale, lut_path: Option<&str>) {
         let key = proxy_key(source_path, lut_path);
-        if self.proxies.contains_key(&key) || self.pending.contains(&key) || self.failed.contains(&key) {
+        if self.proxies.contains_key(&key)
+            || self.pending.contains(&key)
+            || self.failed.contains(&key)
+        {
             return;
         }
         // Check for pre-existing proxy on disk before spawning work.
@@ -135,7 +144,11 @@ impl ProxyCache {
         self.pending.insert(key);
         self.total_requested += 1;
         if let Some(ref tx) = self.work_tx {
-            let _ = tx.send((source_path.to_string(), scale, lut_path.map(|s| s.to_string())));
+            let _ = tx.send((
+                source_path.to_string(),
+                scale,
+                lut_path.map(|s| s.to_string()),
+            ));
         }
     }
 
@@ -145,7 +158,8 @@ impl ProxyCache {
         while let Ok(result) = self.result_rx.try_recv() {
             self.pending.remove(&result.cache_key);
             if result.success {
-                self.proxies.insert(result.cache_key.clone(), result.proxy_path);
+                self.proxies
+                    .insert(result.cache_key.clone(), result.proxy_path);
             } else {
                 self.failed.insert(result.cache_key.clone());
             }

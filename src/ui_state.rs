@@ -13,9 +13,15 @@ pub struct ProgramMonitorState {
     pub docked_split_pos: i32,
 }
 
-fn default_width() -> i32 { 960 }
-fn default_height() -> i32 { 540 }
-fn default_docked_split_pos() -> i32 { 420 }
+fn default_width() -> i32 {
+    960
+}
+fn default_height() -> i32 {
+    540
+}
+fn default_docked_split_pos() -> i32 {
+    420
+}
 
 impl Default for ProgramMonitorState {
     fn default() -> Self {
@@ -37,7 +43,9 @@ pub enum PlaybackPriority {
 }
 
 impl Default for PlaybackPriority {
-    fn default() -> Self { Self::Smooth }
+    fn default() -> Self {
+        Self::Smooth
+    }
 }
 
 impl PlaybackPriority {
@@ -68,7 +76,9 @@ pub enum GskRenderer {
 }
 
 impl Default for GskRenderer {
-    fn default() -> Self { Self::Auto }
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 impl GskRenderer {
@@ -114,7 +124,9 @@ pub enum PreviewQuality {
 }
 
 impl Default for PreviewQuality {
-    fn default() -> Self { Self::Full }
+    fn default() -> Self {
+        Self::Full
+    }
 }
 
 impl PreviewQuality {
@@ -156,7 +168,9 @@ pub enum ProxyMode {
 }
 
 impl Default for ProxyMode {
-    fn default() -> Self { Self::Off }
+    fn default() -> Self {
+        Self::Off
+    }
 }
 
 impl ProxyMode {
@@ -221,7 +235,9 @@ impl Default for PreferencesState {
     }
 }
 
-fn default_show_timeline_preview() -> bool { true }
+fn default_show_timeline_preview() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct UiState {
@@ -239,13 +255,22 @@ fn config_path() -> Option<PathBuf> {
 }
 
 fn load_ui_state() -> UiState {
-    let path = match config_path() { Some(p) => p, None => return UiState::default() };
-    let text = match std::fs::read_to_string(path) { Ok(t) => t, Err(_) => return UiState::default() };
+    let path = match config_path() {
+        Some(p) => p,
+        None => return UiState::default(),
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return UiState::default(),
+    };
     serde_json::from_str::<UiState>(&text).unwrap_or_default()
 }
 
 fn save_ui_state(ui: &UiState) {
-    let path = match config_path() { Some(p) => p, None => return };
+    let path = match config_path() {
+        Some(p) => p,
+        None => return,
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

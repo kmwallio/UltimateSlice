@@ -1,5 +1,5 @@
-use crate::model::project::Project;
 use crate::model::clip::Clip;
+use crate::model::project::Project;
 
 /// A reversible edit operation on the project.
 pub trait EditCommand {
@@ -19,12 +19,26 @@ pub struct MoveClipCommand {
 
 impl EditCommand for MoveClipCommand {
     fn execute(&self, project: &mut Project) {
-        move_clip(project, &self.clip_id, &self.from_track_id, &self.to_track_id, self.new_timeline_start);
+        move_clip(
+            project,
+            &self.clip_id,
+            &self.from_track_id,
+            &self.to_track_id,
+            self.new_timeline_start,
+        );
     }
     fn undo(&self, project: &mut Project) {
-        move_clip(project, &self.clip_id, &self.to_track_id, &self.from_track_id, self.old_timeline_start);
+        move_clip(
+            project,
+            &self.clip_id,
+            &self.to_track_id,
+            &self.from_track_id,
+            self.old_timeline_start,
+        );
     }
-    fn description(&self) -> &str { "Move clip" }
+    fn description(&self) -> &str {
+        "Move clip"
+    }
 }
 
 /// Trim the in-point of a clip
@@ -56,7 +70,9 @@ impl EditCommand for TrimClipCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Trim clip" }
+    fn description(&self) -> &str {
+        "Trim clip"
+    }
 }
 
 /// Trim the out-point of a clip
@@ -84,7 +100,9 @@ impl EditCommand for TrimOutCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Trim clip out-point" }
+    fn description(&self) -> &str {
+        "Trim clip out-point"
+    }
 }
 
 /// Ripple trim the out-point of a clip (shifting subsequent clips)
@@ -106,7 +124,7 @@ impl EditCommand for RippleTrimOutCommand {
                 original_end = Some(clip.timeline_end());
                 clip.source_out = self.new_source_out;
             }
-            
+
             // 2. Shift subsequent clips based on ORIGINAL end threshold
             if let Some(threshold) = original_end {
                 for clip in &mut track.clips {
@@ -130,7 +148,7 @@ impl EditCommand for RippleTrimOutCommand {
                 current_end = Some(clip.timeline_end());
                 clip.source_out = self.old_source_out;
             }
-            
+
             // 2. Shift clips back using the CURRENT end as threshold
             if let Some(threshold) = current_end {
                 for clip in &mut track.clips {
@@ -143,7 +161,9 @@ impl EditCommand for RippleTrimOutCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Ripple trim" }
+    fn description(&self) -> &str {
+        "Ripple trim"
+    }
 }
 
 /// Ripple trim the in-point of a clip (shifting subsequent clips)
@@ -168,7 +188,7 @@ impl EditCommand for RippleTrimInCommand {
                 clip.source_in = self.new_source_in;
                 clip.timeline_start = self.new_timeline_start;
             }
-            
+
             // 2. Shift subsequent clips based on ORIGINAL start threshold
             // Note: Since we are trimming the IN point, the clip itself moves (timeline_start changes).
             // We use the ORIGINAL timeline_start as the threshold for subsequent clips.
@@ -176,8 +196,10 @@ impl EditCommand for RippleTrimInCommand {
             if let Some(threshold) = original_start {
                 for clip in &mut track.clips {
                     // Skip the clip itself (by ID)
-                    if clip.id == self.clip_id { continue; }
-                    
+                    if clip.id == self.clip_id {
+                        continue;
+                    }
+
                     if clip.timeline_start >= threshold {
                         let new_start = (clip.timeline_start as i64 + self.delta).max(0) as u64;
                         clip.timeline_start = new_start;
@@ -196,7 +218,7 @@ impl EditCommand for RippleTrimInCommand {
                 clip.source_in = self.old_source_in;
                 clip.timeline_start = self.old_timeline_start;
             }
-            
+
             // 2. Shift clips back
             // We use the CURRENT (new) start as threshold, because that's where clips are relative to.
             // Wait, if we moved start from 10 to 12 (delta +2). Subsequent clips moved +2.
@@ -204,7 +226,9 @@ impl EditCommand for RippleTrimInCommand {
             // Threshold should be 12 (new_timeline_start).
             if let Some(threshold) = current_start {
                 for clip in &mut track.clips {
-                    if clip.id == self.clip_id { continue; }
+                    if clip.id == self.clip_id {
+                        continue;
+                    }
 
                     if clip.timeline_start >= threshold {
                         let new_start = (clip.timeline_start as i64 - self.delta).max(0) as u64;
@@ -215,7 +239,9 @@ impl EditCommand for RippleTrimInCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Ripple trim in-point" }
+    fn description(&self) -> &str {
+        "Ripple trim in-point"
+    }
 }
 
 /// Slip edit: shift source_in and source_out equally, keeping timeline position and duration fixed.
@@ -247,7 +273,9 @@ impl EditCommand for SlipClipCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Slip clip" }
+    fn description(&self) -> &str {
+        "Slip clip"
+    }
 }
 
 /// Slide edit: move a clip on the timeline while adjusting neighboring clips to compensate.
@@ -277,7 +305,9 @@ impl EditCommand for SlideClipCommand {
                     left.source_out = new_out;
                 }
             }
-            if let (Some(ref rid), Some(new_in), Some(new_rs)) = (&self.right_clip_id, self.new_right_in, self.new_right_start) {
+            if let (Some(ref rid), Some(new_in), Some(new_rs)) =
+                (&self.right_clip_id, self.new_right_in, self.new_right_start)
+            {
                 if let Some(right) = track.clips.iter_mut().find(|c| &c.id == rid) {
                     right.source_in = new_in;
                     right.timeline_start = new_rs;
@@ -296,7 +326,9 @@ impl EditCommand for SlideClipCommand {
                     left.source_out = old_out;
                 }
             }
-            if let (Some(ref rid), Some(old_in), Some(old_rs)) = (&self.right_clip_id, self.old_right_in, self.old_right_start) {
+            if let (Some(ref rid), Some(old_in), Some(old_rs)) =
+                (&self.right_clip_id, self.old_right_in, self.old_right_start)
+            {
                 if let Some(right) = track.clips.iter_mut().find(|c| &c.id == rid) {
                     right.source_in = old_in;
                     right.timeline_start = old_rs;
@@ -305,7 +337,9 @@ impl EditCommand for SlideClipCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Slide clip" }
+    fn description(&self) -> &str {
+        "Slide clip"
+    }
 }
 
 /// Roll edit: adjust the cut point between two clips (left out-point, right in-point/start)
@@ -314,11 +348,11 @@ pub struct RollEditCommand {
     pub left_clip_id: String,
     pub right_clip_id: String,
     pub track_id: String,
-    
+
     // Left clip changes
     pub old_left_out: u64,
     pub new_left_out: u64,
-    
+
     // Right clip changes
     pub old_right_in: u64,
     pub new_right_in: u64,
@@ -343,8 +377,8 @@ impl EditCommand for RollEditCommand {
     }
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
-             // Restore left clip
-             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.left_clip_id) {
+            // Restore left clip
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.left_clip_id) {
                 clip.source_out = self.old_left_out;
             }
             // Restore right clip
@@ -355,7 +389,9 @@ impl EditCommand for RollEditCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Roll edit" }
+    fn description(&self) -> &str {
+        "Roll edit"
+    }
 }
 
 /// Delete a clip from a track
@@ -377,7 +413,9 @@ impl EditCommand for DeleteClipCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Delete clip" }
+    fn description(&self) -> &str {
+        "Delete clip"
+    }
 }
 
 /// Replace a track's full clip list (used for grouped magnetic timeline edits).
@@ -401,7 +439,9 @@ impl EditCommand for SetTrackClipsCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { &self.label }
+    fn description(&self) -> &str {
+        &self.label
+    }
 }
 
 /// Split a clip at a given position (razor cut)
@@ -416,7 +456,11 @@ impl EditCommand for SplitClipCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             // Shorten the original clip to end at the split point
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.original_clip.id) {
+            if let Some(clip) = track
+                .clips
+                .iter_mut()
+                .find(|c| c.id == self.original_clip.id)
+            {
                 let cut_offset = self.split_ns - clip.timeline_start;
                 clip.source_out = clip.source_in + cut_offset;
             }
@@ -428,13 +472,19 @@ impl EditCommand for SplitClipCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             track.remove_clip(&self.right_clip.id);
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.original_clip.id) {
+            if let Some(clip) = track
+                .clips
+                .iter_mut()
+                .find(|c| c.id == self.original_clip.id)
+            {
                 clip.source_out = self.original_clip.source_out;
             }
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Razor cut" }
+    fn description(&self) -> &str {
+        "Razor cut"
+    }
 }
 
 /// Set color correction on a clip (brightness/contrast/saturation)
@@ -470,7 +520,9 @@ impl EditCommand for SetClipColorCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Set clip color" }
+    fn description(&self) -> &str {
+        "Set clip color"
+    }
 }
 
 /// Set transition metadata on a clip boundary (clip -> next clip).
@@ -502,7 +554,9 @@ impl EditCommand for SetClipTransitionCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Set clip transition" }
+    fn description(&self) -> &str {
+        "Set clip transition"
+    }
 }
 
 /// Delete a track (stores full track + index for undo).
@@ -523,7 +577,9 @@ impl EditCommand for DeleteTrackCommand {
         project.tracks.insert(idx, self.track.clone());
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Delete track" }
+    fn description(&self) -> &str {
+        "Delete track"
+    }
 }
 
 /// Add a track (stores track + insertion index for undo).
@@ -544,7 +600,9 @@ impl EditCommand for AddTrackCommand {
         }
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Add track" }
+    fn description(&self) -> &str {
+        "Add track"
+    }
 }
 
 /// Reorder a track from one index to another.
@@ -562,15 +620,18 @@ impl EditCommand for ReorderTrackCommand {
         reorder_track(&mut project.tracks, self.to_index, self.from_index);
         project.dirty = true;
     }
-    fn description(&self) -> &str { "Reorder track" }
+    fn description(&self) -> &str {
+        "Reorder track"
+    }
 }
 
 fn reorder_track<T>(vec: &mut Vec<T>, from: usize, to: usize) {
-    if from >= vec.len() || to >= vec.len() || from == to { return; }
+    if from >= vec.len() || to >= vec.len() || from == to {
+        return;
+    }
     let item = vec.remove(from);
     vec.insert(to, item);
 }
-
 
 pub struct EditHistory {
     pub undo_stack: Vec<Box<dyn EditCommand>>,
@@ -611,15 +672,25 @@ impl EditHistory {
         }
     }
 
-    pub fn can_undo(&self) -> bool { !self.undo_stack.is_empty() }
-    pub fn can_redo(&self) -> bool { !self.redo_stack.is_empty() }
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
 
     pub fn undo_description(&self) -> Option<&str> {
         self.undo_stack.last().map(|c| c.description())
     }
 }
 
-fn move_clip(project: &mut Project, clip_id: &str, from_track_id: &str, to_track_id: &str, new_start: u64) {
+fn move_clip(
+    project: &mut Project,
+    clip_id: &str,
+    from_track_id: &str,
+    to_track_id: &str,
+    new_start: u64,
+) {
     // Extract clip from source track
     let clip = {
         let from_track = match project.track_mut(from_track_id) {
@@ -642,16 +713,16 @@ fn move_clip(project: &mut Project, clip_id: &str, from_track_id: &str, to_track
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::{Track, TrackKind};
-    use crate::model::clip::{Clip, ClipKind};
 
     #[test]
     fn test_ripple_trim_out() {
         let mut project = Project::new("Test Project");
         let mut track = Track::new_video("Video Track");
         let track_id = track.id.clone();
-        
+
         // Clip A: 0..10
         let mut clip_a = Clip::new("file1", 10, 0, ClipKind::Video);
         clip_a.id = "A".to_string();
@@ -673,24 +744,24 @@ mod tests {
             new_source_out: 8,
             delta: -2,
         };
-        
+
         cmd.execute(&mut project);
-        
+
         let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
         let a = track.clips.iter().find(|c| c.id == "A").unwrap();
         let b = track.clips.iter().find(|c| c.id == "B").unwrap();
-        
+
         assert_eq!(a.source_out, 8);
         assert_eq!(a.timeline_end(), 8);
         assert_eq!(b.timeline_start, 13);
-        
+
         // Undo
         cmd.undo(&mut project);
-        
+
         let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
         let a = track.clips.iter().find(|c| c.id == "A").unwrap();
         let b = track.clips.iter().find(|c| c.id == "B").unwrap();
-        
+
         assert_eq!(a.source_out, 10);
         assert_eq!(a.timeline_end(), 10);
         assert_eq!(b.timeline_start, 15);
@@ -723,24 +794,24 @@ mod tests {
             new_source_out: 12,
             delta: 2,
         };
-        
+
         cmd.execute(&mut project);
-        
+
         let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
         let a = track.clips.iter().find(|c| c.id == "A").unwrap();
         let b = track.clips.iter().find(|c| c.id == "B").unwrap();
-        
+
         assert_eq!(a.source_out, 12);
         assert_eq!(a.timeline_end(), 12);
         assert_eq!(b.timeline_start, 13);
-        
+
         // Undo
         cmd.undo(&mut project);
-        
+
         let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
         let a = track.clips.iter().find(|c| c.id == "A").unwrap();
         let b = track.clips.iter().find(|c| c.id == "B").unwrap();
-        
+
         assert_eq!(a.source_out, 10);
         assert_eq!(a.timeline_end(), 10);
         assert_eq!(b.timeline_start, 11);

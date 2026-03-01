@@ -36,7 +36,14 @@ impl MediaProbeCache {
             while let Ok(path) = work_rx.recv() {
                 let uri = format!("file://{path}");
                 let (duration_ns, is_audio_only) = probe_media_bg(&uri);
-                if tx.send(ProbeResult { path, duration_ns, is_audio_only }).is_err() {
+                if tx
+                    .send(ProbeResult {
+                        path,
+                        duration_ns,
+                        is_audio_only,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -85,9 +92,15 @@ fn probe_media_bg(uri: &str) -> (u64, bool) {
     use gstreamer_pbutils::prelude::*;
     use gstreamer_pbutils::Discoverer;
     let fallback = (10 * 1_000_000_000, false);
-    let Ok(()) = gstreamer::init() else { return fallback };
-    let Ok(discoverer) = Discoverer::new(gstreamer::ClockTime::from_seconds(5)) else { return fallback };
-    let Ok(info) = discoverer.discover_uri(uri) else { return fallback };
+    let Ok(()) = gstreamer::init() else {
+        return fallback;
+    };
+    let Ok(discoverer) = Discoverer::new(gstreamer::ClockTime::from_seconds(5)) else {
+        return fallback;
+    };
+    let Ok(info) = discoverer.discover_uri(uri) else {
+        return fallback;
+    };
     let duration_ns = info.duration().map(|d| d.nseconds()).unwrap_or(fallback.0);
     let is_audio_only = info.video_streams().is_empty();
     (duration_ns, is_audio_only)

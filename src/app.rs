@@ -1,7 +1,7 @@
+use crate::ui::window::build_window;
+use gio;
 use gtk4::prelude::*;
 use gtk4::Application;
-use gio;
-use crate::ui::window::build_window;
 
 const APP_ID: &str = "io.github.ultimateslice";
 
@@ -29,7 +29,9 @@ pub fn run(mcp_enabled: bool) {
     });
 
     // Strip --mcp and --mcp-attach from argv before GLib sees it (unknown flags cause errors).
-    let args: Vec<String> = std::env::args().filter(|a| a != "--mcp" && a != "--mcp-attach").collect();
+    let args: Vec<String> = std::env::args()
+        .filter(|a| a != "--mcp" && a != "--mcp-attach")
+        .collect();
     app.run_with_args(&args);
 }
 

@@ -1,5 +1,5 @@
 pub mod widget;
-pub use widget::{TimelineState, ActiveTool, build_timeline};
+pub use widget::{build_timeline, ActiveTool, TimelineState};
 
 /// Build the full timeline panel: timeline DrawingArea + track management bar.
 /// Returns `(panel_box, drawing_area)` — call `drawing_area.queue_draw()` to repaint.
@@ -24,7 +24,7 @@ pub fn build_timeline_panel(
 
     let btn_add_video = Button::with_label("＋ Video Track");
     let btn_add_audio = Button::with_label("＋ Audio Track");
-    let btn_remove    = Button::with_label("✕ Remove Track");
+    let btn_remove = Button::with_label("✕ Remove Track");
     btn_add_video.add_css_class("small-btn");
     btn_add_audio.add_css_class("small-btn");
     btn_remove.add_css_class("small-btn");
@@ -48,7 +48,7 @@ pub fn build_timeline_panel(
                 st.history.execute(Box::new(cmd), &mut proj);
             }
             area.set_content_height(
-                (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32
+                (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32,
             );
             on_project_changed();
             area.queue_draw();
@@ -73,7 +73,7 @@ pub fn build_timeline_panel(
                 st.history.execute(Box::new(cmd), &mut proj);
             }
             area.set_content_height(
-                (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32
+                (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32,
             );
             on_project_changed();
             area.queue_draw();

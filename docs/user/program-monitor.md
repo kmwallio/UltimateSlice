@@ -40,6 +40,18 @@ or outside the export frame.
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause (when timeline has focus) |
+| `←` / `→` / `↑` / `↓` | Nudge selected clip position in transform overlay (0.01) |
+| `Shift + Arrow` | Coarse nudge selected clip position (0.1) |
+| `+` / `-` | Increase / decrease selected clip scale in transform overlay |
+
+## Transform Overlay Controls
+
+When a timeline clip is selected, the Program Monitor overlay provides direct transform editing:
+
+- **Corner handles**: drag to scale; hold **Shift** for constrained scaling.
+- **Center drag**: pan (Position X/Y).
+- **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
+- Keyboard nudges work when the overlay has focus (click the monitor once).
 
 ## Playback Behaviour
 

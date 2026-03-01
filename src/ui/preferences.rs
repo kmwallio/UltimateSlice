@@ -1,7 +1,10 @@
+use crate::ui_state::{GskRenderer, PlaybackPriority, PreferencesState, PreviewQuality, ProxyMode};
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack, StackSidebar};
+use gtk4::{
+    self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack,
+    StackSidebar,
+};
 use std::rc::Rc;
-use crate::ui_state::{GskRenderer, PlaybackPriority, PreviewQuality, ProxyMode, PreferencesState};
 
 const THIRD_PARTY_COMPONENTS: &str = "\
 Third-party crates and libraries:\n\
@@ -104,10 +107,15 @@ pub fn show_preferences_dialog(
     let playback_priority = gtk4::ComboBoxText::new();
     playback_priority.append(Some("smooth"), "Smooth (prioritize playback continuity)");
     playback_priority.append(Some("balanced"), "Balanced");
-    playback_priority.append(Some("accurate"), "Accurate (prioritize seek/frame precision)");
+    playback_priority.append(
+        Some("accurate"),
+        "Accurate (prioritize seek/frame precision)",
+    );
     playback_priority.set_active_id(Some(current.playback_priority.as_str()));
     playback_priority.set_halign(gtk::Align::Start);
-    let hint = Label::new(Some("Applies to source preview playback immediately (with non-GL fallback when needed)."));
+    let hint = Label::new(Some(
+        "Applies to source preview playback immediately (with non-GL fallback when needed).",
+    ));
     hint.set_halign(gtk::Align::Start);
     hint.add_css_class("dim-label");
     let priority_hint = Label::new(Some("Program monitor playback priority controls smoothness vs frame precision during active playback."));
@@ -238,13 +246,19 @@ pub fn show_preferences_dialog(
         if resp == ResponseType::Accept {
             on_save(PreferencesState {
                 hardware_acceleration_enabled: hw_accel.is_active(),
-                playback_priority: PlaybackPriority::from_str(playback_priority.active_id().as_deref().unwrap_or("smooth")),
+                playback_priority: PlaybackPriority::from_str(
+                    playback_priority.active_id().as_deref().unwrap_or("smooth"),
+                ),
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
                 mcp_socket_enabled: mcp_socket_check.is_active(),
-                gsk_renderer: GskRenderer::from_str(gsk_renderer.active_id().as_deref().unwrap_or("auto")),
-                preview_quality: PreviewQuality::from_str(preview_quality.active_id().as_deref().unwrap_or("full")),
+                gsk_renderer: GskRenderer::from_str(
+                    gsk_renderer.active_id().as_deref().unwrap_or("auto"),
+                ),
+                preview_quality: PreviewQuality::from_str(
+                    preview_quality.active_id().as_deref().unwrap_or("full"),
+                ),
             });
         }
         d.close();

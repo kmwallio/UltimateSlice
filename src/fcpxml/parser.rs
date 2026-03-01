@@ -1,9 +1,9 @@
-use quick_xml::Reader;
-use quick_xml::events::Event;
-use anyhow::Result;
-use crate::model::project::{Project, FrameRate};
-use crate::model::track::Track;
 use crate::model::clip::{Clip, ClipKind};
+use crate::model::project::{FrameRate, Project};
+use crate::model::track::Track;
+use anyhow::Result;
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use std::collections::HashMap;
 
 /// Represents a parsed FCPXML asset
@@ -56,15 +56,19 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                     "asset" => {
                         let attrs = parse_attrs(e)?;
                         if let (Some(id), Some(src)) = (attrs.get("id"), attrs.get("src")) {
-                            let duration_ns = attrs.get("duration")
+                            let duration_ns = attrs
+                                .get("duration")
                                 .and_then(|d| parse_fcpxml_time(d))
                                 .unwrap_or(0);
-                            assets.insert(id.clone(), Asset {
-                                id: id.clone(),
-                                src: src.replace("file://", ""),
-                                name: attrs.get("name").cloned().unwrap_or_default(),
-                                duration_ns,
-                            });
+                            assets.insert(
+                                id.clone(),
+                                Asset {
+                                    id: id.clone(),
+                                    src: src.replace("file://", ""),
+                                    name: attrs.get("name").cloned().unwrap_or_default(),
+                                    duration_ns,
+                                },
+                            );
                         }
                     }
                     "spine" => {
@@ -74,30 +78,35 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                         let attrs = parse_attrs(e)?;
                         if let Some(asset_ref) = attrs.get("ref") {
                             if let Some(asset) = assets.get(asset_ref) {
-                                let timeline_start = attrs.get("offset")
+                                let timeline_start = attrs
+                                    .get("offset")
                                     .and_then(|t| parse_fcpxml_time(t))
                                     .unwrap_or(0);
-                                let source_in = attrs.get("start")
+                                let source_in = attrs
+                                    .get("start")
                                     .and_then(|t| parse_fcpxml_time(t))
                                     .unwrap_or(0);
-                                let duration = attrs.get("duration")
+                                let duration = attrs
+                                    .get("duration")
                                     .and_then(|t| parse_fcpxml_time(t))
                                     .unwrap_or(asset.duration_ns);
-                                let label = attrs.get("name")
+                                let label = attrs
+                                    .get("name")
                                     .cloned()
                                     .unwrap_or_else(|| asset.name.clone());
 
                                 // Determine track from us:track-idx / us:track-kind / us:track-name.
                                 // Fall back to track 0 (Video 1) for legacy FCPXML without these attrs.
-                                let track_idx: usize = attrs.get("us:track-idx")
+                                let track_idx: usize = attrs
+                                    .get("us:track-idx")
                                     .and_then(|s| s.parse().ok())
                                     .unwrap_or(0);
-                                let track_kind_str = attrs.get("us:track-kind")
+                                let track_kind_str = attrs
+                                    .get("us:track-kind")
                                     .map(|s| s.as_str())
                                     .unwrap_or("video");
-                                let track_name = attrs.get("us:track-name")
-                                    .cloned()
-                                    .unwrap_or_else(|| {
+                                let track_name =
+                                    attrs.get("us:track-name").cloned().unwrap_or_else(|| {
                                         if track_kind_str == "audio" {
                                             format!("Audio {}", track_idx + 1)
                                         } else {
@@ -105,7 +114,11 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                         }
                                     });
 
-                                let clip_kind = if track_kind_str == "audio" { ClipKind::Audio } else { ClipKind::Video };
+                                let clip_kind = if track_kind_str == "audio" {
+                                    ClipKind::Audio
+                                } else {
+                                    ClipKind::Video
+                                };
 
                                 // Get or create the target track
                                 let track = track_map.entry(track_idx).or_insert_with(|| {
@@ -127,33 +140,88 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                 clip.timeline_start = timeline_start;
                                 clip.label = label;
                                 // Restore color/effects from vendor attributes
-                                if let Some(v) = attrs.get("us:brightness") { clip.brightness = v.parse().unwrap_or(0.0); }
-                                if let Some(v) = attrs.get("us:contrast")   { clip.contrast   = v.parse().unwrap_or(1.0); }
-                                if let Some(v) = attrs.get("us:saturation") { clip.saturation = v.parse().unwrap_or(1.0); }
-                                if let Some(v) = attrs.get("us:denoise")    { clip.denoise    = v.parse().unwrap_or(0.0); }
-                                if let Some(v) = attrs.get("us:sharpness")  { clip.sharpness  = v.parse().unwrap_or(0.0); }
-                                if let Some(v) = attrs.get("us:volume")     { clip.volume     = v.parse().unwrap_or(1.0); }
-                                if let Some(v) = attrs.get("us:pan")        { clip.pan        = v.parse().unwrap_or(0.0); }
-                                if let Some(v) = attrs.get("us:crop-left")  { clip.crop_left  = v.parse().unwrap_or(0); }
-                                if let Some(v) = attrs.get("us:crop-right") { clip.crop_right = v.parse().unwrap_or(0); }
-                                if let Some(v) = attrs.get("us:crop-top")   { clip.crop_top   = v.parse().unwrap_or(0); }
-                                if let Some(v) = attrs.get("us:crop-bottom"){ clip.crop_bottom= v.parse().unwrap_or(0); }
-                                if let Some(v) = attrs.get("us:rotate")     { clip.rotate     = v.parse().unwrap_or(0); }
-                                if let Some(v) = attrs.get("us:flip-h")     { clip.flip_h     = v.parse().unwrap_or(false); }
-                                if let Some(v) = attrs.get("us:flip-v")     { clip.flip_v     = v.parse().unwrap_or(false); }
-                                if let Some(v) = attrs.get("us:scale")      { clip.scale      = v.parse().unwrap_or(1.0); }
-                                if let Some(v) = attrs.get("us:opacity")    { clip.opacity    = v.parse().unwrap_or(1.0); }
-                                if let Some(v) = attrs.get("us:position-x") { clip.position_x = v.parse().unwrap_or(0.0); }
-                                if let Some(v) = attrs.get("us:position-y") { clip.position_y = v.parse().unwrap_or(0.0); }
-                                if let Some(v) = attrs.get("us:title-text") { clip.title_text = v.clone(); }
-                                if let Some(v) = attrs.get("us:title-font") { clip.title_font = v.clone(); }
-                                if let Some(v) = attrs.get("us:title-color"){ clip.title_color = u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF); }
-                                if let Some(v) = attrs.get("us:title-x")    { clip.title_x    = v.parse().unwrap_or(0.5); }
-                                if let Some(v) = attrs.get("us:title-y")    { clip.title_y    = v.parse().unwrap_or(0.9); }
-                                if let Some(v) = attrs.get("us:speed")      { clip.speed      = v.parse().unwrap_or(1.0); }
-                                if let Some(v) = attrs.get("us:lut-path")  { clip.lut_path   = Some(v.clone()); }
-                                if let Some(v) = attrs.get("us:transition-after")    { clip.transition_after    = v.clone(); }
-                                if let Some(v) = attrs.get("us:transition-after-ns") { clip.transition_after_ns = v.parse().unwrap_or(0); }
+                                if let Some(v) = attrs.get("us:brightness") {
+                                    clip.brightness = v.parse().unwrap_or(0.0);
+                                }
+                                if let Some(v) = attrs.get("us:contrast") {
+                                    clip.contrast = v.parse().unwrap_or(1.0);
+                                }
+                                if let Some(v) = attrs.get("us:saturation") {
+                                    clip.saturation = v.parse().unwrap_or(1.0);
+                                }
+                                if let Some(v) = attrs.get("us:denoise") {
+                                    clip.denoise = v.parse().unwrap_or(0.0);
+                                }
+                                if let Some(v) = attrs.get("us:sharpness") {
+                                    clip.sharpness = v.parse().unwrap_or(0.0);
+                                }
+                                if let Some(v) = attrs.get("us:volume") {
+                                    clip.volume = v.parse().unwrap_or(1.0);
+                                }
+                                if let Some(v) = attrs.get("us:pan") {
+                                    clip.pan = v.parse().unwrap_or(0.0);
+                                }
+                                if let Some(v) = attrs.get("us:crop-left") {
+                                    clip.crop_left = v.parse().unwrap_or(0);
+                                }
+                                if let Some(v) = attrs.get("us:crop-right") {
+                                    clip.crop_right = v.parse().unwrap_or(0);
+                                }
+                                if let Some(v) = attrs.get("us:crop-top") {
+                                    clip.crop_top = v.parse().unwrap_or(0);
+                                }
+                                if let Some(v) = attrs.get("us:crop-bottom") {
+                                    clip.crop_bottom = v.parse().unwrap_or(0);
+                                }
+                                if let Some(v) = attrs.get("us:rotate") {
+                                    clip.rotate = v.parse().unwrap_or(0);
+                                }
+                                if let Some(v) = attrs.get("us:flip-h") {
+                                    clip.flip_h = v.parse().unwrap_or(false);
+                                }
+                                if let Some(v) = attrs.get("us:flip-v") {
+                                    clip.flip_v = v.parse().unwrap_or(false);
+                                }
+                                if let Some(v) = attrs.get("us:scale") {
+                                    clip.scale = v.parse().unwrap_or(1.0);
+                                }
+                                if let Some(v) = attrs.get("us:opacity") {
+                                    clip.opacity = v.parse().unwrap_or(1.0);
+                                }
+                                if let Some(v) = attrs.get("us:position-x") {
+                                    clip.position_x = v.parse().unwrap_or(0.0);
+                                }
+                                if let Some(v) = attrs.get("us:position-y") {
+                                    clip.position_y = v.parse().unwrap_or(0.0);
+                                }
+                                if let Some(v) = attrs.get("us:title-text") {
+                                    clip.title_text = v.clone();
+                                }
+                                if let Some(v) = attrs.get("us:title-font") {
+                                    clip.title_font = v.clone();
+                                }
+                                if let Some(v) = attrs.get("us:title-color") {
+                                    clip.title_color =
+                                        u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF);
+                                }
+                                if let Some(v) = attrs.get("us:title-x") {
+                                    clip.title_x = v.parse().unwrap_or(0.5);
+                                }
+                                if let Some(v) = attrs.get("us:title-y") {
+                                    clip.title_y = v.parse().unwrap_or(0.9);
+                                }
+                                if let Some(v) = attrs.get("us:speed") {
+                                    clip.speed = v.parse().unwrap_or(1.0);
+                                }
+                                if let Some(v) = attrs.get("us:lut-path") {
+                                    clip.lut_path = Some(v.clone());
+                                }
+                                if let Some(v) = attrs.get("us:transition-after") {
+                                    clip.transition_after = v.clone();
+                                }
+                                if let Some(v) = attrs.get("us:transition-after-ns") {
+                                    clip.transition_after_ns = v.parse().unwrap_or(0);
+                                }
                                 track.push_unsorted(clip);
                             }
                         }
@@ -164,7 +232,8 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                         if let Some(start_str) = attrs.get("start") {
                             if let Some(pos_ns) = parse_fcpxml_time(start_str) {
                                 let label = attrs.get("value").cloned().unwrap_or_default();
-                                let color = attrs.get("us:color")
+                                let color = attrs
+                                    .get("us:color")
                                     .and_then(|s| u32::from_str_radix(s, 16).ok())
                                     .unwrap_or(0xFF8C00FF);
                                 use crate::model::project::Marker;
@@ -224,7 +293,9 @@ fn parse_fcpxml_time(s: &str) -> Option<u64> {
     if let Some((num, den)) = s.split_once('/') {
         let num: u64 = num.parse().ok()?;
         let den: u64 = den.parse().ok()?;
-        if den == 0 { return None; }
+        if den == 0 {
+            return None;
+        }
         // time_seconds = num / den; ns = time_seconds * 1_000_000_000
         Some(num * 1_000_000_000 / den)
     } else {
@@ -241,7 +312,10 @@ fn parse_frame_duration(s: &str) -> FrameRate {
         // frameDuration = 1/fps → fps = den/num
         let num: u32 = num.parse().unwrap_or(1);
         let den: u32 = den.parse().unwrap_or(24);
-        FrameRate { numerator: den, denominator: num }
+        FrameRate {
+            numerator: den,
+            denominator: num,
+        }
     } else {
         FrameRate::fps_24()
     }

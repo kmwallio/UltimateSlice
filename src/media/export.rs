@@ -1,32 +1,48 @@
+use crate::model::clip::ClipKind;
+use crate::model::project::Project;
 use anyhow::{anyhow, Result};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use crate::model::clip::ClipKind;
-use crate::model::project::Project;
 
 /// Progress updates sent back to the UI thread
 #[derive(Debug)]
 pub enum ExportProgress {
-    Progress(f64),   // 0.0 – 1.0
+    Progress(f64), // 0.0 – 1.0
     Done,
     Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum VideoCodec { H264, H265, Vp9, ProRes, Av1 }
+pub enum VideoCodec {
+    H264,
+    H265,
+    Vp9,
+    ProRes,
+    Av1,
+}
 #[derive(Debug, Clone, PartialEq)]
-pub enum AudioCodec { Aac, Opus, Flac, Pcm }
+pub enum AudioCodec {
+    Aac,
+    Opus,
+    Flac,
+    Pcm,
+}
 #[derive(Debug, Clone, PartialEq)]
-pub enum Container { Mp4, Mov, WebM, Mkv }
+pub enum Container {
+    Mp4,
+    Mov,
+    WebM,
+    Mkv,
+}
 
 impl Container {
     pub fn extension(&self) -> &'static str {
         match self {
-            Container::Mp4  => "mp4",
-            Container::Mov  => "mov",
+            Container::Mp4 => "mp4",
+            Container::Mov => "mov",
             Container::WebM => "webm",
-            Container::Mkv  => "mkv",
+            Container::Mkv => "mkv",
         }
     }
 }
@@ -67,17 +83,28 @@ pub fn export_project(
     options: ExportOptions,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
-    let out_w = if options.output_width  == 0 { project.width  } else { options.output_width  };
-    let out_h = if options.output_height == 0 { project.height } else { options.output_height };
+    let out_w = if options.output_width == 0 {
+        project.width
+    } else {
+        options.output_width
+    };
+    let out_h = if options.output_height == 0 {
+        project.height
+    } else {
+        options.output_height
+    };
 
     // Primary video track (first video track) — forms the base concat sequence.
     // Secondary video tracks are composited on top with overlay.
     let mut video_tracks_iter = project.video_tracks();
     let primary_clips: Vec<&crate::model::clip::Clip> = video_tracks_iter
-        .next().map(|t| t.clips.iter().collect()).unwrap_or_default();
+        .next()
+        .map(|t| t.clips.iter().collect())
+        .unwrap_or_default();
 
     // Remaining video tracks: each is a list of (overlay) clips
-    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project.video_tracks()
+    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
+        .video_tracks()
         .skip(1)
         .filter(|t| !t.muted)
         .map(|t| t.clips.iter().collect())
@@ -88,7 +115,8 @@ pub fn export_project(
     }
 
     // Collect audio-only clips from non-muted audio tracks
-    let mut audio_clips: Vec<_> = project.audio_tracks()
+    let mut audio_clips: Vec<_> = project
+        .audio_tracks()
         .filter(|t| !t.muted)
         .flat_map(|t| t.clips.iter())
         .collect();
@@ -104,26 +132,34 @@ pub fn export_project(
     let mut cmd = Command::new(&ffmpeg);
     cmd.arg("-y")
         .arg("-hide_banner")
-        .arg("-loglevel").arg("error")
-        .arg("-progress").arg("pipe:2")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-progress")
+        .arg("pipe:2")
         .arg("-nostats");
 
     // Inputs: primary video clips (0..primary_clips.len())
     for clip in &primary_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
         let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
-        cmd.arg("-ss").arg(format!("{in_s:.6}"))
-            .arg("-t").arg(format!("{src_dur_s:.6}"))
-            .arg("-i").arg(&clip.source_path);
+        cmd.arg("-ss")
+            .arg(format!("{in_s:.6}"))
+            .arg("-t")
+            .arg(format!("{src_dur_s:.6}"))
+            .arg("-i")
+            .arg(&clip.source_path);
     }
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
     for clip in &secondary_clips_flat {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
         let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
-        cmd.arg("-ss").arg(format!("{in_s:.6}"))
-            .arg("-t").arg(format!("{src_dur_s:.6}"))
-            .arg("-i").arg(&clip.source_path);
+        cmd.arg("-ss")
+            .arg(format!("{in_s:.6}"))
+            .arg("-t")
+            .arg(format!("{src_dur_s:.6}"))
+            .arg("-i")
+            .arg(&clip.source_path);
     }
 
     let sec_base = primary_clips.len();
@@ -133,9 +169,12 @@ pub fn export_project(
     for clip in &audio_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
         let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
-        cmd.arg("-ss").arg(format!("{in_s:.6}"))
-            .arg("-t").arg(format!("{src_dur_s:.6}"))
-            .arg("-i").arg(&clip.source_path);
+        cmd.arg("-ss")
+            .arg(format!("{in_s:.6}"))
+            .arg("-t")
+            .arg(format!("{src_dur_s:.6}"))
+            .arg("-i")
+            .arg(&clip.source_path);
     }
 
     let mut filter = String::new();
@@ -147,9 +186,10 @@ pub fn export_project(
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
+        let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
         filter.push_str(&format!(
-            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{scale_pos_filter},fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
+            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter},fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
@@ -161,20 +201,21 @@ pub fn export_project(
     let transition_xfade_name = |kind: &str| -> &'static str {
         match kind {
             "cross_dissolve" => "fade",
-            "fade_to_black"  => "fadeblack",
-            "wipe_right"     => "wiperight",
-            "wipe_left"      => "wipeleft",
-            _                => "fade", // safe fallback
+            "fade_to_black" => "fadeblack",
+            "wipe_right" => "wiperight",
+            "wipe_left" => "wipeleft",
+            _ => "fade", // safe fallback
         }
     };
 
     // Build primary-track sequence:
     // - If transitions exist AND filters are supported, chain xfade filters
     // - Otherwise use concat (original behavior).
-    let has_primary_transitions = primary_clips.iter()
+    let has_primary_transitions = primary_clips
+        .iter()
         .take(primary_clips.len().saturating_sub(1))
         .any(|c| !c.transition_after.is_empty() && c.transition_after_ns > 0);
-    
+
     if primary_clips.len() == 1 {
         filter.push_str("[pv0]copy[vbase]");
     } else if has_primary_transitions && has_xfade && has_tpad {
@@ -190,7 +231,11 @@ pub fn export_project(
             } else {
                 0.0
             };
-            let max_d = (primary_clips[i].duration().min(primary_clips[i + 1].duration()) as f64 / 1_000_000_000.0) - 0.001;
+            let max_d = (primary_clips[i]
+                .duration()
+                .min(primary_clips[i + 1].duration()) as f64
+                / 1_000_000_000.0)
+                - 0.001;
             d_s = d_s.clamp(0.0, max_d.max(0.0));
             if d_s <= 0.0 {
                 d_s = 0.001;
@@ -206,7 +251,9 @@ pub fn export_project(
             prev_label = out_label;
         }
         if total_overlap_s > 0.0 {
-            filter.push_str(&format!(";[{prev_label}]tpad=stop_mode=clone:stop_duration={total_overlap_s:.6}[vbase]"));
+            filter.push_str(&format!(
+                ";[{prev_label}]tpad=stop_mode=clone:stop_duration={total_overlap_s:.6}[vbase]"
+            ));
         } else {
             filter.push_str(&format!(";[{prev_label}]copy[vbase]"));
         }
@@ -227,12 +274,13 @@ pub fn export_project(
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
+        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
         let opacity = clip.opacity.clamp(0.0, 1.0);
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{denoise_filter}{sharpen_filter}{lut_filter},format=yuva420p{scale_pos_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{denoise_filter}{sharpen_filter}{lut_filter},format=yuva420p{crop_filter}{scale_pos_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
@@ -259,7 +307,9 @@ pub fn export_project(
             let label = format!("va{i}");
             let atempo = build_atempo(clip.speed);
             let vol = clip.volume;
-            filter.push_str(&format!(";[{i}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"));
+            filter.push_str(&format!(
+                ";[{i}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
+            ));
             audio_labels.push(label);
         }
     }
@@ -272,7 +322,9 @@ pub fn export_project(
             let label = format!("sva{k}");
             let atempo = build_atempo(clip.speed);
             let vol = clip.volume;
-            filter.push_str(&format!(";[{in_idx}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"));
+            filter.push_str(&format!(
+                ";[{in_idx}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
+            ));
             audio_labels.push(label);
         }
     }
@@ -283,7 +335,10 @@ pub fn export_project(
         let label = format!("aa{j}");
         let atempo = build_atempo(clip.speed);
         let vol = clip.volume;
-        filter.push_str(&format!(";[{}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]", audio_base + j));
+        filter.push_str(&format!(
+            ";[{}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]",
+            audio_base + j
+        ));
         audio_labels.push(label);
     }
 
@@ -298,25 +353,75 @@ pub fn export_project(
         filter.push_str(&format!("amix=inputs={n}:normalize=0[aout]"));
     }
 
-    cmd.arg("-filter_complex").arg(&filter)
-        .arg("-map").arg(format!("[{vout_label}]"));
+    cmd.arg("-filter_complex")
+        .arg(&filter)
+        .arg("-map")
+        .arg(format!("[{vout_label}]"));
 
     if has_audio {
         cmd.arg("-map").arg("[aout]");
         match options.audio_codec {
-            AudioCodec::Aac  => { cmd.arg("-c:a").arg("aac").arg("-b:a").arg(format!("{}k", options.audio_bitrate_kbps)); }
-            AudioCodec::Opus => { cmd.arg("-c:a").arg("libopus").arg("-b:a").arg(format!("{}k", options.audio_bitrate_kbps)); }
-            AudioCodec::Flac => { cmd.arg("-c:a").arg("flac"); }
-            AudioCodec::Pcm  => { cmd.arg("-c:a").arg("pcm_s24le"); }
+            AudioCodec::Aac => {
+                cmd.arg("-c:a")
+                    .arg("aac")
+                    .arg("-b:a")
+                    .arg(format!("{}k", options.audio_bitrate_kbps));
+            }
+            AudioCodec::Opus => {
+                cmd.arg("-c:a")
+                    .arg("libopus")
+                    .arg("-b:a")
+                    .arg(format!("{}k", options.audio_bitrate_kbps));
+            }
+            AudioCodec::Flac => {
+                cmd.arg("-c:a").arg("flac");
+            }
+            AudioCodec::Pcm => {
+                cmd.arg("-c:a").arg("pcm_s24le");
+            }
         }
     }
 
     match options.video_codec {
-        VideoCodec::H264   => { cmd.arg("-c:v").arg("libx264").arg("-crf").arg(options.crf.to_string()).arg("-pix_fmt").arg("yuv420p"); }
-        VideoCodec::H265   => { cmd.arg("-c:v").arg("libx265").arg("-crf").arg(options.crf.to_string()).arg("-pix_fmt").arg("yuv420p"); }
-        VideoCodec::Vp9    => { cmd.arg("-c:v").arg("libvpx-vp9").arg("-crf").arg(options.crf.to_string()).arg("-b:v").arg("0").arg("-pix_fmt").arg("yuv420p"); }
-        VideoCodec::ProRes => { cmd.arg("-c:v").arg("prores_ks").arg("-profile:v").arg("3"); }
-        VideoCodec::Av1    => { cmd.arg("-c:v").arg("libaom-av1").arg("-crf").arg(options.crf.to_string()).arg("-b:v").arg("0").arg("-pix_fmt").arg("yuv420p"); }
+        VideoCodec::H264 => {
+            cmd.arg("-c:v")
+                .arg("libx264")
+                .arg("-crf")
+                .arg(options.crf.to_string())
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        VideoCodec::H265 => {
+            cmd.arg("-c:v")
+                .arg("libx265")
+                .arg("-crf")
+                .arg(options.crf.to_string())
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        VideoCodec::Vp9 => {
+            cmd.arg("-c:v")
+                .arg("libvpx-vp9")
+                .arg("-crf")
+                .arg(options.crf.to_string())
+                .arg("-b:v")
+                .arg("0")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        VideoCodec::ProRes => {
+            cmd.arg("-c:v").arg("prores_ks").arg("-profile:v").arg("3");
+        }
+        VideoCodec::Av1 => {
+            cmd.arg("-c:v")
+                .arg("libaom-av1")
+                .arg("-crf")
+                .arg(options.crf.to_string())
+                .arg("-b:v")
+                .arg("0")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
     }
 
     // Container-specific flags
@@ -328,10 +433,18 @@ pub fn export_project(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    eprintln!("[export] ffmpeg args: {:?}", cmd.get_args().collect::<Vec<_>>());
+    eprintln!(
+        "[export] ffmpeg args: {:?}",
+        cmd.get_args().collect::<Vec<_>>()
+    );
 
-    let mut child = cmd.spawn().map_err(|e| anyhow!("Failed to start ffmpeg: {e}"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("Failed to capture ffmpeg stderr"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("Failed to start ffmpeg: {e}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture ffmpeg stderr"))?;
     let reader = BufReader::new(stderr);
 
     let mut error_lines: Vec<String> = Vec::new();
@@ -347,17 +460,25 @@ pub fn export_project(
                 let p = (us as f64 / total_duration_us as f64).clamp(0.0, 1.0);
                 let _ = tx.send(ExportProgress::Progress(p));
             }
-        } else if !line.starts_with("frame=") && !line.starts_with("fps=")
-               && !line.starts_with("progress=") && !line.starts_with("speed=")
-               && !line.starts_with("bitrate=") && !line.starts_with("size=")
-               && !line.starts_with("out_") && !line.starts_with("dup_")
-               && !line.starts_with("drop_") && !line.starts_with("stream_") {
+        } else if !line.starts_with("frame=")
+            && !line.starts_with("fps=")
+            && !line.starts_with("progress=")
+            && !line.starts_with("speed=")
+            && !line.starts_with("bitrate=")
+            && !line.starts_with("size=")
+            && !line.starts_with("out_")
+            && !line.starts_with("dup_")
+            && !line.starts_with("drop_")
+            && !line.starts_with("stream_")
+        {
             eprintln!("[export] ffmpeg: {line}");
             error_lines.push(line);
         }
     }
 
-    let status = child.wait().map_err(|e| anyhow!("Failed waiting for ffmpeg: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| anyhow!("Failed waiting for ffmpeg: {e}"))?;
     if !status.success() {
         let detail = error_lines.join("; ");
         let msg = format!("ffmpeg export failed: {detail}");
@@ -371,25 +492,39 @@ pub fn export_project(
 
 fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
-        format!(",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
+        format!(
+            ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
             clip.brightness.clamp(-1.0, 1.0),
             clip.contrast.clamp(0.0, 2.0),
-            clip.saturation.clamp(0.0, 2.0))
-    } else { String::new() }
+            clip.saturation.clamp(0.0, 2.0)
+        )
+    } else {
+        String::new()
+    }
 }
 
 fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.denoise > 0.0 {
         let d = clip.denoise.clamp(0.0, 1.0);
-        format!(",hqdn3d={:.4}:{:.4}:{:.4}:{:.4}", d*4.0, d*3.0, d*6.0, d*4.5)
-    } else { String::new() }
+        format!(
+            ",hqdn3d={:.4}:{:.4}:{:.4}:{:.4}",
+            d * 4.0,
+            d * 3.0,
+            d * 6.0,
+            d * 4.5
+        )
+    } else {
+        String::new()
+    }
 }
 
 fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.sharpness != 0.0 {
         let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
         format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
-    } else { String::new() }
+    } else {
+        String::new()
+    }
 }
 
 fn build_lut_filter(clip: &crate::model::clip::Clip) -> String {
@@ -406,7 +541,35 @@ fn build_lut_filter(clip: &crate::model::clip::Clip) -> String {
 fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
     if (clip.speed - 1.0).abs() > 0.001 {
         format!(",setpts=PTS/{:.6}", clip.speed)
-    } else { String::new() }
+    } else {
+        String::new()
+    }
+}
+
+/// Build an ffmpeg crop + re-pad filter for user-controlled crop.
+/// `transparent_pad`: when true, pads with transparent black (for overlay clips);
+/// otherwise pads with opaque black (primary track).
+fn build_crop_filter(
+    clip: &crate::model::clip::Clip,
+    out_w: u32,
+    out_h: u32,
+    transparent_pad: bool,
+) -> String {
+    let cl = clip.crop_left.max(0) as u32;
+    let cr = clip.crop_right.max(0) as u32;
+    let ct = clip.crop_top.max(0) as u32;
+    let cb = clip.crop_bottom.max(0) as u32;
+    if cl == 0 && cr == 0 && ct == 0 && cb == 0 {
+        return String::new();
+    }
+    let cw = out_w.saturating_sub(cl + cr).max(1);
+    let ch = out_h.saturating_sub(ct + cb).max(1);
+    let pad_color = if transparent_pad {
+        "black@0.0"
+    } else {
+        "black"
+    };
+    format!(",crop={cw}:{ch}:{cl}:{ct},pad={out_w}:{out_h}:{cl}:{ct}:{pad_color}")
 }
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.
@@ -418,7 +581,8 @@ fn build_scale_position_filter(
     transparent_pad: bool,
 ) -> String {
     let scale = clip.scale.clamp(0.1, 4.0);
-    if (scale - 1.0).abs() < 0.001 && clip.position_x.abs() < 0.001 && clip.position_y.abs() < 0.001 {
+    if (scale - 1.0).abs() < 0.001 && clip.position_x.abs() < 0.001 && clip.position_y.abs() < 0.001
+    {
         return String::new(); // passthrough when scale=1 and position=0
     }
     let pw = out_w as f64;
@@ -454,7 +618,9 @@ fn build_scale_position_filter(
 /// atempo is limited to 0.5–2.0 per filter, so chain multiple for extremes.
 /// Returns a string like "atempo=2.0," (with trailing comma) or "" for 1.0x.
 fn build_atempo(speed: f64) -> String {
-    if (speed - 1.0).abs() < 0.001 { return String::new(); }
+    if (speed - 1.0).abs() < 0.001 {
+        return String::new();
+    }
     let mut remaining = speed;
     let mut filters = String::new();
     // Chain atempo in [0.5, 2.0] steps
@@ -469,7 +635,6 @@ fn build_atempo(speed: f64) -> String {
     filters.push_str(&format!("atempo={remaining:.6},"));
     filters
 }
-
 
 fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
     let output = Command::new(ffmpeg)
@@ -491,8 +656,17 @@ fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
     // Derive ffprobe path from ffmpeg path (they live side-by-side)
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
     Command::new(&ffprobe)
-        .args(["-v", "error", "-select_streams", "a:0",
-               "-show_entries", "stream=codec_type", "-of", "csv=p=0", path])
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
         .output()
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false)
@@ -501,11 +675,21 @@ fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
 /// Find the ffmpeg binary, checking PATH and common install locations.
 pub(crate) fn find_ffmpeg() -> Result<String> {
     // First try the name directly (respects the process PATH)
-    if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() {
+    if Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+    {
         return Ok("ffmpeg".to_string());
     }
     // Fall back to common absolute paths
-    for path in &["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"] {
+    for path in &[
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+    ] {
         if std::path::Path::new(path).exists() {
             return Ok(path.to_string());
         }

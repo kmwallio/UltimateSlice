@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::track::{Track, TrackKind};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A timeline marker (chapter point / note) placed at a specific position.
@@ -15,7 +15,9 @@ pub struct Marker {
     pub color: u32,
 }
 
-fn default_marker_color() -> u32 { 0xFF8C00FF }
+fn default_marker_color() -> u32 {
+    0xFF8C00FF
+}
 
 impl Marker {
     pub fn new(position_ns: u64, label: impl Into<String>) -> Self {
@@ -36,9 +38,24 @@ pub struct FrameRate {
 }
 
 impl FrameRate {
-    pub fn fps_24() -> Self { Self { numerator: 24, denominator: 1 } }
-    pub fn fps_30() -> Self { Self { numerator: 30000, denominator: 1001 } }
-    pub fn fps_60() -> Self { Self { numerator: 60, denominator: 1 } }
+    pub fn fps_24() -> Self {
+        Self {
+            numerator: 24,
+            denominator: 1,
+        }
+    }
+    pub fn fps_30() -> Self {
+        Self {
+            numerator: 30000,
+            denominator: 1001,
+        }
+    }
+    pub fn fps_60() -> Self {
+        Self {
+            numerator: 60,
+            denominator: 1,
+        }
+    }
 
     pub fn as_f64(&self) -> f64 {
         self.numerator as f64 / self.denominator as f64

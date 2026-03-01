@@ -1,13 +1,16 @@
-use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, FlowBox, FlowBoxChild, Label, Orientation, ScrolledWindow};
+use crate::media::probe_cache::MediaProbeCache;
+use crate::media::thumb_cache::ThumbnailCache;
+use crate::model::media_library::MediaItem;
 use gdk4;
 use gio;
 use glib;
+use gtk4::prelude::*;
+use gtk4::{
+    self as gtk, Box as GBox, Button, DrawingArea, FlowBox, FlowBoxChild, Label, Orientation,
+    ScrolledWindow,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::model::media_library::MediaItem;
-use crate::media::thumb_cache::ThumbnailCache;
-use crate::media::probe_cache::MediaProbeCache;
 
 const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
@@ -73,7 +76,12 @@ pub fn build_media_browser(
     {
         let lib = library.borrow();
         for item in lib.iter() {
-            let child = make_grid_item(&item.label, &item.source_path, item.duration_ns, &thumb_cache);
+            let child = make_grid_item(
+                &item.label,
+                &item.source_path,
+                item.duration_ns,
+                &thumb_cache,
+            );
             flow_box.insert(&child, -1);
         }
     }
@@ -203,7 +211,9 @@ pub fn build_media_browser(
                 if let Ok(files) = result {
                     for i in 0..files.n_items() {
                         let Some(obj) = files.item(i) else { continue };
-                        let Ok(file) = obj.downcast::<gio::File>() else { continue };
+                        let Ok(file) = obj.downcast::<gio::File>() else {
+                            continue;
+                        };
                         let Some(path) = file.path() else { continue };
                         let _ = import_path_into_library(
                             path.to_string_lossy().to_string(),
@@ -233,7 +243,15 @@ pub fn build_media_browser(
             };
             let mut imported_any = false;
             for path in parse_external_drop_paths(&payload) {
-                if import_path_into_library(path, &library, &flow_box_for_drop, &thumb_cache, &probe_cache).is_some() {
+                if import_path_into_library(
+                    path,
+                    &library,
+                    &flow_box_for_drop,
+                    &thumb_cache,
+                    &probe_cache,
+                )
+                .is_some()
+                {
                     imported_any = true;
                 }
             }
@@ -338,9 +356,15 @@ pub fn probe_duration(uri: &str) -> Option<u64> {
 pub fn probe_is_audio_only(uri: &str) -> bool {
     use gstreamer_pbutils::prelude::*;
     use gstreamer_pbutils::Discoverer;
-    let Ok(()) = gstreamer::init() else { return false };
-    let Ok(discoverer) = Discoverer::new(gstreamer::ClockTime::from_seconds(5)) else { return false };
-    let Ok(info) = discoverer.discover_uri(uri) else { return false };
+    let Ok(()) = gstreamer::init() else {
+        return false;
+    };
+    let Ok(discoverer) = Discoverer::new(gstreamer::ClockTime::from_seconds(5)) else {
+        return false;
+    };
+    let Ok(info) = discoverer.discover_uri(uri) else {
+        return false;
+    };
     info.video_streams().is_empty()
 }
 
@@ -361,7 +385,9 @@ fn import_path_into_library(
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
     probe_cache: &Rc<RefCell<MediaProbeCache>>,
 ) -> Option<(String, u64, FlowBoxChild)> {
-    if path_str.is_empty() { return None; }
+    if path_str.is_empty() {
+        return None;
+    }
     // Start background probe (non-blocking). Duration/audio-only updated by 250ms timer.
     probe_cache.borrow_mut().request(&path_str);
     let duration_ns = 0; // placeholder until probe completes
@@ -381,7 +407,9 @@ fn parse_external_drop_paths(payload: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in payload.lines() {
         let s = line.trim();
-        if s.is_empty() || s.starts_with('#') { continue; }
+        if s.is_empty() || s.starts_with('#') {
+            continue;
+        }
         if s.starts_with("file://") {
             let f = gio::File::for_uri(s);
             if let Some(path) = f.path() {
@@ -399,7 +427,12 @@ fn rebuild_flowbox(fb: &FlowBox, lib: &[MediaItem], thumb_cache: &Rc<RefCell<Thu
         fb.remove(&child);
     }
     for item in lib.iter() {
-        let child = make_grid_item(&item.label, &item.source_path, item.duration_ns, thumb_cache);
+        let child = make_grid_item(
+            &item.label,
+            &item.source_path,
+            item.duration_ns,
+            thumb_cache,
+        );
         fb.insert(&child, -1);
     }
 }

@@ -9,16 +9,36 @@ pub enum ClipKind {
     Image,
 }
 
-fn default_contrast() -> f32 { 1.0 }
-fn default_saturation() -> f32 { 1.0 }
-fn default_volume() -> f32 { 1.0 }
-fn default_speed() -> f64 { 1.0 }
-fn default_scale() -> f64 { 1.0 }
-fn default_opacity() -> f64 { 1.0 }
-fn default_title_font() -> String { "Sans Bold 36".to_string() }
-fn default_title_color() -> u32 { 0xFFFFFFFF }
-fn default_title_x() -> f64 { 0.5 }
-fn default_title_y() -> f64 { 0.9 }
+fn default_contrast() -> f32 {
+    1.0
+}
+fn default_saturation() -> f32 {
+    1.0
+}
+fn default_volume() -> f32 {
+    1.0
+}
+fn default_speed() -> f64 {
+    1.0
+}
+fn default_scale() -> f64 {
+    1.0
+}
+fn default_opacity() -> f64 {
+    1.0
+}
+fn default_title_font() -> String {
+    "Sans Bold 36".to_string()
+}
+fn default_title_color() -> u32 {
+    0xFFFFFFFF
+}
+fn default_title_x() -> f64 {
+    0.5
+}
+fn default_title_y() -> f64 {
+    0.9
+}
 
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,11 +102,11 @@ pub struct Clip {
     #[serde(default = "default_title_font")]
     pub title_font: String,
     #[serde(default = "default_title_color")]
-    pub title_color: u32,   // 0xRRGGBBAA
+    pub title_color: u32, // 0xRRGGBBAA
     #[serde(default = "default_title_x")]
-    pub title_x: f64,       // 0.0–1.0 relative horizontal position
+    pub title_x: f64, // 0.0–1.0 relative horizontal position
     #[serde(default = "default_title_y")]
-    pub title_y: f64,       // 0.0–1.0 relative vertical position
+    pub title_y: f64, // 0.0–1.0 relative vertical position
     /// Transition to the next clip on the same track (e.g. "cross_dissolve").
     #[serde(default)]
     pub transition_after: String,
@@ -114,7 +134,12 @@ pub struct Clip {
 }
 
 impl Clip {
-    pub fn new(source_path: impl Into<String>, source_out: u64, timeline_start: u64, kind: ClipKind) -> Self {
+    pub fn new(
+        source_path: impl Into<String>,
+        source_out: u64,
+        timeline_start: u64,
+        kind: ClipKind,
+    ) -> Self {
         let source_path = source_path.into();
         let label = std::path::Path::new(&source_path)
             .file_stem()
@@ -168,7 +193,11 @@ impl Clip {
     /// A 2× speed clip occupies half the wall-clock time; 0.5× occupies double.
     pub fn duration(&self) -> u64 {
         let src = self.source_duration();
-        if self.speed > 0.0 { (src as f64 / self.speed) as u64 } else { src }
+        if self.speed > 0.0 {
+            (src as f64 / self.speed) as u64
+        } else {
+            src
+        }
     }
 
     /// Exclusive end position on the timeline, in nanoseconds

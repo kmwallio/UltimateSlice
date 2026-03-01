@@ -1,15 +1,19 @@
+use crate::model::project::Project;
+use anyhow::Result;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
 use std::io::Cursor;
-use anyhow::Result;
-use crate::model::project::Project;
 
 /// Serialize a `Project` to FCPXML 1.10 format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);
 
     // XML declaration
-    writer.write_event(Event::Decl(quick_xml::events::BytesDecl::new("1.0", Some("UTF-8"), None)))?;
+    writer.write_event(Event::Decl(quick_xml::events::BytesDecl::new(
+        "1.0",
+        Some("UTF-8"),
+        None,
+    )))?;
 
     // <fcpxml version="1.10">
     let mut fcpxml = BytesStart::new("fcpxml");
@@ -30,7 +34,10 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     writer.write_event(Event::Start(proj_elem))?;
 
     // <sequence>
-    let _fps = format!("{}/{}", project.frame_rate.numerator, project.frame_rate.denominator);
+    let _fps = format!(
+        "{}/{}",
+        project.frame_rate.numerator, project.frame_rate.denominator
+    );
     let duration_str = ns_to_fcpxml_time(project.duration(), &project.frame_rate);
     let format_ref = "r1";
 
@@ -63,41 +70,47 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("start", start.as_str()));
             asset_clip.push_attribute(("name", clip.label.as_str()));
             // Multi-track routing
-            asset_clip.push_attribute(("us:track-idx",  track_idx.to_string().as_str()));
+            asset_clip.push_attribute(("us:track-idx", track_idx.to_string().as_str()));
             asset_clip.push_attribute(("us:track-kind", track_kind));
             asset_clip.push_attribute(("us:track-name", track.label.as_str()));
             // Store color/effects as custom vendor attributes (us: prefix).
             // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
             asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
-            asset_clip.push_attribute(("us:contrast",   clip.contrast.to_string().as_str()));
+            asset_clip.push_attribute(("us:contrast", clip.contrast.to_string().as_str()));
             asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
-            asset_clip.push_attribute(("us:denoise",    clip.denoise.to_string().as_str()));
-            asset_clip.push_attribute(("us:sharpness",  clip.sharpness.to_string().as_str()));
-            asset_clip.push_attribute(("us:volume",     clip.volume.to_string().as_str()));
-            asset_clip.push_attribute(("us:pan",        clip.pan.to_string().as_str()));
-            asset_clip.push_attribute(("us:crop-left",  clip.crop_left.to_string().as_str()));
+            asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
+            asset_clip.push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
+            asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
+            asset_clip.push_attribute(("us:pan", clip.pan.to_string().as_str()));
+            asset_clip.push_attribute(("us:crop-left", clip.crop_left.to_string().as_str()));
             asset_clip.push_attribute(("us:crop-right", clip.crop_right.to_string().as_str()));
-            asset_clip.push_attribute(("us:crop-top",   clip.crop_top.to_string().as_str()));
-            asset_clip.push_attribute(("us:crop-bottom",clip.crop_bottom.to_string().as_str()));
-            asset_clip.push_attribute(("us:rotate",     clip.rotate.to_string().as_str()));
-            asset_clip.push_attribute(("us:flip-h",     clip.flip_h.to_string().as_str()));
-            asset_clip.push_attribute(("us:flip-v",     clip.flip_v.to_string().as_str()));
-            asset_clip.push_attribute(("us:scale",      clip.scale.to_string().as_str()));
-            asset_clip.push_attribute(("us:opacity",    clip.opacity.to_string().as_str()));
+            asset_clip.push_attribute(("us:crop-top", clip.crop_top.to_string().as_str()));
+            asset_clip.push_attribute(("us:crop-bottom", clip.crop_bottom.to_string().as_str()));
+            asset_clip.push_attribute(("us:rotate", clip.rotate.to_string().as_str()));
+            asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
+            asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
+            asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
+            asset_clip.push_attribute(("us:opacity", clip.opacity.to_string().as_str()));
             asset_clip.push_attribute(("us:position-x", clip.position_x.to_string().as_str()));
             asset_clip.push_attribute(("us:position-y", clip.position_y.to_string().as_str()));
             asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));
             asset_clip.push_attribute(("us:title-font", clip.title_font.as_str()));
-            asset_clip.push_attribute(("us:title-color", format!("{:08X}", clip.title_color).as_str()));
-            asset_clip.push_attribute(("us:title-x",    clip.title_x.to_string().as_str()));
-            asset_clip.push_attribute(("us:title-y",    clip.title_y.to_string().as_str()));
-            asset_clip.push_attribute(("us:speed",      clip.speed.to_string().as_str()));
+            asset_clip.push_attribute((
+                "us:title-color",
+                format!("{:08X}", clip.title_color).as_str(),
+            ));
+            asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
+            asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
+            asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
             if let Some(ref lut) = clip.lut_path {
                 asset_clip.push_attribute(("us:lut-path", lut.as_str()));
             }
             if !clip.transition_after.is_empty() {
-                asset_clip.push_attribute(("us:transition-after",    clip.transition_after.as_str()));
-                asset_clip.push_attribute(("us:transition-after-ns", clip.transition_after_ns.to_string().as_str()));
+                asset_clip.push_attribute(("us:transition-after", clip.transition_after.as_str()));
+                asset_clip.push_attribute((
+                    "us:transition-after-ns",
+                    clip.transition_after_ns.to_string().as_str(),
+                ));
             }
             writer.write_event(Event::Empty(asset_clip))?;
         }
@@ -108,7 +121,10 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     // Write markers as <marker> elements inside <sequence>
     for marker in &project.markers {
         let mut m = BytesStart::new("marker");
-        m.push_attribute(("start", ns_to_fcpxml_time(marker.position_ns, &project.frame_rate).as_str()));
+        m.push_attribute((
+            "start",
+            ns_to_fcpxml_time(marker.position_ns, &project.frame_rate).as_str(),
+        ));
         m.push_attribute(("duration", "1/24s"));
         m.push_attribute(("value", marker.label.as_str()));
         m.push_attribute(("us:color", format!("{:08X}", marker.color).as_str()));
@@ -129,11 +145,21 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
     writer.write_event(Event::Start(BytesStart::new("resources")))?;
 
     // Format resource
-    let _fps = format!("{}/{}", project.frame_rate.numerator, project.frame_rate.denominator);
+    let _fps = format!(
+        "{}/{}",
+        project.frame_rate.numerator, project.frame_rate.denominator
+    );
     let mut fmt = BytesStart::new("format");
     fmt.push_attribute(("id", "r1"));
     fmt.push_attribute(("name", "FFVideoFormat1080p24"));
-    fmt.push_attribute(("frameDuration", format!("{}/{}", project.frame_rate.denominator, project.frame_rate.numerator).as_str()));
+    fmt.push_attribute((
+        "frameDuration",
+        format!(
+            "{}/{}",
+            project.frame_rate.denominator, project.frame_rate.numerator
+        )
+        .as_str(),
+    ));
     fmt.push_attribute(("width", project.width.to_string().as_str()));
     fmt.push_attribute(("height", project.height.to_string().as_str()));
     writer.write_event(Event::Empty(fmt))?;
@@ -144,7 +170,11 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
             let asset_id = format!("a_{}", sanitize_id(&clip.id));
             let uri = crate::media::thumbnail::path_to_uri(&clip.source_path);
             let duration = ns_to_fcpxml_time(clip.source_out, &project.frame_rate);
-            let has_video = if clip.kind == crate::model::clip::ClipKind::Audio { "0" } else { "1" };
+            let has_video = if clip.kind == crate::model::clip::ClipKind::Audio {
+                "0"
+            } else {
+                "1"
+            };
             let has_audio = "1";
 
             let mut asset = BytesStart::new("asset");

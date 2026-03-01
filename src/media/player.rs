@@ -1,7 +1,7 @@
-use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::{Arc, Mutex};
 
 /// Playback state
 #[derive(Debug, Clone, PartialEq)]
@@ -86,9 +86,11 @@ impl Player {
             gb.set_property("sigma", 0.0_f64);
 
             let bin = gst::Bin::new();
-            let conv1 = gst::ElementFactory::make("videoconvert").build()
+            let conv1 = gst::ElementFactory::make("videoconvert")
+                .build()
                 .expect("videoconvert must be available");
-            let conv2 = gst::ElementFactory::make("videoconvert").build()
+            let conv2 = gst::ElementFactory::make("videoconvert")
+                .build()
                 .expect("videoconvert must be available");
 
             // Determine sink element (videocrop if available, else videobalance)
@@ -96,23 +98,31 @@ impl Player {
             if let (Some(ref vc), Some(ref vfr), Some(ref vff)) =
                 (&videocrop, &videoflip_rotate, &videoflip_flip)
             {
-                let conv3 = gst::ElementFactory::make("videoconvert").build()
+                let conv3 = gst::ElementFactory::make("videoconvert")
+                    .build()
                     .expect("videoconvert must be available");
-                let conv4 = gst::ElementFactory::make("videoconvert").build()
+                let conv4 = gst::ElementFactory::make("videoconvert")
+                    .build()
                     .expect("videoconvert must be available");
-                bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
-                gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff]).ok();
+                bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                    .ok();
+                gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                    .ok();
                 let sink_pad = vc.static_pad("sink").unwrap();
                 let src_pad = vff.static_pad("src").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                    .ok();
+                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
+                    .ok();
             } else {
                 bin.add_many([vb, &conv1, gb]).ok();
                 gst::Element::link_many([vb, &conv1, gb]).ok();
                 let sink_pad = vb.static_pad("sink").unwrap();
                 let src_pad = gb.static_pad("src").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
-                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).ok();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                    .ok();
+                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
+                    .ok();
             }
             pipeline.set_property("video-filter", &bin);
         } else if let Some(ref vb) = videobalance {
@@ -123,18 +133,21 @@ impl Player {
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let hardware_acceleration_enabled = Arc::new(Mutex::new(hardware_acceleration_enabled));
 
-        Ok((Self {
-            pipeline,
-            state,
-            paintablesink,
-            gl_video_sink,
-            hardware_acceleration_enabled,
-            videobalance,
-            gaussianblur,
-            videocrop,
-            videoflip_rotate,
-            videoflip_flip,
-        }, paintable))
+        Ok((
+            Self {
+                pipeline,
+                state,
+                paintablesink,
+                gl_video_sink,
+                hardware_acceleration_enabled,
+                videobalance,
+                gaussianblur,
+                videocrop,
+                videoflip_rotate,
+                videoflip_flip,
+            },
+            paintable,
+        ))
     }
 
     /// Load a URI (e.g. `file:///path/to/video.mp4`)
@@ -300,7 +313,16 @@ impl Player {
     }
 
     /// Apply crop, rotation, and flip transform to the video filter elements.
-    pub fn set_transform(&self, crop_left: i32, crop_right: i32, crop_top: i32, crop_bottom: i32, rotate: i32, flip_h: bool, flip_v: bool) {
+    pub fn set_transform(
+        &self,
+        crop_left: i32,
+        crop_right: i32,
+        crop_top: i32,
+        crop_bottom: i32,
+        rotate: i32,
+        flip_h: bool,
+        flip_v: bool,
+    ) {
         if let Some(ref vc) = self.videocrop {
             vc.set_property("left", crop_left.max(0));
             vc.set_property("right", crop_right.max(0));
@@ -309,18 +331,18 @@ impl Player {
         }
         if let Some(ref vfr) = self.videoflip_rotate {
             let method = match rotate {
-                90  => "clockwise",
+                90 => "clockwise",
                 180 => "rotate-180",
                 270 => "counterclockwise",
-                _   => "none",
+                _ => "none",
             };
             vfr.set_property_from_str("method", method);
         }
         if let Some(ref vff) = self.videoflip_flip {
             let method = match (flip_h, flip_v) {
-                (true, true)   => "rotate-180",
-                (true, false)  => "horizontal-flip",
-                (false, true)  => "vertical-flip",
+                (true, true) => "rotate-180",
+                (true, false) => "horizontal-flip",
+                (false, true) => "vertical-flip",
                 (false, false) => "none",
             };
             vff.set_property_from_str("method", method);

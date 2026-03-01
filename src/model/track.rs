@@ -1,6 +1,6 @@
+use super::clip::Clip;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use super::clip::Clip;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TrackKind {
@@ -74,6 +74,10 @@ impl Track {
 
     /// Total timeline duration covered by this track's clips
     pub fn duration(&self) -> u64 {
-        self.clips.iter().map(|c| c.timeline_end()).max().unwrap_or(0)
+        self.clips
+            .iter()
+            .map(|c| c.timeline_end())
+            .max()
+            .unwrap_or(0)
     }
 }

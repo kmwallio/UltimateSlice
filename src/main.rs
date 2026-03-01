@@ -1,12 +1,12 @@
 mod app;
-mod model;
-mod media;
 mod fcpxml;
-mod ui;
-mod undo;
 mod mcp;
+mod media;
+mod model;
 mod recent;
+mod ui;
 mod ui_state;
+mod undo;
 
 /// PID file used to track a running `--mcp` instance so a new invocation
 /// can terminate the old one before taking over.
@@ -77,8 +77,12 @@ fn run_mcp_attach() -> i32 {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
-            if writer_stream.write_all(&buf[..n]).is_err() { break; }
-            if writer_stream.flush().is_err() { break; }
+            if writer_stream.write_all(&buf[..n]).is_err() {
+                break;
+            }
+            if writer_stream.flush().is_err() {
+                break;
+            }
         }
         // Shut down write half so the server sees EOF
         let _ = writer_stream.shutdown(std::net::Shutdown::Write);
@@ -90,8 +94,12 @@ fn run_mcp_attach() -> i32 {
     for line in reader.lines() {
         match line {
             Ok(l) => {
-                if writeln!(stdout, "{l}").is_err() { break; }
-                if stdout.flush().is_err() { break; }
+                if writeln!(stdout, "{l}").is_err() {
+                    break;
+                }
+                if stdout.flush().is_err() {
+                    break;
+                }
             }
             Err(_) => break,
         }
@@ -119,7 +127,9 @@ fn ensure_single_mcp_instance() {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
                     while std::time::Instant::now() < deadline {
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        if !process_exists(pid) { break; }
+                        if !process_exists(pid) {
+                            break;
+                        }
                     }
                     // Force-kill if still alive
                     if process_exists(pid) {

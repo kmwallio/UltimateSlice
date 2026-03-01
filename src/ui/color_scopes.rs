@@ -1,12 +1,12 @@
+use gtk4::prelude::*;
 /// Colour scopes panel — waveform, histogram, RGB parade, and vectorscope.
 ///
 /// Builds a widget with a mode-tab strip on top and a Cairo `DrawingArea` below.
 /// Call `update_scope_frame()` from the 33 ms poll timer in `window.rs` to push
 /// a new frame; the widget queues a redraw automatically.
 use gtk4::{self as gtk, DrawingArea, Orientation, ToggleButton};
-use gtk4::prelude::*;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 pub use crate::media::program_player::ScopeFrame;
 
@@ -45,10 +45,10 @@ pub fn build_color_scopes() -> (gtk::Widget, Rc<RefCell<ColorScopesState>>) {
     tab_bar.set_margin_top(4);
     tab_bar.set_margin_bottom(4);
 
-    let btn_wave  = ToggleButton::with_label("Waveform");
-    let btn_hist  = ToggleButton::with_label("Histogram");
-    let btn_parade= ToggleButton::with_label("RGB Parade");
-    let btn_vec   = ToggleButton::with_label("Vectorscope");
+    let btn_wave = ToggleButton::with_label("Waveform");
+    let btn_hist = ToggleButton::with_label("Histogram");
+    let btn_parade = ToggleButton::with_label("RGB Parade");
+    let btn_vec = ToggleButton::with_label("Vectorscope");
 
     btn_wave.set_active(true);
     btn_hist.set_group(Some(&btn_wave));
@@ -76,27 +76,43 @@ pub fn build_color_scopes() -> (gtk::Widget, Rc<RefCell<ColorScopesState>>) {
 
     // Wire tab buttons → mode changes
     {
-        let s = state.clone(); let da2 = da.clone();
+        let s = state.clone();
+        let da2 = da.clone();
         btn_wave.connect_toggled(move |b| {
-            if b.is_active() { s.borrow_mut().mode = ScopeMode::Waveform; da2.queue_draw(); }
+            if b.is_active() {
+                s.borrow_mut().mode = ScopeMode::Waveform;
+                da2.queue_draw();
+            }
         });
     }
     {
-        let s = state.clone(); let da2 = da.clone();
+        let s = state.clone();
+        let da2 = da.clone();
         btn_hist.connect_toggled(move |b| {
-            if b.is_active() { s.borrow_mut().mode = ScopeMode::Histogram; da2.queue_draw(); }
+            if b.is_active() {
+                s.borrow_mut().mode = ScopeMode::Histogram;
+                da2.queue_draw();
+            }
         });
     }
     {
-        let s = state.clone(); let da2 = da.clone();
+        let s = state.clone();
+        let da2 = da.clone();
         btn_parade.connect_toggled(move |b| {
-            if b.is_active() { s.borrow_mut().mode = ScopeMode::RgbParade; da2.queue_draw(); }
+            if b.is_active() {
+                s.borrow_mut().mode = ScopeMode::RgbParade;
+                da2.queue_draw();
+            }
         });
     }
     {
-        let s = state.clone(); let da2 = da.clone();
+        let s = state.clone();
+        let da2 = da.clone();
         btn_vec.connect_toggled(move |b| {
-            if b.is_active() { s.borrow_mut().mode = ScopeMode::Vectorscope; da2.queue_draw(); }
+            if b.is_active() {
+                s.borrow_mut().mode = ScopeMode::Vectorscope;
+                da2.queue_draw();
+            }
         });
     }
 
@@ -112,10 +128,10 @@ pub fn build_color_scopes() -> (gtk::Widget, Rc<RefCell<ColorScopesState>>) {
 
             if let Some(ref frame) = st.frame {
                 match st.mode {
-                    ScopeMode::Waveform   => draw_waveform(cr, frame, w, h),
-                    ScopeMode::Histogram  => draw_histogram(cr, frame, w, h),
-                    ScopeMode::RgbParade  => draw_rgb_parade(cr, frame, w, h),
-                    ScopeMode::Vectorscope=> draw_vectorscope(cr, frame, w, h),
+                    ScopeMode::Waveform => draw_waveform(cr, frame, w, h),
+                    ScopeMode::Histogram => draw_histogram(cr, frame, w, h),
+                    ScopeMode::RgbParade => draw_rgb_parade(cr, frame, w, h),
+                    ScopeMode::Vectorscope => draw_vectorscope(cr, frame, w, h),
                 }
             } else {
                 // No frame yet — draw label
@@ -150,8 +166,10 @@ fn draw_waveform(cr: &gtk::cairo::Context, frame: &ScopeFrame, w: i32, h: i32) {
     for fy in 0..fh {
         for fx in 0..frame.width {
             let base = (fy * frame.width + fx) * 4;
-            if base + 2 >= frame.data.len() { continue; }
-            let r = frame.data[base]     as f64;
+            if base + 2 >= frame.data.len() {
+                continue;
+            }
+            let r = frame.data[base] as f64;
             let g = frame.data[base + 1] as f64;
             let b = frame.data[base + 2] as f64;
             let luma = 0.299 * r + 0.587 * g + 0.114 * b;
@@ -167,7 +185,8 @@ fn draw_waveform(cr: &gtk::cairo::Context, frame: &ScopeFrame, w: i32, h: i32) {
     cr.set_line_width(0.5);
     for pct in [0.0_f64, 0.25, 0.5, 0.75, 1.0] {
         let y = pct * hf;
-        cr.move_to(0.0, y); cr.line_to(wf, y);
+        cr.move_to(0.0, y);
+        cr.line_to(wf, y);
         let _ = cr.stroke();
     }
 }
@@ -178,7 +197,7 @@ fn draw_histogram(cr: &gtk::cairo::Context, frame: &ScopeFrame, w: i32, h: i32) 
     let len = frame.data.len();
     let mut i = 0;
     while i + 3 < len {
-        let r = frame.data[i]     as f64;
+        let r = frame.data[i] as f64;
         let g = frame.data[i + 1] as f64;
         let b = frame.data[i + 2] as f64;
         let luma = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as usize;
@@ -219,7 +238,9 @@ fn draw_rgb_parade(cr: &gtk::cairo::Context, frame: &ScopeFrame, w: i32, h: i32)
         for fy in 0..fh {
             for fx in 0..frame.width {
                 let base = (fy * frame.width + fx) * 4;
-                if base + ch >= frame.data.len() { continue; }
+                if base + ch >= frame.data.len() {
+                    continue;
+                }
                 let val = frame.data[base + ch] as f64;
                 let sx = x_offset + fx as f64 / fw * col_w;
                 let sy = ((255.0 - val) / 255.0 * hf).clamp(0.0, hf - 1.0);
@@ -233,7 +254,8 @@ fn draw_rgb_parade(cr: &gtk::cairo::Context, frame: &ScopeFrame, w: i32, h: i32)
         cr.set_line_width(1.0);
         if ch < 2 {
             let dx = (ch + 1) as f64 * col_w;
-            cr.move_to(dx, 0.0); cr.line_to(dx, hf);
+            cr.move_to(dx, 0.0);
+            cr.line_to(dx, hf);
             let _ = cr.stroke();
         }
     }
@@ -252,8 +274,10 @@ fn draw_vectorscope(cr: &gtk::cairo::Context, frame: &ScopeFrame, w: i32, h: i32
     cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
     let _ = cr.stroke();
     // Centre cross
-    cr.move_to(cx - 5.0, cy); cr.line_to(cx + 5.0, cy);
-    cr.move_to(cx, cy - 5.0); cr.line_to(cx, cy + 5.0);
+    cr.move_to(cx - 5.0, cy);
+    cr.line_to(cx + 5.0, cy);
+    cr.move_to(cx, cy - 5.0);
+    cr.line_to(cx, cy + 5.0);
     let _ = cr.stroke();
 
     // Plot pixels
@@ -261,7 +285,7 @@ fn draw_vectorscope(cr: &gtk::cairo::Context, frame: &ScopeFrame, w: i32, h: i32
     let len = frame.data.len();
     let mut i = 0;
     while i + 2 < len {
-        let r = frame.data[i]     as f64 / 255.0;
+        let r = frame.data[i] as f64 / 255.0;
         let g = frame.data[i + 1] as f64 / 255.0;
         let b = frame.data[i + 2] as f64 / 255.0;
         // BT.601 YCbCr

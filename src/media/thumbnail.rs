@@ -45,7 +45,8 @@ pub fn extract_frame(source_path: &str, time_ns: u64) -> Result<gdk4::MemoryText
 
     pipeline.set_state(gst::State::Playing)?;
 
-    let sample = appsink.pull_sample()
+    let sample = appsink
+        .pull_sample()
         .map_err(|_| anyhow!("failed to pull frame"))?;
 
     let buffer = sample.buffer().ok_or_else(|| anyhow!("no buffer"))?;
@@ -54,13 +55,7 @@ pub fn extract_frame(source_path: &str, time_ns: u64) -> Result<gdk4::MemoryText
     let map = buffer.map_readable()?;
     let bytes = glib::Bytes::from(map.as_slice());
 
-    let texture = gdk4::MemoryTexture::new(
-        160,
-        90,
-        gdk4::MemoryFormat::R8g8b8a8,
-        &bytes,
-        160 * 4,
-    );
+    let texture = gdk4::MemoryTexture::new(160, 90, gdk4::MemoryFormat::R8g8b8a8, &bytes, 160 * 4);
 
     // PipelineGuard ensures pipeline is set to Null when this function returns.
     Ok(texture)
@@ -70,8 +65,12 @@ pub fn path_to_uri(path: &str) -> String {
     if path.starts_with("file://") || path.starts_with("http") {
         path.to_string()
     } else {
-        format!("file://{}", Path::new(path).canonicalize()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string()))
+        format!(
+            "file://{}",
+            Path::new(path)
+                .canonicalize()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string())
+        )
     }
 }

@@ -1,9 +1,11 @@
+use crate::media::program_player::ProgramPlayer;
 use gtk4::prelude::*;
-use gtk4::{self as gtk, AspectFrame, Box as GBox, Button, DrawingArea, EventControllerScroll,
-           EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow};
+use gtk4::{
+    self as gtk, AspectFrame, Box as GBox, Button, DrawingArea, EventControllerScroll,
+    EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use crate::media::program_player::ProgramPlayer;
 
 /// Transform parameters for a clip (crop, rotation, flip).
 /// Kept here so other modules can reference it without a separate file.
@@ -13,7 +15,7 @@ pub struct ClipTransform {
     pub crop_right: i32,
     pub crop_top: i32,
     pub crop_bottom: i32,
-    pub rotate: i32,   // 0, 90, 180, 270
+    pub rotate: i32, // 0, 90, 180, 270
     pub flip_h: bool,
     pub flip_v: bool,
 }
@@ -38,7 +40,16 @@ pub fn build_program_monitor(
     on_play_pause: impl Fn() + 'static,
     on_toggle_popout: impl Fn() + 'static,
     transform_overlay_da: Option<DrawingArea>,
-) -> (GBox, Label, Label, Picture, Picture, DrawingArea, Rc<Cell<[f64; 2]>>, AspectFrame) {
+) -> (
+    GBox,
+    Label,
+    Label,
+    Picture,
+    Picture,
+    DrawingArea,
+    Rc<Cell<[f64; 2]>>,
+    AspectFrame,
+) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
     root.set_vexpand(true);
@@ -186,17 +197,22 @@ pub fn build_program_monitor(
     // At non-1.0 zoom, disables hexpand/vexpand so the frame can grow beyond viewport.
     let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let apply_zoom = {
-        let canvas_frame       = canvas_frame.clone();
-        let scroll             = scroll.clone();
-        let zoom_level         = zoom_level.clone();
-        let fit_w              = fit_w.clone();
-        let fit_h              = fit_h.clone();
-        let transform_da_zoom  = transform_da_for_zoom.clone();
+        let canvas_frame = canvas_frame.clone();
+        let scroll = scroll.clone();
+        let zoom_level = zoom_level.clone();
+        let fit_w = fit_w.clone();
+        let fit_h = fit_h.clone();
+        let transform_da_zoom = transform_da_for_zoom.clone();
         move |new_z: f64| {
-            let z = zoom_levels.iter()
+            let z = zoom_levels
+                .iter()
                 .cloned()
                 .fold(f64::INFINITY, |best, z| {
-                    if (z - new_z).abs() < (best - new_z).abs() { z } else { best }
+                    if (z - new_z).abs() < (best - new_z).abs() {
+                        z
+                    } else {
+                        best
+                    }
                 })
                 .clamp(0.25, 4.0);
 
@@ -264,8 +280,12 @@ pub fn build_program_monitor(
             if mods.contains(gdk4::ModifierType::CONTROL_MASK) {
                 let step = if dy < 0.0 { 1_isize } else { -1_isize };
                 let z = zoom_level.get();
-                let idx = zoom_levels.iter().position(|&l| (l - z).abs() < 0.01).unwrap_or(3);
-                let new_idx = (idx as isize + step).clamp(0, zoom_levels.len() as isize - 1) as usize;
+                let idx = zoom_levels
+                    .iter()
+                    .position(|&l| (l - z).abs() < 0.01)
+                    .unwrap_or(3);
+                let new_idx =
+                    (idx as isize + step).clamp(0, zoom_levels.len() as isize - 1) as usize;
                 let new_z = zoom_levels[new_idx];
                 az(new_z);
                 lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
@@ -286,7 +306,10 @@ pub fn build_program_monitor(
         let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
         zoom_out_btn.connect_clicked(move |_| {
             let z = zl.get();
-            let idx = zoom_levels_v.iter().position(|&l| (l - z).abs() < 0.01).unwrap_or(3);
+            let idx = zoom_levels_v
+                .iter()
+                .position(|&l| (l - z).abs() < 0.01)
+                .unwrap_or(3);
             let new_idx = idx.saturating_sub(1);
             let new_z = zoom_levels_v[new_idx];
             az(new_z);
@@ -300,7 +323,10 @@ pub fn build_program_monitor(
         let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
         zoom_in_btn.connect_clicked(move |_| {
             let z = zl.get();
-            let idx = zoom_levels_v.iter().position(|&l| (l - z).abs() < 0.01).unwrap_or(3);
+            let idx = zoom_levels_v
+                .iter()
+                .position(|&l| (l - z).abs() < 0.01)
+                .unwrap_or(3);
             let new_idx = (idx + 1).min(zoom_levels_v.len() - 1);
             let new_z = zoom_levels_v[new_idx];
             az(new_z);
@@ -318,7 +344,6 @@ pub fn build_program_monitor(
     // Update zoom label from Ctrl+Scroll via zoom_level cell poll in size-allocate
     // is not needed — buttons update it directly. For Ctrl+Scroll we update in the
     // scroll handler above by re-reading zoom_level in the label callbacks below.
-
 
     // Transport controls
     let controls = GBox::new(Orientation::Horizontal, 8);
@@ -348,7 +373,16 @@ pub fn build_program_monitor(
     // Place VU meter at the end of the title bar (right-aligned).
     title_bar.append(&vu_bar);
 
-    (root, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame)
+    (
+        root,
+        pos_label,
+        speed_label,
+        picture_a,
+        picture_b,
+        vu_meter,
+        peak_cell,
+        canvas_frame,
+    )
 }
 
 /// Build a VU meter DrawingArea showing L/R audio peak levels in dBFS.
@@ -393,7 +427,8 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
             // Yellow zone: -18 to -6 dBFS
             let yellow_frac = db_to_frac(-6.0);
             let yellow_top = green_frac * height as f64;
-            let yellow_h = ((yellow_frac - green_frac) * height as f64).min((bar_h - green_h).max(0.0));
+            let yellow_h =
+                ((yellow_frac - green_frac) * height as f64).min((bar_h - green_h).max(0.0));
             if yellow_h > 0.0 {
                 cr.set_source_rgb(0.9, 0.85, 0.1);
                 cr.rectangle(x, height as f64 - yellow_top - yellow_h, bar_w, yellow_h);
@@ -428,9 +463,9 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
 pub fn format_timecode(ns: u64) -> String {
     let total_frames = ns / (1_000_000_000 / 30);
     let frames = total_frames % 30;
-    let secs   = ns / 1_000_000_000;
-    let s      = secs % 60;
-    let m      = (secs / 60) % 60;
-    let h      = secs / 3600;
+    let secs = ns / 1_000_000_000;
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = secs / 3600;
     format!("{h:02}:{m:02}:{s:02};{frames:02}")
 }

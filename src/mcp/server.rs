@@ -75,10 +75,7 @@ pub fn socket_path() -> PathBuf {
 
 /// Unix domain socket transport.  Listens for one client at a time; rejects
 /// additional connections while a session is active.  Exits when `stop` is set.
-pub fn run_socket_server(
-    sender: std::sync::mpsc::Sender<McpCommand>,
-    stop: Arc<AtomicBool>,
-) {
+pub fn run_socket_server(sender: std::sync::mpsc::Sender<McpCommand>, stop: Arc<AtomicBool>) {
     use std::os::unix::net::UnixListener;
 
     let path = socket_path();
@@ -119,7 +116,10 @@ pub fn run_socket_server(
                     stream.set_nonblocking(false).ok();
                     let reader = BufReader::new(match stream.try_clone() {
                         Ok(s) => s,
-                        Err(_) => { active.store(false, Ordering::Relaxed); return; }
+                        Err(_) => {
+                            active.store(false, Ordering::Relaxed);
+                            return;
+                        }
                     });
                     let mut writer = stream;
                     run_server(reader, &mut writer, &sender);
@@ -738,9 +738,9 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             reply: tx,
         },
 
-        "play"  => McpCommand::Play  { reply: tx },
+        "play" => McpCommand::Play { reply: tx },
         "pause" => McpCommand::Pause { reply: tx },
-        "stop"  => McpCommand::Stop  { reply: tx },
+        "stop" => McpCommand::Stop { reply: tx },
         "seek_playhead" => McpCommand::SeekPlayhead {
             timeline_pos_ns: args["timeline_pos_ns"].as_u64().unwrap_or(0),
             reply: tx,

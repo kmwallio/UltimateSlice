@@ -1,3 +1,4 @@
+use gtk4::glib;
 /// Interactive transform overlay drawn over the program monitor video.
 ///
 /// Shows a bounding box + 4 corner handles representing the clip's scale and position.
@@ -16,6 +17,8 @@ use std::rc::Rc;
 const HANDLE_R: f64 = 7.0;
 /// Hit-test radius for corner handles (a bit larger than drawn for ease of use).
 const HANDLE_HIT: f64 = 16.0;
+/// Inspector crop slider max (pixels).
+const CROP_MAX: i32 = 500;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Handle {
@@ -24,30 +27,47 @@ enum Handle {
     TopRight,
     BottomLeft,
     BottomRight,
+    CropLeft,
+    CropRight,
+    CropTop,
+    CropBottom,
     /// Drag inside the bounding box → pan.
     Pan,
 }
 
 struct DragState {
-    handle:      Handle,
-    start_wx:    f64,
-    start_wy:    f64,
+    handle: Handle,
+    start_wx: f64,
+    start_wy: f64,
     start_scale: f64,
-    start_px:    f64,
-    start_py:    f64,
+    start_px: f64,
+    start_py: f64,
+    start_crop_left: i32,
+    start_crop_right: i32,
+    start_crop_top: i32,
+    start_crop_bottom: i32,
+    proj_w: u32,
+    proj_h: u32,
     /// Video rect cached at drag start.
-    vx: f64, vy: f64, vw: f64, vh: f64,
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
 }
 
 pub struct TransformOverlay {
     pub drawing_area: DrawingArea,
-    scale:         Rc<Cell<f64>>,
-    position_x:    Rc<Cell<f64>>,
-    position_y:    Rc<Cell<f64>>,
-    selected:      Rc<Cell<bool>>,
-    proj_w:        Rc<Cell<u32>>,
-    proj_h:        Rc<Cell<u32>>,
-    picture:       Rc<RefCell<Option<gtk4::Picture>>>,
+    scale: Rc<Cell<f64>>,
+    position_x: Rc<Cell<f64>>,
+    position_y: Rc<Cell<f64>>,
+    crop_left: Rc<Cell<i32>>,
+    crop_right: Rc<Cell<i32>>,
+    crop_top: Rc<Cell<i32>>,
+    crop_bottom: Rc<Cell<i32>>,
+    selected: Rc<Cell<bool>>,
+    proj_w: Rc<Cell<u32>>,
+    proj_h: Rc<Cell<u32>>,
+    picture: Rc<RefCell<Option<gtk4::Picture>>>,
     /// The AspectFrame widget that constrains the canvas area.
     /// When set, the draw/drag functions query its bounds in the DA's coordinate
     /// space via `Widget::compute_bounds()` instead of calling `video_rect()` on
@@ -60,13 +80,21 @@ pub struct TransformOverlay {
 impl TransformOverlay {
     /// Create a new overlay.  `on_change(scale, position_x, position_y)` is
     /// called whenever the user adjusts scale or position via drag.
-    pub fn new(on_change: impl Fn(f64, f64, f64) + 'static) -> Self {
-        let scale      = Rc::new(Cell::new(1.0_f64));
+    pub fn new(
+        on_change: impl Fn(f64, f64, f64) + 'static,
+        on_crop_change: impl Fn(i32, i32, i32, i32) + 'static,
+        on_drag_end: impl Fn() + 'static,
+    ) -> Self {
+        let scale = Rc::new(Cell::new(1.0_f64));
         let position_x = Rc::new(Cell::new(0.0_f64));
         let position_y = Rc::new(Cell::new(0.0_f64));
-        let selected   = Rc::new(Cell::new(false));
-        let proj_w     = Rc::new(Cell::new(1920_u32));
-        let proj_h     = Rc::new(Cell::new(1080_u32));
+        let crop_left = Rc::new(Cell::new(0_i32));
+        let crop_right = Rc::new(Cell::new(0_i32));
+        let crop_top = Rc::new(Cell::new(0_i32));
+        let crop_bottom = Rc::new(Cell::new(0_i32));
+        let selected = Rc::new(Cell::new(false));
+        let proj_w = Rc::new(Cell::new(1920_u32));
+        let proj_h = Rc::new(Cell::new(1080_u32));
         let picture: Rc<RefCell<Option<gtk4::Picture>>> = Rc::new(RefCell::new(None));
         let canvas_widget: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
 
@@ -74,65 +102,94 @@ impl TransformOverlay {
         da.set_hexpand(true);
         da.set_vexpand(true);
         da.set_can_target(true);
-        da.set_focusable(false);
+        da.set_focusable(true);
 
         // Draw function ----------------------------------------------------
         {
-            let scale         = scale.clone();
-            let position_x    = position_x.clone();
-            let position_y    = position_y.clone();
-            let selected      = selected.clone();
-            let proj_w        = proj_w.clone();
-            let proj_h        = proj_h.clone();
-            let picture       = picture.clone();
+            let scale = scale.clone();
+            let position_x = position_x.clone();
+            let position_y = position_y.clone();
+            let crop_left = crop_left.clone();
+            let crop_right = crop_right.clone();
+            let crop_top = crop_top.clone();
+            let crop_bottom = crop_bottom.clone();
+            let selected = selected.clone();
+            let proj_w = proj_w.clone();
+            let proj_h = proj_h.clone();
+            let picture = picture.clone();
             let canvas_widget = canvas_widget.clone();
 
             da.set_draw_func(move |da, cr, ww, wh| {
-                if !selected.get() { return; }
+                if !selected.get() {
+                    return;
+                }
                 // Always use project dimensions for the canvas boundary.
                 // The canvas border represents what will be exported, not the clip's native size.
                 let _ = &picture; // kept for potential future use
-                let (vx, vy, vw, vh) = canvas_video_rect(da, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
+                let (vx, vy, vw, vh) =
+                    canvas_video_rect(da, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
                 // Always draw: dark vignette + canvas border
                 draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
                 // Only draw clip handles when clip doesn't fill the canvas exactly
-                let s  = scale.get();
+                let s = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
-                if (s - 1.0).abs() > 0.02 || px.abs() > 0.02 || py.abs() > 0.02 {
-                    draw_overlay(cr, vx, vy, vw, vh, s, px, py);
-                }
+                draw_overlay(
+                    cr,
+                    vx,
+                    vy,
+                    vw,
+                    vh,
+                    s,
+                    px,
+                    py,
+                    crop_left.get(),
+                    crop_right.get(),
+                    crop_top.get(),
+                    crop_bottom.get(),
+                    proj_w.get(),
+                    proj_h.get(),
+                );
             });
         }
 
         // Drag gesture -----------------------------------------------------
         let drag_state: Rc<RefCell<Option<DragState>>> = Rc::new(RefCell::new(None));
         let on_change = Rc::new(on_change);
+        let on_crop_change = Rc::new(on_crop_change);
 
         let gesture = gtk::GestureDrag::new();
         gesture.set_button(1); // left button only
 
         // drag_begin: hit-test → choose handle
         {
-            let scale         = scale.clone();
-            let position_x    = position_x.clone();
-            let position_y    = position_y.clone();
-            let selected      = selected.clone();
-            let proj_w        = proj_w.clone();
-            let proj_h        = proj_h.clone();
-            let picture       = picture.clone();
-            let drag_state    = drag_state.clone();
-            let da_ref        = da.clone();
+            let scale = scale.clone();
+            let position_x = position_x.clone();
+            let position_y = position_y.clone();
+            let crop_left = crop_left.clone();
+            let crop_right = crop_right.clone();
+            let crop_top = crop_top.clone();
+            let crop_bottom = crop_bottom.clone();
+            let selected = selected.clone();
+            let proj_w = proj_w.clone();
+            let proj_h = proj_h.clone();
+            let picture = picture.clone();
+            let drag_state = drag_state.clone();
+            let da_ref = da.clone();
             let canvas_widget = canvas_widget.clone();
 
             gesture.connect_drag_begin(move |_g, sx, sy| {
-                if !selected.get() { return; }
+                if !selected.get() {
+                    return;
+                }
+                da_ref.grab_focus();
                 let ww = da_ref.width();
                 let wh = da_ref.height();
                 let _ = &picture; // kept for potential future use
-                let (vx, vy, vw, vh) = canvas_video_rect(&da_ref, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
-                let s  = scale.get();
+                let (vx, vy, vw, vh) =
+                    canvas_video_rect(&da_ref, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
+                let s = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
 
@@ -141,12 +198,52 @@ impl TransformOverlay {
                 let cy = vy + vh / 2.0 + py * vh * (1.0 - s) / 2.0;
                 let hw = vw * s / 2.0;
                 let hh = vh * s / 2.0;
+                let left = cx - hw;
+                let right = cx + hw;
+                let top = cy - hh;
+                let bottom = cy + hh;
+                let (crop_l_px, crop_r_px, crop_t_px, crop_b_px) = crop_insets_to_overlay_px(
+                    crop_left.get(),
+                    crop_right.get(),
+                    crop_top.get(),
+                    crop_bottom.get(),
+                    proj_w.get(),
+                    proj_h.get(),
+                    right - left,
+                    bottom - top,
+                );
+                let crop_left_x = left + crop_l_px;
+                let crop_right_x = right - crop_r_px;
+                let crop_top_y = top + crop_t_px;
+                let crop_bottom_y = bottom - crop_b_px;
 
                 let corners = [
-                    (cx - hw, cy - hh, Handle::TopLeft),
-                    (cx + hw, cy - hh, Handle::TopRight),
-                    (cx - hw, cy + hh, Handle::BottomLeft),
-                    (cx + hw, cy + hh, Handle::BottomRight),
+                    (left, top, Handle::TopLeft),
+                    (right, top, Handle::TopRight),
+                    (left, bottom, Handle::BottomLeft),
+                    (right, bottom, Handle::BottomRight),
+                ];
+                let crop_edges = [
+                    (
+                        (crop_left_x + crop_right_x) / 2.0,
+                        crop_top_y,
+                        Handle::CropTop,
+                    ),
+                    (
+                        (crop_left_x + crop_right_x) / 2.0,
+                        crop_bottom_y,
+                        Handle::CropBottom,
+                    ),
+                    (
+                        crop_left_x,
+                        (crop_top_y + crop_bottom_y) / 2.0,
+                        Handle::CropLeft,
+                    ),
+                    (
+                        crop_right_x,
+                        (crop_top_y + crop_bottom_y) / 2.0,
+                        Handle::CropRight,
+                    ),
                 ];
 
                 let mut handle = Handle::None;
@@ -157,10 +254,19 @@ impl TransformOverlay {
                         break;
                     }
                 }
+                if handle == Handle::None {
+                    for (hx, hy, h) in &crop_edges {
+                        let d = ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt();
+                        if d <= HANDLE_HIT {
+                            handle = *h;
+                            break;
+                        }
+                    }
+                }
 
                 if handle == Handle::None {
-                    // Inside the video rect → pan
-                    if sx >= vx && sx <= vx + vw && sy >= vy && sy <= vy + vh {
+                    // Inside the clip bounds → pan
+                    if sx >= left && sx <= right && sy >= top && sy <= bottom {
                         handle = Handle::Pan;
                     }
                 }
@@ -168,9 +274,21 @@ impl TransformOverlay {
                 if handle != Handle::None {
                     *drag_state.borrow_mut() = Some(DragState {
                         handle,
-                        start_wx: sx, start_wy: sy,
-                        start_scale: s, start_px: px, start_py: py,
-                        vx, vy, vw, vh,
+                        start_wx: sx,
+                        start_wy: sy,
+                        start_scale: s,
+                        start_px: px,
+                        start_py: py,
+                        start_crop_left: crop_left.get(),
+                        start_crop_right: crop_right.get(),
+                        start_crop_top: crop_top.get(),
+                        start_crop_bottom: crop_bottom.get(),
+                        proj_w: proj_w.get(),
+                        proj_h: proj_h.get(),
+                        vx,
+                        vy,
+                        vw,
+                        vh,
                     });
                 }
             });
@@ -178,16 +296,23 @@ impl TransformOverlay {
 
         // drag_update: apply delta
         {
-            let scale      = scale.clone();
+            let scale = scale.clone();
             let position_x = position_x.clone();
             let position_y = position_y.clone();
+            let crop_left = crop_left.clone();
+            let crop_right = crop_right.clone();
+            let crop_top = crop_top.clone();
+            let crop_bottom = crop_bottom.clone();
             let drag_state = drag_state.clone();
-            let on_change  = on_change.clone();
-            let da_ref     = da.clone();
+            let on_change = on_change.clone();
+            let on_crop_change = on_crop_change.clone();
+            let da_ref = da.clone();
 
-            gesture.connect_drag_update(move |_g, off_x, off_y| {
+            gesture.connect_drag_update(move |g, off_x, off_y| {
                 let mut ds_borrow = drag_state.borrow_mut();
-                let Some(ref ds) = *ds_borrow else { return; };
+                let Some(ref ds) = *ds_borrow else {
+                    return;
+                };
 
                 match ds.handle {
                     Handle::Pan => {
@@ -213,22 +338,91 @@ impl TransformOverlay {
                         position_y.set(new_py);
                         on_change(scale.get(), new_px, new_py);
                     }
-                    _ => {
+                    Handle::TopLeft
+                    | Handle::TopRight
+                    | Handle::BottomLeft
+                    | Handle::BottomRight => {
                         // Scale: ratio of distance from clip centre to current vs. start.
-                        // Use the same centre formula as draw_overlay for consistency.
-                        let clip_cx = ds.vx + ds.vw / 2.0 + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
-                        let clip_cy = ds.vy + ds.vh / 2.0 + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
-                        let orig = ((ds.start_wx - clip_cx).powi(2)
-                                  + (ds.start_wy - clip_cy).powi(2)).sqrt();
+                        // Holding Shift uses constrained scaling (same X/Y scale factor).
+                        let clip_cx = ds.vx
+                            + ds.vw / 2.0
+                            + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
+                        let clip_cy = ds.vy
+                            + ds.vh / 2.0
+                            + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
                         let cur_x = ds.start_wx + off_x;
                         let cur_y = ds.start_wy + off_y;
-                        let now  = ((cur_x - clip_cx).powi(2)
-                                  + (cur_y - clip_cy).powi(2)).sqrt();
-                        if orig > 1.0 {
-                            let new_s = (ds.start_scale * now / orig).clamp(0.1, 4.0);
+                        let orig_dx = (ds.start_wx - clip_cx).abs();
+                        let orig_dy = (ds.start_wy - clip_cy).abs();
+                        let now_dx = (cur_x - clip_cx).abs();
+                        let now_dy = (cur_y - clip_cy).abs();
+                        if orig_dx > 1.0 || orig_dy > 1.0 {
+                            let sx = if orig_dx > 1.0 { now_dx / orig_dx } else { 1.0 };
+                            let sy = if orig_dy > 1.0 { now_dy / orig_dy } else { 1.0 };
+                            let shift = g
+                                .current_event_state()
+                                .contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                            let factor = if shift { sx.max(sy) } else { (sx + sy) * 0.5 };
+                            let new_s = (ds.start_scale * factor).clamp(0.1, 4.0);
                             scale.set(new_s);
                             on_change(new_s, position_x.get(), position_y.get());
                         }
+                    }
+                    Handle::CropLeft => {
+                        let clip_w = (ds.vw * ds.start_scale).max(1.0);
+                        let delta = (off_x * ds.proj_w as f64 / clip_w).round() as i32;
+                        let mut new_left = ds.start_crop_left + delta;
+                        let max_left = (ds.proj_w as i32 - 2 - crop_right.get()).clamp(0, CROP_MAX);
+                        new_left = new_left.clamp(0, max_left);
+                        crop_left.set(new_left);
+                        on_crop_change(
+                            new_left,
+                            crop_right.get(),
+                            crop_top.get(),
+                            crop_bottom.get(),
+                        );
+                    }
+                    Handle::CropRight => {
+                        let clip_w = (ds.vw * ds.start_scale).max(1.0);
+                        let delta = (-off_x * ds.proj_w as f64 / clip_w).round() as i32;
+                        let mut new_right = ds.start_crop_right + delta;
+                        let max_right = (ds.proj_w as i32 - 2 - crop_left.get()).clamp(0, CROP_MAX);
+                        new_right = new_right.clamp(0, max_right);
+                        crop_right.set(new_right);
+                        on_crop_change(
+                            crop_left.get(),
+                            new_right,
+                            crop_top.get(),
+                            crop_bottom.get(),
+                        );
+                    }
+                    Handle::CropTop => {
+                        let clip_h = (ds.vh * ds.start_scale).max(1.0);
+                        let delta = (off_y * ds.proj_h as f64 / clip_h).round() as i32;
+                        let mut new_top = ds.start_crop_top + delta;
+                        let max_top = (ds.proj_h as i32 - 2 - crop_bottom.get()).clamp(0, CROP_MAX);
+                        new_top = new_top.clamp(0, max_top);
+                        crop_top.set(new_top);
+                        on_crop_change(
+                            crop_left.get(),
+                            crop_right.get(),
+                            new_top,
+                            crop_bottom.get(),
+                        );
+                    }
+                    Handle::CropBottom => {
+                        let clip_h = (ds.vh * ds.start_scale).max(1.0);
+                        let delta = (-off_y * ds.proj_h as f64 / clip_h).round() as i32;
+                        let mut new_bottom = ds.start_crop_bottom + delta;
+                        let max_bottom = (ds.proj_h as i32 - 2 - crop_top.get()).clamp(0, CROP_MAX);
+                        new_bottom = new_bottom.clamp(0, max_bottom);
+                        crop_bottom.set(new_bottom);
+                        on_crop_change(
+                            crop_left.get(),
+                            crop_right.get(),
+                            crop_top.get(),
+                            new_bottom,
+                        );
                     }
                     Handle::None => {}
                 }
@@ -237,17 +431,93 @@ impl TransformOverlay {
             });
         }
 
-        // drag_end: clear state
+        // drag_end: clear state and notify for a final preview refresh.
         {
             let drag_state = drag_state.clone();
+            let on_drag_end = Rc::new(on_drag_end);
             gesture.connect_drag_end(move |_g, _ox, _oy| {
                 *drag_state.borrow_mut() = None;
+                on_drag_end();
             });
         }
 
         da.add_controller(gesture);
+        {
+            let scale = scale.clone();
+            let position_x = position_x.clone();
+            let position_y = position_y.clone();
+            let selected = selected.clone();
+            let on_change = on_change.clone();
+            let da_ref = da.clone();
+            let key_ctrl = gtk::EventControllerKey::new();
+            key_ctrl.connect_key_pressed(move |_, key, _, mods| {
+                use gtk::gdk::{Key, ModifierType};
+                if !selected.get() {
+                    return glib::Propagation::Proceed;
+                }
+                let shift = mods.contains(ModifierType::SHIFT_MASK);
+                let mut handled = false;
+                match key {
+                    Key::Left => {
+                        position_x.set(
+                            (position_x.get() - if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                        );
+                        handled = true;
+                    }
+                    Key::Right => {
+                        position_x.set(
+                            (position_x.get() + if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                        );
+                        handled = true;
+                    }
+                    Key::Up => {
+                        position_y.set(
+                            (position_y.get() - if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                        );
+                        handled = true;
+                    }
+                    Key::Down => {
+                        position_y.set(
+                            (position_y.get() + if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                        );
+                        handled = true;
+                    }
+                    Key::plus | Key::equal | Key::KP_Add => {
+                        scale.set((scale.get() + if shift { 0.10 } else { 0.05 }).clamp(0.1, 4.0));
+                        handled = true;
+                    }
+                    Key::minus | Key::underscore | Key::KP_Subtract => {
+                        scale.set((scale.get() - if shift { 0.10 } else { 0.05 }).clamp(0.1, 4.0));
+                        handled = true;
+                    }
+                    _ => {}
+                }
+                if handled {
+                    on_change(scale.get(), position_x.get(), position_y.get());
+                    da_ref.queue_draw();
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+            da.add_controller(key_ctrl);
+        }
 
-        TransformOverlay { drawing_area: da, scale, position_x, position_y, selected, proj_w, proj_h, picture, canvas_widget }
+        TransformOverlay {
+            drawing_area: da,
+            scale,
+            position_x,
+            position_y,
+            crop_left,
+            crop_right,
+            crop_top,
+            crop_bottom,
+            selected,
+            proj_w,
+            proj_h,
+            picture,
+            canvas_widget,
+        }
     }
 
     /// Give the overlay access to the AspectFrame that constrains the canvas area.
@@ -271,6 +541,15 @@ impl TransformOverlay {
         self.drawing_area.queue_draw();
     }
 
+    /// Update overlay crop values (in source pixels).
+    pub fn set_crop(&self, cl: i32, cr: i32, ct: i32, cb: i32) {
+        self.crop_left.set(cl.clamp(0, CROP_MAX));
+        self.crop_right.set(cr.clamp(0, CROP_MAX));
+        self.crop_top.set(ct.clamp(0, CROP_MAX));
+        self.crop_bottom.set(cb.clamp(0, CROP_MAX));
+        self.drawing_area.queue_draw();
+    }
+
     /// Show or hide handles (true when a clip is selected).
     pub fn set_clip_selected(&self, selected: bool) {
         self.selected.set(selected);
@@ -289,7 +568,11 @@ impl TransformOverlay {
 /// Query the actual paintable intrinsic dimensions from the GtkPicture.
 /// Kept for future use if re-alignment with the paintable is needed.
 #[allow(dead_code)]
-fn paintable_dims(picture: &Rc<RefCell<Option<gtk4::Picture>>>, proj_w: u32, proj_h: u32) -> (u32, u32) {
+fn paintable_dims(
+    picture: &Rc<RefCell<Option<gtk4::Picture>>>,
+    proj_w: u32,
+    proj_h: u32,
+) -> (u32, u32) {
     if let Some(ref p) = *picture.borrow() {
         if let Some(paintable) = p.paintable() {
             let iw = paintable.intrinsic_width();
@@ -314,8 +597,10 @@ fn paintable_dims(picture: &Rc<RefCell<Option<gtk4::Picture>>>, proj_w: u32, pro
 fn canvas_video_rect(
     da: &DrawingArea,
     canvas_widget: &Rc<RefCell<Option<gtk4::Widget>>>,
-    ww: i32, wh: i32,
-    proj_w: u32, proj_h: u32,
+    ww: i32,
+    wh: i32,
+    proj_w: u32,
+    proj_h: u32,
 ) -> (f64, f64, f64, f64) {
     if let Some(ref cw) = *canvas_widget.borrow() {
         if let Some(bounds) = cw.compute_bounds(da) {
@@ -371,7 +656,15 @@ fn video_rect(ww: i32, wh: i32, pw: u32, ph: u32) -> (f64, f64, f64, f64) {
 
 /// Darken the areas outside the canvas rect so it's immediately obvious what
 /// is in-frame (will be exported) vs. out-of-frame.
-fn draw_outside_vignette(cr: &gtk4::cairo::Context, ww: f64, wh: f64, vx: f64, vy: f64, vw: f64, vh: f64) {
+fn draw_outside_vignette(
+    cr: &gtk4::cairo::Context,
+    ww: f64,
+    wh: f64,
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
+) {
     cr.save().ok();
     cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
     // Fill the four rects surrounding the canvas rect
@@ -421,9 +714,9 @@ fn draw_frame_border(cr: &gtk4::cairo::Context, vx: f64, vy: f64, vw: f64, vh: f
     // Corner tick marks (small L-shapes at each corner, 10 px long)
     let tick = 10.0_f64;
     let corners = [
-        (vx, vy, tick, 0.0, 0.0, tick),          // top-left
-        (vx + vw, vy, -tick, 0.0, 0.0, tick),    // top-right
-        (vx, vy + vh, tick, 0.0, 0.0, -tick),    // bottom-left
+        (vx, vy, tick, 0.0, 0.0, tick),             // top-left
+        (vx + vw, vy, -tick, 0.0, 0.0, tick),       // top-right
+        (vx, vy + vh, tick, 0.0, 0.0, -tick),       // bottom-left
         (vx + vw, vy + vh, -tick, 0.0, 0.0, -tick), // bottom-right
     ];
     cr.save().ok();
@@ -443,10 +736,40 @@ fn draw_frame_border(cr: &gtk4::cairo::Context, vx: f64, vy: f64, vw: f64, vh: f
 }
 
 /// Draw the clip bounding box, corner scale handles, center pan dot, and scale label.
+fn crop_insets_to_overlay_px(
+    crop_left: i32,
+    crop_right: i32,
+    crop_top: i32,
+    crop_bottom: i32,
+    proj_w: u32,
+    proj_h: u32,
+    clip_w: f64,
+    clip_h: f64,
+) -> (f64, f64, f64, f64) {
+    let pw = proj_w.max(1) as f64;
+    let ph = proj_h.max(1) as f64;
+    let left = (crop_left.max(0) as f64 / pw) * clip_w;
+    let right = (crop_right.max(0) as f64 / pw) * clip_w;
+    let top = (crop_top.max(0) as f64 / ph) * clip_h;
+    let bottom = (crop_bottom.max(0) as f64 / ph) * clip_h;
+    (left, right, top, bottom)
+}
+
 fn draw_overlay(
     cr: &gtk4::cairo::Context,
-    vx: f64, vy: f64, vw: f64, vh: f64,
-    scale: f64, pos_x: f64, pos_y: f64,
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
+    scale: f64,
+    pos_x: f64,
+    pos_y: f64,
+    crop_left: i32,
+    crop_right: i32,
+    crop_top: i32,
+    crop_bottom: i32,
+    proj_w: u32,
+    proj_h: u32,
 ) {
     // Clip centre and half-extents in widget coords.
     // GStreamer's videobox pads/crops (1-scale)*pw*(1+pos_x)/2 on the left, so the
@@ -457,10 +780,24 @@ fn draw_overlay(
     let hw = vw * scale / 2.0;
     let hh = vh * scale / 2.0;
 
-    let left   = cx - hw;
-    let right  = cx + hw;
-    let top    = cy - hh;
+    let left = cx - hw;
+    let right = cx + hw;
+    let top = cy - hh;
     let bottom = cy + hh;
+    let (crop_l_px, crop_r_px, crop_t_px, crop_b_px) = crop_insets_to_overlay_px(
+        crop_left,
+        crop_right,
+        crop_top,
+        crop_bottom,
+        proj_w,
+        proj_h,
+        right - left,
+        bottom - top,
+    );
+    let crop_left_x = left + crop_l_px;
+    let crop_right_x = right - crop_r_px;
+    let crop_top_y = top + crop_t_px;
+    let crop_bottom_y = bottom - crop_b_px;
 
     // Clip bounding box (white dashed)
     cr.save().ok();
@@ -483,6 +820,35 @@ fn draw_overlay(
         cr.restore().ok();
     }
 
+    // Crop rectangle and edge midpoint handles
+    cr.save().ok();
+    cr.set_source_rgba(0.3, 0.95, 0.45, 0.95);
+    cr.set_line_width(1.5);
+    cr.set_dash(&[5.0, 3.0], 0.0);
+    cr.rectangle(
+        crop_left_x,
+        crop_top_y,
+        (crop_right_x - crop_left_x).max(1.0),
+        (crop_bottom_y - crop_top_y).max(1.0),
+    );
+    cr.stroke().ok();
+    cr.restore().ok();
+    for (hx, hy) in &[
+        ((crop_left_x + crop_right_x) / 2.0, crop_top_y),
+        ((crop_left_x + crop_right_x) / 2.0, crop_bottom_y),
+        (crop_left_x, (crop_top_y + crop_bottom_y) / 2.0),
+        (crop_right_x, (crop_top_y + crop_bottom_y) / 2.0),
+    ] {
+        cr.save().ok();
+        cr.rectangle(*hx - 6.0, *hy - 6.0, 12.0, 12.0);
+        cr.set_source_rgba(0.3, 0.95, 0.45, 0.95);
+        cr.fill_preserve().ok();
+        cr.set_source_rgba(0.0, 0.35, 0.1, 1.0);
+        cr.set_line_width(1.2);
+        cr.stroke().ok();
+        cr.restore().ok();
+    }
+
     // Centre pan dot
     cr.save().ok();
     cr.arc(cx, cy, 4.5, 0.0, std::f64::consts::TAU);
@@ -495,7 +861,11 @@ fn draw_overlay(
 
     // Scale label near top-right of the video frame
     cr.save().ok();
-    cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
+    cr.select_font_face(
+        "Sans",
+        gtk4::cairo::FontSlant::Normal,
+        gtk4::cairo::FontWeight::Bold,
+    );
     cr.set_font_size(11.0);
     let label = format!("{scale:.2}×");
     let te = match cr.text_extents(&label) {

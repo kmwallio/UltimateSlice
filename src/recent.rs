@@ -14,15 +14,24 @@ fn config_path() -> Option<PathBuf> {
 
 /// Load the recent projects list (most-recent first). Returns an empty list on any error.
 pub fn load() -> Vec<String> {
-    let path = match config_path() { Some(p) => p, None => return Vec::new() };
-    let text = match std::fs::read_to_string(&path) { Ok(t) => t, Err(_) => return Vec::new() };
+    let path = match config_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
     serde_json::from_str::<Vec<String>>(&text).unwrap_or_default()
 }
 
 /// Push `path` to the front of the recent list and persist it.
 /// Duplicate entries are removed; the list is capped at MAX_RECENT.
 pub fn push(path: &str) {
-    let config_path = match config_path() { Some(p) => p, None => return };
+    let config_path = match config_path() {
+        Some(p) => p,
+        None => return,
+    };
     let mut entries = load();
     entries.retain(|p| p != path);
     entries.insert(0, path.to_string());

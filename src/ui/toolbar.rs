@@ -1,14 +1,16 @@
-use gtk4::prelude::*;
-use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
+use crate::fcpxml;
+use crate::media::export::{
+    export_project, AudioCodec, Container, ExportOptions, ExportProgress, VideoCodec,
+};
+use crate::model::project::{FrameRate, Project};
+use crate::recent;
+use crate::ui::timeline::{ActiveTool, TimelineState};
 use gio;
 use glib;
+use gtk4::prelude::*;
+use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::model::project::{Project, FrameRate};
-use crate::fcpxml;
-use crate::media::export::{export_project, ExportProgress, ExportOptions, VideoCodec, AudioCodec, Container};
-use crate::ui::timeline::{TimelineState, ActiveTool};
-use crate::recent;
 
 /// Build the main `HeaderBar` toolbar.
 pub fn build_toolbar(
@@ -78,7 +80,10 @@ pub fn build_toolbar(
                         std::thread::spawn(move || {
                             let result = std::fs::read_to_string(&path_bg)
                                 .map_err(|e| format!("Failed to read file: {e}"))
-                                .and_then(|xml| fcpxml::parser::parse_fcpxml(&xml).map_err(|e| format!("FCPXML parse error: {e}")));
+                                .and_then(|xml| {
+                                    fcpxml::parser::parse_fcpxml(&xml)
+                                        .map_err(|e| format!("FCPXML parse error: {e}"))
+                                });
                             let _ = tx.send(result);
                         });
                         let project = project.clone();
@@ -109,7 +114,9 @@ pub fn build_toolbar(
                                     timeline_state_cb.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
                                 }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    glib::ControlFlow::Continue
+                                }
                                 Err(_) => {
                                     timeline_state_cb.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
@@ -137,8 +144,10 @@ pub fn build_toolbar(
         // so the list reflects any projects opened during this session.
         let pop = gtk::Popover::new();
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        vbox.set_margin_start(4); vbox.set_margin_end(4);
-        vbox.set_margin_top(4);   vbox.set_margin_bottom(4);
+        vbox.set_margin_start(4);
+        vbox.set_margin_end(4);
+        vbox.set_margin_top(4);
+        vbox.set_margin_bottom(4);
         pop.set_child(Some(&vbox));
         btn_recent.set_popover(Some(&pop));
 
@@ -153,13 +162,16 @@ pub fn build_toolbar(
             if entries.is_empty() {
                 let empty = gtk::Label::new(Some("No recent projects"));
                 empty.add_css_class("dim-label");
-                empty.set_margin_start(8); empty.set_margin_end(8);
-                empty.set_margin_top(4);   empty.set_margin_bottom(4);
+                empty.set_margin_start(8);
+                empty.set_margin_end(8);
+                empty.set_margin_top(4);
+                empty.set_margin_bottom(4);
                 vbox_ref.append(&empty);
             } else {
                 for path_str in &entries {
                     let display = std::path::Path::new(path_str)
-                        .file_name().and_then(|n| n.to_str())
+                        .file_name()
+                        .and_then(|n| n.to_str())
                         .unwrap_or(path_str)
                         .to_string();
                     let row = gtk::Button::with_label(&display);
@@ -174,14 +186,19 @@ pub fn build_toolbar(
                     let on_project_changed = on_project_changed.clone();
                     let pop_weak = pop.downgrade();
                     row.connect_clicked(move |_| {
-                        if let Some(pop) = pop_weak.upgrade() { pop.popdown(); }
+                        if let Some(pop) = pop_weak.upgrade() {
+                            pop.popdown();
+                        }
                         // Parse FCPXML on a background thread to avoid blocking the UI.
                         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
                         let path_bg = path_owned.clone();
                         std::thread::spawn(move || {
                             let result = std::fs::read_to_string(&path_bg)
                                 .map_err(|e| format!("Failed to open recent project: {e}"))
-                                .and_then(|xml| fcpxml::parser::parse_fcpxml(&xml).map_err(|e| format!("FCPXML parse error: {e}")));
+                                .and_then(|xml| {
+                                    fcpxml::parser::parse_fcpxml(&xml)
+                                        .map_err(|e| format!("FCPXML parse error: {e}"))
+                                });
                             let _ = tx.send(result);
                         });
                         let project = project.clone();
@@ -213,7 +230,9 @@ pub fn build_toolbar(
                                     timeline_state.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
                                 }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    glib::ControlFlow::Continue
+                                }
                                 Err(_) => {
                                     timeline_state.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
@@ -256,7 +275,9 @@ pub fn build_toolbar(
                                     eprintln!("Save error: {e}");
                                 } else {
                                     println!("Saved to {}", path.display());
-                                    if let Some(p) = path.to_str() { recent::push(p); }
+                                    if let Some(p) = path.to_str() {
+                                        recent::push(p);
+                                    }
                                 }
                             }
                             Err(e) => eprintln!("FCPXML write error: {e}"),
@@ -286,9 +307,12 @@ pub fn build_toolbar(
             dialog.set_modal(true);
 
             let grid = gtk::Grid::new();
-            grid.set_margin_start(16); grid.set_margin_end(16);
-            grid.set_margin_top(16);  grid.set_margin_bottom(16);
-            grid.set_row_spacing(10); grid.set_column_spacing(12);
+            grid.set_margin_start(16);
+            grid.set_margin_end(16);
+            grid.set_margin_top(16);
+            grid.set_margin_bottom(16);
+            grid.set_row_spacing(10);
+            grid.set_column_spacing(12);
 
             // Resolution preset
             let res_label = gtk::Label::new(Some("Resolution:"));
@@ -304,11 +328,11 @@ pub fn build_toolbar(
             let res_idx = match (proj.width, proj.height) {
                 (1920, 1080) => 0,
                 (3840, 2160) => 1,
-                (1280, 720)  => 2,
-                (720, 480)   => 3,
+                (1280, 720) => 2,
+                (720, 480) => 3,
                 (1080, 1920) => 4,
                 (1080, 1080) => 5,
-                _             => 0,
+                _ => 0,
             };
             res_combo.set_selected(res_idx);
             grid.attach(&res_label, 0, 0, 1, 1);
@@ -357,13 +381,34 @@ pub fn build_toolbar(
                         _ => (1920, 1080),
                     };
                     let fr = match fps_combo.selected() {
-                        0 => FrameRate { numerator: 24000, denominator: 1001 },
-                        1 => FrameRate { numerator: 24, denominator: 1 },
-                        2 => FrameRate { numerator: 25, denominator: 1 },
-                        3 => FrameRate { numerator: 30000, denominator: 1001 },
-                        4 => FrameRate { numerator: 30, denominator: 1 },
-                        5 => FrameRate { numerator: 60, denominator: 1 },
-                        _ => FrameRate { numerator: 24, denominator: 1 },
+                        0 => FrameRate {
+                            numerator: 24000,
+                            denominator: 1001,
+                        },
+                        1 => FrameRate {
+                            numerator: 24,
+                            denominator: 1,
+                        },
+                        2 => FrameRate {
+                            numerator: 25,
+                            denominator: 1,
+                        },
+                        3 => FrameRate {
+                            numerator: 30000,
+                            denominator: 1001,
+                        },
+                        4 => FrameRate {
+                            numerator: 30,
+                            denominator: 1,
+                        },
+                        5 => FrameRate {
+                            numerator: 60,
+                            denominator: 1,
+                        },
+                        _ => FrameRate {
+                            numerator: 24,
+                            denominator: 1,
+                        },
                     };
                     let mut proj = project.borrow_mut();
                     proj.width = w;
@@ -400,14 +445,23 @@ pub fn build_toolbar(
             opt_dialog.set_modal(true);
 
             let grid = gtk::Grid::new();
-            grid.set_margin_start(16); grid.set_margin_end(16);
-            grid.set_margin_top(16);  grid.set_margin_bottom(16);
-            grid.set_row_spacing(10); grid.set_column_spacing(12);
+            grid.set_margin_start(16);
+            grid.set_margin_end(16);
+            grid.set_margin_top(16);
+            grid.set_margin_bottom(16);
+            grid.set_row_spacing(10);
+            grid.set_column_spacing(12);
 
             // Video codec
             let vc_label = gtk::Label::new(Some("Video Codec:"));
             vc_label.set_halign(gtk::Align::End);
-            let vc_combo = gtk::DropDown::from_strings(&["H.264 (libx264)", "H.265 / HEVC (libx265)", "VP9 (libvpx-vp9)", "ProRes (prores_ks)", "AV1 (libaom-av1)"]);
+            let vc_combo = gtk::DropDown::from_strings(&[
+                "H.264 (libx264)",
+                "H.265 / HEVC (libx265)",
+                "VP9 (libvpx-vp9)",
+                "ProRes (prores_ks)",
+                "AV1 (libaom-av1)",
+            ]);
             vc_combo.set_selected(0);
             grid.attach(&vc_label, 0, 0, 1, 1);
             grid.attach(&vc_combo, 1, 0, 1, 1);
@@ -415,7 +469,12 @@ pub fn build_toolbar(
             // Container
             let ct_label = gtk::Label::new(Some("Container:"));
             ct_label.set_halign(gtk::Align::End);
-            let ct_combo = gtk::DropDown::from_strings(&["MP4 (.mp4)", "QuickTime (.mov)", "WebM (.webm)", "Matroska (.mkv)"]);
+            let ct_combo = gtk::DropDown::from_strings(&[
+                "MP4 (.mp4)",
+                "QuickTime (.mov)",
+                "WebM (.webm)",
+                "Matroska (.mkv)",
+            ]);
             ct_combo.set_selected(0);
             grid.attach(&ct_label, 0, 1, 1, 1);
             grid.attach(&ct_combo, 1, 1, 1, 1);
@@ -448,12 +507,17 @@ pub fn build_toolbar(
             crf_box.append(&crf_slider);
             crf_box.append(&crf_hint);
             grid.attach(&crf_label, 0, 3, 1, 1);
-            grid.attach(&crf_box,   1, 3, 1, 1);
+            grid.attach(&crf_box, 1, 3, 1, 1);
 
             // Audio codec
             let ac_label = gtk::Label::new(Some("Audio Codec:"));
             ac_label.set_halign(gtk::Align::End);
-            let ac_combo = gtk::DropDown::from_strings(&["AAC", "Opus", "FLAC (lossless)", "PCM (uncompressed)"]);
+            let ac_combo = gtk::DropDown::from_strings(&[
+                "AAC",
+                "Opus",
+                "FLAC (lossless)",
+                "PCM (uncompressed)",
+            ]);
             ac_combo.set_selected(0);
             grid.attach(&ac_label, 0, 4, 1, 1);
             grid.attach(&ac_combo, 1, 4, 1, 1);
@@ -473,7 +537,10 @@ pub fn build_toolbar(
 
             let project = project.clone();
             opt_dialog.connect_response(move |d, resp| {
-                if resp != gtk::ResponseType::Accept { d.close(); return; }
+                if resp != gtk::ResponseType::Accept {
+                    d.close();
+                    return;
+                }
 
                 let video_codec = match vc_combo.selected() {
                     0 => VideoCodec::H264,
@@ -509,7 +576,15 @@ pub fn build_toolbar(
                 let audio_bitrate_kbps = ab_entry.text().parse::<u32>().unwrap_or(192);
                 let ext = container.extension();
 
-                let options = ExportOptions { video_codec, container, output_width: out_w, output_height: out_h, crf, audio_codec, audio_bitrate_kbps };
+                let options = ExportOptions {
+                    video_codec,
+                    container,
+                    output_width: out_w,
+                    output_height: out_h,
+                    crf,
+                    audio_codec,
+                    audio_bitrate_kbps,
+                };
                 d.close();
 
                 // Now open file-chooser for the output path
@@ -530,7 +605,9 @@ pub fn build_toolbar(
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
-                                if let Err(e) = export_project(&proj, &output_clone, opts, tx.clone()) {
+                                if let Err(e) =
+                                    export_project(&proj, &output_clone, opts, tx.clone())
+                                {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
                                 }
                             });
@@ -541,8 +618,10 @@ pub fn build_toolbar(
                                 .default_width(380)
                                 .build();
                             let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-                            vbox.set_margin_start(20); vbox.set_margin_end(20);
-                            vbox.set_margin_top(20);   vbox.set_margin_bottom(20);
+                            vbox.set_margin_start(20);
+                            vbox.set_margin_end(20);
+                            vbox.set_margin_top(20);
+                            vbox.set_margin_bottom(20);
 
                             let status_label = gtk::Label::new(Some("Preparing export…"));
                             status_label.set_halign(gtk::Align::Start);
@@ -562,34 +641,41 @@ pub fn build_toolbar(
 
                             {
                                 let pd = progress_dialog.clone();
-                                close_btn.connect_clicked(move |_| { pd.close(); });
+                                close_btn.connect_clicked(move |_| {
+                                    pd.close();
+                                });
                             }
 
-                            glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-                                while let Ok(msg) = rx.try_recv() {
-                                    match msg {
-                                        ExportProgress::Progress(p) => {
-                                            progress_bar.set_fraction(p);
-                                            progress_bar.set_text(Some(&format!("{:.0}%", p * 100.0)));
-                                            status_label.set_text(&format!("Exporting to {output}…"));
-                                        }
-                                        ExportProgress::Done => {
-                                            progress_bar.set_fraction(1.0);
-                                            progress_bar.set_text(Some("Done!"));
-                                            status_label.set_text("Export complete.");
-                                            close_btn.set_label("Close");
-                                            return glib::ControlFlow::Break;
-                                        }
-                                        ExportProgress::Error(e) => {
-                                            status_label.set_text(&format!("Error: {e}"));
-                                            close_btn.set_label("Close");
-                                            eprintln!("Export error: {e}");
-                                            return glib::ControlFlow::Break;
+                            glib::timeout_add_local(
+                                std::time::Duration::from_millis(200),
+                                move || {
+                                    while let Ok(msg) = rx.try_recv() {
+                                        match msg {
+                                            ExportProgress::Progress(p) => {
+                                                progress_bar.set_fraction(p);
+                                                progress_bar
+                                                    .set_text(Some(&format!("{:.0}%", p * 100.0)));
+                                                status_label
+                                                    .set_text(&format!("Exporting to {output}…"));
+                                            }
+                                            ExportProgress::Done => {
+                                                progress_bar.set_fraction(1.0);
+                                                progress_bar.set_text(Some("Done!"));
+                                                status_label.set_text("Export complete.");
+                                                close_btn.set_label("Close");
+                                                return glib::ControlFlow::Break;
+                                            }
+                                            ExportProgress::Error(e) => {
+                                                status_label.set_text(&format!("Error: {e}"));
+                                                close_btn.set_label("Close");
+                                                eprintln!("Export error: {e}");
+                                                return glib::ControlFlow::Break;
+                                            }
                                         }
                                     }
-                                }
-                                glib::ControlFlow::Continue
-                            });
+                                    glib::ControlFlow::Continue
+                                },
+                            );
                         }
                     }
                 });

@@ -135,6 +135,7 @@ struct VideoSlot {
     videobalance: Option<gst::Element>,
     gaussianblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
+    videobox_crop_alpha: Option<gst::Element>,
     videoflip_rotate: Option<gst::Element>,
     videoflip_flip: Option<gst::Element>,
     textoverlay: Option<gst::Element>,
@@ -524,11 +525,16 @@ impl ProgramPlayer {
                             log::debug!(
                                 "compositor src: pts={} wh={}x{} hash={:x}",
                                 buffer.pts().map(|p| p.nseconds()).unwrap_or(0),
-                                w, h,
+                                w,
+                                h,
                                 frame_hash_u64(&data),
                             );
                             if let Ok(mut frame) = lcf.lock() {
-                                *frame = Some(ScopeFrame { data, width: w, height: h });
+                                *frame = Some(ScopeFrame {
+                                    data,
+                                    width: w,
+                                    height: h,
+                                });
                                 cseq.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -720,13 +726,17 @@ impl ProgramPlayer {
             }
             let after_reseek_seq = self.scope_frame_seq.load(Ordering::Relaxed);
             let deadline = Instant::now() + Duration::from_millis(800);
-            while self.scope_frame_seq.load(Ordering::Relaxed) <= start_seq && Instant::now() < deadline {
+            while self.scope_frame_seq.load(Ordering::Relaxed) <= start_seq
+                && Instant::now() < deadline
+            {
                 std::thread::sleep(Duration::from_millis(10));
             }
             let end_seq = self.scope_frame_seq.load(Ordering::Relaxed);
             log::info!(
                 "export_displayed_frame: after_reseek_seq={} end_seq={} seq_changed={}",
-                after_reseek_seq, end_seq, end_seq > start_seq
+                after_reseek_seq,
+                end_seq,
+                end_seq > start_seq
             );
             self.write_scope_frame_ppm(path)
         })();
@@ -748,7 +758,11 @@ impl ProgramPlayer {
         let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
         log::info!(
             "prepare_export: start_seq={} slots={} current_idx={:?} state={:?} timeline_ns={}",
-            start_seq, self.slots.len(), self.current_idx, self.state, self.timeline_pos_ns
+            start_seq,
+            self.slots.len(),
+            self.current_idx,
+            self.state,
+            self.timeline_pos_ns
         );
         let left_playing = if self.current_idx.is_some() && self.state != PlayerState::Playing {
             self.reseek_all_slots_for_export()
@@ -855,7 +869,10 @@ impl ProgramPlayer {
     pub fn pipeline_state_debug(&self) -> String {
         let (_, pipe_cur, pipe_pend) = self.pipeline.state(gst::ClockTime::from_mseconds(10));
         let (_, comp_cur, comp_pend) = self.compositor.state(gst::ClockTime::from_mseconds(10));
-        format!("pipe={:?}/{:?} comp={:?}/{:?}", pipe_cur, pipe_pend, comp_cur, comp_pend)
+        format!(
+            "pipe={:?}/{:?} comp={:?}/{:?}",
+            pipe_cur, pipe_pend, comp_cur, comp_pend
+        )
     }
 
     pub fn state(&self) -> &PlayerState {
@@ -1201,9 +1218,9 @@ impl ProgramPlayer {
         rotate: i32,
         flip_h: bool,
         flip_v: bool,
-        _scale: f64,
-        _position_x: f64,
-        _position_y: f64,
+        scale: f64,
+        position_x: f64,
+        position_y: f64,
     ) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             Self::apply_transform_to_slot(
@@ -1216,6 +1233,17 @@ impl ProgramPlayer {
                 flip_h,
                 flip_v,
             );
+            if let Some(ref pad) = slot.compositor_pad {
+                Self::apply_zoom_to_slot(
+                    slot,
+                    pad,
+                    scale,
+                    position_x,
+                    position_y,
+                    self.project_width,
+                    self.project_height,
+                );
+            }
         }
     }
 
@@ -1311,8 +1339,10 @@ impl ProgramPlayer {
                 clip.position_x = position_x;
                 clip.position_y = position_y;
             }
-            if self.current_idx == Some(i) {
-                self.set_transform(
+            // Apply to the slot for this clip (any track, not just top).
+            if let Some(slot) = self.slot_for_clip(i) {
+                Self::apply_transform_to_slot(
+                    slot,
                     crop_left,
                     crop_right,
                     crop_top,
@@ -1320,13 +1350,21 @@ impl ProgramPlayer {
                     rotate,
                     flip_h,
                     flip_v,
-                    scale,
-                    position_x,
-                    position_y,
                 );
-                if self.state != PlayerState::Playing {
-                    self.reseek_slot_for_current();
+                if let Some(ref pad) = slot.compositor_pad {
+                    Self::apply_zoom_to_slot(
+                        slot,
+                        pad,
+                        scale,
+                        position_x,
+                        position_y,
+                        self.project_width,
+                        self.project_height,
+                    );
                 }
+            }
+            if self.state != PlayerState::Playing {
+                self.reseek_slot_by_clip_idx(i);
             }
         }
     }
@@ -1473,7 +1511,11 @@ impl ProgramPlayer {
     /// main-thread blocking time (which prevents gtk4paintablesink from completing
     /// its preroll, causing a deadlock-like stall).
     fn wait_for_paused_preroll(&self) {
-        let base_ms = if self.state == PlayerState::Playing { 150 } else { 500 };
+        let base_ms = if self.state == PlayerState::Playing {
+            150
+        } else {
+            500
+        };
         // Scale down per-decoder timeout when many slots are active to keep
         // total blocking time under ~600ms. With 3+ heavy decode tracks the
         // main thread must return to the GTK main loop promptly so the display
@@ -1512,20 +1554,34 @@ impl ProgramPlayer {
     fn wait_for_compositor_arrivals(&self, baseline: &[u64], timeout_ms: u64) -> bool {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
-            let all_arrived = self.slots.iter().zip(baseline.iter()).all(|(slot, &base)| {
-                slot.comp_arrival_seq.load(Ordering::Relaxed) > base
-            });
+            let all_arrived = self
+                .slots
+                .iter()
+                .zip(baseline.iter())
+                .all(|(slot, &base)| slot.comp_arrival_seq.load(Ordering::Relaxed) > base);
             if all_arrived {
-                log::info!("wait_for_compositor_arrivals: all {} slots arrived", self.slots.len());
+                log::info!(
+                    "wait_for_compositor_arrivals: all {} slots arrived",
+                    self.slots.len()
+                );
                 return true;
             }
             if Instant::now() >= deadline {
-                let pending: Vec<usize> = self.slots.iter().zip(baseline.iter())
+                let pending: Vec<usize> = self
+                    .slots
+                    .iter()
+                    .zip(baseline.iter())
                     .enumerate()
-                    .filter(|(_, (slot, &base))| slot.comp_arrival_seq.load(Ordering::Relaxed) <= base)
+                    .filter(|(_, (slot, &base))| {
+                        slot.comp_arrival_seq.load(Ordering::Relaxed) <= base
+                    })
                     .map(|(i, _)| i)
                     .collect();
-                log::warn!("wait_for_compositor_arrivals: timeout {}ms, pending slots={:?}", timeout_ms, pending);
+                log::warn!(
+                    "wait_for_compositor_arrivals: timeout {}ms, pending slots={:?}",
+                    timeout_ms,
+                    pending
+                );
                 return false;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1556,7 +1612,10 @@ impl ProgramPlayer {
         let (res, cur, pend) = self.pipeline.state(gst::ClockTime::from_mseconds(10));
         log::info!(
             "complete_playing_pulse: state_result={:?} cur={:?} pend={:?} seq={}",
-            res, cur, pend, self.scope_frame_seq.load(Ordering::Relaxed)
+            res,
+            cur,
+            pend,
+            self.scope_frame_seq.load(Ordering::Relaxed)
         );
         let _ = self.pipeline.set_state(gst::State::Paused);
         self.wait_for_paused_preroll();
@@ -1582,11 +1641,18 @@ impl ProgramPlayer {
         let timeout_ms = if self.slots.len() >= 3 { 300 } else { 150 };
         let seq_before = self.scope_frame_seq.load(Ordering::Relaxed);
         let _ = self.pipeline.set_state(gst::State::Playing);
-        let (res, cur, pend) = self.pipeline.state(gst::ClockTime::from_mseconds(timeout_ms));
+        let (res, cur, pend) = self
+            .pipeline
+            .state(gst::ClockTime::from_mseconds(timeout_ms));
         let seq_after = self.scope_frame_seq.load(Ordering::Relaxed);
         log::info!(
             "playing_pulse: slots={} state_result={:?} cur={:?} pend={:?} seq={}->{}",
-            self.slots.len(), res, cur, pend, seq_before, seq_after
+            self.slots.len(),
+            res,
+            cur,
+            pend,
+            seq_before,
+            seq_after
         );
         let _ = self.pipeline.set_state(gst::State::Paused);
         self.wait_for_paused_preroll();
@@ -1607,21 +1673,27 @@ impl ProgramPlayer {
         let source_ns = clip.source_pos_ns(timeline_pos_ns);
         slot.decoder
             .seek(
-            clip.speed,
-            seek_flags,
-            gst::SeekType::Set,
-            gst::ClockTime::from_nseconds(source_ns),
-            gst::SeekType::Set,
-            gst::ClockTime::from_nseconds(clip.source_out_ns),
+                clip.speed,
+                seek_flags,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(source_ns),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(clip.source_out_ns),
             )
             .is_ok()
     }
 
-    fn seek_slot_decoder_paused(slot: &VideoSlot, clip: &ProgramClip, timeline_pos_ns: u64) -> bool {
+    fn seek_slot_decoder_paused(
+        slot: &VideoSlot,
+        clip: &ProgramClip,
+        timeline_pos_ns: u64,
+    ) -> bool {
         let source_ns = clip.source_pos_ns(timeline_pos_ns);
         log::info!(
             "seek_slot_decoder_paused: clip={} timeline_ns={} source_ns={}",
-            clip.id, timeline_pos_ns, source_ns
+            clip.id,
+            timeline_pos_ns,
+            source_ns
         );
         slot.decoder
             .seek_simple(
@@ -1675,12 +1747,33 @@ impl ProgramPlayer {
     /// Force a re-seek on the current clip's slot so a paused frame refreshes.
     fn reseek_slot_for_current(&self) {
         let Some(idx) = self.current_idx else { return };
-        let Some(slot) = self.slot_for_clip(idx) else {
+        self.reseek_slot_by_clip_idx(idx);
+    }
+
+    /// Public entry point to force a paused frame refresh on the current slot.
+    pub fn reseek_paused(&self) {
+        if self.state != PlayerState::Playing {
+            self.reseek_slot_for_current();
+        }
+    }
+
+    /// Force a re-seek on a specific clip's slot so a paused frame refreshes.
+    /// Flushes the compositor and reseeks ALL decoder slots so the compositor
+    /// can re-aggregate a complete composited frame from every video track.
+    fn reseek_slot_by_clip_idx(&self, _clip_idx: usize) {
+        if self.slots.is_empty() {
             return;
-        };
-        let clip = &self.clips[idx];
-        let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, self.timeline_pos_ns);
+        }
+        let baseline = self.snapshot_arrival_seqs();
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, self.timeline_pos_ns);
+        }
         self.wait_for_paused_preroll();
+        self.wait_for_compositor_arrivals(&baseline, 3000);
     }
 
     /// Re-seek ALL decoder slots so the compositor produces a fresh composited
@@ -1698,7 +1791,9 @@ impl ProgramPlayer {
             return false;
         }
         let baseline = self.snapshot_arrival_seqs();
-        let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, self.timeline_pos_ns);
@@ -1745,7 +1840,9 @@ impl ProgramPlayer {
         // preroll frames that the compositor produced before decoder buffers
         // arrived.  The per-decoder seeks below will then set each decoder
         // to the correct source position.
-        let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
         // Seek every decoder to the new source position.  These FLUSH seeks
         // reset each compositor pad individually and position the decoders.
         for slot in &self.slots {
@@ -1788,6 +1885,15 @@ impl ProgramPlayer {
             vc.set_property("right", crop_right.max(0));
             vc.set_property("top", crop_top.max(0));
             vc.set_property("bottom", crop_bottom.max(0));
+        }
+        // Re-pad cropped edges with transparent borders so the compositor
+        // reveals lower tracks through the cropped area.
+        if let Some(ref vb) = slot.videobox_crop_alpha {
+            vb.set_property("left", -(crop_left.max(0)));
+            vb.set_property("right", -(crop_right.max(0)));
+            vb.set_property("top", -(crop_top.max(0)));
+            vb.set_property("bottom", -(crop_bottom.max(0)));
+            vb.set_property("border-alpha", 0.0_f64);
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
             let method = match rotate {
@@ -1972,7 +2078,10 @@ impl ProgramPlayer {
                 let clip = &self.clips[slot.clip_idx];
                 log::warn!(
                     "ProgramPlayer: slot[{}] clip={} linked={} source={}",
-                    i, clip.id, linked, clip.source_path
+                    i,
+                    clip.id,
+                    linked,
+                    clip.source_path
                 );
             }
             log::warn!("ProgramPlayer: timed out waiting for video pad links");
@@ -1981,7 +2090,10 @@ impl ProgramPlayer {
                 let clip = &self.clips[slot.clip_idx];
                 log::warn!(
                     "ProgramPlayer: slot[{}] decoder state {:?}/{:?} source={}",
-                    i, cur, pend, clip.source_path
+                    i,
+                    cur,
+                    pend,
+                    clip.source_path
                 );
             }
         }
@@ -1997,6 +2109,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // videobalance
         Option<gst::Element>, // gaussianblur
         Option<gst::Element>, // videocrop
+        Option<gst::Element>, // videobox_crop_alpha
         Option<gst::Element>, // videoflip_rotate
         Option<gst::Element>, // videoflip_flip
         Option<gst::Element>, // textoverlay
@@ -2011,24 +2124,19 @@ impl ProgramPlayer {
         // no-op elements and their associated videoconvert instances.  This
         // dramatically reduces per-frame CPU cost for clips without effects
         // (3 concurrent clips drops from ~51 to ~22 pipeline elements).
-        let need_crop = clip.crop_left != 0
-            || clip.crop_right != 0
-            || clip.crop_top != 0
-            || clip.crop_bottom != 0;
-        let need_balance = clip.brightness != 0.0
-            || clip.contrast != 1.0
-            || clip.saturation != 1.0;
+        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
         let blur_sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
         let need_rotate = clip.rotate != 0;
         let need_flip = clip.flip_h || clip.flip_v;
         let need_title = !clip.title_text.is_empty();
 
-        let videocrop = if need_crop {
-            gst::ElementFactory::make("videocrop").build().ok()
-        } else {
-            None
-        };
+        // Always create videocrop + videobox_crop_alpha so live crop editing
+        // works even when crop starts at zero (no pipeline rebuild needed).
+        // videocrop is placed AFTER capsfilter_proj (RGBA at project resolution)
+        // so cropped regions become transparent via videobox_crop_alpha.
+        let videocrop = gst::ElementFactory::make("videocrop").build().ok();
+        let videobox_crop_alpha = gst::ElementFactory::make("videobox").build().ok();
 
         // conv1 + videobalance: only if color correction is active.
         let (conv1, videobalance) = if need_balance {
@@ -2145,17 +2253,21 @@ impl ProgramPlayer {
 
         // Build chain: downscale to project resolution EARLY so all effects
         // process at 1080p instead of source resolution (e.g. 5.3K for GoPro).
-        // Order: [crop] → convertscale to project res → [effects] → zoom/position.
+        // Order: convertscale to project res → [crop + alpha repad] → [effects] → zoom/position.
         let mut chain: Vec<gst::Element> = Vec::new();
-        // 1. Crop at source resolution (before downscale so we don't scale black).
-        if let Some(ref e) = videocrop {
-            chain.push(e.clone());
-        }
-        // 2. Convert + downscale to project resolution in a single pass.
+        // 1. Convert + downscale to project resolution in a single pass.
         if let Some(ref e) = convertscale {
             chain.push(e.clone());
         }
         if let Some(ref e) = capsfilter_proj {
+            chain.push(e.clone());
+        }
+        // 2. Crop at project resolution (RGBA) then re-pad with transparent
+        //    borders so the compositor reveals lower tracks through cropped areas.
+        if let Some(ref e) = videocrop {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videobox_crop_alpha {
             chain.push(e.clone());
         }
         // 3. Effects at project resolution (much cheaper than source res).
@@ -2227,6 +2339,7 @@ impl ProgramPlayer {
             videobalance,
             gaussianblur,
             videocrop,
+            videobox_crop_alpha,
             videoflip_rotate,
             videoflip_flip,
             textoverlay,
@@ -2241,7 +2354,9 @@ impl ProgramPlayer {
         let was_playing = self.state == PlayerState::Playing;
         log::debug!(
             "rebuild_pipeline_at: START was_playing={} timeline_pos={}ns slots={}",
-            was_playing, timeline_pos, self.slots.len()
+            was_playing,
+            timeline_pos,
+            self.slots.len()
         );
 
         // Tear down existing slots FIRST — each decoder is set to Null
@@ -2299,6 +2414,7 @@ impl ProgramPlayer {
                 videobalance,
                 gaussianblur,
                 videocrop,
+                videobox_crop_alpha,
                 videoflip_rotate,
                 videoflip_flip,
                 textoverlay,
@@ -2422,16 +2538,27 @@ impl ProgramPlayer {
                 if let Some(caps) = caps {
                     if let Some(s) = caps.structure(0) {
                         let name = s.name().to_string();
-                        log::info!("ProgramPlayer: pad-added clip={} caps={}", clip_id_for_cb, name);
+                        log::info!(
+                            "ProgramPlayer: pad-added clip={} caps={}",
+                            clip_id_for_cb,
+                            name
+                        );
                         if name.starts_with("video/") {
                             if let Some(ref sink) = effects_sink {
                                 match pad.link(sink) {
                                     Ok(_) => {
                                         video_linked_for_cb.store(true, Ordering::Relaxed);
-                                        log::info!("ProgramPlayer: video linked clip={}", clip_id_for_cb);
+                                        log::info!(
+                                            "ProgramPlayer: video linked clip={}",
+                                            clip_id_for_cb
+                                        );
                                     }
                                     Err(e) => {
-                                        log::warn!("ProgramPlayer: video link FAILED clip={} err={:?}", clip_id_for_cb, e);
+                                        log::warn!(
+                                            "ProgramPlayer: video link FAILED clip={} err={:?}",
+                                            clip_id_for_cb,
+                                            e
+                                        );
                                     }
                                 }
                             }
@@ -2497,6 +2624,7 @@ impl ProgramPlayer {
                 videobalance: videobalance.clone(),
                 gaussianblur: gaussianblur.clone(),
                 videocrop: videocrop.clone(),
+                videobox_crop_alpha: videobox_crop_alpha.clone(),
                 videoflip_rotate: videoflip_rotate.clone(),
                 videoflip_flip: videoflip_flip.clone(),
                 textoverlay: textoverlay.clone(),
@@ -2545,6 +2673,7 @@ impl ProgramPlayer {
                 videobalance,
                 gaussianblur,
                 videocrop,
+                videobox_crop_alpha,
                 videoflip_rotate,
                 videoflip_flip,
                 textoverlay,
@@ -2571,7 +2700,10 @@ impl ProgramPlayer {
         }
 
         // Transition pipeline to Paused so decoders preroll and can accept seeks.
-        log::debug!("rebuild_pipeline_at: setting Paused for preroll (was_playing={})", was_playing);
+        log::debug!(
+            "rebuild_pipeline_at: setting Paused for preroll (was_playing={})",
+            was_playing
+        );
         let _ = self.pipeline.set_state(gst::State::Paused);
         log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
         self.wait_for_paused_preroll();
@@ -2580,7 +2712,9 @@ impl ProgramPlayer {
         // Atomically flush the compositor and ALL downstream (tee, sinks).
         let baseline = self.snapshot_arrival_seqs();
         log::debug!("rebuild_pipeline_at: compositor flush...");
-        let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
         log::debug!("rebuild_pipeline_at: compositor flush done");
 
         // Seek each decoder to its source position with stop boundary.
@@ -2589,7 +2723,11 @@ impl ProgramPlayer {
         // KEY_UNIT seeks can snap long-GOP proxy media back to the nearest
         // keyframe (often 0s), which looks like lower-track clips restarting
         // when another track enters/exits and triggers a rebuild.
-        log::debug!("rebuild_pipeline_at: seeking {} decoders (was_playing={})", self.slots.len(), was_playing);
+        log::debug!(
+            "rebuild_pipeline_at: seeking {} decoders (was_playing={})",
+            self.slots.len(),
+            was_playing
+        );
         let seek_flags = if was_playing {
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
         } else {
@@ -2598,12 +2736,7 @@ impl ProgramPlayer {
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             if was_playing {
-                let ok = Self::seek_slot_decoder_with_retry(
-                    slot,
-                    clip,
-                    timeline_pos,
-                    seek_flags,
-                );
+                let ok = Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags);
                 if !ok {
                     log::warn!("rebuild_pipeline_at: seek FAILED for clip {}", clip.id);
                     if let Some(ref pad) = slot.compositor_pad {
@@ -2638,7 +2771,9 @@ impl ProgramPlayer {
             let baseline = self.snapshot_arrival_seqs();
             // Flush the compositor atomically before per-decoder seeks to clear
             // stale preroll frames produced before decoder pads were linked.
-            let _ = self.compositor.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+            let _ = self
+                .compositor
+                .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
             for slot in &self.slots {
                 let clip = &self.clips[slot.clip_idx];
                 let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
@@ -2646,11 +2781,12 @@ impl ProgramPlayer {
             let _ = self.pipeline.set_state(gst::State::Paused);
             self.wait_for_paused_preroll();
             self.wait_for_compositor_arrivals(&baseline, 3000);
-            self.reseek_slot_for_current();
             let (_, pipe_cur, pipe_pend) = self.pipeline.state(gst::ClockTime::ZERO);
             log::info!(
                 "rebuild_pipeline_at: after_settle slots={} pipe={:?}/{:?} seq={}",
-                self.slots.len(), pipe_cur, pipe_pend,
+                self.slots.len(),
+                pipe_cur,
+                pipe_pend,
                 self.scope_frame_seq.load(Ordering::Relaxed)
             );
         }

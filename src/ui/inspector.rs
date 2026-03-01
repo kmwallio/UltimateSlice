@@ -1,9 +1,11 @@
+use crate::model::project::Project;
+use gio;
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, Entry, Expander, Label, Orientation, Scale, Separator};
+use gtk4::{
+    self as gtk, Box as GBox, Button, Entry, Expander, Label, Orientation, Scale, Separator,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
-use gio;
-use crate::model::project::Project;
 
 /// Holds references to the inspector's display labels so they can be
 /// updated from outside without widget traversal.
@@ -67,7 +69,9 @@ impl InspectorView {
         use crate::model::clip::ClipKind;
 
         let clip = clip_id.and_then(|id| {
-            project.tracks.iter()
+            project
+                .tracks
+                .iter()
                 .flat_map(|t| t.clips.iter())
                 .find(|c| c.id == id)
         });
@@ -98,7 +102,8 @@ impl InspectorView {
                 self.name_entry.set_text(&c.label);
                 self.path_value.set_text(
                     std::path::Path::new(&c.source_path)
-                        .file_name().and_then(|n| n.to_str())
+                        .file_name()
+                        .and_then(|n| n.to_str())
                         .unwrap_or(&c.source_path),
                 );
                 self.in_value.set_text(&ns_to_timecode(c.source_in));
@@ -131,7 +136,8 @@ impl InspectorView {
                 match &c.lut_path {
                     Some(p) => {
                         let name = std::path::Path::new(p)
-                            .file_name().and_then(|n| n.to_str())
+                            .file_name()
+                            .and_then(|n| n.to_str())
                             .unwrap_or(p.as_str());
                         self.lut_path_label.set_text(name);
                         self.lut_clear_btn.set_sensitive(true);
@@ -144,8 +150,13 @@ impl InspectorView {
             }
             None => {
                 self.name_entry.set_text("");
-                for l in [&self.path_value, &self.in_value, &self.out_value,
-                           &self.dur_value, &self.pos_value] {
+                for l in [
+                    &self.path_value,
+                    &self.in_value,
+                    &self.out_value,
+                    &self.dur_value,
+                    &self.pos_value,
+                ] {
                     l.set_text("—");
                 }
                 self.brightness_slider.set_value(0.0);
@@ -207,7 +218,9 @@ pub fn build_inspector(
     title.add_css_class("browser-header");
     vbox.append(&title);
 
-    let empty_state_label = Label::new(Some("Select a clip in the timeline to edit its properties."));
+    let empty_state_label = Label::new(Some(
+        "Select a clip in the timeline to edit its properties.",
+    ));
     empty_state_label.set_halign(gtk::Align::Start);
     empty_state_label.set_xalign(0.0);
     empty_state_label.set_wrap(true);
@@ -355,9 +368,9 @@ pub fn build_inspector(
     scale_slider.set_value(1.0);
     scale_slider.set_draw_value(true);
     scale_slider.set_digits(2);
-    scale_slider.add_mark(0.5,  gtk4::PositionType::Bottom, Some("½×"));
-    scale_slider.add_mark(1.0,  gtk4::PositionType::Bottom, Some("1×"));
-    scale_slider.add_mark(2.0,  gtk4::PositionType::Bottom, Some("2×"));
+    scale_slider.add_mark(0.5, gtk4::PositionType::Bottom, Some("½×"));
+    scale_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("1×"));
+    scale_slider.add_mark(2.0, gtk4::PositionType::Bottom, Some("2×"));
     scale_slider.set_hexpand(true);
     scale_slider.set_tooltip_text(Some("Scale: <1 = shrink with black borders, >1 = zoom in"));
     transform_inner.append(&scale_slider);
@@ -379,10 +392,12 @@ pub fn build_inspector(
     position_x_slider.set_draw_value(true);
     position_x_slider.set_digits(2);
     position_x_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("←"));
-    position_x_slider.add_mark( 0.0, gtk4::PositionType::Bottom, Some("·"));
-    position_x_slider.add_mark( 1.0, gtk4::PositionType::Bottom, Some("→"));
+    position_x_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
+    position_x_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("→"));
     position_x_slider.set_hexpand(true);
-    position_x_slider.set_tooltip_text(Some("Horizontal position: −1 = left, 0 = center, +1 = right"));
+    position_x_slider.set_tooltip_text(Some(
+        "Horizontal position: −1 = left, 0 = center, +1 = right",
+    ));
     transform_inner.append(&position_x_slider);
 
     row_label(&transform_inner, "Position Y");
@@ -391,14 +406,16 @@ pub fn build_inspector(
     position_y_slider.set_draw_value(true);
     position_y_slider.set_digits(2);
     position_y_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("↑"));
-    position_y_slider.add_mark( 0.0, gtk4::PositionType::Bottom, Some("·"));
-    position_y_slider.add_mark( 1.0, gtk4::PositionType::Bottom, Some("↓"));
+    position_y_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
+    position_y_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("↓"));
     position_y_slider.set_hexpand(true);
-    position_y_slider.set_tooltip_text(Some("Vertical position: −1 = top, 0 = center, +1 = bottom"));
+    position_y_slider
+        .set_tooltip_text(Some("Vertical position: −1 = top, 0 = center, +1 = bottom"));
     transform_inner.append(&position_y_slider);
 
     row_label(&transform_inner, "Crop Left");
-    let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);    crop_left_slider.set_value(0.0);
+    let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    crop_left_slider.set_value(0.0);
     crop_left_slider.set_draw_value(true);
     crop_left_slider.set_digits(0);
     transform_inner.append(&crop_left_slider);
@@ -426,8 +443,8 @@ pub fn build_inspector(
 
     row_label(&transform_inner, "Rotate");
     let rotate_combo = gtk4::ComboBoxText::new();
-    rotate_combo.append(Some("0"),   "0°");
-    rotate_combo.append(Some("90"),  "90° CW");
+    rotate_combo.append(Some("0"), "0°");
+    rotate_combo.append(Some("90"), "90° CW");
     rotate_combo.append(Some("180"), "180°");
     rotate_combo.append(Some("270"), "270° CW");
     rotate_combo.set_active_id(Some("0"));
@@ -484,9 +501,9 @@ pub fn build_inspector(
     speed_slider.set_value(1.0);
     speed_slider.set_draw_value(true);
     speed_slider.set_digits(2);
-    speed_slider.add_mark(0.5,  gtk4::PositionType::Bottom, Some("½×"));
-    speed_slider.add_mark(1.0,  gtk4::PositionType::Bottom, Some("1×"));
-    speed_slider.add_mark(2.0,  gtk4::PositionType::Bottom, Some("2×"));
+    speed_slider.add_mark(0.5, gtk4::PositionType::Bottom, Some("½×"));
+    speed_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("1×"));
+    speed_slider.add_mark(2.0, gtk4::PositionType::Bottom, Some("2×"));
     speed_slider.set_hexpand(true);
     speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
     speed_inner.append(&speed_slider);
@@ -532,7 +549,8 @@ pub fn build_inspector(
     let on_clip_changed = Rc::new(on_clip_changed);
     let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
-    let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> = Rc::new(on_transform_changed);
+    let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
+        Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
     let on_speed_changed: Rc<dyn Fn(f64)> = Rc::new(on_speed_changed);
     let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
@@ -547,7 +565,9 @@ pub fn build_inspector(
 
         apply_btn.connect_clicked(move |_| {
             let new_name = name_entry_cb.text().to_string();
-            if new_name.is_empty() { return; }
+            if new_name.is_empty() {
+                return;
+            }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -581,7 +601,9 @@ pub fn build_inspector(
         apply: fn(&mut crate::model::clip::Clip, f32),
     ) {
         slider.connect_value_changed(move |s| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let val = s.value() as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -596,49 +618,79 @@ pub fn build_inspector(
                     }
                 }
                 // Fire lightweight effects callback with all five current values
-                let b   = brightness_slider.value() as f32;
-                let c   = contrast_slider.value() as f32;
+                let b = brightness_slider.value() as f32;
+                let c = contrast_slider.value() as f32;
                 let sat = saturation_slider.value() as f32;
-                let d   = denoise_slider.value() as f32;
-                let sh  = sharpness_slider.value() as f32;
+                let d = denoise_slider.value() as f32;
+                let sh = sharpness_slider.value() as f32;
                 on_color_changed(b, c, sat, d, sh);
             }
         });
     }
 
     connect_color_slider(
-        &brightness_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_color_changed.clone(),
-        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
-        denoise_slider.clone(), sharpness_slider.clone(),
+        &brightness_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
         |clip, v| clip.brightness = v,
     );
     connect_color_slider(
-        &contrast_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_color_changed.clone(),
-        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
-        denoise_slider.clone(), sharpness_slider.clone(),
+        &contrast_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
         |clip, v| clip.contrast = v,
     );
     connect_color_slider(
-        &saturation_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_color_changed.clone(),
-        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
-        denoise_slider.clone(), sharpness_slider.clone(),
+        &saturation_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
         |clip, v| clip.saturation = v,
     );
     connect_color_slider(
-        &denoise_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_color_changed.clone(),
-        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
-        denoise_slider.clone(), sharpness_slider.clone(),
+        &denoise_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
         |clip, v| clip.denoise = v,
     );
     connect_color_slider(
-        &sharpness_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_color_changed.clone(),
-        brightness_slider.clone(), contrast_slider.clone(), saturation_slider.clone(),
-        denoise_slider.clone(), sharpness_slider.clone(),
+        &sharpness_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
         |clip, v| clip.sharpness = v,
     );
 
@@ -651,7 +703,9 @@ pub fn build_inspector(
         let volume_slider_cb = volume_slider.clone();
         let pan_slider_cb = pan_slider.clone();
         volume_slider.connect_value_changed(move |s| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let val = s.value() as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -665,7 +719,10 @@ pub fn build_inspector(
                         }
                     }
                 }
-                on_audio_changed(volume_slider_cb.value() as f32, pan_slider_cb.value() as f32);
+                on_audio_changed(
+                    volume_slider_cb.value() as f32,
+                    pan_slider_cb.value() as f32,
+                );
             }
         });
     }
@@ -677,7 +734,9 @@ pub fn build_inspector(
         let volume_slider_cb = volume_slider.clone();
         let pan_slider_cb = pan_slider.clone();
         pan_slider.connect_value_changed(move |s| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let val = s.value() as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -691,7 +750,10 @@ pub fn build_inspector(
                         }
                     }
                 }
-                on_audio_changed(volume_slider_cb.value() as f32, pan_slider_cb.value() as f32);
+                on_audio_changed(
+                    volume_slider_cb.value() as f32,
+                    pan_slider_cb.value() as f32,
+                );
             }
         });
     }
@@ -717,7 +779,9 @@ pub fn build_inspector(
         apply: fn(&mut crate::model::clip::Clip, i32),
     ) {
         slider.connect_value_changed(move |s| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let val = s.value() as i32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -735,7 +799,8 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c.active_id()
+                let rot = rotate_c
+                    .active_id()
                     .and_then(|id| id.parse::<i32>().ok())
                     .unwrap_or(0);
                 let fh = flip_h_b.is_active();
@@ -749,39 +814,75 @@ pub fn build_inspector(
     }
 
     connect_transform_slider(
-        &crop_left_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_transform_changed.clone(),
-        crop_left_slider.clone(), crop_right_slider.clone(),
-        crop_top_slider.clone(), crop_bottom_slider.clone(),
-        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
-        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
+        &crop_left_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_transform_changed.clone(),
+        crop_left_slider.clone(),
+        crop_right_slider.clone(),
+        crop_top_slider.clone(),
+        crop_bottom_slider.clone(),
+        rotate_combo.clone(),
+        flip_h_btn.clone(),
+        flip_v_btn.clone(),
+        scale_slider.clone(),
+        position_x_slider.clone(),
+        position_y_slider.clone(),
         |clip, v| clip.crop_left = v,
     );
     connect_transform_slider(
-        &crop_right_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_transform_changed.clone(),
-        crop_left_slider.clone(), crop_right_slider.clone(),
-        crop_top_slider.clone(), crop_bottom_slider.clone(),
-        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
-        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
+        &crop_right_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_transform_changed.clone(),
+        crop_left_slider.clone(),
+        crop_right_slider.clone(),
+        crop_top_slider.clone(),
+        crop_bottom_slider.clone(),
+        rotate_combo.clone(),
+        flip_h_btn.clone(),
+        flip_v_btn.clone(),
+        scale_slider.clone(),
+        position_x_slider.clone(),
+        position_y_slider.clone(),
         |clip, v| clip.crop_right = v,
     );
     connect_transform_slider(
-        &crop_top_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_transform_changed.clone(),
-        crop_left_slider.clone(), crop_right_slider.clone(),
-        crop_top_slider.clone(), crop_bottom_slider.clone(),
-        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
-        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
+        &crop_top_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_transform_changed.clone(),
+        crop_left_slider.clone(),
+        crop_right_slider.clone(),
+        crop_top_slider.clone(),
+        crop_bottom_slider.clone(),
+        rotate_combo.clone(),
+        flip_h_btn.clone(),
+        flip_v_btn.clone(),
+        scale_slider.clone(),
+        position_x_slider.clone(),
+        position_y_slider.clone(),
         |clip, v| clip.crop_top = v,
     );
     connect_transform_slider(
-        &crop_bottom_slider, project.clone(), selected_clip_id.clone(),
-        updating.clone(), on_transform_changed.clone(),
-        crop_left_slider.clone(), crop_right_slider.clone(),
-        crop_top_slider.clone(), crop_bottom_slider.clone(),
-        rotate_combo.clone(), flip_h_btn.clone(), flip_v_btn.clone(),
-        scale_slider.clone(), position_x_slider.clone(), position_y_slider.clone(),
+        &crop_bottom_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_transform_changed.clone(),
+        crop_left_slider.clone(),
+        crop_right_slider.clone(),
+        crop_top_slider.clone(),
+        crop_bottom_slider.clone(),
+        rotate_combo.clone(),
+        flip_h_btn.clone(),
+        flip_v_btn.clone(),
+        scale_slider.clone(),
+        position_x_slider.clone(),
+        position_y_slider.clone(),
         |clip, v| clip.crop_bottom = v,
     );
 
@@ -801,8 +902,11 @@ pub fn build_inspector(
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
         rotate_combo.connect_changed(move |combo| {
-            if *updating.borrow() { return; }
-            let rot = combo.active_id()
+            if *updating.borrow() {
+                return;
+            }
+            let rot = combo
+                .active_id()
                 .and_then(|id| id.parse::<i32>().ok())
                 .unwrap_or(0);
             let id = selected_clip_id.borrow().clone();
@@ -823,7 +927,18 @@ pub fn build_inspector(
                 let cb = crop_bottom_s.value() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), pos_y_s.value());
+                on_transform_changed(
+                    cl,
+                    cr,
+                    ct,
+                    cb,
+                    rot,
+                    fh,
+                    fv,
+                    scale_s.value(),
+                    pos_x_s.value(),
+                    pos_y_s.value(),
+                );
             }
         });
     }
@@ -844,7 +959,9 @@ pub fn build_inspector(
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
         flip_h_btn.connect_toggled(move |btn| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let fh = btn.is_active();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -862,11 +979,23 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c.active_id()
+                let rot = rotate_c
+                    .active_id()
                     .and_then(|id| id.parse::<i32>().ok())
                     .unwrap_or(0);
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), pos_y_s.value());
+                on_transform_changed(
+                    cl,
+                    cr,
+                    ct,
+                    cb,
+                    rot,
+                    fh,
+                    fv,
+                    scale_s.value(),
+                    pos_x_s.value(),
+                    pos_y_s.value(),
+                );
             }
         });
     }
@@ -885,7 +1014,9 @@ pub fn build_inspector(
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
         flip_v_btn.connect_toggled(move |btn| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let fv = btn.is_active();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -903,11 +1034,23 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c.active_id()
+                let rot = rotate_c
+                    .active_id()
                     .and_then(|id| id.parse::<i32>().ok())
                     .unwrap_or(0);
                 let fh = flip_h_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), pos_y_s.value());
+                on_transform_changed(
+                    cl,
+                    cr,
+                    ct,
+                    cb,
+                    rot,
+                    fh,
+                    fv,
+                    scale_s.value(),
+                    pos_x_s.value(),
+                    pos_y_s.value(),
+                );
             }
         });
     }
@@ -929,7 +1072,9 @@ pub fn build_inspector(
         let pos_y_s = position_y_slider.clone();
         let scale_s2 = scale_slider.clone();
         scale_slider.connect_value_changed(move |sl| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let sc = sl.value();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -947,10 +1092,24 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c.active_id().and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
+                let rot = rotate_c
+                    .active_id()
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .unwrap_or(0);
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, sc, pos_x_s.value(), pos_y_s.value());
+                on_transform_changed(
+                    cl,
+                    cr,
+                    ct,
+                    cb,
+                    rot,
+                    fh,
+                    fv,
+                    sc,
+                    pos_x_s.value(),
+                    pos_y_s.value(),
+                );
             }
         });
         let _ = scale_s2; // silence unused warning
@@ -961,7 +1120,9 @@ pub fn build_inspector(
         let updating = updating.clone();
         let on_opacity_changed = on_opacity_changed.clone();
         opacity_slider.connect_value_changed(move |sl| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let opacity = sl.value().clamp(0.0, 1.0);
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -995,7 +1156,9 @@ pub fn build_inspector(
         let pos_y_s = position_y_slider.clone();
         let pos_x_s2 = position_x_slider.clone();
         position_x_slider.connect_value_changed(move |sl| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let px = sl.value();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -1013,10 +1176,24 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c.active_id().and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
+                let rot = rotate_c
+                    .active_id()
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .unwrap_or(0);
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), px, pos_y_s.value());
+                on_transform_changed(
+                    cl,
+                    cr,
+                    ct,
+                    cb,
+                    rot,
+                    fh,
+                    fv,
+                    scale_s.value(),
+                    px,
+                    pos_y_s.value(),
+                );
             }
         });
         let _ = pos_x_s2;
@@ -1037,7 +1214,9 @@ pub fn build_inspector(
         let pos_x_s = position_x_slider.clone();
         let pos_y_s2 = position_y_slider.clone();
         position_y_slider.connect_value_changed(move |sl| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let py = sl.value();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -1055,10 +1234,24 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c.active_id().and_then(|id| id.parse::<i32>().ok()).unwrap_or(0);
+                let rot = rotate_c
+                    .active_id()
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .unwrap_or(0);
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
-                on_transform_changed(cl, cr, ct, cb, rot, fh, fv, scale_s.value(), pos_x_s.value(), py);
+                on_transform_changed(
+                    cl,
+                    cr,
+                    ct,
+                    cb,
+                    rot,
+                    fh,
+                    fv,
+                    scale_s.value(),
+                    pos_x_s.value(),
+                    py,
+                );
             }
         });
         let _ = pos_y_s2;
@@ -1073,7 +1266,9 @@ pub fn build_inspector(
         let title_y = title_y_slider.clone();
         let on_title_changed = on_title_changed.clone();
         title_entry.connect_changed(move |entry| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let text = entry.text().to_string();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -1099,7 +1294,9 @@ pub fn build_inspector(
         let title_y = title_y_slider.clone();
         let on_title_changed = on_title_changed.clone();
         title_x_slider.connect_value_changed(move |sl| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let x = sl.value();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -1125,7 +1322,9 @@ pub fn build_inspector(
         let title_x = title_x_slider.clone();
         let on_title_changed = on_title_changed.clone();
         title_y_slider.connect_value_changed(move |sl| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let y = sl.value();
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
@@ -1151,7 +1350,9 @@ pub fn build_inspector(
         let updating = updating.clone();
         let on_speed_changed = on_speed_changed.clone();
         speed_slider.connect_value_changed(move |sl| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let speed = sl.value();
             if let Some(ref id) = *selected_clip_id.borrow() {
                 let mut proj = project.borrow_mut();
@@ -1164,7 +1365,9 @@ pub fn build_inspector(
                         }
                     }
                 }
-                if found { proj.dirty = true; }
+                if found {
+                    proj.dirty = true;
+                }
             }
             on_speed_changed(speed);
         });
@@ -1202,14 +1405,17 @@ pub fn build_inspector(
                         if let Some(ref clip_id) = id {
                             let mut proj = project.borrow_mut();
                             for track in &mut proj.tracks {
-                                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| &c.id == clip_id)
+                                {
                                     clip.lut_path = Some(path_str.clone());
                                     proj.dirty = true;
                                     break;
                                 }
                             }
                         }
-                        let name = path.file_name()
+                        let name = path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or(&path_str)
                             .to_string();

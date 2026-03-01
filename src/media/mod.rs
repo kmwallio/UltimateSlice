@@ -1,11 +1,11 @@
-pub mod player;
-pub mod thumbnail;
-pub mod thumb_cache;
-pub mod waveform_cache;
-pub mod probe_cache;
-pub mod proxy_cache;
-pub mod program_player;
 pub mod export;
+pub mod player;
+pub mod probe_cache;
+pub mod program_player;
+pub mod proxy_cache;
+pub mod thumb_cache;
+pub mod thumbnail;
+pub mod waveform_cache;
 
 /// RAII guard that sets a GStreamer pipeline to NULL on drop.
 /// Prevents "Trying to dispose element ... but it is in READY" warnings

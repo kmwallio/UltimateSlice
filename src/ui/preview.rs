@@ -1,10 +1,13 @@
-use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label, Orientation, Picture, Separator};
-use glib;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use crate::media::player::{Player, PlayerState};
 use crate::model::media_library::SourceMarks;
+use glib;
+use gtk4::prelude::*;
+use gtk4::{
+    self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label,
+    Orientation, Picture, Separator,
+};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 const NS_PER_SECOND: f64 = 1_000_000_000.0;
 /// Default frame duration at 24 fps (nanoseconds)
@@ -80,7 +83,9 @@ pub fn build_preview(
                     return None;
                 }
                 let payload = format!("{}|{}", marks.path, marks.duration_ns);
-                Some(gdk4::ContentProvider::for_value(&glib::Value::from(&payload)))
+                Some(gdk4::ContentProvider::for_value(&glib::Value::from(
+                    &payload,
+                )))
             }
         });
         picture.add_controller(drag_src);
@@ -115,7 +120,9 @@ pub fn build_preview(
         let scrubber_weak = scrubber.downgrade();
         Rc::new(move |x: f64| {
             let dur = source_marks.borrow().duration_ns;
-            if dur == 0 { return; }
+            if dur == 0 {
+                return;
+            }
             // Use the drawn width recorded in draw_func; fall back to the
             // widget's allocated width if draw_func hasn't fired yet.
             let w = {
@@ -123,7 +130,8 @@ pub fn build_preview(
                 if dw > 1.0 {
                     dw
                 } else {
-                    scrubber_weak.upgrade()
+                    scrubber_weak
+                        .upgrade()
                         .map(|s| s.width() as f64)
                         .unwrap_or(1.0)
                         .max(1.0)
@@ -135,7 +143,9 @@ pub fn build_preview(
             // the correct playhead even while GStreamer is still pre-rolling.
             source_marks.borrow_mut().display_pos_ns = pos;
             let _ = player.borrow().seek(pos);
-            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+            if let Some(a) = scrubber_weak.upgrade() {
+                a.queue_draw();
+            }
         })
     };
 
@@ -164,16 +174,20 @@ pub fn build_preview(
                     return;
                 }
                 let w = drawn_width.get().max(1.0);
-                let in_x  = (marks.in_ns  as f64 / dur as f64) * w;
+                let in_x = (marks.in_ns as f64 / dur as f64) * w;
                 let out_x = (marks.out_ns as f64 / dur as f64) * w;
                 drop(marks);
                 const HIT: f64 = 8.0;
                 if (x - in_x).abs() <= HIT {
                     drag_mode.set(1);
-                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    if let Some(a) = scrubber_weak.upgrade() {
+                        a.queue_draw();
+                    }
                 } else if (x - out_x).abs() <= HIT {
                     drag_mode.set(2);
-                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    if let Some(a) = scrubber_weak.upgrade() {
+                        a.queue_draw();
+                    }
                 } else {
                     drag_mode.set(0);
                     seek_from_x(x);
@@ -198,7 +212,9 @@ pub fn build_preview(
                         let frac = (x / w).clamp(0.0, 1.0);
                         let mut marks = source_marks.borrow_mut();
                         let dur = marks.duration_ns;
-                        if dur == 0 { return; }
+                        if dur == 0 {
+                            return;
+                        }
                         let pos_ns = (frac * dur as f64) as u64;
                         if mode == 1 {
                             marks.in_ns = pos_ns.min(marks.out_ns.saturating_sub(1_000_000));
@@ -206,7 +222,9 @@ pub fn build_preview(
                             marks.out_ns = pos_ns.max(marks.in_ns + 1_000_000);
                         }
                         drop(marks);
-                        if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                        if let Some(a) = scrubber_weak.upgrade() {
+                            a.queue_draw();
+                        }
                     }
                 }
             }
@@ -225,7 +243,7 @@ pub fn build_preview(
     marks_bar.set_margin_end(8);
     marks_bar.set_margin_top(4);
 
-    let in_label  = Label::new(Some("In  00:00:00:00"));
+    let in_label = Label::new(Some("In  00:00:00:00"));
     let out_label = Label::new(Some("Out 00:00:00:00"));
     let dur_label = Label::new(Some("Dur 00:00:00:00"));
     in_label.add_css_class("marks-timecode");
@@ -257,20 +275,22 @@ pub fn build_preview(
     controls.set_margin_top(4);
     controls.set_margin_bottom(4);
 
-    let btn_set_in     = Button::with_label("Set In (I)");
-    let btn_set_out    = Button::with_label("Set Out (O)");
+    let btn_set_in = Button::with_label("Set In (I)");
+    let btn_set_out = Button::with_label("Set Out (O)");
     let btn_prev_frame = Button::with_label("◀▮");
-    let btn_stop       = Button::with_label("⏹");
+    let btn_stop = Button::with_label("⏹");
     let btn_play_pause = Button::with_label("▶");
     let btn_next_frame = Button::with_label("▮▶");
-    let btn_append     = Button::with_label("⬇ Append");
-    let btn_insert     = Button::with_label("⤵ Insert");
-    let btn_overwrite  = Button::with_label("⏺ Overwrite");
+    let btn_append = Button::with_label("⬇ Append");
+    let btn_insert = Button::with_label("⤵ Insert");
+    let btn_overwrite = Button::with_label("⏺ Overwrite");
     btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     btn_next_frame.set_tooltip_text(Some("Step forward one frame (→)"));
     btn_append.set_tooltip_text(Some("Append selection to timeline"));
     btn_insert.set_tooltip_text(Some("Insert at playhead, shifting subsequent clips (,)"));
-    btn_overwrite.set_tooltip_text(Some("Overwrite at playhead, replacing existing material (.)"));
+    btn_overwrite.set_tooltip_text(Some(
+        "Overwrite at playhead, replacing existing material (.)",
+    ));
     btn_append.set_sensitive(false); // enabled once a source is loaded
     btn_insert.set_sensitive(false);
     btn_overwrite.set_sensitive(false);
@@ -318,7 +338,9 @@ pub fn build_preview(
             m.in_ns = pos.min(m.out_ns.saturating_sub(1_000_000));
             update_marks_bar(&m);
             drop(m);
-            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+            if let Some(a) = scrubber_weak.upgrade() {
+                a.queue_draw();
+            }
         });
     }
 
@@ -333,7 +355,9 @@ pub fn build_preview(
             m.out_ns = pos.max(m.in_ns + 1_000_000);
             update_marks_bar(&m);
             drop(m);
-            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+            if let Some(a) = scrubber_weak.upgrade() {
+                a.queue_draw();
+            }
         });
     }
 
@@ -367,8 +391,14 @@ pub fn build_preview(
             shuttle_speed.set(0);
             let p = player.borrow();
             match p.state() {
-                PlayerState::Playing => { let _ = p.pause(); btn.set_label("▶"); }
-                _ => { let _ = p.play(); btn.set_label("⏸"); }
+                PlayerState::Playing => {
+                    let _ = p.pause();
+                    btn.set_label("▶");
+                }
+                _ => {
+                    let _ = p.play();
+                    btn.set_label("⏸");
+                }
             }
         });
     }
@@ -399,7 +429,9 @@ pub fn build_preview(
                 source_marks.borrow_mut().display_pos_ns = new_pos;
             }
             drop(p);
-            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+            if let Some(a) = scrubber_weak.upgrade() {
+                a.queue_draw();
+            }
         });
     }
 
@@ -416,7 +448,9 @@ pub fn build_preview(
                 source_marks.borrow_mut().display_pos_ns = new_pos;
             }
             drop(p);
-            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+            if let Some(a) = scrubber_weak.upgrade() {
+                a.queue_draw();
+            }
         });
     }
 
@@ -440,7 +474,9 @@ pub fn build_preview(
                     m.in_ns = pos.min(m.out_ns.saturating_sub(1_000_000));
                     update_marks_bar(&m);
                     drop(m);
-                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    if let Some(a) = scrubber_weak.upgrade() {
+                        a.queue_draw();
+                    }
                     glib::Propagation::Stop
                 }
                 Key::o | Key::O => {
@@ -449,15 +485,23 @@ pub fn build_preview(
                     m.out_ns = pos.max(m.in_ns + 1_000_000);
                     update_marks_bar(&m);
                     drop(m);
-                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    if let Some(a) = scrubber_weak.upgrade() {
+                        a.queue_draw();
+                    }
                     glib::Propagation::Stop
                 }
                 Key::space => {
                     shuttle_speed.set(0);
                     let p = player.borrow();
                     match p.state() {
-                        PlayerState::Playing => { let _ = p.pause(); btn_play_pause.set_label("▶"); }
-                        _ => { let _ = p.play(); btn_play_pause.set_label("⏸"); }
+                        PlayerState::Playing => {
+                            let _ = p.pause();
+                            btn_play_pause.set_label("▶");
+                        }
+                        _ => {
+                            let _ = p.play();
+                            btn_play_pause.set_label("⏸");
+                        }
                     }
                     glib::Propagation::Stop
                 }
@@ -503,7 +547,9 @@ pub fn build_preview(
                     }
                     drop(p);
                     btn_play_pause.set_label("▶");
-                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    if let Some(a) = scrubber_weak.upgrade() {
+                        a.queue_draw();
+                    }
                     glib::Propagation::Stop
                 }
                 // → — step forward one frame
@@ -516,7 +562,9 @@ pub fn build_preview(
                     }
                     drop(p);
                     btn_play_pause.set_label("▶");
-                    if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+                    if let Some(a) = scrubber_weak.upgrade() {
+                        a.queue_draw();
+                    }
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
@@ -607,7 +655,9 @@ pub fn build_preview(
                 update_marks_bar(&m);
             }
             drop(p);
-            if let Some(a) = scrubber_weak.upgrade() { a.queue_draw(); }
+            if let Some(a) = scrubber_weak.upgrade() {
+                a.queue_draw();
+            }
             glib::ControlFlow::Continue
         });
     }
@@ -615,11 +665,7 @@ pub fn build_preview(
     (vbox, source_marks, clip_name_label)
 }
 
-fn draw_scrubber(
-    cr: &gtk::cairo::Context,
-    width: f64,
-    marks: &SourceMarks,
-) {
+fn draw_scrubber(cr: &gtk::cairo::Context, width: f64, marks: &SourceMarks) {
     let height = 20.0;
     let dur = marks.duration_ns;
 
@@ -628,10 +674,12 @@ fn draw_scrubber(
     cr.rectangle(0.0, 0.0, width, height);
     cr.fill().ok();
 
-    if dur == 0 { return; }
+    if dur == 0 {
+        return;
+    }
 
     // In/out selection band
-    let in_x  = (marks.in_ns  as f64 / dur as f64) * width;
+    let in_x = (marks.in_ns as f64 / dur as f64) * width;
     let out_x = (marks.out_ns as f64 / dur as f64) * width;
     cr.set_source_rgba(0.17, 0.47, 0.85, 0.45);
     cr.rectangle(in_x, 0.0, out_x - in_x, height);

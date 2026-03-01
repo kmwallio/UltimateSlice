@@ -62,7 +62,14 @@
 
 ## Inspector
 
-All Inspector controls are mouse-driven sliders and text fields — no dedicated keyboard shortcuts beyond standard Tab/Shift+Tab focus navigation.
+All Inspector controls are mouse-driven sliders and text fields. Transform edits can also be nudged from the Program Monitor overlay:
+
+| Shortcut | Action |
+|---|---|
+| `←` / `→` / `↑` / `↓` | Nudge selected clip position by 0.01 |
+| `Shift + Arrow` | Nudge selected clip position by 0.1 |
+| `+` | Increase selected clip scale |
+| `-` | Decrease selected clip scale |
 
 ---
 

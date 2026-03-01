@@ -229,9 +229,9 @@ Tracking docs:
   - [x] Export pipeline updated similarly — all concurrent clips composited via ffmpeg `overlay` filter chain before final output
   - Inspector shows which track layer a clip is on; layer order controls composite z-order
   - [x] Per-clip opacity control so tracks can blend softly over each other
-- [ ] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
-- [ ] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
-- [ ] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
+- [x] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
+- [x] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
+- [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
