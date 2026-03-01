@@ -221,6 +221,12 @@ pub struct ProgramPlayer {
     background_compositor_pad: gst::Pad,
     /// Current preview quality divisor.
     preview_divisor: u32,
+    /// Display queue between tee and gtk4paintablesink.  Switched to leaky
+    /// during transform live mode to prevent backpressure blocking.
+    display_queue: Option<gst::Element>,
+    /// True when the transform tool has temporarily set the pipeline to live
+    /// mode for interactive preview during drag.
+    transform_live: bool,
     /// Wall-clock instant when playback last entered Playing state.
     play_start: Option<Instant>,
 }
@@ -255,7 +261,7 @@ impl ProgramPlayer {
         let compositor_capture_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         // Build tee-based sink bin: display + scope appsink (320x180 RGBA).
-        let video_sink_bin: gst::Element = (|| {
+        let (video_sink_bin, display_queue): (gst::Element, Option<gst::Element>) = (|| {
             let tee = gst::ElementFactory::make("tee")
                 .property("allow-not-linked", true)
                 .build()
@@ -378,9 +384,9 @@ impl ProgramPlayer {
                 .ok()?;
             let ghost = gst::GhostPad::with_target(&tee.static_pad("sink")?).ok()?;
             bin.add_pad(&ghost).ok()?;
-            Some(bin.upcast::<gst::Element>())
+            Some((bin.upcast::<gst::Element>(), Some(q1)))
         })()
-        .unwrap_or(video_sink_inner);
+        .unwrap_or((video_sink_inner, None));
 
         // -- Compositor pipeline ------------------------------------------------
         let pipeline = gst::Pipeline::new();
@@ -635,6 +641,8 @@ impl ProgramPlayer {
                 background_src: black_src,
                 background_compositor_pad: comp_bg_pad,
                 preview_divisor: 1,
+                display_queue,
+                transform_live: false,
                 play_start: None,
             },
             paintable,
@@ -1382,6 +1390,114 @@ impl ProgramPlayer {
                 self.reseek_slot_by_clip_idx(i);
             }
         }
+    }
+
+    /// Update transform properties on GStreamer elements without triggering a
+    /// blocking reseek.  Used during interactive drag so the GTK main thread
+    /// is never blocked.  The caller should call `reseek_paused()` or
+    /// `exit_transform_live_mode()` when the drag ends.
+    pub fn set_transform_properties_only(
+        &mut self,
+        clip_id: Option<&str>,
+        crop_left: i32,
+        crop_right: i32,
+        crop_top: i32,
+        crop_bottom: i32,
+        rotate: i32,
+        flip_h: bool,
+        flip_v: bool,
+        scale: f64,
+        position_x: f64,
+        position_y: f64,
+    ) {
+        let idx = match clip_id {
+            Some(id) => self.clips.iter().position(|c| c.id == id),
+            None => self.current_idx,
+        };
+        if let Some(i) = idx {
+            if let Some(clip) = self.clips.get_mut(i) {
+                clip.crop_left = crop_left;
+                clip.crop_right = crop_right;
+                clip.crop_top = crop_top;
+                clip.crop_bottom = crop_bottom;
+                clip.rotate = rotate;
+                clip.flip_h = flip_h;
+                clip.flip_v = flip_v;
+                clip.scale = scale;
+                clip.position_x = position_x;
+                clip.position_y = position_y;
+            }
+            if let Some(slot) = self.slot_for_clip(i) {
+                Self::apply_transform_to_slot(
+                    slot,
+                    crop_left,
+                    crop_right,
+                    crop_top,
+                    crop_bottom,
+                    rotate,
+                    flip_h,
+                    flip_v,
+                );
+                if let Some(ref pad) = slot.compositor_pad {
+                    Self::apply_zoom_to_slot(
+                        slot,
+                        pad,
+                        scale,
+                        position_x,
+                        position_y,
+                        self.project_width,
+                        self.project_height,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Switch the pipeline into live mode for interactive transform preview.
+    ///
+    /// Sets `is-live=true` on the background source so the compositor enters
+    /// live aggregation (clock-paced ~30fps output), makes the display queue
+    /// leaky so the compositor never blocks on backpressure, locks decoder
+    /// slots in their current state (preventing frame advancement), and sets
+    /// the pipeline to Playing.
+    ///
+    /// Call `exit_transform_live_mode()` when the drag ends.
+    pub fn enter_transform_live_mode(&mut self) {
+        if self.transform_live || self.state == PlayerState::Playing {
+            return;
+        }
+        log::info!("enter_transform_live_mode: slots={}", self.slots.len());
+        self.background_src.set_property("is-live", true);
+        if let Some(ref q) = self.display_queue {
+            q.set_property_from_str("leaky", "downstream");
+            q.set_property("max-size-buffers", 2u32);
+        }
+        for slot in &self.slots {
+            slot.decoder.set_locked_state(true);
+        }
+        let _ = self.pipeline.set_state(gst::State::Playing);
+        self.transform_live = true;
+    }
+
+    /// Exit live transform mode and restore the pipeline to normal paused state.
+    /// Does a final reseek so the displayed frame accurately reflects the
+    /// last transform parameters.
+    pub fn exit_transform_live_mode(&mut self) {
+        if !self.transform_live {
+            return;
+        }
+        log::info!("exit_transform_live_mode");
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        for slot in &self.slots {
+            slot.decoder.set_locked_state(false);
+        }
+        self.background_src.set_property("is-live", false);
+        if let Some(ref q) = self.display_queue {
+            q.set_property_from_str("leaky", "never");
+            q.set_property("max-size-buffers", 3u32);
+        }
+        self.transform_live = false;
+        self.reseek_slot_for_current();
     }
 
     pub fn update_current_opacity(&mut self, opacity: f64) {

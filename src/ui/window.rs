@@ -649,7 +649,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         inspector_view.position_y_slider.set_value(py);
                         *inspector_view.updating.borrow_mut() = false;
                     }
-                    // 3. Push to GStreamer (read existing crop/rotate/flip from inspector)
+                    // 3. Push to GStreamer without blocking reseek (live mode handles preview)
                     let cl = inspector_view.crop_left_slider.value() as i32;
                     let crv = inspector_view.crop_right_slider.value() as i32;
                     let ct = inspector_view.crop_top_slider.value() as i32;
@@ -662,13 +662,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let fh = inspector_view.flip_h_btn.is_active();
                     let fv = inspector_view.flip_v_btn.is_active();
                     let mut pp = prog_player.borrow_mut();
-                    if let Some(ref clip_id) = selected {
-                        pp.update_transform_for_clip(
-                            clip_id, cl, crv, ct, cb, rot, fh, fv, sc, px, py,
-                        );
-                    } else {
-                        pp.update_current_transform(cl, crv, ct, cb, rot, fh, fv, sc, px, py);
-                    }
+                    pp.enter_transform_live_mode();
+                    pp.set_transform_properties_only(
+                        selected.as_deref(),
+                        cl,
+                        crv,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        sc,
+                        px,
+                        py,
+                    );
                     // 4. Update window dirty marker
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
@@ -718,13 +725,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let py = inspector_view.position_y_slider.value();
                     player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                     let mut pp = prog_player.borrow_mut();
-                    if let Some(ref clip_id) = selected {
-                        pp.update_transform_for_clip(
-                            clip_id, cl, cr, ct, cb, rot, fh, fv, sc, px, py,
-                        );
-                    } else {
-                        pp.update_current_transform(cl, cr, ct, cb, rot, fh, fv, sc, px, py);
-                    }
+                    pp.enter_transform_live_mode();
+                    pp.set_transform_properties_only(
+                        selected.as_deref(),
+                        cl,
+                        cr,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        sc,
+                        px,
+                        py,
+                    );
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
                         win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
@@ -732,11 +746,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             },
             {
-                // on_drag_end: trigger a final preview reseek so the composited
-                // frame reflects the last transform state.
+                // on_drag_end: exit live transform mode and do a final reseek
+                // so the composited frame accurately reflects the last state.
                 let prog_player = prog_player.clone();
                 move || {
-                    prog_player.borrow().reseek_paused();
+                    prog_player.borrow_mut().exit_transform_live_mode();
                 }
             },
         ));
