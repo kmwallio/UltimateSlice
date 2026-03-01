@@ -1472,8 +1472,15 @@ impl ProgramPlayer {
             q.set_property_from_str("leaky", "downstream");
             q.set_property("max-size-buffers", 2u32);
         }
-        // Mute audio by locking the audio sink to Paused.
-        self.audio_sink.set_locked_state(true);
+        // Mute audio output without blocking the audio pipeline.
+        // Using set_locked_state blocks the audiomixer's downstream push,
+        // which can prevent some decoders (especially audio-less clips) from
+        // delivering video frames to the compositor.
+        if self.audio_sink.find_property("mute").is_some() {
+            self.audio_sink.set_property("mute", true);
+        } else {
+            self.audio_sink.set_locked_state(true);
+        }
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.transform_live = true;
     }
@@ -1487,9 +1494,13 @@ impl ProgramPlayer {
         }
         log::info!("exit_transform_live_mode");
         let _ = self.pipeline.set_state(gst::State::Paused);
-        // Restore audio sink.
-        self.audio_sink.set_locked_state(false);
-        let _ = self.audio_sink.sync_state_with_parent();
+        // Restore audio output.
+        if self.audio_sink.find_property("mute").is_some() {
+            self.audio_sink.set_property("mute", false);
+        } else if self.audio_sink.is_locked_state() {
+            self.audio_sink.set_locked_state(false);
+            let _ = self.audio_sink.sync_state_with_parent();
+        }
         self.background_src.set_property("is-live", false);
         if let Some(ref q) = self.display_queue {
             q.set_property_from_str("leaky", "no");
