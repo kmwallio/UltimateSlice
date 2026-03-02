@@ -92,6 +92,24 @@ impl Player {
             gb.set_property("sigma", 0.0_f64);
 
             let bin = gst::Bin::new();
+
+            // Downscale oversized sources (e.g. 5.3K GoPro) early so the
+            // effects chain doesn't process multi-megapixel RGBA frames.
+            let prescale = gst::ElementFactory::make("videoconvertscale")
+                .build()
+                .expect("videoconvertscale must be available");
+            let prescale_caps = gst::ElementFactory::make("capsfilter")
+                .property(
+                    "caps",
+                    &gst::Caps::builder("video/x-raw")
+                        .field("width", gst::IntRange::new(1i32, 1920))
+                        .field("height", gst::IntRange::new(1i32, 1080))
+                        .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+                        .build(),
+                )
+                .build()
+                .expect("capsfilter must be available");
+
             let conv1 = gst::ElementFactory::make("videoconvert")
                 .build()
                 .expect("videoconvert must be available");
@@ -110,20 +128,20 @@ impl Player {
                 let conv4 = gst::ElementFactory::make("videoconvert")
                     .build()
                     .expect("videoconvert must be available");
-                bin.add_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                bin.add_many([&prescale, &prescale_caps, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
                     .ok();
-                gst::Element::link_many([vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                gst::Element::link_many([&prescale, &prescale_caps, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
                     .ok();
-                let sink_pad = vc.static_pad("sink").unwrap();
+                let sink_pad = prescale.static_pad("sink").unwrap();
                 let src_pad = vff.static_pad("src").unwrap();
                 bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
                     .ok();
                 bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
                     .ok();
             } else {
-                bin.add_many([vb, &conv1, gb]).ok();
-                gst::Element::link_many([vb, &conv1, gb]).ok();
-                let sink_pad = vb.static_pad("sink").unwrap();
+                bin.add_many([&prescale, &prescale_caps, vb, &conv1, gb]).ok();
+                gst::Element::link_many([&prescale, &prescale_caps, vb, &conv1, gb]).ok();
+                let sink_pad = prescale.static_pad("sink").unwrap();
                 let src_pad = gb.static_pad("src").unwrap();
                 bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
                     .ok();
