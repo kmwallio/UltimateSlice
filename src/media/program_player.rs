@@ -2521,8 +2521,6 @@ impl ProgramPlayer {
     /// Reset every retained slot's compositor-arrival counter so that
     /// `wait_for_compositor_arrivals` requires a genuinely fresh buffer
     /// from each slot after the topology change + flush/seek cycle.
-    /// Currently unused by the "no-touch-retained" incremental strategy.
-    #[allow(dead_code)]
     fn reset_slot_arrival_seqs(&self) {
         for slot in &self.slots {
             slot.comp_arrival_seq.store(0, Ordering::Relaxed);
@@ -2562,14 +2560,17 @@ impl ProgramPlayer {
         }
     }
 
-    /// Incremental add-only boundary update using "no-touch-retained" strategy.
+    /// Incremental add-only boundary update.
     ///
-    /// Key insight: `compositor.seek_simple(FLUSH, ZERO)` propagates upstream
-    /// through ALL sink pads to ALL decoders, including retained ones.  This
-    /// double-flush-seek corrupts retained decoders' streaming state.  Instead,
-    /// we pause the pipeline (retained decoders preroll in place), build and
-    /// seek ONLY new decoders, then resume.  Retained decoders are never
-    /// flushed or seeked — their paused preroll buffers are already correct.
+    /// Pauses pipeline, builds new slots, then seeks ALL decoders individually
+    /// (both new and retained) to their correct positions before resuming.
+    ///
+    /// Critical: we do NOT use compositor.seek_simple(FLUSH, ZERO) — that
+    /// propagates upstream through ALL sink pads causing a double-flush-seek
+    /// on retained decoders.  Instead, each per-decoder FLUSH seek only
+    /// propagates through that decoder's own effects→queue→compositor_pad
+    /// branch.  Combined with set_start_time(ZERO), all decoders produce
+    /// buffers with aligned running-times from a clean base.
     fn try_incremental_add_only_update(
         &mut self,
         timeline_pos: u64,
@@ -2601,8 +2602,7 @@ impl ProgramPlayer {
             was_playing
         );
 
-        // 1. Pause — retained decoders settle into paused preroll at their
-        //    current position (just before boundary).  This is non-destructive.
+        // 1. Pause — all decoders settle into paused preroll.
         let _ = self.pipeline.set_state(gst::State::Paused);
 
         // 2. Build only NEW slots.
@@ -2668,28 +2668,22 @@ impl ProgramPlayer {
             }
         }
 
-        // 5. Seek ONLY new decoders — never touch retained decoders.
-        //    Each new decoder's per-branch FLUSH propagates through its own
-        //    effects→queue→compositor_pad path only, not to other branches.
-        let new_baseline: Vec<(usize, u64)> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| added_clip_idxs.contains(&s.clip_idx))
-            .map(|(i, s)| {
-                s.comp_arrival_seq.store(0, Ordering::Relaxed);
-                (i, 0u64)
-            })
-            .collect();
+        // 5. Reset start_time so running-times align across all decoders.
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+
+        // 6. Seek ALL decoders individually — both new and retained.
+        //    Each per-decoder FLUSH propagates through its own branch only
+        //    (unlike compositor.seek_simple which propagates to ALL branches).
+        //    This gives every decoder a clean segment from its seek position
+        //    with running_time starting from 0, aligned with the reset start_time.
+        self.reset_slot_arrival_seqs();
+        let baseline = self.snapshot_arrival_seqs();
         let seek_flags = if was_playing {
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
         } else {
             Self::paused_seek_flags()
         };
         for slot in &self.slots {
-            if !added_clip_idxs.contains(&slot.clip_idx) {
-                continue;
-            }
             let clip = &self.clips[slot.clip_idx];
             let ok = if was_playing {
                 Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags)
@@ -2698,7 +2692,7 @@ impl ProgramPlayer {
             };
             if !ok {
                 log::warn!(
-                    "try_incremental_add_only: seek FAILED for new clip {}",
+                    "try_incremental_add_only: seek FAILED for clip {}",
                     clip.id
                 );
                 if let Some(ref pad) = slot.compositor_pad {
@@ -2710,49 +2704,15 @@ impl ProgramPlayer {
             }
         }
 
-        // 6. Wait for new decoders' preroll + arrival only.
-        //    Retained decoders already have paused preroll buffers — don't wait
-        //    for them to re-arrive since we never flushed them.
-        for slot in &self.slots {
-            if added_clip_idxs.contains(&slot.clip_idx) {
-                let _ = slot.decoder.state(gst::ClockTime::from_mseconds(
-                    if was_playing { 100 } else { 300 },
-                ));
-            }
-        }
+        // 7. Wait for all decoders' preroll + compositor arrivals.
+        self.wait_for_paused_preroll();
         let arrival_budget = if was_playing {
-            self.adaptive_arrival_wait_ms(800)
+            self.adaptive_arrival_wait_ms(1500)
         } else {
-            800
+            1200
         };
-        // Wait for new slots' compositor arrivals only.
-        if !new_baseline.is_empty() {
-            let deadline = Instant::now() + Duration::from_millis(arrival_budget);
-            let sleep_ms = if was_playing { 5 } else { 15 };
-            loop {
-                let all = new_baseline.iter().all(|&(idx, base)| {
-                    self.slots[idx].comp_arrival_seq.load(Ordering::Relaxed) > base
-                });
-                if all {
-                    log::info!(
-                        "try_incremental_add_only: new slot arrivals confirmed"
-                    );
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    log::warn!(
-                        "try_incremental_add_only: new slot arrival timeout ({}ms)",
-                        arrival_budget
-                    );
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(sleep_ms));
-            }
-        }
+        self.wait_for_compositor_arrivals(&baseline, arrival_budget);
 
-        // 7. DON'T reset start_time — retained decoders' segments and
-        //    running-time calculations are still valid from the original
-        //    pipeline clock base.  poll() resets base_timeline_ns + play_start.
         self.current_idx = desired.last().copied();
         self.slot_queue_drop_late_active = false;
         let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
@@ -2768,13 +2728,12 @@ impl ProgramPlayer {
         true
     }
 
-    /// Incremental remove-only boundary update using "no-touch-retained" strategy.
+    /// Incremental remove-only boundary update.
     ///
-    /// The simplest incremental path: just teardown exiting slots.  Retained
-    /// decoders are never paused, flushed, or seeked.  The GStreamer compositor
-    /// (GstVideoAggregator) handles dynamic pad removal natively — once a sink
-    /// pad is released, the aggregator stops waiting for buffers from it and
-    /// continues aggregating from the remaining pads.
+    /// Briefly pauses the pipeline for safe topology change (avoids removing
+    /// elements while streaming threads are active), tears down exiting slots,
+    /// then resumes.  Retained decoders are re-seeked to their correct positions
+    /// with a reset start_time for clean running-time alignment.
     fn try_incremental_remove_only_update(
         &mut self,
         timeline_pos: u64,
@@ -2802,10 +2761,11 @@ impl ProgramPlayer {
             was_playing
         );
 
-        // 1. Teardown removed slots.  FlushStart on their compositor/mixer
-        //    pads unblocks the aggregator, then elements are removed and set
-        //    to Null.  The compositor continues aggregating from retained pads.
-        //    DO NOT pause the pipeline — retained decoders keep streaming.
+        // 1. Pause pipeline for safe topology change — streaming threads
+        //    must be quiescent before removing elements.
+        let _ = self.pipeline.set_state(gst::State::Paused);
+
+        // 2. Teardown removed slots.
         let mut i = 0usize;
         while i < self.slots.len() {
             if desired.contains(&self.slots[i].clip_idx) {
@@ -2819,7 +2779,7 @@ impl ProgramPlayer {
             return false;
         }
 
-        // 2. Update zorder on retained slots to match desired order.
+        // 3. Update zorder on retained slots to match desired order.
         for (zorder_offset, clip_idx) in desired.iter().enumerate() {
             if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == *clip_idx) {
                 if let Some(ref pad) = slot.compositor_pad {
@@ -2828,8 +2788,47 @@ impl ProgramPlayer {
             }
         }
 
-        // 3. No flush, no seek, no state change on retained decoders.
-        //    Their streaming threads continue uninterrupted.
+        // 4. Reset start_time and seek retained decoders individually so
+        //    running-times are clean after the topology change.  Per-decoder
+        //    FLUSH seeks only affect each decoder's own branch.
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+        self.reset_slot_arrival_seqs();
+        let baseline = self.snapshot_arrival_seqs();
+        let seek_flags = if was_playing {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+        } else {
+            Self::paused_seek_flags()
+        };
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            let ok = if was_playing {
+                Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags)
+            } else {
+                Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos)
+            };
+            if !ok {
+                log::warn!(
+                    "try_incremental_remove_only: seek FAILED for clip {}",
+                    clip.id
+                );
+                if let Some(ref pad) = slot.compositor_pad {
+                    let _ = pad.send_event(gst::event::Eos::new());
+                }
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    let _ = pad.send_event(gst::event::Eos::new());
+                }
+            }
+        }
+
+        // 5. Wait for retained decoders' preroll + arrivals.
+        self.wait_for_paused_preroll();
+        let arrival_budget = if was_playing {
+            self.adaptive_arrival_wait_ms(1200)
+        } else {
+            1000
+        };
+        self.wait_for_compositor_arrivals(&baseline, arrival_budget);
+
         self.current_idx = desired.last().copied();
         self.slot_queue_drop_late_active = false;
         let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
