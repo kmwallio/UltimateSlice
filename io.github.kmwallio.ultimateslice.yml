@@ -12,6 +12,9 @@ finish-args:
   - --socket=pulseaudio
   - --device=dri
   - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --filesystem=/mnt
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
