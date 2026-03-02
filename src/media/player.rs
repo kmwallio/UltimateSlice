@@ -48,25 +48,16 @@ impl Player {
                 .expect("gtk4paintablesink 'paintable' property must implement gdk4::Paintable")
         };
 
-        // Optional GL sink path for hardware-accelerated upload.
-        // Only build glsinkbin when hardware acceleration is actually enabled.
-        // If we build glsinkbin unconditionally it adds paintablesink to its
-        // internal bin (giving paintablesink a GstBus reference). Then if we
-        // also set paintablesink as playbin's video-sink directly, GStreamer's
-        // playsink try_element() asserts !element_bus and crashes (GStreamer 1.26+).
-        let gl_video_sink = if hardware_acceleration_enabled {
-            gst::ElementFactory::make("glsinkbin")
-                .property("sink", &paintablesink)
-                .build()
-                .ok()
-        } else {
-            None
-        };
-        let video_sink = if hardware_acceleration_enabled {
-            gl_video_sink.as_ref().unwrap_or(&paintablesink)
-        } else {
-            &paintablesink
-        };
+        // Always try glsinkbin for efficient GL texture upload.
+        // Without it, gtk4paintablesink must upload raw CPU buffers to GPU
+        // textures on every frame, which can freeze the UI with high-res
+        // content (e.g. 5.3K GoPro HEVC).  Falls back to raw paintablesink
+        // only if glsinkbin is unavailable (no GL support).
+        let gl_video_sink = gst::ElementFactory::make("glsinkbin")
+            .property("sink", &paintablesink)
+            .build()
+            .ok();
+        let video_sink = gl_video_sink.as_ref().unwrap_or(&paintablesink);
 
         let pipeline = gst::ElementFactory::make("playbin")
             .property("video-sink", video_sink)
@@ -276,39 +267,10 @@ impl Player {
     }
 
     pub fn set_hardware_acceleration(&self, enabled: bool) -> Result<()> {
-        let current_enabled = *self.hardware_acceleration_enabled.lock().unwrap();
-        if current_enabled == enabled {
-            return Ok(());
-        }
-
-        let target_sink = if enabled {
-            self.gl_video_sink.as_ref().unwrap_or(&self.paintablesink)
-        } else {
-            &self.paintablesink
-        };
-
-        let state_before = self.state();
-        let pos_before = self.position();
-        self.pipeline.set_state(gst::State::Ready)?;
-        self.pipeline.set_property("video-sink", target_sink);
-
-        match state_before {
-            PlayerState::Playing => {
-                self.pipeline.set_state(gst::State::Paused)?;
-                let _ = self.seek(pos_before);
-                self.pipeline.set_state(gst::State::Playing)?;
-                *self.state.lock().unwrap() = PlayerState::Playing;
-            }
-            PlayerState::Paused => {
-                self.pipeline.set_state(gst::State::Paused)?;
-                let _ = self.seek(pos_before);
-                *self.state.lock().unwrap() = PlayerState::Paused;
-            }
-            PlayerState::Stopped => {
-                *self.state.lock().unwrap() = PlayerState::Stopped;
-            }
-        }
-
+        // glsinkbin is always used when available for efficient GL rendering;
+        // swapping to raw paintablesink at runtime would trigger the
+        // !element_bus assertion because paintablesink already has a bus
+        // from glsinkbin.  Track the flag for future use (decoder hints).
         *self.hardware_acceleration_enabled.lock().unwrap() = enabled;
         Ok(())
     }
