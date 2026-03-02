@@ -2727,16 +2727,13 @@ impl ProgramPlayer {
         true
     }
 
-    /// Incremental remove-only boundary update — safe path.
+    /// Incremental remove-only boundary update — DISABLED.
     ///
-    /// Pauses the pipeline, tears down exiting slots, updates zorder on
-    /// retained slots, and returns.  poll() then sets Playing + resets
-    /// the wall-clock base.
-    ///
-    /// Retained decoders are NEVER seeked or flushed — they pause at their
-    /// current position and resume exactly where they left off.  The
-    /// compositor handles dynamic pad removal natively (stops waiting for
-    /// released pads and continues aggregating from the rest).
+    /// This method is kept for reference but not called.  After removing
+    /// compositor sink pads, the aggregator's internal timing/segment state
+    /// remains stale without a compositor.seek_simple reset, causing retained
+    /// decoders to produce ≤1 frame/sec.  All transitions now use full rebuild.
+    #[allow(dead_code)]
     fn try_incremental_remove_only_update(
         &mut self,
         timeline_pos: u64,
@@ -3512,32 +3509,16 @@ impl ProgramPlayer {
             self.slots.len()
         );
 
-        // Incremental boundary paths: only the remove-only path is enabled.
-        // The add-only path is disabled because GstVideoAggregator's aggregation
-        // state can only be properly reset via compositor.seek_simple (src-pad seek)
-        // which propagates upstream to ALL decoders — corrupting retained decoders'
-        // streaming state.  Individual pad flushes from per-decoder seeks don't
-        // trigger the aggregator's coordinated seek handler.  Remove-only is safe
-        // because retained decoders just pause/resume without any seeking or flushing.
-        const INCREMENTAL_REMOVE_ONLY: bool = true;
-        if INCREMENTAL_REMOVE_ONLY && !self.slots.is_empty() {
-            let desired = self.clips_active_at(timeline_pos);
-            let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
-            if !desired.is_empty() {
-                // Only try remove-only (clip exiting).  Add-only is disabled due to
-                // GstVideoAggregator running-time alignment issues with retained decoders.
-                if self.try_incremental_remove_only_update(
-                    timeline_pos, &desired, &current, was_playing,
-                ) {
-                    let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
-                    log::info!(
-                        "rebuild_pipeline_at: incremental REMOVE succeeded elapsed_ms={}",
-                        elapsed_ms
-                    );
-                    return;
-                }
-            }
-        }
+        // Incremental boundary paths are disabled.  Both add-only and
+        // remove-only paths suffer from the same GstVideoAggregator limitation:
+        // after topology changes (adding or removing compositor sink pads),
+        // the aggregator's internal timing/segment state must be reset via
+        // compositor.seek_simple (src-pad seek).  Skipping that reset causes
+        // retained decoders to produce ≤1 frame/sec (remove-only) or freeze
+        // entirely (add-only).  The proven full-rebuild path handles all
+        // transitions correctly.
+        #[allow(unused)]
+        const INCREMENTAL_BOUNDARY: bool = false;
 
         // Full rebuild: tear down existing slots FIRST — each decoder is set
         // to Null individually, which avoids a pipeline-wide state change on
