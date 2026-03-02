@@ -184,7 +184,7 @@ Tracking docs:
           - [ ] Replace full boundary rebuild with incremental slot diffing (reuse unchanged slots; add/remove only deltas)
           - [ ] Re-introduce remove-only incremental boundary path after transition frame-update correctness is verified
           - [ ] Re-introduce add-only incremental boundary path after proxy/transition frame-update correctness is verified
-          - [ ] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
+          - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
         - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview

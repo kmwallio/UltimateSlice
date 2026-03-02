@@ -246,6 +246,10 @@ pub struct ProgramPlayer {
     rebuild_history_cursor: usize,
     /// Number of entries actually recorded (≤ `rebuild_history_ms.len()`).
     rebuild_history_count: usize,
+    /// Pre-preroll sidecar pipelines for upcoming boundary clips.
+    /// These run asynchronously in background threads, decoding the first
+    /// frame to warm OS file cache and codec state before handoff.
+    prepreroll_sidecars: Vec<gst::Pipeline>,
 }
 
 impl ProgramPlayer {
@@ -668,6 +672,7 @@ impl ProgramPlayer {
                 rebuild_history_ms: [0; 8],
                 rebuild_history_cursor: 0,
                 rebuild_history_count: 0,
+                prepreroll_sidecars: Vec::new(),
             },
             paintable,
             paintable2,
@@ -993,6 +998,7 @@ impl ProgramPlayer {
         self.prewarmed_boundary_ns = None;
         self.rebuild_history_count = 0;
         self.rebuild_history_cursor = 0;
+        self.teardown_prepreroll_sidecars();
     }
 
     // ── Transport controls ─────────────────────────────────────────────────
@@ -1148,6 +1154,7 @@ impl ProgramPlayer {
 
     pub fn stop(&mut self) {
         self.teardown_slots();
+        self.teardown_prepreroll_sidecars();
         let _ = self.pipeline.set_state(gst::State::Ready);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Stopped;
@@ -1735,19 +1742,70 @@ impl ProgramPlayer {
             .min()
     }
 
-    fn prewarm_incoming_clip_resources(&self, clip: &ProgramClip) {
+    fn prewarm_incoming_clip_resources(&mut self, clip: &ProgramClip, timeline_pos: u64) {
         let effective_path = self.effective_source_path_for_clip(clip);
         let uri = format!("file://{}", effective_path);
-        if let Ok(decoder) = gst::ElementFactory::make("uridecodebin")
+        // Build a lightweight sidecar pipeline that actually decodes the
+        // first frame at the clip's source position.  This warms the OS
+        // page cache, codec initialisation, and container demux state.
+        // The pipeline runs asynchronously — we set it to Paused and seek,
+        // then store it; teardown happens at rebuild or load.
+        let sidecar = gst::Pipeline::new();
+        let Ok(decoder) = gst::ElementFactory::make("uridecodebin")
             .property("uri", &uri)
             .build()
-        {
-            let _ = decoder.set_state(gst::State::Ready);
-            let _ = decoder.state(gst::ClockTime::from_mseconds(20));
-            let _ = decoder.set_state(gst::State::Null);
+        else {
+            return;
+        };
+        let Ok(fakesink) = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+        else {
+            return;
+        };
+        if sidecar.add_many([&decoder, &fakesink]).is_err() {
+            return;
         }
-        let (effects_bin, ..) = Self::build_effects_bin(clip, self.project_width, self.project_height);
+        // Dynamic pad linking: connect first video pad to fakesink.
+        let fs = fakesink.clone();
+        decoder.connect_pad_added(move |_dec, pad| {
+            let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
+            if let Some(caps) = caps {
+                if let Some(s) = caps.structure(0) {
+                    if s.name().starts_with("video/") {
+                        if let Some(sink_pad) = fs.static_pad("sink") {
+                            if !sink_pad.is_linked() {
+                                let _ = pad.link(&sink_pad);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let _ = sidecar.set_state(gst::State::Paused);
+        // Seek to the clip's source position so the decoder decodes from
+        // the right keyframe, not from position 0.
+        let source_ns = clip.source_pos_ns(timeline_pos);
+        let _ = decoder.seek(
+            1.0,
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(source_ns),
+            gst::SeekType::None,
+            gst::ClockTime::NONE,
+        );
+        // Also warm the effects-bin construction path.
+        let (effects_bin, ..) =
+            Self::build_effects_bin(clip, self.project_width, self.project_height);
         let _ = effects_bin.set_state(gst::State::Null);
+        self.prepreroll_sidecars.push(sidecar);
+    }
+
+    /// Tear down all pre-preroll sidecar pipelines.
+    fn teardown_prepreroll_sidecars(&mut self) {
+        for sidecar in self.prepreroll_sidecars.drain(..) {
+            let _ = sidecar.set_state(gst::State::Null);
+        }
     }
 
     fn prewarm_upcoming_boundary(&mut self, timeline_pos_ns: u64) {
@@ -1772,7 +1830,7 @@ impl ProgramPlayer {
                 let _ = self.probe_has_audio_stream_cached(&effective_path);
             }
             if incoming {
-                self.prewarm_incoming_clip_resources(&clip);
+                self.prewarm_incoming_clip_resources(&clip, boundary_ns);
             }
         }
         log::debug!(
@@ -3295,6 +3353,9 @@ impl ProgramPlayer {
         // deadlock when gtk4paintablesink needs the main loop to complete
         // its transition).
         self.teardown_slots();
+        // Tear down pre-preroll sidecars now that the real rebuild is starting.
+        // The OS file cache and codec state benefits persist after Null.
+        self.teardown_prepreroll_sidecars();
 
         // Avoid pipeline-wide Ready transitions here: in some media/layout
         // combinations this can deadlock in gst_pad_set_active while pads are
