@@ -182,9 +182,9 @@ Tracking docs:
           - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
           - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
-          - [ ] Replace full boundary rebuild with incremental slot diffing (reuse unchanged slots; add/remove only deltas) — code fixed but disabled; retained decoders stop producing frames after flush+seek during playback
-          - [ ] Re-introduce remove-only incremental boundary path after retained-decoder frame-refresh regression is resolved
-          - [ ] Re-introduce add-only incremental boundary path after retained-decoder frame-refresh regression is resolved
+          - [x] Replace full boundary rebuild with incremental slot diffing (reuse unchanged slots; add/remove only deltas) — re-enabled with "no-touch-retained" strategy that avoids compositor-wide flush propagation to retained decoders
+          - [x] Re-introduce remove-only incremental boundary path — tears down exiting slots without pausing or flushing retained decoders (~90% faster than full rebuild)
+          - [x] Re-introduce add-only incremental boundary path — pauses, builds + seeks only new decoders while retained decoders keep paused preroll (~50% faster)
           - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
         - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
