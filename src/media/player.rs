@@ -49,12 +49,18 @@ impl Player {
         };
 
         // Optional GL sink path for hardware-accelerated upload.
-        let gl_video_sink = match gst::ElementFactory::make("glsinkbin")
-            .property("sink", &paintablesink)
-            .build()
-        {
-            Ok(s) => Some(s),
-            Err(_) => None,
+        // Only build glsinkbin when hardware acceleration is actually enabled.
+        // If we build glsinkbin unconditionally it adds paintablesink to its
+        // internal bin (giving paintablesink a GstBus reference). Then if we
+        // also set paintablesink as playbin's video-sink directly, GStreamer's
+        // playsink try_element() asserts !element_bus and crashes (GStreamer 1.26+).
+        let gl_video_sink = if hardware_acceleration_enabled {
+            gst::ElementFactory::make("glsinkbin")
+                .property("sink", &paintablesink)
+                .build()
+                .ok()
+        } else {
+            None
         };
         let video_sink = if hardware_acceleration_enabled {
             gl_video_sink.as_ref().unwrap_or(&paintablesink)

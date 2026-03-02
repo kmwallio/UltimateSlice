@@ -306,11 +306,32 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
+            let timeline_state = timeline_state.clone();
             let cell = timeline_panel_cell.clone();
             move |vol, pan| {
-                prog_player
-                    .borrow_mut()
-                    .update_current_audio(vol as f64, pan as f64);
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                // Persist the new volume/pan to the project model for the selected clip.
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(ref cid) = selected {
+                        for track in proj.tracks.iter_mut() {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == cid) {
+                                clip.volume = vol as f32;
+                                clip.pan = pan as f32;
+                                break;
+                            }
+                        }
+                    }
+                    proj.dirty = true;
+                }
+                // Update live GStreamer audio: target the selected clip when possible,
+                // fall back to updating the "current" (playhead) clip.
+                let mut pp = prog_player.borrow_mut();
+                if let Some(ref cid) = selected {
+                    pp.update_audio_for_clip(cid, vol as f64, pan as f64);
+                } else {
+                    pp.update_current_audio(vol as f64, pan as f64);
+                }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -1645,9 +1666,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             .flat_map(|t| t.clips.iter())
                             .find(|c| &c.id == cid);
                         if let Some(c) = clip_opt {
-                            to.set_transform(c.scale, c.position_x, c.position_y);
-                            to.set_crop(c.crop_left, c.crop_right, c.crop_top, c.crop_bottom);
-                            to.set_clip_selected(true);
+                            // Don't show transform handles for audio-only clips — they
+                            // have no visual representation on the canvas.
+                            let is_visual = c.kind != ClipKind::Audio;
+                            if is_visual {
+                                to.set_transform(c.scale, c.position_x, c.position_y);
+                                to.set_crop(c.crop_left, c.crop_right, c.crop_top, c.crop_bottom);
+                                to.set_clip_selected(true);
+                            } else {
+                                to.set_clip_selected(false);
+                            }
                         } else {
                             to.set_clip_selected(false);
                         }
