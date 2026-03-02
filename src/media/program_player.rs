@@ -2796,9 +2796,10 @@ impl ProgramPlayer {
         self.current_idx = desired.last().copied();
         self.slot_queue_drop_late_active = false;
         let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
-        if was_playing {
-            self.record_rebuild_duration_ms(elapsed_ms);
-        }
+        // Do NOT record this duration in the adaptive wait ring buffer.
+        // Remove-only times (~100ms) are fundamentally different from full
+        // rebuild times (~1300ms) and would contaminate the p75 calculation,
+        // causing subsequent full rebuilds to use dangerously tight budgets.
         log::info!(
             "try_incremental_remove_only: timeline_pos={} slots_after={} elapsed_ms={}",
             timeline_pos,
