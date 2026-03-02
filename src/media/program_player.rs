@@ -229,6 +229,8 @@ pub struct ProgramPlayer {
     /// True when heavy-overlap playback is using drop-late display policy to
     /// keep displayed video aligned to the audio clock.
     playback_drop_late_active: bool,
+    /// True when per-slot queues are in drop-late mode during heavy overlap playback.
+    slot_queue_drop_late_active: bool,
     /// True when the transform tool has temporarily set the pipeline to live
     /// mode for interactive preview during drag.
     transform_live: bool,
@@ -651,6 +653,7 @@ impl ProgramPlayer {
                 preview_divisor: 1,
                 display_queue,
                 playback_drop_late_active: false,
+                slot_queue_drop_late_active: false,
                 transform_live: false,
                 play_start: None,
                 prewarmed_boundary_ns: None,
@@ -1091,6 +1094,7 @@ impl ProgramPlayer {
         self.play_start = Some(Instant::now());
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
+        self.update_slot_queue_policy();
     }
 
     pub fn pause(&mut self) {
@@ -1110,6 +1114,7 @@ impl ProgramPlayer {
         self.state = PlayerState::Paused;
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
+        self.update_slot_queue_policy();
     }
 
     pub fn toggle_play_pause(&mut self) {
@@ -1138,6 +1143,7 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Stopped;
         self.update_drop_late_policy();
+        self.update_slot_queue_policy();
     }
 
     pub fn set_jkl_rate(&mut self, rate: f64) {
@@ -1164,6 +1170,7 @@ impl ProgramPlayer {
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.state = PlayerState::Playing;
         self.update_drop_late_policy();
+        self.update_slot_queue_policy();
     }
 
     // ── Poll ───────────────────────────────────────────────────────────────
@@ -1192,6 +1199,7 @@ impl ProgramPlayer {
             self.timeline_pos_ns = self.timeline_dur_ns;
             self.prewarmed_boundary_ns = None;
             self.update_drop_late_policy();
+            self.update_slot_queue_policy();
             return true;
         }
 
@@ -1224,6 +1232,7 @@ impl ProgramPlayer {
             self.timeline_pos_ns = self.timeline_dur_ns;
             self.prewarmed_boundary_ns = None;
             self.update_drop_late_policy();
+            self.update_slot_queue_policy();
             return true;
         }
 
@@ -1235,7 +1244,9 @@ impl ProgramPlayer {
             // video slots. Rebuilds can take noticeable time under overlap, and
             // letting audio continue during that window causes audible drift.
             let _ = self.audio_pipeline.set_state(gst::State::Paused);
-            self.rebuild_pipeline_at(new_pos);
+            if !self.try_incremental_remove_only_update(new_pos, &desired, &current) {
+                self.rebuild_pipeline_at(new_pos);
+            }
             let _ = self.pipeline.set_state(gst::State::Playing);
             self.sync_audio_to(new_pos);
             if self.audio_current_idx.is_some() {
@@ -1252,6 +1263,7 @@ impl ProgramPlayer {
         // Advance audio pipeline across clip boundaries.
         self.poll_audio(new_pos);
         self.update_drop_late_policy();
+        self.update_slot_queue_policy();
 
         changed
     }
@@ -1549,6 +1561,7 @@ impl ProgramPlayer {
         }
         let _ = self.pipeline.set_state(gst::State::Paused);
         self.transform_live = true;
+        self.update_slot_queue_policy();
     }
 
     /// Exit live transform mode and restore the pipeline to normal paused state.
@@ -1573,6 +1586,7 @@ impl ProgramPlayer {
             q.set_property("max-size-buffers", 3u32);
         }
         self.transform_live = false;
+        self.update_slot_queue_policy();
         self.reseek_slot_for_current();
     }
 
@@ -1776,6 +1790,29 @@ impl ProgramPlayer {
         }
         log::info!(
             "update_drop_late_policy: active={} slots={}",
+            should_drop_late,
+            self.slots.len()
+        );
+    }
+
+    fn update_slot_queue_policy(&mut self) {
+        let should_drop_late =
+            self.state == PlayerState::Playing && self.slots.len() >= 3 && !self.transform_live;
+        if should_drop_late == self.slot_queue_drop_late_active {
+            return;
+        }
+        self.slot_queue_drop_late_active = should_drop_late;
+        for slot in &self.slots {
+            if let Some(ref q) = slot.slot_queue {
+                if should_drop_late {
+                    q.set_property_from_str("leaky", "downstream");
+                } else {
+                    q.set_property_from_str("leaky", "no");
+                }
+            }
+        }
+        log::info!(
+            "update_slot_queue_policy: active={} slots={}",
             should_drop_late,
             self.slots.len()
         );
@@ -2282,7 +2319,113 @@ impl ProgramPlayer {
         let _ = pad;
     }
 
+    fn try_incremental_remove_only_update(
+        &mut self,
+        timeline_pos: u64,
+        desired: &[usize],
+        current: &[usize],
+    ) -> bool {
+        // Minimal safe incremental path: boundary transitions that only REMOVE
+        // clips from the active set. Adding new decoder branches still uses the
+        // full rebuild path for correctness.
+        if desired.is_empty() || current.is_empty() || desired.len() >= current.len() {
+            return false;
+        }
+        if !desired.iter().all(|idx| current.contains(idx)) {
+            return false;
+        }
+        let removed_count = current.len().saturating_sub(desired.len());
+        if removed_count == 0 {
+            return false;
+        }
+        log::debug!(
+            "try_incremental_remove_only_update: timeline_pos={} removed={} slots_before={}",
+            timeline_pos,
+            removed_count,
+            self.slots.len()
+        );
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        let mut i = 0usize;
+        while i < self.slots.len() {
+            if desired.contains(&self.slots[i].clip_idx) {
+                i += 1;
+                continue;
+            }
+            let slot = self.slots.remove(i);
+            self.teardown_single_slot(slot);
+        }
+        if self.slots.is_empty() {
+            return false;
+        }
+        for (zorder_offset, clip_idx) in desired.iter().enumerate() {
+            if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == *clip_idx) {
+                if let Some(ref pad) = slot.compositor_pad {
+                    pad.set_property("zorder", (zorder_offset + 1) as u32);
+                }
+            }
+        }
+        let baseline = self.snapshot_arrival_seqs();
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+        }
+        self.wait_for_paused_preroll();
+        self.wait_for_compositor_arrivals(&baseline, 900);
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+        self.current_idx = desired.last().copied();
+        self.slot_queue_drop_late_active = false;
+        log::info!(
+            "try_incremental_remove_only_update: timeline_pos={} slots_after={}",
+            timeline_pos,
+            self.slots.len()
+        );
+        true
+    }
+
     // ── Pipeline rebuild ───────────────────────────────────────────────────
+
+    fn teardown_single_slot(&mut self, slot: VideoSlot) {
+        if let Some(ref pad) = slot.compositor_pad {
+            let _ = pad.send_event(gst::event::FlushStart::new());
+        }
+        if let Some(ref pad) = slot.audio_mixer_pad {
+            let _ = pad.send_event(gst::event::FlushStart::new());
+        }
+        // 1. Detach branch elements from the pipeline.
+        self.pipeline.remove(&slot.decoder).ok();
+        self.pipeline
+            .remove(slot.effects_bin.upcast_ref::<gst::Element>())
+            .ok();
+        if let Some(ref q) = slot.slot_queue {
+            self.pipeline.remove(q).ok();
+        }
+        if let Some(ref ac) = slot.audio_conv {
+            self.pipeline.remove(ac).ok();
+        }
+        // 2. Stop any residual streaming work on removed elements.
+        let _ = slot.decoder.set_state(gst::State::Null);
+        let _ = slot.decoder.state(gst::ClockTime::from_mseconds(100));
+        let _ = slot.effects_bin.set_state(gst::State::Null);
+        let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(100));
+        if let Some(ref q) = slot.slot_queue {
+            let _ = q.set_state(gst::State::Null);
+            let _ = q.state(gst::ClockTime::from_mseconds(100));
+        }
+        if let Some(ref ac) = slot.audio_conv {
+            let _ = ac.set_state(gst::State::Null);
+            let _ = ac.state(gst::ClockTime::from_mseconds(100));
+        }
+        // 3. Release aggregator request pads after branch shutdown.
+        if let Some(ref pad) = slot.compositor_pad {
+            self.compositor.release_request_pad(pad);
+        }
+        if let Some(ref pad) = slot.audio_mixer_pad {
+            self.audiomixer.release_request_pad(pad);
+        }
+    }
 
     /// Tear down all active decoder slots (decoders, effects, pads).
     ///
@@ -2307,39 +2450,11 @@ impl ProgramPlayer {
             }
         }
 
-        for slot in self.slots.drain(..) {
-            // 1. Detach branch elements from the pipeline.
-            self.pipeline.remove(&slot.decoder).ok();
-            self.pipeline
-                .remove(slot.effects_bin.upcast_ref::<gst::Element>())
-                .ok();
-            if let Some(ref q) = slot.slot_queue {
-                self.pipeline.remove(q).ok();
-            }
-            if let Some(ref ac) = slot.audio_conv {
-                self.pipeline.remove(ac).ok();
-            }
-            // 2. Stop any residual streaming work on removed elements.
-            let _ = slot.decoder.set_state(gst::State::Null);
-            let _ = slot.decoder.state(gst::ClockTime::from_mseconds(100));
-            let _ = slot.effects_bin.set_state(gst::State::Null);
-            let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(100));
-            if let Some(ref q) = slot.slot_queue {
-                let _ = q.set_state(gst::State::Null);
-                let _ = q.state(gst::ClockTime::from_mseconds(100));
-            }
-            if let Some(ref ac) = slot.audio_conv {
-                let _ = ac.set_state(gst::State::Null);
-                let _ = ac.state(gst::ClockTime::from_mseconds(100));
-            }
-            // 3. Release aggregator request pads after branch shutdown.
-            if let Some(ref pad) = slot.compositor_pad {
-                self.compositor.release_request_pad(pad);
-            }
-            if let Some(ref pad) = slot.audio_mixer_pad {
-                self.audiomixer.release_request_pad(pad);
-            }
+        let drained: Vec<VideoSlot> = self.slots.drain(..).collect();
+        for slot in drained {
+            self.teardown_single_slot(slot);
         }
+        self.slot_queue_drop_late_active = false;
     }
 
     /// Wait briefly for dynamic decode pads to link into the effects chain.
