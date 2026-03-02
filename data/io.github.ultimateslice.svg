@@ -1,23 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
   <defs>
-    <!-- Background: warm caramel-orange (GNOME Orange 3 → Orange 5) -->
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#ffbe6f"/>
-      <stop offset="100%" stop-color="#9f5606"/>
-    </linearGradient>
-
-    <!-- Camera body: GNOME Dark 2 → Dark 4 -->
-    <linearGradient id="cam" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#5e5c64"/>
-      <stop offset="100%" stop-color="#3d3846"/>
-    </linearGradient>
-
-    <!-- Film magazine: slightly darker -->
-    <linearGradient id="mag" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#4a4851"/>
-      <stop offset="100%" stop-color="#2e2a38"/>
-    </linearGradient>
-
     <!-- Lens glass: GNOME Blue 2 → Blue 5 -->
     <radialGradient id="lens" cx="30%" cy="30%" r="70%">
       <stop offset="0%"  stop-color="#99c1f1"/>
@@ -57,14 +39,16 @@
     </clipPath>
   </defs>
 
-  <!-- ── Background (GNOME squircle icon shape) ── -->
-  <rect width="128" height="128" rx="20" fill="url(#bg)"/>
+  <!-- Translate all content so camera bottom aligns with GNOME HIG baseline (~y=108) -->
+  <g transform="translate(0, 11)">
 
   <!-- ── CINEMA CAMERA EXTERIOR (above the cut line) ── -->
   <g clip-path="url(#camSide)">
 
     <!-- Film magazine (top-left, ARRI-style detachable box) -->
-    <rect x="14" y="18" width="42" height="22" rx="4" fill="url(#mag)" stroke="#5e5c64" stroke-width="1.2"/>
+    <!-- Magazine 3D front-face profile (GNOME HIG depth) -->
+    <rect x="14" y="38" width="42" height="4" rx="2" fill="#2a2835"/>
+    <rect x="14" y="18" width="42" height="22" rx="4" fill="#4a4851" stroke="#5e5c64" stroke-width="1.2"/>
     <!-- Magazine latches -->
     <rect x="18" y="19" width="10" height="6" rx="1.5" fill="#2a2835" stroke="#6e6c76" stroke-width="0.8"/>
     <rect x="42" y="19" width="10" height="6" rx="1.5" fill="#2a2835" stroke="#6e6c76" stroke-width="0.8"/>
@@ -74,6 +58,8 @@
     <line x1="14" y1="30" x2="56" y2="30" stroke="#2a2835" stroke-width="0.9"/>
 
     <!-- Top carry handle (spans the body, very cinema-camera) -->
+    <!-- Handle 3D front-face profile (GNOME HIG depth) -->
+    <rect x="26" y="19" width="68" height="4" rx="3" fill="#2a2835"/>
     <rect x="26" y="8" width="68" height="13" rx="6" fill="#3d3846" stroke="#5e5c64" stroke-width="1.2"/>
     <!-- Handle grip knurling lines -->
     <g stroke="#2d2b37" stroke-width="0.9" opacity="0.65">
@@ -90,7 +76,9 @@
     </g>
 
     <!-- Main camera body (wider and more rectangular than before) -->
-    <rect x="10" y="36" width="108" height="60" rx="5" fill="url(#cam)"/>
+    <!-- Camera body 3D front-face profile (GNOME HIG depth, drawn behind top face) -->
+    <rect x="10" y="40" width="108" height="58" rx="5" fill="#3d3846"/>
+    <rect x="10" y="36" width="108" height="56" rx="5" fill="#5e5c64"/>
     <!-- Body horizontal panel seam (separates top/bottom sections) -->
     <line x1="10" y1="54" x2="118" y2="54" stroke="#2a2835" stroke-width="0.9" opacity="0.55"/>
 
@@ -177,6 +165,10 @@
   <line x1="0" y1="48" x2="128" y2="88"
         stroke="#000" stroke-width="1.5" opacity="0.18"/>
 
+  <!-- ── Camera body bottom front-face profile (GNOME HIG 3D depth) ── -->
+  <!-- Visible below the accessory rail as a 4 px darker front face -->
+  <rect x="10" y="93" width="108" height="4" rx="2" fill="#2e2a38"/>
+
   <!-- ── KITCHEN KNIFE (along the cut line, handle at lower-right) ── -->
   <!--
     translate(64, 68) rotate(17.35°) — local x-axis aligns with the cut
@@ -204,4 +196,6 @@
     <circle cx="44" cy="0" r="2.5" fill="#c0a878"/>
     <circle cx="55" cy="0" r="2.5" fill="#c0a878"/>
   </g>
+
+  </g> <!-- end translate group -->
 </svg>
