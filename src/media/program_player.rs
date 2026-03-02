@@ -2521,6 +2521,7 @@ impl ProgramPlayer {
     /// Reset every retained slot's compositor-arrival counter so that
     /// `wait_for_compositor_arrivals` requires a genuinely fresh buffer
     /// from each slot after the topology change + flush/seek cycle.
+    #[allow(dead_code)]
     fn reset_slot_arrival_seqs(&self) {
         for slot in &self.slots {
             slot.comp_arrival_seq.store(0, Ordering::Relaxed);
@@ -2560,17 +2561,15 @@ impl ProgramPlayer {
         }
     }
 
-    /// Incremental add-only boundary update.
+    /// Incremental add-only boundary update — DISABLED.
     ///
-    /// Pauses pipeline, builds new slots, then seeks ALL decoders individually
-    /// (both new and retained) to their correct positions before resuming.
-    ///
-    /// Critical: we do NOT use compositor.seek_simple(FLUSH, ZERO) — that
-    /// propagates upstream through ALL sink pads causing a double-flush-seek
-    /// on retained decoders.  Instead, each per-decoder FLUSH seek only
-    /// propagates through that decoder's own effects→queue→compositor_pad
-    /// branch.  Combined with set_start_time(ZERO), all decoders produce
-    /// buffers with aligned running-times from a clean base.
+    /// This method is kept for reference but not called.  Individual per-decoder
+    /// FLUSH seeks don't trigger GstVideoAggregator's coordinated seek handler,
+    /// leaving the compositor's segment/position tracking stale.  And using
+    /// compositor.seek_simple propagates upstream to retained decoders causing
+    /// double-flush corruption.  A future approach using gst_pad_set_offset()
+    /// for running-time alignment could make this viable.
+    #[allow(dead_code)]
     fn try_incremental_add_only_update(
         &mut self,
         timeline_pos: u64,
@@ -2728,12 +2727,16 @@ impl ProgramPlayer {
         true
     }
 
-    /// Incremental remove-only boundary update.
+    /// Incremental remove-only boundary update — safe path.
     ///
-    /// Briefly pauses the pipeline for safe topology change (avoids removing
-    /// elements while streaming threads are active), tears down exiting slots,
-    /// then resumes.  Retained decoders are re-seeked to their correct positions
-    /// with a reset start_time for clean running-time alignment.
+    /// Pauses the pipeline, tears down exiting slots, updates zorder on
+    /// retained slots, and returns.  poll() then sets Playing + resets
+    /// the wall-clock base.
+    ///
+    /// Retained decoders are NEVER seeked or flushed — they pause at their
+    /// current position and resume exactly where they left off.  The
+    /// compositor handles dynamic pad removal natively (stops waiting for
+    /// released pads and continues aggregating from the rest).
     fn try_incremental_remove_only_update(
         &mut self,
         timeline_pos: u64,
@@ -2761,8 +2764,8 @@ impl ProgramPlayer {
             was_playing
         );
 
-        // 1. Pause pipeline for safe topology change — streaming threads
-        //    must be quiescent before removing elements.
+        // 1. Pause pipeline — streaming threads must be quiescent before
+        //    removing elements and releasing pads.
         let _ = self.pipeline.set_state(gst::State::Paused);
 
         // 2. Teardown removed slots.
@@ -2788,47 +2791,8 @@ impl ProgramPlayer {
             }
         }
 
-        // 4. Reset start_time and seek retained decoders individually so
-        //    running-times are clean after the topology change.  Per-decoder
-        //    FLUSH seeks only affect each decoder's own branch.
-        self.pipeline.set_start_time(gst::ClockTime::ZERO);
-        self.reset_slot_arrival_seqs();
-        let baseline = self.snapshot_arrival_seqs();
-        let seek_flags = if was_playing {
-            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
-        } else {
-            Self::paused_seek_flags()
-        };
-        for slot in &self.slots {
-            let clip = &self.clips[slot.clip_idx];
-            let ok = if was_playing {
-                Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags)
-            } else {
-                Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos)
-            };
-            if !ok {
-                log::warn!(
-                    "try_incremental_remove_only: seek FAILED for clip {}",
-                    clip.id
-                );
-                if let Some(ref pad) = slot.compositor_pad {
-                    let _ = pad.send_event(gst::event::Eos::new());
-                }
-                if let Some(ref pad) = slot.audio_mixer_pad {
-                    let _ = pad.send_event(gst::event::Eos::new());
-                }
-            }
-        }
-
-        // 5. Wait for retained decoders' preroll + arrivals.
-        self.wait_for_paused_preroll();
-        let arrival_budget = if was_playing {
-            self.adaptive_arrival_wait_ms(1200)
-        } else {
-            1000
-        };
-        self.wait_for_compositor_arrivals(&baseline, arrival_budget);
-
+        // 4. No flush, no seek, no start_time reset.  Retained decoders
+        //    resume from their paused preroll position when poll() sets Playing.
         self.current_idx = desired.last().copied();
         self.slot_queue_drop_late_active = false;
         let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
@@ -3547,27 +3511,20 @@ impl ProgramPlayer {
             self.slots.len()
         );
 
-        // Incremental boundary paths: "no-touch-retained" strategy avoids the
-        // compositor.seek_simple(FLUSH) that propagated upstream to ALL decoders
-        // (including retained ones), which was the root cause of the static-frame
-        // regression.  Remove-only just tears down exiting slots; add-only pauses,
-        // builds + seeks only new decoders, then resumes.
-        const INCREMENTAL_ENABLED: bool = true;
-        if INCREMENTAL_ENABLED && !self.slots.is_empty() {
+        // Incremental boundary paths: only the remove-only path is enabled.
+        // The add-only path is disabled because GstVideoAggregator's aggregation
+        // state can only be properly reset via compositor.seek_simple (src-pad seek)
+        // which propagates upstream to ALL decoders — corrupting retained decoders'
+        // streaming state.  Individual pad flushes from per-decoder seeks don't
+        // trigger the aggregator's coordinated seek handler.  Remove-only is safe
+        // because retained decoders just pause/resume without any seeking or flushing.
+        const INCREMENTAL_REMOVE_ONLY: bool = true;
+        if INCREMENTAL_REMOVE_ONLY && !self.slots.is_empty() {
             let desired = self.clips_active_at(timeline_pos);
             let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
             if !desired.is_empty() {
-                // Try add-only first (clip entering), then remove-only (clip exiting).
-                if self.try_incremental_add_only_update(
-                    timeline_pos, &desired, &current, was_playing,
-                ) {
-                    let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
-                    log::info!(
-                        "rebuild_pipeline_at: incremental ADD succeeded elapsed_ms={}",
-                        elapsed_ms
-                    );
-                    return;
-                }
+                // Only try remove-only (clip exiting).  Add-only is disabled due to
+                // GstVideoAggregator running-time alignment issues with retained decoders.
                 if self.try_incremental_remove_only_update(
                     timeline_pos, &desired, &current, was_playing,
                 ) {
