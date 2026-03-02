@@ -26,6 +26,10 @@ pub struct InspectorView {
     // Denoise / sharpness sliders
     pub denoise_slider: Scale,
     pub sharpness_slider: Scale,
+    // Grading sliders
+    pub shadows_slider: Scale,
+    pub midtones_slider: Scale,
+    pub highlights_slider: Scale,
     // Audio sliders
     pub volume_slider: Scale,
     pub pan_slider: Scale,
@@ -115,6 +119,9 @@ impl InspectorView {
                 self.saturation_slider.set_value(c.saturation as f64);
                 self.denoise_slider.set_value(c.denoise as f64);
                 self.sharpness_slider.set_value(c.sharpness as f64);
+                self.shadows_slider.set_value(c.shadows as f64);
+                self.midtones_slider.set_value(c.midtones as f64);
+                self.highlights_slider.set_value(c.highlights as f64);
                 self.volume_slider.set_value(c.volume as f64);
                 self.pan_slider.set_value(c.pan as f64);
                 self.crop_left_slider.set_value(c.crop_left as f64);
@@ -164,6 +171,9 @@ impl InspectorView {
                 self.saturation_slider.set_value(1.0);
                 self.denoise_slider.set_value(0.0);
                 self.sharpness_slider.set_value(0.0);
+                self.shadows_slider.set_value(0.0);
+                self.midtones_slider.set_value(0.0);
+                self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(1.0);
                 self.pan_slider.set_value(0.0);
                 self.crop_left_slider.set_value(0.0);
@@ -194,13 +204,13 @@ impl InspectorView {
 ///
 /// - `on_clip_changed`: fired when the clip name is applied (triggers full project-changed cycle).
 /// - `on_color_changed`: fired on every color/effects slider movement with
-///   `(brightness, contrast, saturation, denoise, sharpness)`;
+///   `(brightness, contrast, saturation, denoise, sharpness, shadows, midtones, highlights)`;
 ///   should update the program player's video filter elements directly without a full pipeline reload.
 /// - `on_audio_changed`: fired on every audio slider movement with `(volume, pan)`.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32, f32, f32) + 'static,
+    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
     on_audio_changed: impl Fn(f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
@@ -324,6 +334,35 @@ pub fn build_inspector(
     sharpness_slider.set_digits(2);
     sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&sharpness_slider);
+
+    let grading_title = Label::new(Some("Grading"));
+    grading_title.set_halign(gtk::Align::Start);
+    grading_title.add_css_class("browser-header");
+    color_inner.append(&grading_title);
+
+    row_label(&color_inner, "Shadows");
+    let shadows_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    shadows_slider.set_value(0.0);
+    shadows_slider.set_draw_value(true);
+    shadows_slider.set_digits(2);
+    shadows_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&shadows_slider);
+
+    row_label(&color_inner, "Midtones");
+    let midtones_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    midtones_slider.set_value(0.0);
+    midtones_slider.set_draw_value(true);
+    midtones_slider.set_digits(2);
+    midtones_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&midtones_slider);
+
+    row_label(&color_inner, "Highlights");
+    let highlights_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    highlights_slider.set_value(0.0);
+    highlights_slider.set_draw_value(true);
+    highlights_slider.set_digits(2);
+    highlights_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&highlights_slider);
 
     // ── Audio section (Video + Audio only) ───────────────────────────────────
     let audio_section = GBox::new(Orientation::Vertical, 8);
@@ -547,7 +586,7 @@ pub fn build_inspector(
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed = Rc::new(on_clip_changed);
-    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
+    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
@@ -586,18 +625,21 @@ pub fn build_inspector(
     }
 
     // Helper: connect an effects slider — updates the model field then fires on_color_changed
-    // with all five current values so the program player can update its filters directly.
+    // with all eight current values so the program player can update its filters directly.
     fn connect_color_slider(
         slider: &Scale,
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32)>,
+        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32)>,
         brightness_slider: Scale,
         contrast_slider: Scale,
         saturation_slider: Scale,
         denoise_slider: Scale,
         sharpness_slider: Scale,
+        shadows_slider: Scale,
+        midtones_slider: Scale,
+        highlights_slider: Scale,
         apply: fn(&mut crate::model::clip::Clip, f32),
     ) {
         slider.connect_value_changed(move |s| {
@@ -617,13 +659,15 @@ pub fn build_inspector(
                         }
                     }
                 }
-                // Fire lightweight effects callback with all five current values
                 let b = brightness_slider.value() as f32;
                 let c = contrast_slider.value() as f32;
                 let sat = saturation_slider.value() as f32;
                 let d = denoise_slider.value() as f32;
                 let sh = sharpness_slider.value() as f32;
-                on_color_changed(b, c, sat, d, sh);
+                let shd = shadows_slider.value() as f32;
+                let mid = midtones_slider.value() as f32;
+                let hil = highlights_slider.value() as f32;
+                on_color_changed(b, c, sat, d, sh, shd, mid, hil);
             }
         });
     }
@@ -639,6 +683,9 @@ pub fn build_inspector(
         saturation_slider.clone(),
         denoise_slider.clone(),
         sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
         |clip, v| clip.brightness = v,
     );
     connect_color_slider(
@@ -652,6 +699,9 @@ pub fn build_inspector(
         saturation_slider.clone(),
         denoise_slider.clone(),
         sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
         |clip, v| clip.contrast = v,
     );
     connect_color_slider(
@@ -665,6 +715,9 @@ pub fn build_inspector(
         saturation_slider.clone(),
         denoise_slider.clone(),
         sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
         |clip, v| clip.saturation = v,
     );
     connect_color_slider(
@@ -678,6 +731,9 @@ pub fn build_inspector(
         saturation_slider.clone(),
         denoise_slider.clone(),
         sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
         |clip, v| clip.denoise = v,
     );
     connect_color_slider(
@@ -691,7 +747,58 @@ pub fn build_inspector(
         saturation_slider.clone(),
         denoise_slider.clone(),
         sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
         |clip, v| clip.sharpness = v,
+    );
+    connect_color_slider(
+        &shadows_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
+        |clip, v| clip.shadows = v,
+    );
+    connect_color_slider(
+        &midtones_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
+        |clip, v| clip.midtones = v,
+    );
+    connect_color_slider(
+        &highlights_slider,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        on_color_changed.clone(),
+        brightness_slider.clone(),
+        contrast_slider.clone(),
+        saturation_slider.clone(),
+        denoise_slider.clone(),
+        sharpness_slider.clone(),
+        shadows_slider.clone(),
+        midtones_slider.clone(),
+        highlights_slider.clone(),
+        |clip, v| clip.highlights = v,
     );
 
     // Wire audio sliders
@@ -1466,6 +1573,9 @@ pub fn build_inspector(
         saturation_slider,
         denoise_slider,
         sharpness_slider,
+        shadows_slider,
+        midtones_slider,
+        highlights_slider,
         volume_slider,
         pan_slider,
         crop_left_slider,

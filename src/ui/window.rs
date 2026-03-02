@@ -135,6 +135,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     {
         let p = project.borrow();
         prog_player_raw.set_project_dimensions(p.width, p.height);
+        prog_player_raw.set_frame_rate(p.frame_rate.numerator, p.frame_rate.denominator);
     }
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
@@ -288,10 +289,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |b, c, s, d, sh| {
+            move |b, c, s, d, sh, shd, mid, hil| {
                 prog_player
                     .borrow_mut()
-                    .update_current_effects(b as f64, c as f64, s as f64, d as f64, sh as f64);
+                    .update_current_effects(b as f64, c as f64, s as f64, d as f64, sh as f64, shd as f64, mid as f64, hil as f64);
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
@@ -1620,9 +1621,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
 
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
-            let (clips, media_from_project, project_dims): (
+            let (clips, media_from_project, project_dims, project_frame_rate): (
                 Vec<ProgramClip>,
                 Vec<(String, u64)>,
+                (u32, u32),
                 (u32, u32),
             ) = {
                 let proj = project.borrow();
@@ -1695,6 +1697,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             opacity: c.opacity,
                             position_x: c.position_x,
                             position_y: c.position_y,
+                            shadows: c.shadows as f64,
+                            midtones: c.midtones as f64,
+                            highlights: c.highlights as f64,
                             has_audio: true, // default; overridden by probe cache below
                         })
                     })
@@ -1709,7 +1714,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .filter(|c| media_seen.insert(c.source_path.as_str()))
                     .map(|c| (c.source_path.clone(), c.source_out))
                     .collect();
-                (clips, media, (proj.width, proj.height))
+                (clips, media, (proj.width, proj.height), (proj.frame_rate.numerator, proj.frame_rate.denominator))
             }; // proj borrow dropped here — safe to call GStreamer below
             program_empty_hint.set_visible(clips.is_empty());
 
@@ -1737,6 +1742,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 )
             };
             let (proj_w, proj_h) = project_dims;
+            let (fr_num, fr_den) = project_frame_rate;
             let prog_player_reload = prog_player.clone();
             let preferences_state_reload = preferences_state.clone();
             let project_reload = project.clone();
@@ -1790,6 +1796,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 {
                     let mut pp = prog_player_reload.borrow_mut();
                     pp.set_project_dimensions(proj_w, proj_h);
+                    pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
                 }
                 log::debug!(
@@ -2298,6 +2305,9 @@ fn handle_mcp_command(
                             "saturation":       c.saturation,
                             "denoise":          c.denoise,
                             "sharpness":        c.sharpness,
+                            "shadows":          c.shadows,
+                            "midtones":         c.midtones,
+                            "highlights":       c.highlights,
                             "opacity":          c.opacity,
                         })
                     })
@@ -2689,6 +2699,9 @@ fn handle_mcp_command(
             saturation,
             denoise,
             sharpness,
+            shadows,
+            midtones,
+            highlights,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -2701,6 +2714,9 @@ fn handle_mcp_command(
                         clip.saturation = saturation as f32;
                         clip.denoise = denoise as f32;
                         clip.sharpness = sharpness as f32;
+                        clip.shadows = shadows as f32;
+                        clip.midtones = midtones as f32;
+                        clip.highlights = highlights as f32;
                         proj.dirty = true;
                         found = true;
                         break 'outer;

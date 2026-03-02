@@ -161,6 +161,7 @@ Tracking docs:
   - [x] Move MCP `open_fcpxml` read/parse path off the GTK main thread and trim parser attribute-allocation overhead
   - [x] Reduce timeline thumbnail/waveform warm-up spikes via lower extraction concurrency and lighter thumbnail tile density
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
+    - [x] Frame-boundary seek deduplication: quantize paused scrub positions to frame boundaries and skip redundant pipeline work for same-frame seeks
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
    - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
@@ -179,10 +180,12 @@ Tracking docs:
           - [x] Apply adaptive per-slot queue drop-late policy during heavy-overlap playback to reduce compositor-branch backpressure at handoff
           - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
           - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
-          - [x] Start incremental boundary updates with a remove-only fast path (skip full rebuild when active-set change only removes clips)
           - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
-          - [ ] Replace full boundary rebuild with incremental slot diffing (reuse unchanged slots; add/remove only deltas)
-          - [ ] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
+          - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
+          - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
+          - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
+          - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
+          - [x] Occlusion-based video decode skip: clips fully hidden behind an opaque full-frame overlay build audio-only slots (decoder with audio caps only), skipping video decode/effects/compositor
         - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview

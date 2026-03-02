@@ -182,6 +182,7 @@ pub fn export_project(
     // === Primary video track: scale/correct each clip then concatenate ===
     for (i, clip) in primary_clips.iter().enumerate() {
         let color_filter = build_color_filter(clip);
+        let grading_filter = build_grading_filter(clip);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
@@ -189,7 +190,7 @@ pub fn export_project(
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
         filter.push_str(&format!(
-            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter},fps={}/{},format=yuv420p{color_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
+            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter},fps={}/{},format=yuv420p{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
@@ -270,6 +271,7 @@ pub fn export_project(
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         let color_filter = build_color_filter(clip);
+        let grading_filter = build_grading_filter(clip);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let speed_filter = build_speed_filter(clip);
@@ -280,7 +282,7 @@ pub fn export_project(
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{denoise_filter}{sharpen_filter}{lut_filter},format=yuva420p{crop_filter}{scale_pos_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter},format=yuva420p{crop_filter}{scale_pos_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
@@ -536,6 +538,19 @@ fn build_lut_filter(clip: &crate::model::clip::Clip) -> String {
         }
     }
     String::new()
+}
+
+fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.shadows != 0.0 || clip.midtones != 0.0 || clip.highlights != 0.0 {
+        let s = clip.shadows.clamp(-1.0, 1.0);
+        let m = clip.midtones.clamp(-1.0, 1.0);
+        let h = clip.highlights.clamp(-1.0, 1.0);
+        format!(
+            ",colorbalance=rs={s:.4}:gs={s:.4}:bs={s:.4}:rm={m:.4}:gm={m:.4}:bm={m:.4}:rh={h:.4}:gh={h:.4}:bh={h:.4}"
+        )
+    } else {
+        String::new()
+    }
 }
 
 fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
