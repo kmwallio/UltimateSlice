@@ -3,7 +3,7 @@ use gio;
 use gtk4::prelude::*;
 use gtk4::Application;
 
-const APP_ID: &str = "io.github.ultimateslice";
+const APP_ID: &str = "io.github.kmwallio.ultimateslice";
 
 pub fn run(mcp_enabled: bool) {
     // When running as an MCP server we've already terminated any prior instance

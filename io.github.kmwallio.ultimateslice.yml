@@ -55,9 +55,9 @@ modules:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       - cargo --offline build --release --locked
       - install -Dm755 target/release/ultimate-slice /app/bin/ultimate-slice
-      - install -Dm644 data/io.github.ultimateslice.desktop /app/share/applications/io.github.ultimateslice.desktop
-      - install -Dm644 data/io.github.ultimateslice.metainfo.xml /app/share/metainfo/io.github.ultimateslice.metainfo.xml
-      - install -Dm644 data/io.github.ultimateslice.svg /app/share/icons/hicolor/scalable/apps/io.github.ultimateslice.svg
+      - install -Dm644 data/io.github.kmwallio.ultimateslice.desktop /app/share/applications/io.github.kmwallio.ultimateslice.desktop
+      - install -Dm644 data/io.github.kmwallio.ultimateslice.metainfo.xml /app/share/metainfo/io.github.kmwallio.ultimateslice.metainfo.xml
+      - install -Dm644 data/io.github.kmwallio.ultimateslice.svg /app/share/icons/hicolor/scalable/apps/io.github.kmwallio.ultimateslice.svg
     sources:
       - type: dir
         path: .

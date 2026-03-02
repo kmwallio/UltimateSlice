@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.ultimateslice</id>
+  <id>io.github.kmwallio.ultimateslice</id>
   <name>UltimateSlice</name>
   <summary>Final Cut Pro-inspired non-linear video editor</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -11,7 +11,7 @@
       interface. Import media, arrange clips on the timeline, and export to MP4.
     </p>
   </description>
-  <launchable type="desktop-id">io.github.ultimateslice.desktop</launchable>
+  <launchable type="desktop-id">io.github.kmwallio.ultimateslice.desktop</launchable>
   <url type="homepage">https://github.com/ultimateslice</url>
   <releases>
     <release version="0.1.0" date="2026-02-25">
