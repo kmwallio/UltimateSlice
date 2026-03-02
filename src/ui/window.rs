@@ -289,10 +289,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |b, c, s, d, sh| {
+            move |b, c, s, d, sh, shd, mid, hil| {
                 prog_player
                     .borrow_mut()
-                    .update_current_effects(b as f64, c as f64, s as f64, d as f64, sh as f64);
+                    .update_current_effects(b as f64, c as f64, s as f64, d as f64, sh as f64, shd as f64, mid as f64, hil as f64);
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
@@ -1697,6 +1697,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             opacity: c.opacity,
                             position_x: c.position_x,
                             position_y: c.position_y,
+                            shadows: c.shadows as f64,
+                            midtones: c.midtones as f64,
+                            highlights: c.highlights as f64,
                             has_audio: true, // default; overridden by probe cache below
                         })
                     })
@@ -2302,6 +2305,9 @@ fn handle_mcp_command(
                             "saturation":       c.saturation,
                             "denoise":          c.denoise,
                             "sharpness":        c.sharpness,
+                            "shadows":          c.shadows,
+                            "midtones":         c.midtones,
+                            "highlights":       c.highlights,
                             "opacity":          c.opacity,
                         })
                     })
@@ -2693,6 +2699,9 @@ fn handle_mcp_command(
             saturation,
             denoise,
             sharpness,
+            shadows,
+            midtones,
+            highlights,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -2705,6 +2714,9 @@ fn handle_mcp_command(
                         clip.saturation = saturation as f32;
                         clip.denoise = denoise as f32;
                         clip.sharpness = sharpness as f32;
+                        clip.shadows = shadows as f32;
+                        clip.midtones = midtones as f32;
+                        clip.highlights = highlights as f32;
                         proj.dirty = true;
                         found = true;
                         break 'outer;

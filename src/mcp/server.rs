@@ -321,7 +321,10 @@ fn tools_list() -> Value {
                     "contrast":   { "type": "number",  "description": "Contrast multiplier: 0.0 to 2.0. Default 1.0." },
                     "saturation": { "type": "number",  "description": "Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid). Default 1.0." },
                     "denoise":    { "type": "number",  "description": "Denoise strength: 0.0 (off) to 1.0 (heavy). Default 0.0." },
-                    "sharpness":  { "type": "number",  "description": "Sharpness: -1.0 (soften) to 1.0 (sharpen). Default 0.0." }
+                    "sharpness":  { "type": "number",  "description": "Sharpness: -1.0 (soften) to 1.0 (sharpen). Default 0.0." },
+                    "shadows":    { "type": "number",  "description": "Shadow grading: -1.0 (crush) to 1.0 (lift). Default 0.0." },
+                    "midtones":   { "type": "number",  "description": "Midtone grading: -1.0 (darken) to 1.0 (brighten). Default 0.0." },
+                    "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." }
                 },
                 "required": ["clip_id"]
             }
@@ -641,6 +644,9 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             saturation: args["saturation"].as_f64().unwrap_or(1.0),
             denoise: args["denoise"].as_f64().unwrap_or(0.0),
             sharpness: args["sharpness"].as_f64().unwrap_or(0.0),
+            shadows: args["shadows"].as_f64().unwrap_or(0.0),
+            midtones: args["midtones"].as_f64().unwrap_or(0.0),
+            highlights: args["highlights"].as_f64().unwrap_or(0.0),
             reply: tx,
         },
 

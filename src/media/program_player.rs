@@ -90,6 +90,12 @@ pub struct ProgramClip {
     pub position_x: f64,
     /// Vertical position offset: −1.0 (top) to 1.0 (bottom). Default 0.0.
     pub position_y: f64,
+    /// Shadow grading: −1.0 (crush) to 1.0 (lift). Default 0.0.
+    pub shadows: f64,
+    /// Midtone grading: −1.0 (darken) to 1.0 (brighten). Default 0.0.
+    pub midtones: f64,
+    /// Highlight grading: −1.0 (pull down) to 1.0 (boost). Default 0.0.
+    pub highlights: f64,
     /// Whether the source file contains an audio stream.
     pub has_audio: bool,
 }
@@ -1339,7 +1345,7 @@ impl ProgramPlayer {
     // ── Effects / transform updates ────────────────────────────────────────
 
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
-        self.update_current_effects(brightness, contrast, saturation, 0.0, 0.0);
+        self.update_current_effects(brightness, contrast, saturation, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
 
     pub fn update_current_effects(
@@ -1349,11 +1355,27 @@ impl ProgramPlayer {
         saturation: f64,
         denoise: f64,
         sharpness: f64,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
     ) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             if let Some(ref vb) = slot.videobalance {
-                vb.set_property("brightness", brightness.clamp(-1.0, 1.0));
-                vb.set_property("contrast", contrast.clamp(0.0, 2.0));
+                // Approximate shadows/midtones/highlights via videobalance
+                // brightness and contrast offsets.  Not pixel-perfect but
+                // gives real-time visual feedback.  Export uses ffmpeg
+                // colorbalance for accurate per-luminance grading.
+                let eff_brightness = (brightness
+                    + shadows * 0.3
+                    + midtones * 0.2
+                    + highlights * 0.15)
+                    .clamp(-1.0, 1.0);
+                let eff_contrast = (contrast
+                    - shadows * 0.15
+                    + highlights * 0.15)
+                    .clamp(0.0, 2.0);
+                vb.set_property("brightness", eff_brightness);
+                vb.set_property("contrast", eff_contrast);
                 vb.set_property("saturation", saturation.clamp(0.0, 2.0));
             }
             if let Some(ref gb) = slot.gaussianblur {
@@ -3041,8 +3063,18 @@ impl ProgramPlayer {
 
         // Set initial values from clip data.
         if let Some(ref vb) = videobalance {
-            vb.set_property("brightness", clip.brightness.clamp(-1.0, 1.0));
-            vb.set_property("contrast", clip.contrast.clamp(0.0, 2.0));
+            // Apply shadows/midtones/highlights approximation via videobalance.
+            let eff_brightness = (clip.brightness
+                + clip.shadows * 0.3
+                + clip.midtones * 0.2
+                + clip.highlights * 0.15)
+                .clamp(-1.0, 1.0);
+            let eff_contrast = (clip.contrast
+                - clip.shadows * 0.15
+                + clip.highlights * 0.15)
+                .clamp(0.0, 2.0);
+            vb.set_property("brightness", eff_brightness);
+            vb.set_property("contrast", eff_contrast);
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
         }
         if let Some(ref gb) = gaussianblur {

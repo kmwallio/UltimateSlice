@@ -131,6 +131,15 @@ pub struct Clip {
     /// Vertical position offset: −1.0 (top edge) to 1.0 (bottom edge). Default 0.0 (centered).
     #[serde(default)]
     pub position_y: f64,
+    /// Shadow grading: −1.0 (crush shadows) to 1.0 (lift shadows). Default 0.0.
+    #[serde(default)]
+    pub shadows: f32,
+    /// Midtone grading: −1.0 (darken midtones) to 1.0 (brighten midtones). Default 0.0.
+    #[serde(default)]
+    pub midtones: f32,
+    /// Highlight grading: −1.0 (pull down highlights) to 1.0 (boost highlights). Default 0.0.
+    #[serde(default)]
+    pub highlights: f32,
 }
 
 impl Clip {
@@ -181,6 +190,9 @@ impl Clip {
             opacity: 1.0,
             position_x: 0.0,
             position_y: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
         }
     }
 

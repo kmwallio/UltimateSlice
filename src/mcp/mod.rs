@@ -72,6 +72,9 @@ pub enum McpCommand {
         saturation: f64,
         denoise: f64,
         sharpness: f64,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
         reply: SyncSender<Value>,
     },
     SetTitle {
