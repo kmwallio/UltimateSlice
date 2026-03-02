@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
   <defs>
-    <!-- Lens glass: GNOME Blue 2 → Blue 5 -->
-    <radialGradient id="lens" cx="30%" cy="30%" r="70%">
+    <!-- Lens glass: radial gradient (curved surface — HIG permitted) -->
+    <radialGradient id="lens" cx="35%" cy="35%" r="65%">
       <stop offset="0%"  stop-color="#99c1f1"/>
-      <stop offset="38%" stop-color="#3584e4"/>
+      <stop offset="40%" stop-color="#3584e4"/>
       <stop offset="100%" stop-color="#1a5fb4"/>
     </radialGradient>
 
-    <!-- Knife blade: metallic silver -->
+    <!-- Knife blade: metallic gradient (skeuomorphic metal — HIG permitted) -->
     <linearGradient id="blade" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%"  stop-color="#f6f5f4"/>
-      <stop offset="50%" stop-color="#c8c7c6"/>
+      <stop offset="0%"   stop-color="#f6f5f4"/>
+      <stop offset="50%"  stop-color="#c8c7c6"/>
       <stop offset="100%" stop-color="#9a9996"/>
     </linearGradient>
 
@@ -21,162 +21,202 @@
     </filter>
 
     <!--
-      Cut line: (0, 48) → (128, 88)
-        y = 0.3125·x + 48    angle ≈ 17.35°    centre (64, 68)
+      Cut line: (0, 50) → (128, 97)
+        y = (47/128)·x + 50 ≈ 0.3672·x + 50    angle ≈ 20.2°    centre (64, 73.5)
+
+      3D cabinet projection — depth vector: (+8, −4) upper-right
 
       camSide  — above the cut (camera exterior)
       cakeSide — below the cut (cake cross-section)
     -->
     <clipPath id="camSide">
-      <polygon points="0,0 128,0 128,88 0,48"/>
+      <polygon points="0,0 128,0 128,97 0,50"/>
     </clipPath>
     <clipPath id="cakeSide">
-      <polygon points="0,48 128,88 128,128 0,128"/>
+      <polygon points="0,50 128,97 128,128 0,128"/>
     </clipPath>
-    <!-- Constrain cake layers to the camera body rectangle -->
-    <clipPath id="camBody">
-      <rect x="10" y="36" width="108" height="60" rx="5"/>
+    <!-- Clip cake layers to the camera body front face -->
+    <clipPath id="bodyFace">
+      <rect x="5" y="42" width="102" height="62" rx="6"/>
     </clipPath>
   </defs>
 
-  <!-- Translate all content so camera bottom aligns with GNOME HIG baseline (~y=108) -->
-  <g transform="translate(0, 11)">
+  <!-- ═══════════════════════════════════════════════════════════
+       3D TOP FACES — cabinet projection (depth vector +8, −4)
+       Always above the cut line; no clip needed.
+       ═══════════════════════════════════════════════════════════ -->
 
-  <!-- ── CINEMA CAMERA EXTERIOR (above the cut line) ── -->
+  <!-- Camera body: TOP face -->
+  <polygon points="5,42  107,42  115,38  13,38"  fill="#e5b84a"/>
+  <!-- Film magazine: TOP face -->
+  <polygon points="5,14  49,14  57,10  13,10"    fill="#62a0ea"/>
+  <!-- Handle: TOP face -->
+  <polygon points="20,6  90,6   98,2   28,2"     fill="#f66151"/>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       CAMERA EXTERIOR — all drawn above the cut (clipped by camSide)
+       ═══════════════════════════════════════════════════════════ -->
   <g clip-path="url(#camSide)">
 
-    <!-- Film magazine (top-left, ARRI-style detachable box) -->
-    <!-- Magazine 3D front-face profile (GNOME HIG depth) -->
-    <rect x="14" y="38" width="42" height="4" rx="2" fill="#2a2835"/>
-    <rect x="14" y="18" width="42" height="22" rx="4" fill="#4a4851" stroke="#5e5c64" stroke-width="1.2"/>
-    <!-- Magazine latches -->
-    <rect x="18" y="19" width="10" height="6" rx="1.5" fill="#2a2835" stroke="#6e6c76" stroke-width="0.8"/>
-    <rect x="42" y="19" width="10" height="6" rx="1.5" fill="#2a2835" stroke="#6e6c76" stroke-width="0.8"/>
-    <!-- Magazine label area -->
-    <rect x="30" y="22" width="18" height="11" rx="2" fill="#1a1826" stroke="#3d3846" stroke-width="0.5"/>
-    <!-- Magazine horizontal seam -->
-    <line x1="14" y1="30" x2="56" y2="30" stroke="#2a2835" stroke-width="0.9"/>
+    <!-- Camera body: RIGHT side face -->
+    <polygon points="107,42  115,38  115,100  107,104" fill="#8a5200"/>
+    <!-- Film magazine: RIGHT side face -->
+    <polygon points="49,14  57,10  57,40  49,44"       fill="#1553b0"/>
+    <!-- Handle: RIGHT side face -->
+    <polygon points="90,6   98,2   98,16  90,19"       fill="#9a0007"/>
 
-    <!-- Top carry handle (spans the body, very cinema-camera) -->
-    <!-- Handle 3D front-face profile (GNOME HIG depth) -->
-    <rect x="26" y="19" width="68" height="4" rx="3" fill="#2a2835"/>
-    <rect x="26" y="8" width="68" height="13" rx="6" fill="#3d3846" stroke="#5e5c64" stroke-width="1.2"/>
-    <!-- Handle grip knurling lines -->
-    <g stroke="#2d2b37" stroke-width="0.9" opacity="0.65">
-      <line x1="33" y1="8" x2="33" y2="21"/>
-      <line x1="39" y1="8" x2="39" y2="21"/>
-      <line x1="45" y1="8" x2="45" y2="21"/>
-      <line x1="51" y1="8" x2="51" y2="21"/>
-      <line x1="57" y1="8" x2="57" y2="21"/>
-      <line x1="63" y1="8" x2="63" y2="21"/>
-      <line x1="69" y1="8" x2="69" y2="21"/>
-      <line x1="75" y1="8" x2="75" y2="21"/>
-      <line x1="81" y1="8" x2="81" y2="21"/>
-      <line x1="87" y1="8" x2="87" y2="21"/>
+    <!-- ── Handle front face (bright toy red) ── -->
+    <rect x="20" y="6" width="70" height="13" rx="6.5"
+          fill="#e01b24" stroke="#9a0007" stroke-width="1.2"/>
+    <!-- Handle knurling grip lines -->
+    <g stroke="#9a0007" stroke-width="0.9" opacity="0.55">
+      <line x1="28" y1="6"  x2="28" y2="19"/>
+      <line x1="34" y1="6"  x2="34" y2="19"/>
+      <line x1="40" y1="6"  x2="40" y2="19"/>
+      <line x1="46" y1="6"  x2="46" y2="19"/>
+      <line x1="52" y1="6"  x2="52" y2="19"/>
+      <line x1="58" y1="6"  x2="58" y2="19"/>
+      <line x1="64" y1="6"  x2="64" y2="19"/>
+      <line x1="70" y1="6"  x2="70" y2="19"/>
+      <line x1="76" y1="6"  x2="76" y2="19"/>
+      <line x1="82" y1="6"  x2="82" y2="19"/>
     </g>
 
-    <!-- Main camera body (wider and more rectangular than before) -->
-    <!-- Camera body 3D front-face profile (GNOME HIG depth, drawn behind top face) -->
-    <rect x="10" y="40" width="108" height="58" rx="5" fill="#3d3846"/>
-    <rect x="10" y="36" width="108" height="56" rx="5" fill="#5e5c64"/>
-    <!-- Body horizontal panel seam (separates top/bottom sections) -->
-    <line x1="10" y1="54" x2="118" y2="54" stroke="#2a2835" stroke-width="0.9" opacity="0.55"/>
+    <!-- ── Film magazine front face (bright toy blue) ── -->
+    <rect x="5" y="14" width="44" height="30" rx="5"
+          fill="#1e78e4" stroke="#1553b0" stroke-width="1.5"/>
+    <!-- Magazine label window -->
+    <rect x="9" y="19" width="28" height="18" rx="3" fill="#1a5fb4"/>
+    <!-- Label top stripe accent -->
+    <rect x="9" y="19" width="28" height="5"  rx="2" fill="#3584e4"/>
+    <!-- Label horizontal lines -->
+    <g stroke="#7ec8f4" stroke-width="1.2" opacity="0.7">
+      <line x1="12" y1="28" x2="34" y2="28"/>
+      <line x1="12" y1="32" x2="34" y2="32"/>
+    </g>
+    <!-- Magazine latches (toy clips) -->
+    <rect x="6"  y="15" width="7" height="5" rx="1.5" fill="#1553b0" stroke="#62a0ea" stroke-width="0.7"/>
+    <rect x="41" y="15" width="7" height="5" rx="1.5" fill="#1553b0" stroke="#62a0ea" stroke-width="0.7"/>
 
-    <!-- Lens port darkened area (left half of body) -->
-    <rect x="10" y="36" width="60" height="60" rx="5" fill="#1a1826" opacity="0.35"/>
+    <!-- ── Camera body front face (warm golden toy wood) ── -->
+    <rect x="5" y="42" width="102" height="62" rx="6"
+          fill="#d4952a" stroke="#804000" stroke-width="1.5"/>
+    <!-- Wood grain texture lines -->
+    <g stroke="#b07010" stroke-width="0.6" opacity="0.3">
+      <line x1="5" y1="52"  x2="107" y2="52"/>
+      <line x1="5" y1="60"  x2="107" y2="60"/>
+      <line x1="5" y1="68"  x2="107" y2="68"/>
+      <line x1="5" y1="76"  x2="107" y2="76"/>
+      <line x1="5" y1="84"  x2="107" y2="84"/>
+      <line x1="5" y1="92"  x2="107" y2="92"/>
+      <line x1="5" y1="100" x2="107" y2="100"/>
+    </g>
 
-    <!-- Big cinema prime lens assembly -->
-    <!-- Outer housing / shroud ring -->
-    <circle cx="40" cy="66" r="26" fill="#141420" stroke="#4a4851" stroke-width="2"/>
-    <!-- Focus ring (largest, dashed to show gear teeth) -->
-    <circle cx="40" cy="66" r="22" fill="#1c1c2a" stroke="#3d3846" stroke-width="1.5"
-            stroke-dasharray="2.8,2"/>
+    <!-- Lens port darkened zone (left side) -->
+    <rect x="5" y="42" width="58" height="62" rx="6"
+          fill="#241f31" opacity="0.22"/>
+
+    <!-- ── Cinema lens assembly (concentric rings, slightly offset for 3D) ── -->
+    <!-- Barrel extrusion depth shadow -->
+    <circle cx="36" cy="73" r="27" fill="#1a1826" opacity="0.4"/>
+    <!-- Outer shroud ring -->
+    <circle cx="34" cy="73" r="26" fill="#241f31" stroke="#4a4851" stroke-width="2.5"/>
+    <!-- Focus ring (dashed gear-tooth) -->
+    <circle cx="34" cy="73" r="22" fill="#2d2b37" stroke="#3d3846" stroke-width="1.5"
+            stroke-dasharray="3,2"/>
     <!-- Iris / T-stop ring -->
-    <circle cx="40" cy="66" r="17" fill="#111118" stroke="#5e5c64" stroke-width="1.2"/>
-    <!-- Front lens element glass -->
-    <circle cx="40" cy="66" r="13" fill="url(#lens)"/>
-    <!-- Inner aperture pupil -->
-    <circle cx="40" cy="66" r="6" fill="#040820" stroke="#1a5fb4" stroke-width="0.8"/>
-    <!-- Lens highlight / flare -->
-    <ellipse cx="32" cy="58" rx="4.5" ry="3" fill="#fff" opacity="0.28"/>
-    <ellipse cx="45" cy="73" rx="2"   ry="1.5" fill="#fff" opacity="0.09"/>
-    <!-- Focus-scale tick marks on outer ring (cardinal points) -->
-    <g stroke="#9a9996" stroke-width="0.9" opacity="0.55">
-      <line x1="40" y1="40" x2="40" y2="44"/>   <!-- top    -->
-      <line x1="62" y1="57" x2="58" y2="59"/>   <!-- right  -->
-      <line x1="40" y1="92" x2="40" y2="88"/>   <!-- bottom -->
-      <line x1="18" y1="57" x2="22" y2="59"/>   <!-- left   -->
+    <circle cx="34" cy="73" r="17" fill="#1a1826" stroke="#5e5c64" stroke-width="1.5"/>
+    <!-- Front glass element -->
+    <circle cx="34" cy="73" r="13" fill="url(#lens)"/>
+    <!-- Aperture pupil -->
+    <circle cx="34" cy="73" r="5.5" fill="#040820" stroke="#1a5fb4" stroke-width="1"/>
+    <!-- Glass highlights -->
+    <ellipse cx="28" cy="66" rx="4"   ry="2.5" fill="#fff" opacity="0.32"/>
+    <ellipse cx="40" cy="80" rx="2"   ry="1.5" fill="#fff" opacity="0.10"/>
+    <!-- Outer ring tick marks -->
+    <g stroke="#9a9996" stroke-width="1" opacity="0.6">
+      <line x1="34" y1="47" x2="34" y2="51"/>
+      <line x1="56" y1="65" x2="52" y2="67"/>
+      <line x1="34" y1="99" x2="34" y2="95"/>
+      <line x1="12" y1="65" x2="16" y2="67"/>
     </g>
 
-    <!-- Right body panel: controls -->
-    <!-- Large REC button (red, GNOME Red 4) -->
-    <circle cx="96" cy="44" r="8" fill="#c01010" stroke="#8a0e0e" stroke-width="1.5"/>
-    <circle cx="96" cy="44" r="5" fill="#e01b24"/>
-    <circle cx="94" cy="42" r="2" fill="#ff8080" opacity="0.5"/>
+    <!-- ── Controls panel: big toy-style round buttons ── -->
+    <!-- REC button (big bright red) -->
+    <circle cx="82" cy="55" r="9.5" fill="#9a0007" stroke="#7a0000" stroke-width="1.5"/>
+    <circle cx="82" cy="55" r="7.5" fill="#e01b24"/>
+    <circle cx="79" cy="52" r="2.5" fill="#ff8080" opacity="0.55"/>
 
-    <!-- ISO/Gain control dial -->
-    <circle cx="96" cy="66" r="7.5" fill="#2a2835" stroke="#5e5c64" stroke-width="1.2"/>
-    <circle cx="96" cy="66" r="5"   fill="#3d3846"/>
-    <line x1="96" y1="58.5" x2="96" y2="62" stroke="#9a9996" stroke-width="1.2"/>
+    <!-- Mode dial (big bright yellow knob) -->
+    <circle cx="82" cy="76" r="8.5" fill="#c07800" stroke="#804000" stroke-width="1.5"/>
+    <circle cx="82" cy="76" r="6.5" fill="#e5a50a"/>
+    <line x1="82" y1="68" x2="82" y2="72" stroke="#804000" stroke-width="2" stroke-linecap="round"/>
 
-    <!-- Timecode display (LED/LCD panel) -->
-    <rect x="66" y="57" width="24" height="12" rx="2" fill="#0d1117" stroke="#3d3846" stroke-width="0.8"/>
-    <rect x="68" y="59" width="20" height="8"  rx="1" fill="#000d08"/>
-    <!-- Green TC digit blocks -->
-    <g fill="#00e878" opacity="0.75">
-      <rect x="69"   y="61" width="3" height="4" rx="0.5"/>
-      <rect x="73.5" y="61" width="3" height="4" rx="0.5"/>
-      <rect x="79"   y="61" width="3" height="4" rx="0.5"/>
-      <rect x="83.5" y="61" width="3" height="4" rx="0.5"/>
+    <!-- Power/indicator button (bright green) -->
+    <circle cx="95" cy="55" r="5.5" fill="#1a7340" stroke="#0f5228" stroke-width="1"/>
+    <circle cx="95" cy="55" r="4"   fill="#26a269"/>
+    <circle cx="93" cy="53" r="1.5" fill="#57e389" opacity="0.75"/>
+
+    <!-- Timecode LED display -->
+    <rect x="66" y="65" width="26" height="13" rx="2.5" fill="#0d1117" stroke="#3d3846" stroke-width="0.8"/>
+    <rect x="68" y="67" width="22" height="9"  rx="1.5" fill="#000d08"/>
+    <g fill="#00e878" opacity="0.8">
+      <rect x="69"   y="69" width="3" height="5" rx="0.5"/>
+      <rect x="73.5" y="69" width="3" height="5" rx="0.5"/>
+      <rect x="79"   y="69" width="3" height="5" rx="0.5"/>
+      <rect x="83.5" y="69" width="3" height="5" rx="0.5"/>
     </g>
 
-    <!-- Electronic viewfinder (EVF) — right side, protruding -->
-    <rect x="112" y="40" width="12" height="24" rx="3" fill="#2a2835" stroke="#4a4851" stroke-width="1"/>
-    <!-- EVF eyepiece cup -->
-    <rect x="120" y="44" width="8"  height="16" rx="2" fill="#1a1826" stroke="#3d3846" stroke-width="0.8"/>
-    <!-- EVF diopter adjustment lines -->
+    <!-- Viewfinder (right side protrusion) -->
+    <rect x="107" y="46" width="14" height="22" rx="3" fill="#241f31" stroke="#4a4851" stroke-width="1"/>
+    <rect x="114" y="50" width="10" height="14" rx="2" fill="#1a1826" stroke="#3d3846" stroke-width="0.8"/>
     <g stroke="#5e5c64" stroke-width="0.8">
-      <line x1="112" y1="48" x2="116" y2="48"/>
-      <line x1="112" y1="54" x2="116" y2="54"/>
-      <line x1="112" y1="60" x2="116" y2="60"/>
+      <line x1="107" y1="54" x2="112" y2="54"/>
+      <line x1="107" y1="60" x2="112" y2="60"/>
     </g>
 
-    <!-- Bottom accessory rail (15mm / cheese plate) -->
-    <rect x="10" y="91" width="108" height="5" rx="2" fill="#252432" stroke="#4a4851" stroke-width="0.8"/>
-    <!-- Rail mount screws -->
-    <circle cx="22"  cy="93.5" r="2" fill="#3d3846" stroke="#5e5c64" stroke-width="0.7"/>
-    <circle cx="64"  cy="93.5" r="2" fill="#3d3846" stroke="#5e5c64" stroke-width="0.7"/>
-    <circle cx="106" cy="93.5" r="2" fill="#3d3846" stroke="#5e5c64" stroke-width="0.7"/>
-  </g>
+    <!-- Bottom accessory rail -->
+    <rect x="5" y="99" width="102" height="5" rx="2.5"
+          fill="#804000" stroke="#5a3000" stroke-width="0.8"/>
+    <!-- Rail bolt heads (toy-style) -->
+    <circle cx="16"  cy="101.5" r="2.5" fill="#d4952a" stroke="#804000" stroke-width="0.7"/>
+    <circle cx="56"  cy="101.5" r="2.5" fill="#d4952a" stroke="#804000" stroke-width="0.7"/>
+    <circle cx="96"  cy="101.5" r="2.5" fill="#d4952a" stroke="#804000" stroke-width="0.7"/>
 
-  <!-- ── CAKE CROSS-SECTION (below the cut, clipped to camera body) ── -->
+  </g> <!-- end camSide clip -->
+
+  <!-- ═══════════════════════════════════════════════════════════
+       CAKE CROSS-SECTION — below the cut, clipped to camera body
+       Rich and colourful toy-cake layers!
+       ═══════════════════════════════════════════════════════════ -->
   <g clip-path="url(#cakeSide)">
-    <g clip-path="url(#camBody)">
-      <!-- Five alternating cake layers, bottom → top -->
-      <rect x="10" y="88" width="108" height="12" fill="#3e2723"/>  <!-- dark chocolate  -->
-      <rect x="10" y="76" width="108" height="12" fill="#f5f0e8"/>  <!-- vanilla cream    -->
-      <rect x="10" y="64" width="108" height="12" fill="#c27a2e"/>  <!-- golden sponge    -->
-      <rect x="10" y="52" width="108" height="12" fill="#f5f0e8"/>  <!-- vanilla cream    -->
-      <rect x="10" y="36" width="108" height="16" fill="#d4952a"/>  <!-- top sponge       -->
+    <g clip-path="url(#bodyFace)">
+      <!-- Layers bottom → top: each 12 px tall, spaced at 12 px intervals -->
+      <!-- bodyFace clip confines these to x=5..107, y=42..104 -->
+      <rect x="5" y="96" width="102" height="12" fill="#3e2723"/>  <!-- dark chocolate ganache -->
+      <rect x="5" y="84" width="102" height="12" fill="#fffde7"/>  <!-- whipped cream          -->
+      <rect x="5" y="72" width="102" height="12" fill="#e53935"/>  <!-- raspberry jam          -->
+      <rect x="5" y="60" width="102" height="12" fill="#fffde7"/>  <!-- whipped cream          -->
+      <rect x="5" y="42" width="102" height="18" fill="#f9a825"/>  <!-- golden sponge (top)    -->
     </g>
   </g>
 
-  <!-- ── Cut edge shadow (adds depth to the slice) ── -->
-  <line x1="0" y1="48" x2="128" y2="88"
-        stroke="#000" stroke-width="1.5" opacity="0.18"/>
+  <!-- ── Cut edge shadow (depth at the slice) ── -->
+  <line x1="0" y1="50" x2="128" y2="97"
+        stroke="#000" stroke-width="2" opacity="0.22"/>
 
-  <!-- ── Camera body bottom front-face profile (GNOME HIG 3D depth) ── -->
-  <!-- Visible below the accessory rail as a 4 px darker front face -->
-  <rect x="10" y="93" width="108" height="4" rx="2" fill="#2e2a38"/>
+  <!-- ── Camera body 3D bottom edge strip ── -->
+  <polygon points="5,104  107,104  115,100  115,101  107,105  5,105"
+           fill="#8a5200"/>
 
-  <!-- ── KITCHEN KNIFE (along the cut line, handle at lower-right) ── -->
-  <!--
-    translate(64, 68) rotate(17.35°) — local x-axis aligns with the cut
-    Blade tip  local x ≈ −65 → canvas ≈ (2, 49)
-    Bolster    local x ≈ +32 → canvas ≈ (95, 78)
-    Handle end local x ≈ +62 → canvas ≈ (123, 87)
-  -->
-  <g transform="translate(64,68) rotate(17.35)" filter="url(#shadow)">
+  <!-- ═══════════════════════════════════════════════════════════
+       KITCHEN KNIFE — along the cut line, handle at lower-right
+         translate(64, 73.5) rotate(20.2°)
+         Blade tip  ≈ (3,  51)
+         Bolster    ≈ (94, 84)
+         Handle end ≈ (122, 95)
+       ═══════════════════════════════════════════════════════════ -->
+  <g transform="translate(64,73.5) rotate(20.2)" filter="url(#shadow)">
     <!-- Blade (slightly tapered toward tip) -->
     <polygon points="-65,-2.5 32,-3.5 32,3 -65,2.5" fill="url(#blade)"/>
     <!-- Sharp-edge highlight -->
@@ -196,6 +236,4 @@
     <circle cx="44" cy="0" r="2.5" fill="#c0a878"/>
     <circle cx="55" cy="0" r="2.5" fill="#c0a878"/>
   </g>
-
-  </g> <!-- end translate group -->
 </svg>
