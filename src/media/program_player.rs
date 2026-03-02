@@ -226,6 +226,9 @@ pub struct ProgramPlayer {
     /// Display queue between tee and gtk4paintablesink.  Switched to leaky
     /// during transform live mode to prevent backpressure blocking.
     display_queue: Option<gst::Element>,
+    /// True when heavy-overlap playback is using drop-late display policy to
+    /// keep displayed video aligned to the audio clock.
+    playback_drop_late_active: bool,
     /// True when the transform tool has temporarily set the pipeline to live
     /// mode for interactive preview during drag.
     transform_live: bool,
@@ -645,6 +648,7 @@ impl ProgramPlayer {
                 background_compositor_pad: comp_bg_pad,
                 preview_divisor: 1,
                 display_queue,
+                playback_drop_late_active: false,
                 transform_live: false,
                 play_start: None,
             },
@@ -1079,6 +1083,7 @@ impl ProgramPlayer {
         self.base_timeline_ns = pos;
         self.play_start = Some(Instant::now());
         self.jkl_rate = 0.0;
+        self.update_drop_late_policy();
     }
 
     pub fn pause(&mut self) {
@@ -1097,6 +1102,7 @@ impl ProgramPlayer {
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Paused;
         self.jkl_rate = 0.0;
+        self.update_drop_late_policy();
     }
 
     pub fn toggle_play_pause(&mut self) {
@@ -1123,6 +1129,7 @@ impl ProgramPlayer {
         // Keep stop lightweight; avoid paused rebuild/seek in the stop path.
         let _ = self.pipeline.set_state(gst::State::Paused);
         self.state = PlayerState::Stopped;
+        self.update_drop_late_policy();
     }
 
     pub fn set_jkl_rate(&mut self, rate: f64) {
@@ -1148,6 +1155,7 @@ impl ProgramPlayer {
         self.rebuild_pipeline_at(self.timeline_pos_ns);
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.state = PlayerState::Playing;
+        self.update_drop_late_policy();
     }
 
     // ── Poll ───────────────────────────────────────────────────────────────
@@ -1174,6 +1182,7 @@ impl ProgramPlayer {
             self.audio_current_idx = None;
             self.play_start = None;
             self.timeline_pos_ns = self.timeline_dur_ns;
+            self.update_drop_late_policy();
             return true;
         }
 
@@ -1203,6 +1212,7 @@ impl ProgramPlayer {
             self.audio_current_idx = None;
             self.play_start = None;
             self.timeline_pos_ns = self.timeline_dur_ns;
+            self.update_drop_late_policy();
             return true;
         }
 
@@ -1210,8 +1220,16 @@ impl ProgramPlayer {
         let desired = self.clips_active_at(new_pos);
         let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
         if desired != current {
+            // Keep audio and video timeline progression aligned while rebuilding
+            // video slots. Rebuilds can take noticeable time under overlap, and
+            // letting audio continue during that window causes audible drift.
+            let _ = self.audio_pipeline.set_state(gst::State::Paused);
             self.rebuild_pipeline_at(new_pos);
             let _ = self.pipeline.set_state(gst::State::Playing);
+            self.sync_audio_to(new_pos);
+            if self.audio_current_idx.is_some() {
+                let _ = self.audio_pipeline.set_state(gst::State::Playing);
+            }
             // Reset wall-clock base after rebuild.
             self.base_timeline_ns = new_pos;
             self.play_start = Some(Instant::now());
@@ -1222,6 +1240,7 @@ impl ProgramPlayer {
 
         // Advance audio pipeline across clip boundaries.
         self.poll_audio(new_pos);
+        self.update_drop_late_policy();
 
         changed
     }
@@ -1671,6 +1690,36 @@ impl ProgramPlayer {
 
     fn paused_seek_flags() -> gst::SeekFlags {
         gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+    }
+
+    fn update_drop_late_policy(&mut self) {
+        let should_drop_late =
+            self.state == PlayerState::Playing && self.slots.len() >= 3 && !self.transform_live;
+        if should_drop_late == self.playback_drop_late_active {
+            return;
+        }
+        self.playback_drop_late_active = should_drop_late;
+        if let Some(ref q) = self.display_queue {
+            if should_drop_late {
+                q.set_property_from_str("leaky", "downstream");
+                q.set_property("max-size-buffers", 1u32);
+            } else {
+                q.set_property_from_str("leaky", "no");
+                q.set_property("max-size-buffers", 3u32);
+            }
+        }
+        if self.display_sink.find_property("qos").is_some() {
+            self.display_sink.set_property("qos", should_drop_late);
+        }
+        if self.display_sink.find_property("max-lateness").is_some() {
+            let max_lateness: i64 = if should_drop_late { 40_000_000 } else { -1 };
+            self.display_sink.set_property("max-lateness", max_lateness);
+        }
+        log::info!(
+            "update_drop_late_policy: active={} slots={}",
+            should_drop_late,
+            self.slots.len()
+        );
     }
 
     fn should_prioritize_ui_responsiveness(&self) -> bool {
