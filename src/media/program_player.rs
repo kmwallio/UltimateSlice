@@ -1049,6 +1049,15 @@ impl ProgramPlayer {
         let needs_async = if resume_playback {
             self.play_start = Some(Instant::now());
             false
+        } else if self.state == PlayerState::Stopped {
+            // After a fresh project open (state Stopped), do NOT pulse to
+            // Playing: the rebuild path already waited for compositor
+            // preroll in Paused, so the display sink has the first frame.
+            // A playing pulse here would briefly advance the pipeline,
+            // rendering several frames and looking like autoplay.
+            // Transition to Paused so subsequent scrubs get proper pulses.
+            self.state = PlayerState::Paused;
+            false
         } else if self.current_idx.is_some() {
             if self.slots.len() >= 3 {
                 // For 3+ tracks, start a non-blocking Playing pulse: lock the
