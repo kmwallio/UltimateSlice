@@ -1400,11 +1400,22 @@ impl ProgramPlayer {
 
     pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, _pan: f64) {
         let volume = volume.clamp(0.0, 2.0);
+        // Check video clips first (use audiomixer pad on compositor pipeline).
         if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
+            self.clips[i].volume = volume;
             if let Some(slot) = self.slot_for_clip(i) {
                 if let Some(ref pad) = slot.audio_mixer_pad {
                     pad.set_property("volume", volume);
                 }
+            }
+            return;
+        }
+        // For audio-only clips, update the stored volume and, if actively playing,
+        // update the audio_pipeline volume directly.
+        if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
+            self.audio_clips[i].volume = volume;
+            if self.audio_current_idx == Some(i) {
+                self.audio_pipeline.set_property("volume", volume);
             }
         }
     }
