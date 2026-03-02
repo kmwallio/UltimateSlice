@@ -22,13 +22,26 @@
           <li>Media library import with duration probing for video, audio, and images</li>
           <li>Source monitor with playback, scrubber, in/out marks, and timecode display</li>
           <li>Timeline with multi-track rows, zoom/pan, clip selection, trim, move, and razor tool</li>
+          <li>Multi-track video compositing with per-clip opacity for b-roll overlays</li>
           <li>Undo/Redo command history</li>
           <li>Inspector panel for selected clip properties</li>
-          <li>MP4/H.264 export via GStreamer pipeline</li>
-          <li>FCPXML 1.10 import and export</li>
+          <li>Per-clip color correction: brightness, contrast, and saturation</li>
+          <li>Advanced color grading: shadows, midtones, and highlights sliders</li>
+          <li>Denoise and sharpness effects per clip</li>
+          <li>3D LUT support — apply .cube color look-up table files to any clip</li>
+          <li>Per-clip transform controls: scale, position offset, rotation, and horizontal/vertical flip</li>
+          <li>Per-clip crop (left, right, top, bottom) with transparent compositing</li>
+          <li>Interactive transform overlay — drag crop edges and scale handles directly in the Program Monitor</li>
+          <li>Per-clip audio volume and stereo pan controls</li>
+          <li>Per-clip speed control for fast- and slow-motion playback</li>
+          <li>Title and text overlays with font, colour, and position settings</li>
+          <li>MP4/H.264 export via ffmpeg with full color grading, LUT, crop, and speed baked in</li>
+          <li>FCPXML 1.10 import and export with round-trip preservation of all clip properties</li>
           <li>Proxy generation for smoother editing of high-resolution media</li>
-          <li>Basic transitions between clips on the timeline</li>
-          <li>Optional MCP server (--mcp) for JSON-RPC AI collaboration</li>
+          <li>Adaptive proxy assist: automatically switches to proxy media in regions with three or more overlapping video tracks</li>
+          <li>Occlusion-based decode skip: clips fully hidden behind an opaque overlay skip video decode entirely, reducing CPU load</li>
+          <li>Cross-dissolve transitions between clips on the timeline</li>
+          <li>Optional MCP server (--mcp) for JSON-RPC AI collaboration with 55 tools covering the full edit workflow</li>
         </ul>
       </description>
     </release>
