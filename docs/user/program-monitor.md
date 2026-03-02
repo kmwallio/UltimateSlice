@@ -76,7 +76,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - While playback is active, Auto quality changes use a short minimum dwell to avoid rapid resolution flapping when overlap transitions briefly change load.
 - During heavy 3+ track playback overlap, the monitor enables an audio-master "drop-late" preview path so late video frames are dropped rather than queued behind audio; when overlap drops or playback pauses/stops, normal non-dropping buffering is restored.
 - During the same heavy-overlap windows, per-clip compositor branch queues also switch to drop-late mode to reduce branch backpressure and boundary handoff stalls.
-- During playback, the monitor also prewarms the next near-future boundary clip set (look-ahead probe/path warm-up) to reduce transition-handoff stalls.
+- During playback, the monitor also prewarms the next near-future boundary clip set (look-ahead probe/path warm-up), including lightweight incoming decoder/effects resource warm-up, to reduce transition-handoff stalls.
 
 ## Seeking
 

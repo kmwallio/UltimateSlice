@@ -29,6 +29,7 @@ All notable project changes and progress should be recorded here.
 - **Adaptive slot-queue drop-late policy**: During heavy-overlap playback (3+ active video slots), per-slot compositor branch queues now switch to downstream-leaky mode, reducing branch backpressure and helping keep boundary handoffs responsive; queues automatically return to non-leaky mode outside heavy-overlap playback.
 - **Boundary look-ahead prewarm**: While playing, Program Monitor now prewarms the next upcoming clip-boundary active set (within a short window) by resolving effective media paths and priming audio-stream probe cache before the handoff point, reducing synchronous probe work during transition rebuilds.
 - **Incremental boundary update (remove-only fast path)**: Playback boundary handling now skips a full slot teardown/rebuild when the active-set transition only removes clips; surviving slots are reseeked/reordered in place, reducing avoidable decoder branch reconstruction on clip-end handoffs.
+- **Incoming boundary resource prewarm**: Look-ahead boundary prewarm now also performs lightweight incoming-clip resource warm-up (decoder Ready/Null + effects-bin construction) before handoff, reducing first-use setup work at transition ticks.
 - **Launch-screen UI hierarchy polish**: Improved first-use clarity with media/program-monitor empty-state guidance, wider default side panels, a cleaner toolbar grouping separator, and an Inspector empty state that hides dense controls until a clip is selected.
 
 ### Fixed

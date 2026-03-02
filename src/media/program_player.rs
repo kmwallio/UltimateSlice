@@ -1715,6 +1715,21 @@ impl ProgramPlayer {
             .min()
     }
 
+    fn prewarm_incoming_clip_resources(&self, clip: &ProgramClip) {
+        let effective_path = self.effective_source_path_for_clip(clip);
+        let uri = format!("file://{}", effective_path);
+        if let Ok(decoder) = gst::ElementFactory::make("uridecodebin")
+            .property("uri", &uri)
+            .build()
+        {
+            let _ = decoder.set_state(gst::State::Ready);
+            let _ = decoder.state(gst::ClockTime::from_mseconds(20));
+            let _ = decoder.set_state(gst::State::Null);
+        }
+        let (effects_bin, ..) = Self::build_effects_bin(clip, self.project_width, self.project_height);
+        let _ = effects_bin.set_state(gst::State::Null);
+    }
+
     fn prewarm_upcoming_boundary(&mut self, timeline_pos_ns: u64) {
         const PREWARM_WINDOW_NS: u64 = 1_500_000_000;
         let Some(boundary_ns) = self.next_video_boundary_after(timeline_pos_ns) else {
@@ -1727,12 +1742,17 @@ impl ProgramPlayer {
         if self.prewarmed_boundary_ns == Some(boundary_ns) {
             return;
         }
-        let active = self.clips_active_at(boundary_ns);
-        for idx in active {
+        let current_active = self.clips_active_at(timeline_pos_ns);
+        let boundary_active = self.clips_active_at(boundary_ns);
+        for idx in boundary_active {
             let clip = self.clips[idx].clone();
+            let incoming = !current_active.contains(&idx);
             if clip.has_audio {
                 let effective_path = self.effective_source_path_for_clip(&clip);
                 let _ = self.probe_has_audio_stream_cached(&effective_path);
+            }
+            if incoming {
+                self.prewarm_incoming_clip_resources(&clip);
             }
         }
         log::debug!(

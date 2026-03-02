@@ -180,6 +180,7 @@ Tracking docs:
           - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
           - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
           - [x] Start incremental boundary updates with a remove-only fast path (skip full rebuild when active-set change only removes clips)
+          - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
           - [ ] Replace full boundary rebuild with incremental slot diffing (reuse unchanged slots; add/remove only deltas)
           - [ ] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
         - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
