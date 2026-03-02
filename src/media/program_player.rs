@@ -3455,10 +3455,15 @@ impl ProgramPlayer {
             self.slots.len()
         );
 
-        // Try incremental boundary paths before falling back to a full
-        // teardown+rebuild.  These reuse unchanged decoder slots and only
-        // add/remove the delta, saving decoder creation and pad linking time.
-        if !self.slots.is_empty() {
+        // Incremental boundary paths are disabled while a retained-decoder
+        // frame-refresh regression is investigated: after an incremental
+        // add/remove, retained decoders stop producing new frames during
+        // playback, leaving the compositor stuck on a single static frame
+        // while audio continues.  The fixed methods are kept for re-enabling
+        // once the root cause (likely compositor aggregator segment/running-time
+        // mismatch on retained pads after flush+seek) is resolved.
+        const INCREMENTAL_ENABLED: bool = false;
+        if INCREMENTAL_ENABLED && !self.slots.is_empty() {
             let desired = self.clips_active_at(timeline_pos);
             let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
             if !desired.is_empty() {
