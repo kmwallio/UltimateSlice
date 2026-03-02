@@ -306,32 +306,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            let timeline_state = timeline_state.clone();
             let cell = timeline_panel_cell.clone();
-            move |vol, pan| {
-                let selected = timeline_state.borrow().selected_clip_id.clone();
-                // Persist the new volume/pan to the project model for the selected clip.
+            // clip_id comes directly from the inspector (authoritative selected clip),
+            // avoiding any race with timeline_state.selected_clip_id.
+            move |clip_id: &str, vol: f32, pan: f32| {
+                // The inspector already persisted vol/pan to the project model.
+                // Just mark dirty and update live GStreamer audio for the exact clip.
                 {
                     let mut proj = project.borrow_mut();
-                    if let Some(ref cid) = selected {
-                        for track in proj.tracks.iter_mut() {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == cid) {
-                                clip.volume = vol as f32;
-                                clip.pan = pan as f32;
-                                break;
-                            }
-                        }
-                    }
                     proj.dirty = true;
                 }
-                // Update live GStreamer audio: target the selected clip when possible,
-                // fall back to updating the "current" (playhead) clip.
-                let mut pp = prog_player.borrow_mut();
-                if let Some(ref cid) = selected {
-                    pp.update_audio_for_clip(cid, vol as f64, pan as f64);
-                } else {
-                    pp.update_current_audio(vol as f64, pan as f64);
-                }
+                prog_player.borrow_mut().update_audio_for_clip(clip_id, vol as f64, pan as f64);
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
