@@ -71,6 +71,7 @@ fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>
     project
         .tracks
         .iter()
+        .filter(|t| t.kind == TrackKind::Video)
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
             let key = (c.source_path.clone(), c.lut_path.clone());
@@ -150,6 +151,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
     timeline_state.borrow_mut().show_waveform_on_video = initial_show_waveform_on_video;
     timeline_state.borrow_mut().show_timeline_preview = initial_show_timeline_preview;
+    let pending_program_seek_ticket = Rc::new(Cell::new(0u64));
+    let pending_reload_ticket = Rc::new(Cell::new(0u64));
+    let suppress_resume_on_next_reload = Rc::new(Cell::new(false));
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
@@ -452,18 +456,34 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         timeline_state.borrow_mut().on_project_changed = Some(Rc::new(move || cb()));
     }
     {
-        let player = player.clone();
         let prog_player = prog_player.clone();
+        let pending_program_seek_ticket = pending_program_seek_ticket.clone();
         timeline_state.borrow_mut().on_seek = Some(Rc::new(move |ns| {
-            let needs_async = prog_player.borrow_mut().seek(ns);
-            if needs_async {
-                // The pipeline is in Playing; let the GTK main loop run so
-                // gtk4paintablesink can complete its preroll, then restore Paused.
-                let pp = prog_player.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
-                    pp.borrow().complete_playing_pulse();
-                });
-            }
+            let ticket = pending_program_seek_ticket.get().wrapping_add(1);
+            pending_program_seek_ticket.set(ticket);
+            let prog_player_seek = prog_player.clone();
+            let pending_program_seek_ticket_check = pending_program_seek_ticket.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
+                if pending_program_seek_ticket_check.get() != ticket {
+                    return;
+                }
+                let seek_started = std::time::Instant::now();
+                let needs_async = prog_player_seek.borrow_mut().seek(ns);
+                log::debug!(
+                    "window:on_seek timeline_pos={} needs_async={} elapsed_ms={}",
+                    ns,
+                    needs_async,
+                    seek_started.elapsed().as_millis()
+                );
+                if needs_async {
+                    // The pipeline is in Playing; let the GTK main loop run so
+                    // gtk4paintablesink can complete its preroll, then restore Paused.
+                    let pp = prog_player_seek.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                        pp.borrow().complete_playing_pulse();
+                    });
+                }
+            });
         }));
     }
     {
@@ -478,10 +498,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             prog_player.borrow_mut().toggle_play_pause();
         }));
     }
-    let header = toolbar::build_toolbar(project.clone(), timeline_state.clone(), {
-        let cb = on_project_changed.clone();
-        move || cb()
-    });
+    let header = toolbar::build_toolbar(
+        project.clone(),
+        timeline_state.clone(),
+        {
+            let cb = on_project_changed.clone();
+            move || cb()
+        },
+        {
+            let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+            move || suppress_resume_on_next_reload.set(true)
+        },
+    );
     window.set_titlebar(Some(&header));
 
     // ── Root layout: horizontal paned (content | inspector) ──────────────
@@ -648,7 +676,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         inspector_view.position_y_slider.set_value(py);
                         *inspector_view.updating.borrow_mut() = false;
                     }
-                    // 3. Push to GStreamer (read existing crop/rotate/flip from inspector)
+                    // 3. Push to GStreamer without blocking reseek (live mode handles preview)
                     let cl = inspector_view.crop_left_slider.value() as i32;
                     let crv = inspector_view.crop_right_slider.value() as i32;
                     let ct = inspector_view.crop_top_slider.value() as i32;
@@ -661,13 +689,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let fh = inspector_view.flip_h_btn.is_active();
                     let fv = inspector_view.flip_v_btn.is_active();
                     let mut pp = prog_player.borrow_mut();
-                    if let Some(ref clip_id) = selected {
-                        pp.update_transform_for_clip(
-                            clip_id, cl, crv, ct, cb, rot, fh, fv, sc, px, py,
-                        );
-                    } else {
-                        pp.update_current_transform(cl, crv, ct, cb, rot, fh, fv, sc, px, py);
-                    }
+                    pp.enter_transform_live_mode();
+                    pp.set_transform_properties_only(
+                        selected.as_deref(),
+                        cl,
+                        crv,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        sc,
+                        px,
+                        py,
+                    );
                     // 4. Update window dirty marker
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
@@ -717,13 +752,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let py = inspector_view.position_y_slider.value();
                     player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                     let mut pp = prog_player.borrow_mut();
-                    if let Some(ref clip_id) = selected {
-                        pp.update_transform_for_clip(
-                            clip_id, cl, cr, ct, cb, rot, fh, fv, sc, px, py,
-                        );
-                    } else {
-                        pp.update_current_transform(cl, cr, ct, cb, rot, fh, fv, sc, px, py);
-                    }
+                    pp.enter_transform_live_mode();
+                    pp.set_transform_properties_only(
+                        selected.as_deref(),
+                        cl,
+                        cr,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        sc,
+                        px,
+                        py,
+                    );
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
                         win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
@@ -731,11 +773,19 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             },
             {
-                // on_drag_end: trigger a final preview reseek so the composited
-                // frame reflects the last transform state.
+                // on_drag_begin: force paused editing so timeline doesn't
+                // continue advancing while transform handles are dragged.
                 let prog_player = prog_player.clone();
                 move || {
-                    prog_player.borrow().reseek_paused();
+                    prog_player.borrow_mut().pause();
+                }
+            },
+            {
+                // on_drag_end: exit live transform mode and do a final reseek
+                // so the composited frame accurately reflects the last state.
+                let prog_player = prog_player.clone();
+                move || {
+                    prog_player.borrow_mut().exit_transform_live_mode();
                 }
             },
         ));
@@ -863,6 +913,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let effective_proxy_scale_divisor = effective_proxy_scale_divisor.clone();
         let last_auto_check_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_auto_check_us_c = last_auto_check_us.clone();
+        let last_auto_quality_switch_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_auto_quality_switch_us_c = last_auto_quality_switch_us.clone();
+        let last_auto_proxy_switch_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_auto_proxy_switch_us_c = last_auto_proxy_switch_us.clone();
+        let last_proxy_refresh_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_proxy_refresh_us_c = last_proxy_refresh_us.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -873,6 +929,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         let prefs = preferences_state.borrow();
                         (prefs.preview_quality.clone(), prefs.proxy_mode.clone())
                     };
+                    let auto_preview_mode =
+                        matches!(preview_quality, crate::ui_state::PreviewQuality::Auto);
                     let divisor = match preview_quality {
                         crate::ui_state::PreviewQuality::Auto => {
                             let (pw, ph) = {
@@ -889,27 +947,41 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         }
                         _ => preview_quality.divisor(),
                     };
-                    player.set_preview_quality(divisor);
+                    let current_divisor = player.preview_divisor();
+                    let can_switch_auto_quality = !player.is_playing()
+                        || now_us - last_auto_quality_switch_us_c.get() >= 2_000_000;
+                    if divisor == current_divisor
+                        || !auto_preview_mode
+                        || can_switch_auto_quality
+                    {
+                        if auto_preview_mode && divisor != current_divisor {
+                            last_auto_quality_switch_us_c.set(now_us);
+                        }
+                        player.set_preview_quality(divisor);
+                    }
 
                     // Auto-assist for heavy timelines: when manual proxy mode is Off,
-                    // enable proxies automatically when 3+ video tracks overlap.
+                    // enable proxies for 3+ overlaps and disable with hysteresis so
+                    // boundary transitions do not flap proxy state every few frames.
                     let overlap_tracks = {
                         let proj = project.borrow();
                         active_video_track_count(&proj, player.timeline_pos_ns)
                     };
-                    let (desired_proxy_enabled, desired_scale) = if proxy_mode.is_enabled() {
-                        (true, proxy_scale_for_mode(&proxy_mode))
-                    } else if overlap_tracks >= 3 {
-                        (
-                            true,
-                            if divisor >= 4 {
-                                crate::media::proxy_cache::ProxyScale::Quarter
-                            } else {
-                                crate::media::proxy_cache::ProxyScale::Half
-                            },
-                        )
+                    let manual_proxy_mode = proxy_mode.is_enabled();
+                    let current_proxy_enabled = effective_proxy_enabled.get();
+                    let desired_proxy_enabled = if manual_proxy_mode {
+                        true
+                    } else if current_proxy_enabled {
+                        overlap_tracks >= 2
                     } else {
-                        (false, crate::media::proxy_cache::ProxyScale::Half)
+                        overlap_tracks >= 3
+                    };
+                    let desired_scale = if manual_proxy_mode {
+                        proxy_scale_for_mode(&proxy_mode)
+                    } else if desired_proxy_enabled && divisor >= 4 {
+                        crate::media::proxy_cache::ProxyScale::Quarter
+                    } else {
+                        crate::media::proxy_cache::ProxyScale::Half
                     };
                     let desired_scale_divisor = if matches!(
                         desired_scale,
@@ -919,14 +991,26 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     } else {
                         2
                     };
-                    if effective_proxy_enabled.get() != desired_proxy_enabled
-                        || effective_proxy_scale_divisor.get() != desired_scale_divisor
+                    let wants_proxy_change = current_proxy_enabled != desired_proxy_enabled;
+                    let wants_scale_change =
+                        desired_proxy_enabled
+                            && effective_proxy_scale_divisor.get() != desired_scale_divisor;
+                    let can_switch_auto_proxy =
+                        now_us - last_auto_proxy_switch_us_c.get() >= 1_500_000;
+                    if (wants_proxy_change || wants_scale_change)
+                        && (manual_proxy_mode || can_switch_auto_proxy)
                     {
                         player.set_proxy_enabled(desired_proxy_enabled);
                         effective_proxy_enabled.set(desired_proxy_enabled);
                         effective_proxy_scale_divisor.set(desired_scale_divisor);
+                        last_auto_proxy_switch_us_c.set(now_us);
                     }
-                    if desired_proxy_enabled {
+                    let refresh_proxy_paths =
+                        manual_proxy_mode
+                            || (desired_proxy_enabled
+                                && now_us - last_proxy_refresh_us_c.get() >= 1_000_000);
+                    if desired_proxy_enabled && refresh_proxy_paths {
+                        last_proxy_refresh_us_c.set(now_us);
                         let clip_sources = {
                             let proj = project.borrow();
                             collect_unique_clip_sources(&proj)
@@ -1521,6 +1605,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let transform_overlay_cell = transform_overlay_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
+        let pending_reload_ticket = pending_reload_ticket.clone();
+        let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Update window title
@@ -1641,11 +1727,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
             // Reload program player — preserve current position so the monitor
             // doesn't jump to 0 on every project change (e.g., clip name edit).
+            let suppress_resume = suppress_resume_on_next_reload.replace(false);
             let (prev_pos, was_playing) = {
                 let pp = prog_player.borrow();
                 (
                     pp.timeline_pos_ns,
-                    matches!(pp.state(), crate::media::player::PlayerState::Playing),
+                    !suppress_resume
+                        && matches!(pp.state(), crate::media::player::PlayerState::Playing),
                 )
             };
             let (proj_w, proj_h) = project_dims;
@@ -1653,7 +1741,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let preferences_state_reload = preferences_state.clone();
             let project_reload = project.clone();
             let proxy_cache_reload = proxy_cache.clone();
+            let reload_ticket = pending_reload_ticket.get().wrapping_add(1);
+            pending_reload_ticket.set(reload_ticket);
+            let pending_reload_ticket_phase1 = pending_reload_ticket.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
+                if pending_reload_ticket_phase1.get() != reload_ticket {
+                    return;
+                }
+                let phase1_started = std::time::Instant::now();
                 // Resolve proxy paths BEFORE load_clips so the first
                 // rebuild_pipeline_at() uses proxies instead of originals.
                 {
@@ -1692,33 +1787,55 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                 }
 
-                let mut pp = prog_player_reload.borrow_mut();
-                pp.set_project_dimensions(proj_w, proj_h);
-                pp.load_clips(clips);
-                if !pp.clips.is_empty() {
-                    if was_playing {
-                        // Preserve playback behavior after clip reloads.
-                        let _ = pp.seek(prev_pos);
-                        pp.play();
-                    } else {
-                        // Rebuild the pipeline at the previous position so the
-                        // program monitor shows the correct composited frame.
-                        // Without this, load_clips() leaves the pipeline in Ready
-                        // (no decoder slots) and the monitor stays black.
-                        let pos = prev_pos.min(pp.timeline_dur_ns);
-                        let needs_async = pp.seek(pos);
-                        if needs_async {
-                            drop(pp);
-                            let pp2 = prog_player_reload.clone();
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(250),
-                                move || {
-                                    pp2.borrow().complete_playing_pulse();
-                                },
-                            );
+                {
+                    let mut pp = prog_player_reload.borrow_mut();
+                    pp.set_project_dimensions(proj_w, proj_h);
+                    pp.load_clips(clips);
+                }
+                log::debug!(
+                    "window:on_project_changed phase1_load ticket={} elapsed_ms={}",
+                    reload_ticket,
+                    phase1_started.elapsed().as_millis()
+                );
+
+                let prog_player_reload_phase2 = prog_player_reload.clone();
+                let pending_reload_ticket_phase2 = pending_reload_ticket_phase1.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(16), move || {
+                    if pending_reload_ticket_phase2.get() != reload_ticket {
+                        return;
+                    }
+                    let phase2_started = std::time::Instant::now();
+                    let mut pp = prog_player_reload_phase2.borrow_mut();
+                    if !pp.clips.is_empty() {
+                        if was_playing {
+                            // Preserve playback behavior after clip reloads.
+                            let _ = pp.seek(prev_pos);
+                            pp.play();
+                        } else {
+                            // Rebuild the pipeline at the previous position so the
+                            // program monitor shows the correct composited frame.
+                            // Without this, load_clips() leaves no decoder slots
+                            // loaded and the monitor can stay on the previous frame.
+                            let pos = prev_pos.min(pp.timeline_dur_ns);
+                            let needs_async = pp.seek(pos);
+                            if needs_async {
+                                drop(pp);
+                                let pp2 = prog_player_reload_phase2.clone();
+                                glib::timeout_add_local_once(
+                                    std::time::Duration::from_millis(250),
+                                    move || {
+                                        pp2.borrow().complete_playing_pulse();
+                                    },
+                                );
+                            }
                         }
                     }
-                }
+                    log::debug!(
+                        "window:on_project_changed phase2_seek ticket={} elapsed_ms={}",
+                        reload_ticket,
+                        phase2_started.elapsed().as_millis()
+                    );
+                });
             });
 
             // Force immediate timeline redraw (don't wait for 100ms timer)
@@ -1907,6 +2024,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let proxy_cache = proxy_cache.clone();
         let on_close_preview = on_close_preview.clone();
         let on_project_changed = on_project_changed.clone();
+        let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let window_weak = window.downgrade();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
         glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
@@ -1924,6 +2042,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         &proxy_cache,
                         &on_close_preview,
                         &on_project_changed,
+                        &suppress_resume_on_next_reload,
                     );
                 }
             }
@@ -2122,6 +2241,7 @@ fn handle_mcp_command(
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     on_close_preview: &Rc<dyn Fn()>,
     on_project_changed: &Rc<dyn Fn()>,
+    suppress_resume_on_next_reload: &Rc<Cell<bool>>,
 ) {
     use crate::mcp::McpCommand;
     use crate::model::clip::ClipKind;
@@ -2706,6 +2826,7 @@ fn handle_mcp_command(
             let project = project.clone();
             let timeline_state = timeline_state.clone();
             let on_project_changed = on_project_changed.clone();
+            let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
                 match rx.try_recv() {
                     Ok(Ok(mut new_proj)) => {
@@ -2715,6 +2836,7 @@ fn handle_mcp_command(
                         *project.borrow_mut() = new_proj;
                         timeline_state.borrow_mut().loading = false;
                         reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
+                        suppress_resume_on_next_reload.set(true);
                         let on_project_changed = on_project_changed.clone();
                         glib::timeout_add_local_once(
                             std::time::Duration::from_millis(0),
@@ -2928,6 +3050,7 @@ fn handle_mcp_command(
                 st.history = crate::undo::EditHistory::new();
             }
             reply.send(json!({"success": true, "title": title})).ok();
+            suppress_resume_on_next_reload.set(true);
             on_project_changed();
         }
 

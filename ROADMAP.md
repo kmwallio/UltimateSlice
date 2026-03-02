@@ -166,10 +166,24 @@ Tracking docs:
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
     - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops
       - [x] Ensure paused timeline seek in compositor preview re-prerolls after decoder seek so Program Monitor/transform overlay frame refresh remains reliable while scrubbing
-      - [x] Use accurate decoder seeks during playback boundary rebuilds (2→3 / 3→2 active-track transitions) so long-GOP proxies do not snap B-roll back to an earlier keyframe
-      - [x] Reduce playback boundary handoff blocking by removing redundant paused-transition/state checks and shortening playback-path preroll waits for 3+ tracks
-      - [x] Stabilize paused scrub rebuild ordering so active decoder branches are added before paused preroll/seek, preventing persistent black preview frames after playhead moves
-    - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
+       - [x] Use accurate decoder seeks during playback boundary rebuilds (2→3 / 3→2 active-track transitions) so long-GOP proxies do not snap B-roll back to an earlier keyframe
+       - [x] Reduce playback boundary handoff blocking by removing redundant paused-transition/state checks and shortening playback-path preroll waits for 3+ tracks
+         - [x] Stabilize paused scrub rebuild ordering so active decoder branches are added before paused preroll/seek, preventing persistent black preview frames after playhead moves
+         - [x] Keep project-open seek path off `pipeline.set_state(Ready)` hot spots (`load_clips()` stays paused and `rebuild_pipeline_at()` uses `start_time` reset instead of Ready) to avoid intermittent futex deadlocks when seeking immediately after open
+         - [x] Reduce paused seek rebuild overhead by caching per-path audio probe results, applying decoder thread caps in paused rebuilds, and skipping the second paused reseek pass when first-pass link/arrival checks are already satisfied
+          - [x] Stage reload as deferred load→seek phases with ticket coalescing, and cap paused 3+ track settle waits for responsiveness so UI remains interactive during project open + immediate seek
+          - [x] Suppress playback auto-resume for full project replacement actions (new/open/recent and MCP project open/create) so project load does not start playback unexpectedly
+          - [x] Reduce overlap-transition playback churn by keeping audio probe cache warm across proxy-path refreshes and adding hysteresis/min-dwell to auto proxy assist (less flapping around 2↔3 track boundaries)
+          - [x] Add minimum-dwell switching for Auto preview quality divisor while playing to reduce caps renegotiation thrash at transition boundaries
+          - [x] Enable audio-master drop-late preview policy during 3+ track playback overlap (leaky display queue + sink QoS/max-lateness) so displayed frames stay closer to audio clock under decode pressure
+          - [x] Apply adaptive per-slot queue drop-late policy during heavy-overlap playback to reduce compositor-branch backpressure at handoff
+          - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
+          - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
+          - [x] Start incremental boundary updates with a remove-only fast path (skip full rebuild when active-set change only removes clips)
+          - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
+          - [ ] Replace full boundary rebuild with incremental slot diffing (reuse unchanged slots; add/remove only deltas)
+          - [ ] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
+        - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
   - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
@@ -234,6 +248,7 @@ Tracking docs:
 - [x] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
 - [x] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
 - [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
+- [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)

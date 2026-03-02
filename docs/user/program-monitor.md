@@ -52,6 +52,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - **Center drag**: pan (Position X/Y).
 - **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
 - Keyboard nudges work when the overlay has focus (click the monitor once).
+- Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
 
 ## Playback Behaviour
 
@@ -61,6 +62,8 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
 - Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
+- Some clip-end boundary transitions now use an incremental remove-only handoff path (without full decoder branch reconstruction), improving responsiveness when clips simply drop out of the active set.
+- During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
 - Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.
 - If optional denoise filters are unavailable in your GStreamer runtime, Program Monitor still applies crop/scale/position transforms.
@@ -70,6 +73,10 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
 - Preview quality (`Full` / `Half` / `Quarter`) downscales the composed monitor output while preserving full-frame fit/framing in the Program Monitor.
 - Preview quality `Auto` dynamically adjusts effective monitor output quality from the current Program Monitor canvas size (including resize/zoom changes) to balance clarity and performance.
+- While playback is active, Auto quality changes use a short minimum dwell to avoid rapid resolution flapping when overlap transitions briefly change load.
+- During heavy 3+ track playback overlap, the monitor enables an audio-master "drop-late" preview path so late video frames are dropped rather than queued behind audio; when overlap drops or playback pauses/stops, normal non-dropping buffering is restored.
+- During the same heavy-overlap windows, per-clip compositor branch queues also switch to drop-late mode to reduce branch backpressure and boundary handoff stalls.
+- During playback, the monitor also prewarms the next near-future boundary clip set (look-ahead probe/path warm-up), including lightweight incoming decoder/effects resource warm-up, to reduce transition-handoff stalls.
 
 ## Seeking
 
@@ -77,8 +84,13 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - The program monitor seeks to the correct source position within the appropriate clip, accounting for clip speed.
 - When scrubbing within the same clip, the existing decoder is seeked in-place (no pipeline rebuild) so the monitor shows the frame at the exact playhead position without a black-screen or first-frame flash.
 - When the playhead crosses a clip boundary (different clips become active), the pipeline is briefly rebuilt for the new set of active clips.
+- Opening a project and seeking immediately now follows the same safe paused rebuild/seek flow, avoiding intermittent monitor freezes during initial interaction.
+- Opening/creating a project does not auto-start playback; Program Monitor remains paused until you explicitly press Play.
+- Project reload + first seek now run as short staged callbacks (load first, then seek), and stale pending seek/reload requests are coalesced so rapid edits/scrubs don't queue long back-to-back main-thread work.
+- During automatic proxy assist (manual proxy mode Off), proxy enable/disable now uses hysteresis near overlap boundaries to avoid rapid mode flapping while clips start/end.
 - During paused scrubbing, UltimateSlice waits for a fresh post-seek preroll frame so the Program Monitor and transform overlay update to the new playhead frame instead of showing black.
 - During paused scrubbing, active clip decoder branches are created before preroll/seek settle so the monitor does not remain stuck on a black frame after moving the playhead.
+- With 3+ active video tracks, paused settle waits are budget-capped to keep the UI responsive; if the full second-pass settle would exceed the budget it is skipped in favor of immediate interactivity.
 - Manual timeline seeks use the paused accurate-seek path and then resume playback if it was active, so the frame shown at the playhead is updated before playback continues.
 - While paused, the monitor is repainted continuously so delayed post-seek frame updates still appear without requiring playback to resume.
 
