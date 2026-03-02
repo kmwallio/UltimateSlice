@@ -24,6 +24,7 @@ All notable project changes and progress should be recorded here.
 - **Seek stress performance pass (3+ tracks)**: Program Monitor rebuild now reuses cached audio-stream probe results per media path (avoids repeated Discoverer probes), applies FFmpeg decoder thread caps in paused seek rebuilds, and skips the second paused settle/reseek pass when first-pass pad-link + compositor-arrival checks already succeed.
 - **Responsiveness-first open/seek staging**: Program reload now runs in two deferred phases (load first, seek next frame) with ticket-based coalescing so repeated edits/seeks drop stale reload work instead of stacking long GTK callbacks. Timeline seek dispatch is also coalesced to the latest request.
 - **Boundary playback smoothness tuning**: Reduced transition hot-path churn by preserving audio-stream probe cache across proxy-path updates and adding proxy auto-assist hysteresis/refresh throttling (minimum dwell before toggles). This cuts repeated Discoverer probes during boundary rebuilds and reduces proxy mode flapping near 2↔3-track overlap boundaries.
+- **Auto preview-quality stability**: In `Auto` mode, preview quality divisor changes now use a minimum dwell while playing, reducing rapid Full↔Half↔Quarter renegotiation churn during overlap transitions.
 - **Launch-screen UI hierarchy polish**: Improved first-use clarity with media/program-monitor empty-state guidance, wider default side panels, a cleaner toolbar grouping separator, and an Inspector empty state that hides dense controls until a clip is selected.
 
 ### Fixed

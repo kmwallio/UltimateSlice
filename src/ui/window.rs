@@ -913,6 +913,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let effective_proxy_scale_divisor = effective_proxy_scale_divisor.clone();
         let last_auto_check_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_auto_check_us_c = last_auto_check_us.clone();
+        let last_auto_quality_switch_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_auto_quality_switch_us_c = last_auto_quality_switch_us.clone();
         let last_auto_proxy_switch_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_auto_proxy_switch_us_c = last_auto_proxy_switch_us.clone();
         let last_proxy_refresh_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
@@ -927,6 +929,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         let prefs = preferences_state.borrow();
                         (prefs.preview_quality.clone(), prefs.proxy_mode.clone())
                     };
+                    let auto_preview_mode =
+                        matches!(preview_quality, crate::ui_state::PreviewQuality::Auto);
                     let divisor = match preview_quality {
                         crate::ui_state::PreviewQuality::Auto => {
                             let (pw, ph) = {
@@ -943,7 +947,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         }
                         _ => preview_quality.divisor(),
                     };
-                    player.set_preview_quality(divisor);
+                    let current_divisor = player.preview_divisor();
+                    let can_switch_auto_quality = !player.is_playing()
+                        || now_us - last_auto_quality_switch_us_c.get() >= 2_000_000;
+                    if divisor == current_divisor
+                        || !auto_preview_mode
+                        || can_switch_auto_quality
+                    {
+                        if auto_preview_mode && divisor != current_divisor {
+                            last_auto_quality_switch_us_c.set(now_us);
+                        }
+                        player.set_preview_quality(divisor);
+                    }
 
                     // Auto-assist for heavy timelines: when manual proxy mode is Off,
                     // enable proxies for 3+ overlaps and disable with hysteresis so

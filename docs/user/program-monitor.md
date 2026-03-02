@@ -71,6 +71,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
 - Preview quality (`Full` / `Half` / `Quarter`) downscales the composed monitor output while preserving full-frame fit/framing in the Program Monitor.
 - Preview quality `Auto` dynamically adjusts effective monitor output quality from the current Program Monitor canvas size (including resize/zoom changes) to balance clarity and performance.
+- While playback is active, Auto quality changes use a short minimum dwell to avoid rapid resolution flapping when overlap transitions briefly change load.
 
 ## Seeking
 
