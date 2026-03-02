@@ -119,6 +119,9 @@ pub struct TimelineState {
     pub on_extraction_pause: Option<Rc<dyn Fn(bool)>>,
     /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
     pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
+    /// Lightweight callback fired immediately when clip selection changes (no pipeline rebuild).
+    /// Called with the new selected_clip_id (or None if deselected).
+    pub on_clip_selected: Option<Rc<dyn Fn(Option<String>)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
@@ -149,6 +152,7 @@ impl TimelineState {
             on_play_pause: None,
             on_extraction_pause: None,
             on_drop_clip: None,
+            on_clip_selected: None,
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
@@ -480,7 +484,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 }
                             }
                         }
+                        // Immediately notify inspector of the new selection without
+                        // rebuilding the program player (which would clear all GStreamer slots).
+                        let sel_cb = st.on_clip_selected.clone();
+                        let new_sel = st.selected_clip_id.clone();
                         drop(st);
+                        if let Some(cb) = sel_cb {
+                            cb(new_sel);
+                        }
                     }
                 }
             } else if button == 3 {
@@ -548,7 +559,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         st.selected_clip_id = Some(h.clip_id);
                         st.selected_track_id = Some(h.track_id);
                     }
+                    let sel_cb = st.on_clip_selected.clone();
+                    let new_sel = st.selected_clip_id.clone();
                     drop(st);
+                    if let Some(cb) = sel_cb {
+                        cb(new_sel);
+                    }
                     // delete_selected called via keyboard (Delete key)
                 }
             } else {

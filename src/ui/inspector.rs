@@ -206,12 +206,12 @@ impl InspectorView {
 /// - `on_color_changed`: fired on every color/effects slider movement with
 ///   `(brightness, contrast, saturation, denoise, sharpness, shadows, midtones, highlights)`;
 ///   should update the program player's video filter elements directly without a full pipeline reload.
-/// - `on_audio_changed`: fired on every audio slider movement with `(volume, pan)`.
+/// - `on_audio_changed`: fired on every audio slider movement with `(clip_id, volume, pan)`.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
     on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
-    on_audio_changed: impl Fn(f32, f32) + 'static,
+    on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
     on_speed_changed: impl Fn(f64) + 'static,
@@ -587,7 +587,7 @@ pub fn build_inspector(
 
     let on_clip_changed = Rc::new(on_clip_changed);
     let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32)> = Rc::new(on_color_changed);
-    let on_audio_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_audio_changed);
+    let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
@@ -827,6 +827,7 @@ pub fn build_inspector(
                     }
                 }
                 on_audio_changed(
+                    clip_id,
                     volume_slider_cb.value() as f32,
                     pan_slider_cb.value() as f32,
                 );
@@ -858,6 +859,7 @@ pub fn build_inspector(
                     }
                 }
                 on_audio_changed(
+                    clip_id,
                     volume_slider_cb.value() as f32,
                     pan_slider_cb.value() as f32,
                 );
