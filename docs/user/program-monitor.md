@@ -62,7 +62,6 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
 - Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
-- Some clip-end boundary transitions now use an incremental remove-only handoff path (without full decoder branch reconstruction), improving responsiveness when clips simply drop out of the active set.
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
 - Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.
@@ -98,6 +97,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 
 - When you seek and then press Play, UltimateSlice rebuilds the compositor pipeline for the active clips at the playhead position and waits for post-seek preroll (up to ~2 seconds in paused accurate mode for long-GOP media) before transitioning back to Playing. This ensures playback starts from the correct frame rather than jumping to position 0.
 - During active playback boundary handoffs, preroll waits are tuned for responsiveness (shorter than paused scrubbing waits) to reduce visible stutter while preserving accurate clip positioning.
+- Wait budgets for boundary rebuilds adapt automatically based on recent rebuild performance: when recent transitions completed quickly, subsequent waits are tightened to reduce blocking; when they were slow, budgets widen for reliability.
 
 ## Speed Change Preview
 

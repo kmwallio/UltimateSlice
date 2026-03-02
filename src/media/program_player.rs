@@ -238,6 +238,14 @@ pub struct ProgramPlayer {
     play_start: Option<Instant>,
     /// Last timeline boundary timestamp prewarmed for upcoming playback handoff.
     prewarmed_boundary_ns: Option<u64>,
+    /// Ring buffer of recent playback-boundary rebuild durations (ms) for
+    /// adaptive wait budget tuning. Newest entry at index
+    /// `(rebuild_history_cursor - 1) % N`.
+    rebuild_history_ms: [u64; 8],
+    /// Write cursor into `rebuild_history_ms`.
+    rebuild_history_cursor: usize,
+    /// Number of entries actually recorded (≤ `rebuild_history_ms.len()`).
+    rebuild_history_count: usize,
 }
 
 impl ProgramPlayer {
@@ -657,6 +665,9 @@ impl ProgramPlayer {
                 transform_live: false,
                 play_start: None,
                 prewarmed_boundary_ns: None,
+                rebuild_history_ms: [0; 8],
+                rebuild_history_cursor: 0,
+                rebuild_history_count: 0,
             },
             paintable,
             paintable2,
@@ -980,6 +991,8 @@ impl ProgramPlayer {
         self.base_timeline_ns = 0;
         self.play_start = None;
         self.prewarmed_boundary_ns = None;
+        self.rebuild_history_count = 0;
+        self.rebuild_history_cursor = 0;
     }
 
     // ── Transport controls ─────────────────────────────────────────────────
@@ -1244,9 +1257,7 @@ impl ProgramPlayer {
             // video slots. Rebuilds can take noticeable time under overlap, and
             // letting audio continue during that window causes audible drift.
             let _ = self.audio_pipeline.set_state(gst::State::Paused);
-            if !self.try_incremental_remove_only_update(new_pos, &desired, &current) {
-                self.rebuild_pipeline_at(new_pos);
-            }
+            self.rebuild_pipeline_at(new_pos);
             let _ = self.pipeline.set_state(gst::State::Playing);
             self.sync_audio_to(new_pos);
             if self.audio_current_idx.is_some() {
@@ -1843,11 +1854,70 @@ impl ProgramPlayer {
     }
 
     fn effective_wait_timeout_ms(&self, requested_ms: u64) -> u64 {
-        if self.should_prioritize_ui_responsiveness() {
+        if self.state == PlayerState::Playing {
+            // During active playback, keep waits short to minimise boundary stall.
+            // Scale down with slot count and telemetry.
+            let cap = if self.slots.len() >= 3 { 180 } else { 300 };
+            let nominal = requested_ms.min(cap);
+            let scale = self.rebuild_wait_scale();
+            ((nominal as f64 * scale) as u64).max(60)
+        } else if self.should_prioritize_ui_responsiveness() {
             requested_ms.min(220)
         } else {
             requested_ms
         }
+    }
+
+    /// Record a completed rebuild duration into the telemetry ring buffer.
+    fn record_rebuild_duration_ms(&mut self, ms: u64) {
+        let idx = self.rebuild_history_cursor % self.rebuild_history_ms.len();
+        self.rebuild_history_ms[idx] = ms;
+        self.rebuild_history_cursor = self.rebuild_history_cursor.wrapping_add(1);
+        if self.rebuild_history_count < self.rebuild_history_ms.len() {
+            self.rebuild_history_count += 1;
+        }
+    }
+
+    /// Compute adaptive arrival-wait budget from recent rebuild telemetry.
+    /// Returns a factor in `[0.5, 1.5]` to scale nominal wait timeouts.
+    /// Fast recent rebuilds yield tighter waits; slow/cold history is
+    /// conservative.
+    fn rebuild_wait_scale(&self) -> f64 {
+        if self.rebuild_history_count < 2 {
+            return 1.0; // not enough data — use nominal
+        }
+        let n = self.rebuild_history_count;
+        let start = if n < self.rebuild_history_ms.len() {
+            0
+        } else {
+            self.rebuild_history_cursor % self.rebuild_history_ms.len()
+        };
+        let mut sorted = Vec::with_capacity(n);
+        for i in 0..n {
+            sorted.push(self.rebuild_history_ms[(start + i) % self.rebuild_history_ms.len()]);
+        }
+        sorted.sort_unstable();
+        // Use p75 as representative (resilient to one-off spikes).
+        let p75 = sorted[(n * 3 / 4).min(n - 1)];
+        // Map: ≤400ms → 0.6 (fast), 400–1200ms → linear 0.6–1.0, ≥1200ms → linear 1.0–1.5 capped.
+        let scale = if p75 <= 400 {
+            0.6
+        } else if p75 <= 1200 {
+            0.6 + 0.4 * ((p75 - 400) as f64 / 800.0)
+        } else {
+            (1.0 + 0.5 * ((p75 - 1200) as f64 / 2000.0)).min(1.5)
+        };
+        scale
+    }
+
+    /// Return an adaptive arrival-wait timeout in milliseconds for
+    /// `wait_for_compositor_arrivals` during playback boundary rebuilds.
+    /// Uses telemetry to shorten waits when recent rebuilds were fast.
+    fn adaptive_arrival_wait_ms(&self, nominal_ms: u64) -> u64 {
+        let scale = self.rebuild_wait_scale();
+        let scaled = (nominal_ms as f64 * scale) as u64;
+        // Enforce a minimum so we don't drop to zero.
+        scaled.max(200)
     }
 
     /// Wait for decoder slots to reach their target state (typically Paused).
@@ -1866,14 +1936,12 @@ impl ProgramPlayer {
     /// its preroll, causing a deadlock-like stall).
     fn wait_for_paused_preroll(&self) {
         let per_decoder_ms = if self.state == PlayerState::Playing {
-            let base_ms = 150;
-            if self.slots.len() >= 3 {
-                // Playback boundary rebuilds run on the GTK main thread; keep
-                // per-decoder waits short to reduce handoff stutter.
-                (base_ms / self.slots.len() as u64).max(120)
-            } else {
-                base_ms
-            }
+            // Playback boundary rebuilds run on the GTK main thread; keep
+            // per-decoder waits short to reduce handoff stutter.
+            // Scale with telemetry: fast recent rebuilds get tighter waits.
+            let nominal = if self.slots.len() >= 3 { 60u64 } else { 100 };
+            let scale = self.rebuild_wait_scale();
+            ((nominal as f64 * scale) as u64).max(30)
         } else if self.should_prioritize_ui_responsiveness() {
             // Responsiveness-first paused seeks: keep each per-decoder wait tiny
             // so the GTK main loop regains control quickly.
@@ -1902,6 +1970,8 @@ impl ProgramPlayer {
     fn wait_for_compositor_arrivals(&self, baseline: &[u64], timeout_ms: u64) -> bool {
         let effective_timeout_ms = self.effective_wait_timeout_ms(timeout_ms);
         let deadline = Instant::now() + Duration::from_millis(effective_timeout_ms);
+        // Use finer sleep granularity during playback for faster response.
+        let sleep_ms = if self.state == PlayerState::Playing { 5 } else { 15 };
         loop {
             let all_arrived = self
                 .slots
@@ -2339,6 +2409,108 @@ impl ProgramPlayer {
         let _ = pad;
     }
 
+    #[allow(dead_code)]
+    fn try_incremental_add_only_update(
+        &mut self,
+        timeline_pos: u64,
+        desired: &[usize],
+        current: &[usize],
+    ) -> bool {
+        // Minimal safe incremental path: boundary transitions that only ADD clips.
+        if desired.is_empty() || current.is_empty() || desired.len() <= current.len() {
+            return false;
+        }
+        if !current.iter().all(|idx| desired.contains(idx)) {
+            return false;
+        }
+        let added: Vec<usize> = desired
+            .iter()
+            .copied()
+            .filter(|idx| !current.contains(idx))
+            .collect();
+        if added.is_empty() || added.len() > 2 {
+            return false;
+        }
+        log::debug!(
+            "try_incremental_add_only_update: timeline_pos={} added={} slots_before={}",
+            timeline_pos,
+            added.len(),
+            self.slots.len()
+        );
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        let mut added_ok = true;
+        let mut added_clip_idxs: Vec<usize> = Vec::new();
+        for (zorder_offset, clip_idx) in desired.iter().enumerate() {
+            if current.contains(clip_idx) {
+                continue;
+            }
+            if let Some(slot) = self.build_slot_for_clip(*clip_idx, zorder_offset, true) {
+                self.slots.push(slot);
+                added_clip_idxs.push(*clip_idx);
+            } else {
+                added_ok = false;
+                break;
+            }
+        }
+        if !added_ok {
+            let mut i = 0usize;
+            while i < self.slots.len() {
+                if added_clip_idxs.contains(&self.slots[i].clip_idx) {
+                    let slot = self.slots.remove(i);
+                    self.teardown_single_slot(slot);
+                } else {
+                    i += 1;
+                }
+            }
+            return false;
+        }
+        let link_wait_ms = if self.should_prioritize_ui_responsiveness() {
+            self.effective_wait_timeout_ms(220)
+        } else {
+            400
+        };
+        let _ = self
+            .pipeline
+            .state(gst::ClockTime::from_mseconds(link_wait_ms));
+        for slot in &self.slots {
+            if !slot.video_linked.load(Ordering::Relaxed) {
+                if let Some(ref pad) = slot.compositor_pad {
+                    let _ = pad.send_event(gst::event::Eos::new());
+                }
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    let _ = pad.send_event(gst::event::Eos::new());
+                }
+            }
+        }
+        for (zorder_offset, clip_idx) in desired.iter().enumerate() {
+            if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == *clip_idx) {
+                if let Some(ref pad) = slot.compositor_pad {
+                    pad.set_property("zorder", (zorder_offset + 1) as u32);
+                }
+            }
+        }
+        let baseline = self.snapshot_arrival_seqs();
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+        }
+        self.wait_for_paused_preroll();
+        self.wait_for_compositor_arrivals(&baseline, 1000);
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+        self.current_idx = desired.last().copied();
+        self.slot_queue_drop_late_active = false;
+        log::info!(
+            "try_incremental_add_only_update: timeline_pos={} slots_after={}",
+            timeline_pos,
+            self.slots.len()
+        );
+        true
+    }
+
+    #[allow(dead_code)]
     fn try_incremental_remove_only_update(
         &mut self,
         timeline_pos: u64,
@@ -2812,6 +2984,291 @@ impl ProgramPlayer {
         has_audio
     }
 
+    fn build_slot_for_clip(
+        &mut self,
+        clip_idx: usize,
+        zorder_offset: usize,
+        tune_multiqueue: bool,
+    ) -> Option<VideoSlot> {
+        let clip = self.clips[clip_idx].clone();
+
+        // Resolve proxy path.
+        let effective_path = self.effective_source_path_for_clip(&clip);
+        let uri = format!("file://{}", effective_path);
+        log::info!("ProgramPlayer: slot {} uri={}", zorder_offset, uri);
+
+        // Detect whether the source file has an audio stream.
+        let clip_has_audio = if !clip.has_audio {
+            false
+        } else {
+            self.probe_has_audio_stream_cached(&effective_path)
+        };
+
+        // Build per-slot effects bin.
+        let (
+            effects_bin,
+            videobalance,
+            gaussianblur,
+            videocrop,
+            videobox_crop_alpha,
+            videoflip_rotate,
+            videoflip_flip,
+            textoverlay,
+            alpha_filter,
+            capsfilter_zoom,
+            videobox_zoom,
+        ) = Self::build_effects_bin(&clip, self.project_width, self.project_height);
+
+        // Create uridecodebin for this clip.
+        let decoder = match gst::ElementFactory::make("uridecodebin")
+            .property("uri", &uri)
+            .build()
+        {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "ProgramPlayer: failed to create uridecodebin for {}: {}",
+                    uri,
+                    e
+                );
+                return None;
+            }
+        };
+
+        // Add to pipeline.
+        if self.pipeline.add(&decoder).is_err() {
+            log::warn!("ProgramPlayer: failed to add decoder to pipeline");
+            return None;
+        }
+        if self
+            .pipeline
+            .add(effects_bin.upcast_ref::<gst::Element>())
+            .is_err()
+        {
+            self.pipeline.remove(&decoder).ok();
+            log::warn!("ProgramPlayer: failed to add effects_bin to pipeline");
+            return None;
+        }
+
+        // Request compositor sink pad (zorder > 0; 0 is reserved for black bg).
+        let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
+            Some(p) => p,
+            None => {
+                self.pipeline.remove(&decoder).ok();
+                self.pipeline
+                    .remove(effects_bin.upcast_ref::<gst::Element>())
+                    .ok();
+                return None;
+            }
+        };
+        comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
+        comp_pad.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
+
+        // Link effects_bin → queue → compositor pad.
+        let slot_queue = gst::ElementFactory::make("queue")
+            .property("max-size-buffers", 1u32)
+            .property("max-size-bytes", 0u32)
+            .property("max-size-time", 0u64)
+            .build()
+            .unwrap();
+        self.pipeline.add(&slot_queue).ok();
+        if let Some(src) = effects_bin.static_pad("src") {
+            let q_sink = slot_queue.static_pad("sink").unwrap();
+            let _ = src.link(&q_sink);
+        }
+        let q_src = slot_queue.static_pad("src").unwrap();
+        let _ = q_src.link(&comp_pad);
+
+        // Diagnostic probe: log buffers arriving at the compositor from this decoder slot.
+        let comp_arrival_seq = Arc::new(AtomicU64::new(0));
+        {
+            let cid = clip.id.clone();
+            let ci = clip_idx;
+            let arrival_seq = comp_arrival_seq.clone();
+            q_src.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                if let Some(buffer) = info.buffer() {
+                    log::debug!(
+                        "slot[{}] queue→comp: pts={} clip={}",
+                        ci,
+                        buffer.pts().map(|p| p.nseconds()).unwrap_or(u64::MAX),
+                        cid
+                    );
+                    arrival_seq.fetch_add(1, Ordering::Relaxed);
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
+
+        // Create audio path: audioconvert → audiomixer pad.
+        let (audio_conv, amix_pad) = if clip_has_audio {
+            let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let pad = if let Some(ref ac) = ac {
+                if self.pipeline.add(ac).is_ok() {
+                    if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
+                        mp.set_property("volume", clip.volume.clamp(0.0, 2.0));
+                        if let Some(ac_src) = ac.static_pad("src") {
+                            let _ = ac_src.link(&mp);
+                        }
+                        Some(mp)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (ac, pad)
+        } else {
+            log::info!(
+                "ProgramPlayer: skipping audio path for clip {} (no audio)",
+                clip.id
+            );
+            (None, None)
+        };
+
+        // Connect uridecodebin pad-added for dynamic linking.
+        let effects_sink = effects_bin.static_pad("sink");
+        let audio_sink = audio_conv.as_ref().and_then(|ac| ac.static_pad("sink"));
+        let video_linked = Arc::new(AtomicBool::new(false));
+        let video_linked_for_cb = video_linked.clone();
+        let clip_id_for_cb = clip.id.clone();
+        decoder.connect_pad_added(move |_dec, pad| {
+            let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
+            if let Some(caps) = caps {
+                if let Some(s) = caps.structure(0) {
+                    let name = s.name().to_string();
+                    log::info!(
+                        "ProgramPlayer: pad-added clip={} caps={}",
+                        clip_id_for_cb,
+                        name
+                    );
+                    if name.starts_with("video/") {
+                        if let Some(ref sink) = effects_sink {
+                            match pad.link(sink) {
+                                Ok(_) => {
+                                    video_linked_for_cb.store(true, Ordering::Relaxed);
+                                    log::info!("ProgramPlayer: video linked clip={}", clip_id_for_cb);
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "ProgramPlayer: video link FAILED clip={} err={:?}",
+                                        clip_id_for_cb,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    } else if name.starts_with("audio/") {
+                        if let Some(ref sink) = audio_sink {
+                            let _ = pad.link(sink);
+                        }
+                    }
+                }
+            }
+        });
+
+        decoder.connect("deep-element-added", false, move |args| {
+            // deep-element-added: args[0]=uridecodebin, args[1]=parent_bin, args[2]=element
+            let child = args[2].get::<gst::Element>().ok()?;
+            let factory_name = child
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
+            if factory_name.starts_with("avdec_h264") || factory_name.starts_with("avdec_vp8") {
+                child.set_property("max-threads", 2i32);
+            } else if factory_name.starts_with("avdec_h265") || factory_name.starts_with("avdec_vp9")
+            {
+                child.set_property("max-threads", 4i32);
+            } else if tune_multiqueue && factory_name == "multiqueue" {
+                child.set_property("max-size-time", 0u64);
+                child.set_property("max-size-bytes", 10_485_760u32);
+            }
+            None
+        });
+
+        // Sync all slot elements to the pipeline state.
+        let _ = effects_bin.sync_state_with_parent();
+        let _ = slot_queue.sync_state_with_parent();
+        if let Some(ref ac) = audio_conv {
+            let _ = ac.sync_state_with_parent();
+        }
+        let _ = decoder.sync_state_with_parent();
+
+        // Apply per-clip transform.
+        let slot_ref_for_transform = VideoSlot {
+            clip_idx,
+            decoder: decoder.clone(),
+            video_linked: video_linked.clone(),
+            effects_bin: effects_bin.clone(),
+            compositor_pad: Some(comp_pad.clone()),
+            audio_mixer_pad: amix_pad.clone(),
+            audio_conv: audio_conv.clone(),
+            videobalance: videobalance.clone(),
+            gaussianblur: gaussianblur.clone(),
+            videocrop: videocrop.clone(),
+            videobox_crop_alpha: videobox_crop_alpha.clone(),
+            videoflip_rotate: videoflip_rotate.clone(),
+            videoflip_flip: videoflip_flip.clone(),
+            textoverlay: textoverlay.clone(),
+            alpha_filter: alpha_filter.clone(),
+            capsfilter_zoom: capsfilter_zoom.clone(),
+            videobox_zoom: videobox_zoom.clone(),
+            slot_queue: Some(slot_queue.clone()),
+            comp_arrival_seq: comp_arrival_seq.clone(),
+        };
+        Self::apply_transform_to_slot(
+            &slot_ref_for_transform,
+            clip.crop_left,
+            clip.crop_right,
+            clip.crop_top,
+            clip.crop_bottom,
+            clip.rotate,
+            clip.flip_h,
+            clip.flip_v,
+        );
+        Self::apply_title_to_slot(
+            &slot_ref_for_transform,
+            &clip.title_text,
+            &clip.title_font,
+            clip.title_color,
+            clip.title_x,
+            clip.title_y,
+        );
+        Self::apply_zoom_to_slot(
+            &slot_ref_for_transform,
+            &comp_pad,
+            clip.scale,
+            clip.position_x,
+            clip.position_y,
+            self.project_width,
+            self.project_height,
+        );
+
+        Some(VideoSlot {
+            clip_idx,
+            decoder,
+            video_linked,
+            effects_bin,
+            compositor_pad: Some(comp_pad),
+            audio_mixer_pad: amix_pad,
+            audio_conv,
+            videobalance,
+            gaussianblur,
+            videocrop,
+            videobox_crop_alpha,
+            videoflip_rotate,
+            videoflip_flip,
+            textoverlay,
+            alpha_filter,
+            capsfilter_zoom,
+            videobox_zoom,
+            slot_queue: Some(slot_queue),
+            comp_arrival_seq,
+        })
+    }
+
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         let rebuild_started = Instant::now();
@@ -2856,303 +3313,9 @@ impl ProgramPlayer {
         self.current_idx = active.last().copied();
 
         for (zorder_offset, &clip_idx) in active.iter().enumerate() {
-            let clip = self.clips[clip_idx].clone();
-
-            // Resolve proxy path.
-            let effective_path = self.effective_source_path_for_clip(&clip);
-            let uri = format!("file://{}", effective_path);
-            log::info!("ProgramPlayer: slot {} uri={}", zorder_offset, uri);
-
-            // Detect whether the source file has an audio stream.
-            let clip_has_audio = if !clip.has_audio {
-                false
-            } else {
-                self.probe_has_audio_stream_cached(&effective_path)
-            };
-
-            // Build per-slot effects bin.
-            let (
-                effects_bin,
-                videobalance,
-                gaussianblur,
-                videocrop,
-                videobox_crop_alpha,
-                videoflip_rotate,
-                videoflip_flip,
-                textoverlay,
-                alpha_filter,
-                capsfilter_zoom,
-                videobox_zoom,
-            ) = Self::build_effects_bin(&clip, self.project_width, self.project_height);
-
-            // Create uridecodebin for this clip.
-            let decoder = match gst::ElementFactory::make("uridecodebin")
-                .property("uri", &uri)
-                .build()
-            {
-                Ok(d) => d,
-                Err(e) => {
-                    log::warn!(
-                        "ProgramPlayer: failed to create uridecodebin for {}: {}",
-                        uri,
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            // Add to pipeline.
-            if self.pipeline.add(&decoder).is_err() {
-                log::warn!("ProgramPlayer: failed to add decoder to pipeline");
-                continue;
+            if let Some(slot) = self.build_slot_for_clip(clip_idx, zorder_offset, was_playing) {
+                self.slots.push(slot);
             }
-            if self
-                .pipeline
-                .add(effects_bin.upcast_ref::<gst::Element>())
-                .is_err()
-            {
-                self.pipeline.remove(&decoder).ok();
-                log::warn!("ProgramPlayer: failed to add effects_bin to pipeline");
-                continue;
-            }
-
-            // Request compositor sink pad (zorder > 0; 0 is reserved for black bg).
-            let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
-                Some(p) => p,
-                None => {
-                    self.pipeline.remove(&decoder).ok();
-                    self.pipeline
-                        .remove(effects_bin.upcast_ref::<gst::Element>())
-                        .ok();
-                    continue;
-                }
-            };
-            comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
-            comp_pad.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
-
-            // Link effects_bin → queue → compositor pad.
-            // The queue decouples caps negotiation between the effects chain
-            // and the compositor.  Without it, the 3rd+ decoder's effects_bin
-            // can deadlock during caps negotiation when the compositor's
-            // aggregator is waiting for buffers on earlier pads.
-            let slot_queue = gst::ElementFactory::make("queue")
-                .property("max-size-buffers", 1u32)
-                .property("max-size-bytes", 0u32)
-                .property("max-size-time", 0u64)
-                .build()
-                .unwrap();
-            self.pipeline.add(&slot_queue).ok();
-            if let Some(src) = effects_bin.static_pad("src") {
-                let q_sink = slot_queue.static_pad("sink").unwrap();
-                let _ = src.link(&q_sink);
-            }
-            let q_src = slot_queue.static_pad("src").unwrap();
-            let _ = q_src.link(&comp_pad);
-
-            // Diagnostic probe: log buffers arriving at the compositor from this decoder slot.
-            let comp_arrival_seq = Arc::new(AtomicU64::new(0));
-            {
-                let cid = clip.id.clone();
-                let ci = clip_idx;
-                let arrival_seq = comp_arrival_seq.clone();
-                q_src.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
-                    if let Some(buffer) = info.buffer() {
-                        log::debug!(
-                            "slot[{}] queue→comp: pts={} clip={}",
-                            ci,
-                            buffer.pts().map(|p| p.nseconds()).unwrap_or(u64::MAX),
-                            cid
-                        );
-                        arrival_seq.fetch_add(1, Ordering::Relaxed);
-                    }
-                    gst::PadProbeReturn::Ok
-                });
-            }
-
-            // Create audio path: audioconvert → audiomixer pad.
-            // Skip entirely for clips without an audio stream to prevent
-            // the audiomixer from waiting on an unlinked pad.
-            let (audio_conv, amix_pad) = if clip_has_audio {
-                let ac = gst::ElementFactory::make("audioconvert").build().ok();
-                let pad = if let Some(ref ac) = ac {
-                    if self.pipeline.add(ac).is_ok() {
-                        if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
-                            mp.set_property("volume", clip.volume.clamp(0.0, 2.0));
-                            if let Some(ac_src) = ac.static_pad("src") {
-                                let _ = ac_src.link(&mp);
-                            }
-                            Some(mp)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                (ac, pad)
-            } else {
-                log::info!(
-                    "ProgramPlayer: skipping audio path for clip {} (no audio)",
-                    clip.id
-                );
-                (None, None)
-            };
-
-            // Connect uridecodebin pad-added for dynamic linking.
-            let effects_sink = effects_bin.static_pad("sink");
-            let audio_sink = audio_conv.as_ref().and_then(|ac| ac.static_pad("sink"));
-            let video_linked = Arc::new(AtomicBool::new(false));
-            let video_linked_for_cb = video_linked.clone();
-            let clip_id_for_cb = clip.id.clone();
-            decoder.connect_pad_added(move |_dec, pad| {
-                let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
-                if let Some(caps) = caps {
-                    if let Some(s) = caps.structure(0) {
-                        let name = s.name().to_string();
-                        log::info!(
-                            "ProgramPlayer: pad-added clip={} caps={}",
-                            clip_id_for_cb,
-                            name
-                        );
-                        if name.starts_with("video/") {
-                            if let Some(ref sink) = effects_sink {
-                                match pad.link(sink) {
-                                    Ok(_) => {
-                                        video_linked_for_cb.store(true, Ordering::Relaxed);
-                                        log::info!(
-                                            "ProgramPlayer: video linked clip={}",
-                                            clip_id_for_cb
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "ProgramPlayer: video link FAILED clip={} err={:?}",
-                                            clip_id_for_cb,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        } else if name.starts_with("audio/") {
-                            if let Some(ref sink) = audio_sink {
-                                let _ = pad.link(sink);
-                            }
-                        }
-                    }
-                }
-            });
-
-            // Tune inner elements created by uridecodebin for local-file playback:
-            // – cap decoder thread count to avoid thread explosion across 3+ tracks
-            // – keep multiqueue limits seek-safe while paused scrubbing
-            let tune_multiqueue = was_playing;
-            decoder.connect("deep-element-added", false, move |args| {
-                // deep-element-added: args[0]=uridecodebin, args[1]=parent_bin, args[2]=element
-                let child = args[2].get::<gst::Element>().ok()?;
-                let factory_name = child
-                    .factory()
-                    .map(|f| f.name().to_string())
-                    .unwrap_or_default();
-                // Cap H.264/HEVC/VP9 decoder threads (avdec_* defaults to num_cpus).
-                if factory_name.starts_with("avdec_h264") || factory_name.starts_with("avdec_vp8")
-                {
-                    child.set_property("max-threads", 2i32);
-                } else if factory_name.starts_with("avdec_h265")
-                    || factory_name.starts_with("avdec_vp9")
-                {
-                    child.set_property("max-threads", 4i32);
-                } else if tune_multiqueue && factory_name == "multiqueue" {
-                    // Keep paused scrubbing seek-safe: ACCURATE seeks may need to decode
-                    // a full GOP before reaching the target frame, so paused rebuilds keep
-                    // default multiqueue behavior. During active playback, keep a 10MB
-                    // cap per slot to reduce decode buffering pressure.
-                    child.set_property("max-size-time", 0u64);
-                    child.set_property("max-size-bytes", 10_485_760u32);
-                }
-                None
-            });
-
-            // Sync all slot elements to the pipeline state.
-            let _ = effects_bin.sync_state_with_parent();
-            let _ = slot_queue.sync_state_with_parent();
-            if let Some(ref ac) = audio_conv {
-                let _ = ac.sync_state_with_parent();
-            }
-            let _ = decoder.sync_state_with_parent();
-
-            // Apply per-clip transform.
-            let slot_ref_for_transform = VideoSlot {
-                clip_idx,
-                decoder: decoder.clone(),
-                video_linked: video_linked.clone(),
-                effects_bin: effects_bin.clone(),
-                compositor_pad: Some(comp_pad.clone()),
-                audio_mixer_pad: amix_pad.clone(),
-                audio_conv: audio_conv.clone(),
-                videobalance: videobalance.clone(),
-                gaussianblur: gaussianblur.clone(),
-                videocrop: videocrop.clone(),
-                videobox_crop_alpha: videobox_crop_alpha.clone(),
-                videoflip_rotate: videoflip_rotate.clone(),
-                videoflip_flip: videoflip_flip.clone(),
-                textoverlay: textoverlay.clone(),
-                alpha_filter: alpha_filter.clone(),
-                capsfilter_zoom: capsfilter_zoom.clone(),
-                videobox_zoom: videobox_zoom.clone(),
-                slot_queue: Some(slot_queue.clone()),
-                comp_arrival_seq: comp_arrival_seq.clone(),
-            };
-            Self::apply_transform_to_slot(
-                &slot_ref_for_transform,
-                clip.crop_left,
-                clip.crop_right,
-                clip.crop_top,
-                clip.crop_bottom,
-                clip.rotate,
-                clip.flip_h,
-                clip.flip_v,
-            );
-            Self::apply_title_to_slot(
-                &slot_ref_for_transform,
-                &clip.title_text,
-                &clip.title_font,
-                clip.title_color,
-                clip.title_x,
-                clip.title_y,
-            );
-            Self::apply_zoom_to_slot(
-                &slot_ref_for_transform,
-                &comp_pad,
-                clip.scale,
-                clip.position_x,
-                clip.position_y,
-                self.project_width,
-                self.project_height,
-            );
-
-            self.slots.push(VideoSlot {
-                clip_idx,
-                decoder,
-                video_linked,
-                effects_bin,
-                compositor_pad: Some(comp_pad),
-                audio_mixer_pad: amix_pad,
-                audio_conv,
-                videobalance,
-                gaussianblur,
-                videocrop,
-                videobox_crop_alpha,
-                videoflip_rotate,
-                videoflip_flip,
-                textoverlay,
-                alpha_filter,
-                capsfilter_zoom,
-                videobox_zoom,
-                slot_queue: Some(slot_queue),
-                comp_arrival_seq,
-            });
         }
 
         // Transition pipeline to Paused so decoders preroll and can accept seeks.
@@ -3167,7 +3330,7 @@ impl ProgramPlayer {
         // compositor might be waiting on an unlinked pad.  Use a short
         // timeout to let decoders link, then EOS any that didn't.
         let link_wait_ms = if was_playing {
-            400
+            self.adaptive_arrival_wait_ms(400)
         } else {
             self.effective_wait_timeout_ms(400)
         };
@@ -3243,8 +3406,13 @@ impl ProgramPlayer {
         if was_playing {
             log::debug!("rebuild_pipeline_at: post-seek wait_for_paused_preroll...");
             self.wait_for_paused_preroll();
-            log::debug!("rebuild_pipeline_at: post-seek wait_for_compositor_arrivals (1500ms)...");
-            self.wait_for_compositor_arrivals(&baseline, 1500);
+            let arrival_budget = self.adaptive_arrival_wait_ms(1500);
+            log::debug!(
+                "rebuild_pipeline_at: post-seek wait_for_compositor_arrivals ({}ms, scale={:.2})",
+                arrival_budget,
+                self.rebuild_wait_scale()
+            );
+            self.wait_for_compositor_arrivals(&baseline, arrival_budget);
             log::debug!("rebuild_pipeline_at: post-seek arrivals done");
         }
 
@@ -3302,11 +3470,16 @@ impl ProgramPlayer {
         if was_playing {
             let _ = self.pipeline.set_state(gst::State::Playing);
         }
+        let rebuild_elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
+        if was_playing {
+            self.record_rebuild_duration_ms(rebuild_elapsed_ms);
+        }
         log::info!(
-            "rebuild_pipeline_at: END timeline_pos={}ns slots={} elapsed_ms={}",
+            "rebuild_pipeline_at: END timeline_pos={}ns slots={} elapsed_ms={} scale={:.2}",
             timeline_pos,
             self.slots.len(),
-            rebuild_started.elapsed().as_millis()
+            rebuild_elapsed_ms,
+            self.rebuild_wait_scale()
         );
     }
 
