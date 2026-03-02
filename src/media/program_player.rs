@@ -234,6 +234,8 @@ pub struct ProgramPlayer {
     transform_live: bool,
     /// Wall-clock instant when playback last entered Playing state.
     play_start: Option<Instant>,
+    /// Last timeline boundary timestamp prewarmed for upcoming playback handoff.
+    prewarmed_boundary_ns: Option<u64>,
 }
 
 impl ProgramPlayer {
@@ -651,6 +653,7 @@ impl ProgramPlayer {
                 playback_drop_late_active: false,
                 transform_live: false,
                 play_start: None,
+                prewarmed_boundary_ns: None,
             },
             paintable,
             paintable2,
@@ -665,6 +668,7 @@ impl ProgramPlayer {
 
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
         self.proxy_enabled = enabled;
+        self.prewarmed_boundary_ns = None;
     }
 
     /// Enable or disable scope frame capture. When disabled (scopes panel hidden),
@@ -676,6 +680,7 @@ impl ProgramPlayer {
     pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
         if self.proxy_paths != paths {
             self.proxy_paths = paths;
+            self.prewarmed_boundary_ns = None;
         }
     }
 
@@ -971,6 +976,7 @@ impl ProgramPlayer {
         self.timeline_pos_ns = 0;
         self.base_timeline_ns = 0;
         self.play_start = None;
+        self.prewarmed_boundary_ns = None;
     }
 
     // ── Transport controls ─────────────────────────────────────────────────
@@ -985,6 +991,7 @@ impl ProgramPlayer {
         self.timeline_pos_ns = timeline_pos_ns;
         self.base_timeline_ns = timeline_pos_ns;
         self.play_start = None;
+        self.prewarmed_boundary_ns = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             log::debug!(
                 "seek: no clips timeline_pos={} elapsed_ms={}",
@@ -1120,6 +1127,7 @@ impl ProgramPlayer {
         self.timeline_pos_ns = 0;
         self.base_timeline_ns = 0;
         self.play_start = None;
+        self.prewarmed_boundary_ns = None;
         self.current_idx = None;
         self.audio_current_idx = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
@@ -1182,6 +1190,7 @@ impl ProgramPlayer {
             self.audio_current_idx = None;
             self.play_start = None;
             self.timeline_pos_ns = self.timeline_dur_ns;
+            self.prewarmed_boundary_ns = None;
             self.update_drop_late_policy();
             return true;
         }
@@ -1201,6 +1210,7 @@ impl ProgramPlayer {
 
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
+        self.prewarm_upcoming_boundary(new_pos);
 
         // Timeline end reached after update?
         if self.timeline_dur_ns > 0 && self.timeline_pos_ns >= self.timeline_dur_ns {
@@ -1212,6 +1222,7 @@ impl ProgramPlayer {
             self.audio_current_idx = None;
             self.play_start = None;
             self.timeline_pos_ns = self.timeline_dur_ns;
+            self.prewarmed_boundary_ns = None;
             self.update_drop_late_policy();
             return true;
         }
@@ -1668,6 +1679,54 @@ impl ProgramPlayer {
         }
         active.sort_by_key(|&i| self.clips[i].track_index);
         active
+    }
+
+    fn effective_source_path_for_clip(&self, clip: &ProgramClip) -> String {
+        if self.proxy_enabled {
+            let key = crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+            self.proxy_paths
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| clip.source_path.clone())
+        } else {
+            clip.source_path.clone()
+        }
+    }
+
+    fn next_video_boundary_after(&self, timeline_pos_ns: u64) -> Option<u64> {
+        self.clips
+            .iter()
+            .flat_map(|c| [c.timeline_start_ns, c.timeline_end_ns()])
+            .filter(|&t| t > timeline_pos_ns)
+            .min()
+    }
+
+    fn prewarm_upcoming_boundary(&mut self, timeline_pos_ns: u64) {
+        const PREWARM_WINDOW_NS: u64 = 1_500_000_000;
+        let Some(boundary_ns) = self.next_video_boundary_after(timeline_pos_ns) else {
+            self.prewarmed_boundary_ns = None;
+            return;
+        };
+        if boundary_ns.saturating_sub(timeline_pos_ns) > PREWARM_WINDOW_NS {
+            return;
+        }
+        if self.prewarmed_boundary_ns == Some(boundary_ns) {
+            return;
+        }
+        let active = self.clips_active_at(boundary_ns);
+        for idx in active {
+            let clip = self.clips[idx].clone();
+            if clip.has_audio {
+                let effective_path = self.effective_source_path_for_clip(&clip);
+                let _ = self.probe_has_audio_stream_cached(&effective_path);
+            }
+        }
+        log::debug!(
+            "prewarm_upcoming_boundary: timeline_pos={} boundary={}",
+            timeline_pos_ns,
+            boundary_ns
+        );
+        self.prewarmed_boundary_ns = Some(boundary_ns);
     }
 
     /// Find the VideoSlot corresponding to `clip_idx`, if any.
@@ -2665,18 +2724,7 @@ impl ProgramPlayer {
             let clip = self.clips[clip_idx].clone();
 
             // Resolve proxy path.
-            let effective_path = if self.proxy_enabled {
-                let key = crate::media::proxy_cache::proxy_key(
-                    &clip.source_path,
-                    clip.lut_path.as_deref(),
-                );
-                self.proxy_paths
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_else(|| clip.source_path.clone())
-            } else {
-                clip.source_path.clone()
-            };
+            let effective_path = self.effective_source_path_for_clip(&clip);
             let uri = format!("file://{}", effective_path);
             log::info!("ProgramPlayer: slot {} uri={}", zorder_offset, uri);
 

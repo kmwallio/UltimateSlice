@@ -74,6 +74,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Preview quality `Auto` dynamically adjusts effective monitor output quality from the current Program Monitor canvas size (including resize/zoom changes) to balance clarity and performance.
 - While playback is active, Auto quality changes use a short minimum dwell to avoid rapid resolution flapping when overlap transitions briefly change load.
 - During heavy 3+ track playback overlap, the monitor enables an audio-master "drop-late" preview path so late video frames are dropped rather than queued behind audio; when overlap drops or playback pauses/stops, normal non-dropping buffering is restored.
+- During playback, the monitor also prewarms the next near-future boundary clip set (look-ahead probe/path warm-up) to reduce transition-handoff stalls.
 
 ## Seeking
 
