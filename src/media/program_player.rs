@@ -190,6 +190,11 @@ pub struct ProgramPlayer {
     level_element: Option<gst::Element>,
     /// GStreamer `level` element on the audio-only pipeline for metering.
     level_element_audio: Option<gst::Element>,
+    /// GStreamer `volume` element on the audio-only pipeline for volume control.
+    /// Using a dedicated element avoids playbin's StreamVolume which can interact
+    /// with PulseAudio/PipeWire flat-volume behaviour and inadvertently change
+    /// the main pipeline's audio level.
+    audio_volume_element: Option<gst::Element>,
     pub audio_peak_db: [f64; 2],
     jkl_rate: f64,
     /// Latest RGBA frame captured from the scope appsink.
@@ -621,8 +626,31 @@ impl ProgramPlayer {
             .property("interval", 50_000_000u64)
             .build()
             .ok();
-        if let Some(ref lv) = level_element_audio {
-            audio_pipeline.set_property("audio-filter", lv);
+        // Use a dedicated GStreamer volume element for audio-only clip volume.
+        // playbin's own "volume" property delegates to pulsesink's StreamVolume
+        // interface, which under PulseAudio/PipeWire flat-volume mode can also
+        // affect the main compositor pipeline's audio level.
+        let audio_volume_element = gst::ElementFactory::make("volume")
+            .build()
+            .ok();
+        match (&audio_volume_element, &level_element_audio) {
+            (Some(vol), Some(lv)) => {
+                let bin = gst::Bin::builder().name("audio-filter-bin").build();
+                bin.add_many([vol, lv]).unwrap();
+                vol.link(lv).unwrap();
+                let sink_pad = vol.static_pad("sink").unwrap();
+                let src_pad = lv.static_pad("src").unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).unwrap();
+                audio_pipeline.set_property("audio-filter", &bin.upcast::<gst::Element>());
+            }
+            (Some(vol), None) => {
+                audio_pipeline.set_property("audio-filter", vol);
+            }
+            (None, Some(lv)) => {
+                audio_pipeline.set_property("audio-filter", lv);
+            }
+            _ => {}
         }
 
         // Dummy second paintable (API compat — window.rs expects two).
@@ -657,6 +685,7 @@ impl ProgramPlayer {
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
                 level_element_audio,
+                audio_volume_element,
                 audio_peak_db: [-60.0, -60.0],
                 jkl_rate: 0.0,
                 latest_scope_frame,
@@ -1411,11 +1440,15 @@ impl ProgramPlayer {
             return;
         }
         // For audio-only clips, update the stored volume and, if actively playing,
-        // update the audio_pipeline volume directly.
+        // update the dedicated volume element (avoids playbin StreamVolume crosstalk).
         if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
             self.audio_clips[i].volume = volume;
             if self.audio_current_idx == Some(i) {
-                self.audio_pipeline.set_property("volume", volume);
+                if let Some(ref vol_elem) = self.audio_volume_element {
+                    vol_elem.set_property("volume", volume);
+                } else {
+                    self.audio_pipeline.set_property("volume", volume);
+                }
             }
         }
     }
@@ -3991,8 +4024,12 @@ impl ProgramPlayer {
     fn load_audio_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
         let clip = &self.audio_clips[idx];
         let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
-        self.audio_pipeline
-            .set_property("volume", clip.volume.clamp(0.0, 2.0));
+        let vol = clip.volume.clamp(0.0, 2.0);
+        if let Some(ref vol_elem) = self.audio_volume_element {
+            vol_elem.set_property("volume", vol);
+        } else {
+            self.audio_pipeline.set_property("volume", vol);
+        }
         if self.audio_current_idx == Some(idx) {
             let _ = self.audio_pipeline.seek(
                 1.0_f64,
