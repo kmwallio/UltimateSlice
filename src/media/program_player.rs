@@ -2085,7 +2085,11 @@ impl ProgramPlayer {
                 .slots
                 .iter()
                 .zip(baseline.iter())
-                .all(|(slot, &base)| slot.comp_arrival_seq.load(Ordering::Relaxed) > base);
+                .all(|(slot, &base)| {
+                    // Audio-only slots have no compositor pad — always "arrived".
+                    slot.compositor_pad.is_none()
+                        || slot.comp_arrival_seq.load(Ordering::Relaxed) > base
+                });
             if all_arrived {
                 log::info!(
                     "wait_for_compositor_arrivals: all {} slots arrived",
@@ -2100,7 +2104,8 @@ impl ProgramPlayer {
                     .zip(baseline.iter())
                     .enumerate()
                     .filter(|(_, (slot, &base))| {
-                        slot.comp_arrival_seq.load(Ordering::Relaxed) <= base
+                        slot.compositor_pad.is_some()
+                            && slot.comp_arrival_seq.load(Ordering::Relaxed) <= base
                     })
                     .map(|(i, _)| i)
                     .collect();
@@ -3213,6 +3218,144 @@ impl ProgramPlayer {
         has_audio
     }
 
+    /// Returns true if clip at `pos` in `active` is fully occluded by a clip
+    /// above it (higher zorder).  Conservative: only considers full-frame
+    /// opaque clips with no scale-down as occluders.
+    fn is_clip_video_occluded(&self, active: &[usize], pos: usize) -> bool {
+        // Any clip above `pos` that is fully opaque, fills the canvas (scale>=1),
+        // and has no user crop fully occludes everything below.
+        for j in (pos + 1)..active.len() {
+            let c = &self.clips[active[j]];
+            if c.opacity >= 1.0
+                && c.scale >= 1.0
+                && c.crop_left == 0
+                && c.crop_right == 0
+                && c.crop_top == 0
+                && c.crop_bottom == 0
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Build an audio-only slot for a fully-occluded clip.  Skips video
+    /// decode, effects, and compositor pad entirely.
+    fn build_audio_only_slot_for_clip(
+        &mut self,
+        clip_idx: usize,
+    ) -> Option<VideoSlot> {
+        let clip = self.clips[clip_idx].clone();
+        let effective_path = self.effective_source_path_for_clip(&clip);
+        let uri = format!("file://{}", effective_path);
+
+        let clip_has_audio = if !clip.has_audio {
+            false
+        } else {
+            self.probe_has_audio_stream_cached(&effective_path)
+        };
+        if !clip_has_audio {
+            log::info!(
+                "build_audio_only_slot: clip {} has no audio, skipping entirely",
+                clip.id
+            );
+            return None;
+        }
+
+        log::info!(
+            "build_audio_only_slot: clip {} uri={} (video occluded)",
+            clip.id,
+            uri
+        );
+
+        // Create decoder with audio-only caps to skip video decode.
+        let audio_caps = gst::Caps::builder("audio/x-raw").build();
+        let decoder = gst::ElementFactory::make("uridecodebin")
+            .property("uri", &uri)
+            .property("caps", &audio_caps)
+            .build()
+            .ok()?;
+
+        if self.pipeline.add(&decoder).is_err() {
+            return None;
+        }
+
+        // Audio path: audioconvert → audiomixer pad.
+        let (audio_conv, amix_pad) = {
+            let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let pad = if let Some(ref ac) = ac {
+                if self.pipeline.add(ac).is_ok() {
+                    if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
+                        mp.set_property("volume", clip.volume.clamp(0.0, 2.0));
+                        if let Some(ac_src) = ac.static_pad("src") {
+                            let _ = ac_src.link(&mp);
+                        }
+                        Some(mp)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (ac, pad)
+        };
+
+        // Dynamic pad-added: only link audio pads (no video sink available).
+        let audio_sink = audio_conv.as_ref().and_then(|ac| ac.static_pad("sink"));
+        let video_linked = Arc::new(AtomicBool::new(true)); // no video to link
+        let clip_id_for_cb = clip.id.clone();
+        decoder.connect_pad_added(move |_dec, pad| {
+            let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
+            if let Some(caps) = caps {
+                if let Some(s) = caps.structure(0) {
+                    let name = s.name().to_string();
+                    if name.starts_with("audio/") {
+                        if let Some(ref sink) = audio_sink {
+                            let _ = pad.link(sink);
+                            log::info!(
+                                "build_audio_only_slot: audio linked clip={}",
+                                clip_id_for_cb
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+        if let Some(ref ac) = audio_conv {
+            let _ = ac.sync_state_with_parent();
+        }
+        let _ = decoder.sync_state_with_parent();
+
+        // Dummy effects_bin — never added to pipeline, harmless in teardown.
+        let effects_bin = gst::Bin::new();
+
+        Some(VideoSlot {
+            clip_idx,
+            decoder,
+            video_linked,
+            effects_bin,
+            compositor_pad: None,
+            audio_mixer_pad: amix_pad,
+            audio_conv,
+            videobalance: None,
+            gaussianblur: None,
+            videocrop: None,
+            videobox_crop_alpha: None,
+            videoflip_rotate: None,
+            videoflip_flip: None,
+            textoverlay: None,
+            alpha_filter: None,
+            capsfilter_zoom: None,
+            videobox_zoom: None,
+            slot_queue: None,
+            comp_arrival_seq: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
     fn build_slot_for_clip(
         &mut self,
         clip_idx: usize,
@@ -3556,7 +3699,12 @@ impl ProgramPlayer {
         self.current_idx = active.last().copied();
 
         for (zorder_offset, &clip_idx) in active.iter().enumerate() {
-            if let Some(slot) = self.build_slot_for_clip(clip_idx, zorder_offset, was_playing) {
+            // Skip video decode for clips fully occluded by an opaque clip above.
+            if self.is_clip_video_occluded(&active, zorder_offset) {
+                if let Some(slot) = self.build_audio_only_slot_for_clip(clip_idx) {
+                    self.slots.push(slot);
+                }
+            } else if let Some(slot) = self.build_slot_for_clip(clip_idx, zorder_offset, was_playing) {
                 self.slots.push(slot);
             }
         }
