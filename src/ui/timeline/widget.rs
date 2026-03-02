@@ -480,7 +480,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 }
                             }
                         }
+                        // Immediately notify so the inspector updates selected_clip_id
+                        // synchronously — without this, a fast click→slider-drag sequence
+                        // could fire audio/transform callbacks with the previous clip's ID.
+                        let proj_cb = st.on_project_changed.clone();
                         drop(st);
+                        if let Some(cb) = proj_cb {
+                            cb();
+                        }
                     }
                 }
             } else if button == 3 {
@@ -548,7 +555,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         st.selected_clip_id = Some(h.clip_id);
                         st.selected_track_id = Some(h.track_id);
                     }
+                    let proj_cb = st.on_project_changed.clone();
                     drop(st);
+                    if let Some(cb) = proj_cb {
+                        cb();
+                    }
                     // delete_selected called via keyboard (Delete key)
                 }
             } else {
