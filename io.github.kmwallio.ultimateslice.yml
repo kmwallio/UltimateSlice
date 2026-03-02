@@ -22,6 +22,9 @@ build-options:
 modules:
   - name: x264
     buildsystem: autotools
+    cleanup:
+      - /include
+      - /lib/pkgconfig
     config-opts:
       - --enable-shared
       - --disable-static
@@ -34,6 +37,10 @@ modules:
 
   - name: ffmpeg
     buildsystem: autotools
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /share/ffmpeg
     config-opts:
       - --enable-gpl
       - --enable-libx264
