@@ -39,8 +39,8 @@
     </clipPath>
   </defs>
 
-  <!-- ── Background (GNOME squircle icon shape) ── -->
-  <rect width="128" height="128" rx="20" fill="#ffbe6f"/>
+  <!-- Translate all content so camera bottom aligns with GNOME HIG baseline (~y=108) -->
+  <g transform="translate(0, 11)">
 
   <!-- ── CINEMA CAMERA EXTERIOR (above the cut line) ── -->
   <g clip-path="url(#camSide)">
@@ -196,4 +196,6 @@
     <circle cx="44" cy="0" r="2.5" fill="#c0a878"/>
     <circle cx="55" cy="0" r="2.5" fill="#c0a878"/>
   </g>
+
+  </g> <!-- end translate group -->
 </svg>
