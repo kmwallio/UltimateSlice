@@ -10,6 +10,8 @@ The **Inspector** panel (right side) shows and edits the properties of the curre
 
 Select a clip in the timeline to populate the Inspector. All changes apply immediately to the program monitor preview.
 
+The Inspector is **context-sensitive**: it only shows sections relevant to the selected clip type (e.g., audio clips only show audio and speed settings). Each section is **collapsible** via the disclosure triangle in its header.
+
 ---
 
 ## Clip Info
@@ -35,6 +37,16 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 | **Contrast** | 0.0 → 2.0 | 1.0 | Contrast multiplier |
 | **Saturation** | 0.0 → 2.0 | 1.0 | 0 = greyscale, 2 = vivid |
 
+### Advanced Color Grading
+
+| Slider | Range | Default | Effect |
+|---|---|---|---|
+| **Shadows** | −1.0 → 1.0 | 0.0 | Adjust darker regions of the clip |
+| **Midtones** | −1.0 → 1.0 | 0.0 | Adjust the middle luminance range |
+| **Highlights** | −1.0 → 1.0 | 0.0 | Adjust the brightest regions |
+
+> Shadows, midtones, and highlights adjustments are applied via ffmpeg `colorbalance` on export. Preview uses an approximation.
+
 ---
 
 ## Denoise & Sharpness
@@ -49,6 +61,8 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 ---
 
 ## Audio
+
+The audio controls apply to the currently selected clip in the timeline.
 
 | Slider | Range | Default | Effect |
 |---|---|---|---|

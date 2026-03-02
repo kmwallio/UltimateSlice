@@ -24,9 +24,8 @@ Preferences are grouped by category in a sidebar:
 
 - **Enable hardware acceleration** toggles the saved preference value and applies immediately to **source preview playback**.
 - The setting is persisted across launches and available via MCP automation.
-- Scope today:
-  - affects source preview sink selection (`glsinkbin` path when enabled, `gtk4paintablesink` path when disabled),
-  - does not change export behavior.
+- **Implementation**: When enabled, the GStreamer pipeline builds the `glsinkbin` path for higher performance; when disabled, it uses the software-based `gtk4paintablesink` path.
+- Does not change export behavior.
 
 ## Program Monitor Playback Priority
 
@@ -83,8 +82,9 @@ Preferences are grouped by category in a sidebar:
 - **Show timeline preview** controls video thumbnail rendering in the timeline:
   - Enabled (default): show the regular thumbnail strip across each visible video clip.
   - Disabled: only show start/end thumbnails for each visible video clip.
-- Use Disabled mode to reduce thumbnail-generation workload on heavy media/projects.
-- The setting is persisted across launches.
+- **Show audio waveforms on video clips** draws a color-coded waveform overlay on the lower portion of video clips in the timeline.
+- Use these options to balance visual feedback and thumbnail-generation workload on heavy media/projects.
+- The settings are persisted across launches.
 
 ## GTK Renderer (Playback)
 

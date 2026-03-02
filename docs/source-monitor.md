@@ -16,6 +16,7 @@ The **Source Monitor** previews individual library clips before they are added t
 | Scrubber bar | Click to seek; In/Out markers shown in green/orange |
 | Timecode label | Current position / total duration |
 | In/Out timecode bar | Shows the selected range (In → Out) |
+| Volume slider | Adjust preview volume for the source clip |
 | Play / Pause / Stop | Transport buttons |
 | Close (`✕`) | Deselect current media item and hide the Source Monitor |
 

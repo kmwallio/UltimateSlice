@@ -30,8 +30,18 @@ or outside the export frame.
 |---|---|
 | Video display | Renders the assembled sequence at the playhead position |
 | Timecode label | Current timeline position |
+| VU meter | Peak audio levels (L/R) with color zones (Green < −18 dBFS, Yellow < −6 dBFS, Red ≥ −6 dBFS) |
+| Volume slider | Adjust master preview volume for the assembled timeline |
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
+
+## Colour Scopes
+
+Click the **▾ Scopes** button below the monitor to reveal professional analysis tools:
+- **Waveform** — luminance levels across the frame.
+- **Histogram** — distribution of pixels by brightness.
+- **RGB Parade** — separate luminance channels for Red, Green, and Blue.
+- **Vectorscope** — color saturation and hue distribution.
 
 ## Docked Resize
 
@@ -39,11 +49,27 @@ or outside the export frame.
 - If scopes are hidden, the scopes pane is fully collapsed (the splitter/pane disappears).
 - The docked splitter position is saved and restored on next launch.
 
+## Transform Overlay
+
+Select a video clip in the timeline to see its transform handles overlaid directly on the monitor.
+
+- **Move**: Drag the center to move the clip.
+- **Precision Move**: Use arrow keys (`←/→/↑/↓`) for ±0.01 offset, or `Shift+Arrow` for ±0.1.
+- **Scale**: Drag corner handles to scale proportionally. Hold `Shift` for non-proportional scaling.
+- **Scale Shortcut**: Press `+` or `-` to scale the selected clip.
+- **Crop**: Drag side handles (left/right/top/bottom) to crop the clip.
+- **Audio clips** do not display a transform overlay in the Program Monitor.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause (when timeline has focus) |
+| `L` | Shuttle forward — press repeatedly to increase speed (1×, 2×, 4×, 8×) |
+| `J` | Shuttle reverse — press repeatedly to increase speed (−1×, −2×, −4×, −8×) |
+| `K` | Pause / stop shuttle |
+| `← / →` | Move selected clip position (with transform overlay active) |
+| `+ / -` | Scale selected clip (with transform overlay active) |
 
 ## Playback Behaviour
 
@@ -83,5 +109,6 @@ When a clip has a speed multiplier set (see [Inspector](inspector)), the program
 
 ## MCP Automation
 
-- `seek_playhead` seeks the timeline/program-monitor playhead to an absolute nanosecond position.
-- `export_displayed_frame` exports the current displayed frame to a binary PPM (`P6`) image file.
+- **`seek_playhead`**: seeks the timeline/program-monitor playhead to an absolute nanosecond position.
+- **`export_displayed_frame`**: exports the current displayed frame to a binary PPM (`P6`) image file.
+- **`take_screenshot`**: captures a PNG screenshot of the full application window. Returns the path to the saved file.

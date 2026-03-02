@@ -36,12 +36,14 @@ cargo run
 
 ## Flatpak
 
-A Flatpak manifest is provided at `io.github.ultimateslice.yml`.
+A Flatpak manifest is provided at `io.github.kmwallio.ultimateslice.yml`.
 
 ```bash
-flatpak-builder build-dir io.github.ultimateslice.yml --user --install --force-clean
-flatpak run io.github.ultimateslice
+flatpak-builder build-dir io.github.kmwallio.ultimateslice.yml --user --install --force-clean
+flatpak run io.github.kmwallio.ultimateslice
 ```
+
+The Flatpak includes permissions for **external drives** (`/run/media`) to allow importing footage from external SSDs.
 
 For the MCP server mode (for AI agent control):
 

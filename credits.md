@@ -5,6 +5,7 @@ permalink: /credits/
 ---
 
 <div class="hero" style="padding-bottom: 40px;">
+  <img src="{{ "/assets/images/io.github.kmwallio.ultimateslice.svg" | relative_url }}" alt="UltimateSlice Icon" style="width: 80px; height: 80px; margin-bottom: 20px;">
   <h1>Credits</h1>
   <p>The components that make UltimateSlice possible.</p>
 </div>
@@ -12,6 +13,11 @@ permalink: /credits/
 <div class="wrapper" markdown="1" style="max-width: 900px; margin: 0 auto; padding: 40px 20px;">
 
 UltimateSlice is built on the shoulders of giants. We are proud to use and support the following open-source projects.
+
+## Project License
+
+UltimateSlice is licensed under the **[GNU GPL v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.html)**.  
+This license ensures that the editor remains free and open-source, and allows us to distribute a high-quality Flatpak bundle including x264 and FFmpeg with GPL-licensed components.
 
 ## Core Technologies
 

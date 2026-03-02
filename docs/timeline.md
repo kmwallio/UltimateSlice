@@ -127,13 +127,12 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ## Transitions
 
-- Use the **Transitions** pane on the right (below Inspector) to browse available transitions.
+- Use the **Transitions** pane on the right (below Inspector) to browse available transitions: **Cross-dissolve**, **Fade to black**, **Wipe right**, and **Wipe left**.
 - Use the pane's button to **hide/show** the transition list.
-- Drag **Cross-dissolve** from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
+- Drag any transition from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
 - While dragging, the two clips that will receive the transition are highlighted as a live preview.
 - **Remove a transition** by right-clicking its boundary marker in the timeline.
-- Exports apply cross-dissolves on the primary video track.
-- Preview shows transition fade ramps at clip boundaries for cross-dissolve markers.
+- Exports apply transitions on the primary video track via ffmpeg `xfade`.
 - Transitions are designed to be extensible: future transition types will appear in the same pane.
 
 ## Undo / Redo
@@ -150,6 +149,11 @@ The undo history is per-session (not persisted in the FCPXML).
 - Video clips show a time-mapped thumbnail strip (extracted in the background): tiles progress across the clip's source range instead of repeating one frame.
 - Thumbnail strips now load progressively with adaptive tile density to keep timeline warm-up responsive on heavy media.
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
-- Audio clips show a normalised waveform.
+- Audio clips show a **color-coded normalized waveform**:
+  - **Green**: Quiet (< −18 dBFS)
+  - **Yellow**: Moderate (−18 to −6 dBFS)
+  - **Red**: Loud (≥ −6 dBFS)
+- **Waveform overlay on video**: When enabled in **Preferences**, a semi-transparent color-coded waveform is drawn on the lower portion of video clips.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
+- A **cyan LUT badge** appears on clips with an assigned Color LUT.
 - Selected clips have a yellow highlight border.

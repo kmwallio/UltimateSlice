@@ -4,6 +4,7 @@ title: Home
 ---
 
 <section class="hero">
+  <img src="{{ "/assets/images/io.github.kmwallio.ultimateslice.svg" | relative_url }}" alt="UltimateSlice Icon" style="width: 120px; height: 120px; margin-bottom: 20px;">
   <h1>UltimateSlice</h1>
   <p>The Final Cut Pro–inspired video editor for the modern desktop.</p>
   <div style="margin-top: 40px;">

@@ -10,14 +10,13 @@ The **Media Library** panel (left side) holds all source clips available for you
 
 ## Importing Media
 
-1. Click **Import Media** in the library panel.
-2. Choose one or more video, audio, or image files from the file chooser.
-3. Imported items appear in the list showing the clip name and filename.
-4. GStreamer probes each file on import to determine its duration.
+- **Library Empty**: A large **+ Import Media…** button is shown in the center of the library panel.
+- **Library Populated**: The large button is hidden to save space. Click the compact **+** button in the **Media Library** header to add more files.
+- **Drag and Drop**: You can also drag files directly from your system's file manager into the **Media Library** pane to import them.
 
-You can also drag files directly from your file manager into the **Media Library** pane to import them.
+Choose one or more video, audio, or image files from the file chooser. Supported formats depend on your installed GStreamer plugins (any format `playbin` can decode).
 
-Supported formats depend on your installed GStreamer plugins (any format `playbin` can decode).
+GStreamer probes each file on import to determine its duration and type (audio-only or video). This runs in the background to keep the interface responsive.
 
 ## Browsing and Selecting
 
