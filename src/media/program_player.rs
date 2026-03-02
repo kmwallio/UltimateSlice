@@ -1398,6 +1398,17 @@ impl ProgramPlayer {
         }
     }
 
+    pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, _pan: f64) {
+        let volume = volume.clamp(0.0, 2.0);
+        if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
+            if let Some(slot) = self.slot_for_clip(i) {
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    pad.set_property("volume", volume);
+                }
+            }
+        }
+    }
+
     pub fn set_transform(
         &self,
         crop_left: i32,
