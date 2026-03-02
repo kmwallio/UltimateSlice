@@ -135,6 +135,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     {
         let p = project.borrow();
         prog_player_raw.set_project_dimensions(p.width, p.height);
+        prog_player_raw.set_frame_rate(p.frame_rate.numerator, p.frame_rate.denominator);
     }
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
@@ -1620,9 +1621,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
 
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
-            let (clips, media_from_project, project_dims): (
+            let (clips, media_from_project, project_dims, project_frame_rate): (
                 Vec<ProgramClip>,
                 Vec<(String, u64)>,
+                (u32, u32),
                 (u32, u32),
             ) = {
                 let proj = project.borrow();
@@ -1709,7 +1711,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .filter(|c| media_seen.insert(c.source_path.as_str()))
                     .map(|c| (c.source_path.clone(), c.source_out))
                     .collect();
-                (clips, media, (proj.width, proj.height))
+                (clips, media, (proj.width, proj.height), (proj.frame_rate.numerator, proj.frame_rate.denominator))
             }; // proj borrow dropped here — safe to call GStreamer below
             program_empty_hint.set_visible(clips.is_empty());
 
@@ -1737,6 +1739,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 )
             };
             let (proj_w, proj_h) = project_dims;
+            let (fr_num, fr_den) = project_frame_rate;
             let prog_player_reload = prog_player.clone();
             let preferences_state_reload = preferences_state.clone();
             let project_reload = project.clone();
@@ -1790,6 +1793,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 {
                     let mut pp = prog_player_reload.borrow_mut();
                     pp.set_project_dimensions(proj_w, proj_h);
+                    pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
                 }
                 log::debug!(

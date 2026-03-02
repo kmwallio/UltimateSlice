@@ -250,6 +250,12 @@ pub struct ProgramPlayer {
     /// These run asynchronously in background threads, decoding the first
     /// frame to warm OS file cache and codec state before handoff.
     prepreroll_sidecars: Vec<gst::Pipeline>,
+    /// Frame duration in nanoseconds, derived from project frame rate.
+    /// Used to quantize seek positions and deduplicate same-frame seeks.
+    frame_duration_ns: u64,
+    /// Last frame-quantized seek position (nanoseconds). When a new seek
+    /// lands on the same frame, the pipeline work is skipped entirely.
+    last_seeked_frame_pos: Option<u64>,
 }
 
 impl ProgramPlayer {
@@ -673,6 +679,9 @@ impl ProgramPlayer {
                 rebuild_history_cursor: 0,
                 rebuild_history_count: 0,
                 prepreroll_sidecars: Vec::new(),
+                // Default 24 fps ≈ 41_666_666 ns per frame
+                frame_duration_ns: 1_000_000_000 / 24,
+                last_seeked_frame_pos: None,
             },
             paintable,
             paintable2,
@@ -707,6 +716,16 @@ impl ProgramPlayer {
         self.project_width = width;
         self.project_height = height;
         self.apply_compositor_caps();
+    }
+
+    /// Update the frame duration from the project frame rate.
+    /// Called alongside `set_project_dimensions` when the project changes.
+    pub fn set_frame_rate(&mut self, numerator: u32, denominator: u32) {
+        if numerator > 0 && denominator > 0 {
+            // frame_duration = 1e9 * denominator / numerator (nanoseconds)
+            self.frame_duration_ns =
+                (1_000_000_000u64 * denominator as u64) / numerator as u64;
+        }
     }
 
     /// Set preview quality (compositor resolution divisor). Takes effect immediately.
@@ -998,6 +1017,7 @@ impl ProgramPlayer {
         self.prewarmed_boundary_ns = None;
         self.rebuild_history_count = 0;
         self.rebuild_history_cursor = 0;
+        self.last_seeked_frame_pos = None;
         self.teardown_prepreroll_sidecars();
     }
 
@@ -1010,6 +1030,23 @@ impl ProgramPlayer {
     pub fn seek(&mut self, timeline_pos_ns: u64) -> bool {
         let seek_started = Instant::now();
         let resume_playback = self.state == PlayerState::Playing;
+
+        // Frame-boundary deduplication: quantize to the nearest frame and
+        // skip redundant pipeline work when the playhead hasn't moved to a
+        // new frame.  This eliminates unnecessary decoder seeks during slow
+        // timeline scrubbing where multiple pixel-level drag events land on
+        // the same video frame.
+        let frame_pos = if self.frame_duration_ns > 0 {
+            (timeline_pos_ns / self.frame_duration_ns) * self.frame_duration_ns
+        } else {
+            timeline_pos_ns
+        };
+        if !resume_playback && self.last_seeked_frame_pos == Some(frame_pos) {
+            self.timeline_pos_ns = timeline_pos_ns;
+            self.base_timeline_ns = timeline_pos_ns;
+            return false;
+        }
+
         self.timeline_pos_ns = timeline_pos_ns;
         self.base_timeline_ns = timeline_pos_ns;
         self.play_start = None;
@@ -1045,6 +1082,7 @@ impl ProgramPlayer {
                 self.slots.len(),
                 seek_started.elapsed().as_millis()
             );
+            self.last_seeked_frame_pos = Some(frame_pos);
             return needs_async;
         }
         // Full rebuild: needed when the set of active clips has changed (e.g.
@@ -1088,6 +1126,7 @@ impl ProgramPlayer {
             self.slots.len(),
             seek_started.elapsed().as_millis()
         );
+        self.last_seeked_frame_pos = Some(frame_pos);
         needs_async
     }
 
@@ -1120,6 +1159,7 @@ impl ProgramPlayer {
         self.state = PlayerState::Playing;
         self.base_timeline_ns = pos;
         self.play_start = Some(Instant::now());
+        self.last_seeked_frame_pos = None;
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
         self.update_slot_queue_policy();
@@ -1162,6 +1202,7 @@ impl ProgramPlayer {
         self.base_timeline_ns = 0;
         self.play_start = None;
         self.prewarmed_boundary_ns = None;
+        self.last_seeked_frame_pos = None;
         self.current_idx = None;
         self.audio_current_idx = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
