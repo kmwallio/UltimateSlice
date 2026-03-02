@@ -173,6 +173,7 @@ Tracking docs:
          - [x] Reduce paused seek rebuild overhead by caching per-path audio probe results, applying decoder thread caps in paused rebuilds, and skipping the second paused reseek pass when first-pass link/arrival checks are already satisfied
          - [x] Stage reload as deferred load→seek phases with ticket coalescing, and cap paused 3+ track settle waits for responsiveness so UI remains interactive during project open + immediate seek
          - [x] Suppress playback auto-resume for full project replacement actions (new/open/recent and MCP project open/create) so project load does not start playback unexpectedly
+         - [x] Reduce overlap-transition playback churn by keeping audio probe cache warm across proxy-path refreshes and adding hysteresis/min-dwell to auto proxy assist (less flapping around 2↔3 track boundaries)
        - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview

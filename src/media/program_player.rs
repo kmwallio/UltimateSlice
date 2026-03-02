@@ -670,8 +670,9 @@ impl ProgramPlayer {
     }
 
     pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
-        self.proxy_paths = paths;
-        self.audio_stream_probe_cache.clear();
+        if self.proxy_paths != paths {
+            self.proxy_paths = paths;
+        }
     }
 
     pub fn set_project_dimensions(&mut self, width: u32, height: u32) {

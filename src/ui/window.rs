@@ -913,6 +913,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let effective_proxy_scale_divisor = effective_proxy_scale_divisor.clone();
         let last_auto_check_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_auto_check_us_c = last_auto_check_us.clone();
+        let last_auto_proxy_switch_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_auto_proxy_switch_us_c = last_auto_proxy_switch_us.clone();
+        let last_proxy_refresh_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+        let last_proxy_refresh_us_c = last_proxy_refresh_us.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -942,24 +946,27 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     player.set_preview_quality(divisor);
 
                     // Auto-assist for heavy timelines: when manual proxy mode is Off,
-                    // enable proxies automatically when 3+ video tracks overlap.
+                    // enable proxies for 3+ overlaps and disable with hysteresis so
+                    // boundary transitions do not flap proxy state every few frames.
                     let overlap_tracks = {
                         let proj = project.borrow();
                         active_video_track_count(&proj, player.timeline_pos_ns)
                     };
-                    let (desired_proxy_enabled, desired_scale) = if proxy_mode.is_enabled() {
-                        (true, proxy_scale_for_mode(&proxy_mode))
-                    } else if overlap_tracks >= 3 {
-                        (
-                            true,
-                            if divisor >= 4 {
-                                crate::media::proxy_cache::ProxyScale::Quarter
-                            } else {
-                                crate::media::proxy_cache::ProxyScale::Half
-                            },
-                        )
+                    let manual_proxy_mode = proxy_mode.is_enabled();
+                    let current_proxy_enabled = effective_proxy_enabled.get();
+                    let desired_proxy_enabled = if manual_proxy_mode {
+                        true
+                    } else if current_proxy_enabled {
+                        overlap_tracks >= 2
                     } else {
-                        (false, crate::media::proxy_cache::ProxyScale::Half)
+                        overlap_tracks >= 3
+                    };
+                    let desired_scale = if manual_proxy_mode {
+                        proxy_scale_for_mode(&proxy_mode)
+                    } else if desired_proxy_enabled && divisor >= 4 {
+                        crate::media::proxy_cache::ProxyScale::Quarter
+                    } else {
+                        crate::media::proxy_cache::ProxyScale::Half
                     };
                     let desired_scale_divisor = if matches!(
                         desired_scale,
@@ -969,14 +976,26 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     } else {
                         2
                     };
-                    if effective_proxy_enabled.get() != desired_proxy_enabled
-                        || effective_proxy_scale_divisor.get() != desired_scale_divisor
+                    let wants_proxy_change = current_proxy_enabled != desired_proxy_enabled;
+                    let wants_scale_change =
+                        desired_proxy_enabled
+                            && effective_proxy_scale_divisor.get() != desired_scale_divisor;
+                    let can_switch_auto_proxy =
+                        now_us - last_auto_proxy_switch_us_c.get() >= 1_500_000;
+                    if (wants_proxy_change || wants_scale_change)
+                        && (manual_proxy_mode || can_switch_auto_proxy)
                     {
                         player.set_proxy_enabled(desired_proxy_enabled);
                         effective_proxy_enabled.set(desired_proxy_enabled);
                         effective_proxy_scale_divisor.set(desired_scale_divisor);
+                        last_auto_proxy_switch_us_c.set(now_us);
                     }
-                    if desired_proxy_enabled {
+                    let refresh_proxy_paths =
+                        manual_proxy_mode
+                            || (desired_proxy_enabled
+                                && now_us - last_proxy_refresh_us_c.get() >= 1_000_000);
+                    if desired_proxy_enabled && refresh_proxy_paths {
+                        last_proxy_refresh_us_c.set(now_us);
                         let clip_sources = {
                             let proj = project.borrow();
                             collect_unique_clip_sources(&proj)
