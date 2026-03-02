@@ -462,6 +462,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let cb = on_project_changed.clone();
         timeline_state.borrow_mut().on_project_changed = Some(Rc::new(move || cb()));
     }
+    // Wire on_clip_selected: lightweight inspector sync without pipeline rebuild.
+    {
+        let inspector_view = inspector_view.clone();
+        let project = project.clone();
+        timeline_state.borrow_mut().on_clip_selected = Some(Rc::new(move |clip_id: Option<String>| {
+            let proj = project.borrow();
+            inspector_view.update(&proj, clip_id.as_deref());
+        }));
+    }
     {
         let prog_player = prog_player.clone();
         let pending_program_seek_ticket = pending_program_seek_ticket.clone();
