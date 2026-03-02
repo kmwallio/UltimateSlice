@@ -2,17 +2,25 @@
 <component type="desktop-application">
   <id>io.github.kmwallio.ultimateslice</id>
   <name>UltimateSlice</name>
-  <summary>Final Cut Pro-inspired non-linear video editor</summary>
+  <summary>Non-linear video editor</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <description>
     <p>
-      UltimateSlice is a non-linear video editor for Linux with a Final Cut Pro-inspired
-      interface. Import media, arrange clips on the timeline, and export to MP4.
+      UltimateSlice is a non-linear video editor for Linux. Import media, arrange clips on the timeline, and export to MP4.
     </p>
   </description>
   <launchable type="desktop-id">io.github.kmwallio.ultimateslice.desktop</launchable>
-  <url type="homepage">https://github.com/ultimateslice</url>
+  <url type="homepage">https://ultimateslice.6km.io</url>
+  <url type="bugtracker">https://github.com/kmwallio/UltimateSlice/issues</url>
+  <url type="help">https://ultimateslice.6km.io/docs</url>
+  <url type="donation">https://github.com/sponsors/kmwallio</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>UltimateSlice, Main window with project loaded</caption>
+      <image>https://ultimateslice.6km.io/assets/images/ultimateslice.png</image>
+    </screenshot>
+  </screenshots>
   <releases>
     <release version="0.1.0" date="2026-02-25">
       <description>
