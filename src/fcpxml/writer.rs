@@ -102,6 +102,7 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
             asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
             asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
+            asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
             asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
             asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
             asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));

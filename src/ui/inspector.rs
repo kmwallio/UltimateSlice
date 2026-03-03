@@ -2,7 +2,8 @@ use crate::model::project::Project;
 use gio;
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, Button, Entry, Expander, Label, Orientation, Scale, Separator,
+    self as gtk, Box as GBox, Button, CheckButton, Entry, Expander, Label, Orientation, Scale,
+    Separator,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -51,6 +52,7 @@ pub struct InspectorView {
     pub title_y_slider: Scale,
     // Speed
     pub speed_slider: Scale,
+    pub reverse_check: CheckButton,
     // LUT (color grading)
     pub lut_path_label: Label,
     pub lut_clear_btn: Button,
@@ -139,6 +141,7 @@ impl InspectorView {
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
                 self.speed_slider.set_value(c.speed);
+                self.reverse_check.set_active(c.reverse);
                 // LUT
                 match &c.lut_path {
                     Some(p) => {
@@ -191,6 +194,7 @@ impl InspectorView {
                 self.title_x_slider.set_value(0.5);
                 self.title_y_slider.set_value(0.9);
                 self.speed_slider.set_value(1.0);
+                self.reverse_check.set_active(false);
                 self.lut_path_label.set_text("None");
                 self.lut_clear_btn.set_sensitive(false);
             }
@@ -217,6 +221,7 @@ pub fn build_inspector(
     on_speed_changed: impl Fn(f64) + 'static,
     on_lut_changed: impl Fn(Option<String>) + 'static,
     on_opacity_changed: impl Fn(f64) + 'static,
+    on_reverse_changed: impl Fn(bool) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(260);
@@ -547,6 +552,12 @@ pub fn build_inspector(
     speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
     speed_inner.append(&speed_slider);
 
+    let reverse_check = CheckButton::with_label("Reverse (play clip backwards)");
+    reverse_check.set_tooltip_text(Some(
+        "Play this clip in reverse on export. A ◀ badge appears on the timeline clip.",
+    ));
+    speed_inner.append(&reverse_check);
+
     // ── LUT section (Video + Image only) ─────────────────────────────────────
     let lut_section_box = GBox::new(Orientation::Vertical, 8);
     content_box.append(&lut_section_box);
@@ -595,6 +606,7 @@ pub fn build_inspector(
     let on_speed_changed: Rc<dyn Fn(f64)> = Rc::new(on_speed_changed);
     let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
     let on_opacity_changed: Rc<dyn Fn(f64)> = Rc::new(on_opacity_changed);
+    let on_reverse_changed: Rc<dyn Fn(bool)> = Rc::new(on_reverse_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -1483,6 +1495,36 @@ pub fn build_inspector(
         });
     }
 
+    // Reverse checkbox
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_reverse_changed = on_reverse_changed.clone();
+        reverse_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let reversed = btn.is_active();
+            if let Some(ref id) = *selected_clip_id.borrow() {
+                let mut proj = project.borrow_mut();
+                let mut found = false;
+                for track in &mut proj.tracks {
+                    for clip in &mut track.clips {
+                        if clip.id == *id {
+                            clip.reverse = reversed;
+                            found = true;
+                        }
+                    }
+                }
+                if found {
+                    proj.dirty = true;
+                }
+            }
+            on_reverse_changed(reversed);
+        });
+    }
+
     // LUT import button
     {
         let project = project.clone();
@@ -1596,6 +1638,7 @@ pub fn build_inspector(
         title_x_slider,
         title_y_slider,
         speed_slider,
+        reverse_check,
         lut_path_label,
         lut_clear_btn,
         updating,

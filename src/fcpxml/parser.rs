@@ -213,6 +213,9 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                                 if let Some(v) = attrs.get("us:speed") {
                                     clip.speed = v.parse().unwrap_or(1.0);
                                 }
+                                if let Some(v) = attrs.get("us:reverse") {
+                                    clip.reverse = v.parse().unwrap_or(false);
+                                }
                                 if let Some(v) = attrs.get("us:shadows") {
                                     clip.shadows = v.parse().unwrap_or(0.0);
                                 }
