@@ -23,6 +23,9 @@ pub struct Player {
     /// videobalance element for color correction (brightness/contrast/saturation)
     videobalance: Option<gst::Element>,
     /// gaussianblur element for denoise (positive sigma) / sharpness (negative sigma)
+    /// Kept for property storage but NOT linked in the pipeline — gaussianblur
+    /// only accepts AYUV format, forcing two expensive I420↔AYUV conversions
+    /// per frame even at sigma=0.  Denoise/sharpness is applied during export.
     gaussianblur: Option<gst::Element>,
     /// videocrop element for per-clip cropping
     videocrop: Option<gst::Element>,
@@ -30,6 +33,8 @@ pub struct Player {
     videoflip_rotate: Option<gst::Element>,
     /// videoflip element for horizontal/vertical flip
     videoflip_flip: Option<gst::Element>,
+    /// Prescale capsfilter — resolution updated at runtime to match widget size
+    prescale_caps: Option<gst::Element>,
 }
 
 impl Player {
@@ -84,9 +89,12 @@ impl Player {
         }
 
         // Build a filter bin:
-        // videocrop ! videoconvert ! videobalance ! videoconvert ! gaussianblur
-        //   ! videoconvert ! videoflip_rotate ! videoconvert ! videoflip_flip
-        // Chained as playbin's video-filter for per-clip color + denoise/sharpness + transform.
+        // prescale ! caps(I420,≤640×360) ! queue ! videocrop ! videobalance
+        //   ! videoflip_rotate ! videoflip_flip
+        // All elements accept I420 natively — no videoconvert needed.
+        // gaussianblur is NOT linked: it only accepts AYUV, forcing two
+        // expensive I420↔AYUV conversions per frame even at sigma=0.
+        // Denoise/sharpness is applied during export instead.
         let videobalance = gst::ElementFactory::make("videobalance").build().ok();
         let gaussianblur = gst::ElementFactory::make("gaussianblur").build().ok();
         let videocrop = gst::ElementFactory::make("videocrop").build().ok();
@@ -96,16 +104,20 @@ impl Player {
             .build()
             .ok();
 
-        if videobalance.is_some() && gaussianblur.is_some() {
-            let vb = videobalance.as_ref().unwrap();
-            let gb = gaussianblur.as_ref().unwrap();
-            // sigma=0 means no blur/sharpen (neutral)
+        // Keep gaussianblur element for property storage (set_denoise_sharpness)
+        // but don't link it in the pipeline.
+        if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", 0.0_f64);
+        }
 
+        let mut prescale_caps_field: Option<gst::Element> = None;
+
+        if let Some(ref vb) = videobalance {
             let bin = gst::Bin::new();
 
-            // Downscale oversized sources (e.g. 5.3K GoPro) early so the
-            // effects chain doesn't process multi-megapixel RGBA frames.
+            // Downscale oversized sources early. Default 640×360 matches
+            // the typical ~320×200 source preview widget (slight
+            // supersample). Updated at runtime via set_prescale_resolution().
             let prescale = gst::ElementFactory::make("videoconvertscale")
                 .build()
                 .expect("videoconvertscale must be available");
@@ -113,8 +125,9 @@ impl Player {
                 .property(
                     "caps",
                     &gst::Caps::builder("video/x-raw")
-                        .field("width", gst::IntRange::new(1i32, 1920))
-                        .field("height", gst::IntRange::new(1i32, 1080))
+                        .field("format", "I420")
+                        .field("width", gst::IntRange::new(1i32, 640))
+                        .field("height", gst::IntRange::new(1i32, 360))
                         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                         .build(),
                 )
@@ -133,27 +146,12 @@ impl Player {
                 .build()
                 .expect("queue must be available");
 
-            let conv1 = gst::ElementFactory::make("videoconvert")
-                .build()
-                .expect("videoconvert must be available");
-            let conv2 = gst::ElementFactory::make("videoconvert")
-                .build()
-                .expect("videoconvert must be available");
-
-            // Determine sink element (videocrop if available, else videobalance)
-            // and src element (last flip if available, else gaussianblur)
             if let (Some(ref vc), Some(ref vfr), Some(ref vff)) =
                 (&videocrop, &videoflip_rotate, &videoflip_flip)
             {
-                let conv3 = gst::ElementFactory::make("videoconvert")
-                    .build()
-                    .expect("videoconvert must be available");
-                let conv4 = gst::ElementFactory::make("videoconvert")
-                    .build()
-                    .expect("videoconvert must be available");
-                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vc, vb, vfr, vff])
                     .ok();
-                gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vc, vb, vfr, vff])
                     .ok();
                 let sink_pad = prescale.static_pad("sink").unwrap();
                 let src_pad = vff.static_pad("src").unwrap();
@@ -162,19 +160,17 @@ impl Player {
                 bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
                     .ok();
             } else {
-                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vb, &conv1, gb]).ok();
-                gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vb, &conv1, gb]).ok();
+                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vb]).ok();
+                gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vb]).ok();
                 let sink_pad = prescale.static_pad("sink").unwrap();
-                let src_pad = gb.static_pad("src").unwrap();
+                let src_pad = vb.static_pad("src").unwrap();
                 bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
                     .ok();
                 bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
                     .ok();
             }
+            prescale_caps_field = Some(prescale_caps);
             pipeline.set_property("video-filter", &bin);
-        } else if let Some(ref vb) = videobalance {
-            // Fallback: videobalance only (no gaussianblur plugin)
-            pipeline.set_property("video-filter", vb);
         }
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
@@ -192,6 +188,7 @@ impl Player {
                 videocrop,
                 videoflip_rotate,
                 videoflip_flip,
+                prescale_caps: prescale_caps_field,
             },
             paintable,
         ))
@@ -332,6 +329,24 @@ impl Player {
         // from glsinkbin.  Track the flag for future use (decoder hints).
         *self.hardware_acceleration_enabled.lock().unwrap() = enabled;
         Ok(())
+    }
+
+    /// Update the prescale capsfilter to match the source preview widget size.
+    /// `width` and `height` should be the target rendering resolution (e.g.
+    /// 2× the widget pixel size for slight supersampling).  Values are
+    /// clamped to a minimum of 160×90 and maximum of 1920×1080.
+    pub fn set_prescale_resolution(&self, width: i32, height: i32) {
+        if let Some(ref caps_elem) = self.prescale_caps {
+            let w = width.clamp(160, 1920);
+            let h = height.clamp(90, 1080);
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", gst::IntRange::new(1i32, w))
+                .field("height", gst::IntRange::new(1i32, h))
+                .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+                .build();
+            caps_elem.set_property("caps", &caps);
+        }
     }
 
     /// Apply color correction and denoise/sharpness to the video filter elements.

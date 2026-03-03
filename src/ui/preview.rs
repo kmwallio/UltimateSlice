@@ -587,10 +587,35 @@ pub fn build_preview(
         let btn_insert = btn_insert.clone();
         let btn_overwrite = btn_overwrite.clone();
         let btn_close_preview = btn_close_preview.clone();
+        let picture_weak = picture.downgrade();
+        // Track last prescale size to avoid redundant updates
+        let last_prescale_w: Rc<Cell<i32>> = Rc::new(Cell::new(640));
+        let last_prescale_h: Rc<Cell<i32>> = Rc::new(Cell::new(360));
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
             let pos = p.position();
             let dur = p.duration();
+
+            // Adaptive prescale: update resolution to match widget size
+            if let Some(pic) = picture_weak.upgrade() {
+                let pw = pic.width();
+                let ph = pic.height();
+                if pw > 0 && ph > 0 {
+                    // 2× widget size for slight supersample, capped at 1920×1080
+                    let target_w = (pw * 2).min(1920);
+                    let target_h = (ph * 2).min(1080);
+                    let prev_w = last_prescale_w.get();
+                    let prev_h = last_prescale_h.get();
+                    // Only update if size changed by >10% to avoid thrashing
+                    let dw = (target_w - prev_w).unsigned_abs();
+                    let dh = (target_h - prev_h).unsigned_abs();
+                    if dw > (prev_w as u32 / 10) || dh > (prev_h as u32 / 10) {
+                        p.set_prescale_resolution(target_w, target_h);
+                        last_prescale_w.set(target_w);
+                        last_prescale_h.set(target_h);
+                    }
+                }
+            }
 
             // Sync local frame_ns cache from source_marks
             frame_ns.set(source_marks.borrow().frame_ns);

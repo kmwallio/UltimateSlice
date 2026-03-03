@@ -66,3 +66,7 @@ Both operations target the active track (if its kind matches), or fall back to t
 ## Proxy Preview
 
 When a proxy file exists for the selected media (see [Preferences → Proxy Preview](preferences.md)), the Source Monitor automatically loads the proxy instead of the full-resolution original. If no proxy exists yet, a proxy transcode is requested in the background; once it completes, the player reloads with the proxy automatically. This ensures smooth preview playback even with high-resolution footage (e.g. 5.3K GoPro HEVC) without any manual steps.
+
+## Adaptive Quality
+
+The Source Monitor automatically adapts its internal processing resolution to match the widget size. Instead of processing video at a fixed 1920×1080, the preview pipeline scales to approximately 2× the actual display size (e.g. ~640×360 for a 320×180 widget). This dramatically reduces CPU usage — especially for high-resolution sources — while maintaining sharp visual quality. The resolution updates automatically as the panel is resized.
