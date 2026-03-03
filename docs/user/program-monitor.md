@@ -2,7 +2,7 @@
 
 The **Program Monitor** shows the assembled timeline played back in real time, clip by clip.
 
-When no timeline clips are present, the monitor area shows a short first-use hint to import media and append/insert clips.
+When no timeline clips are present, the monitor area shows a short first-use hint to import media and append/insert clips, and previous-project frames are cleared on project switch/new project.
 
 ## Canvas Aspect Ratio
 

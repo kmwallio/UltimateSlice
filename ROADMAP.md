@@ -155,6 +155,7 @@ Tracking docs:
   - Play/Stop transport controls; timecode display
   - Timeline seek (click ruler) also seeks the program monitor
   - Clips reload automatically on every project change
+  - Project replacement resets cached monitor output so empty projects do not show stale prior frames
 - [x] Program-monitor playback priority mode in Preferences (`Smooth` / `Balanced` / `Accurate`)
 - [x] Docked Program Monitor and scopes are resizable via draggable splitter (position persisted; pane collapses fully when scopes are hidden)
 - [ ] Detachable Program Monitor window (pop-out preview)

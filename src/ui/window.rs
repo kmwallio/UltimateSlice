@@ -1030,6 +1030,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let last_auto_proxy_switch_us_c = last_auto_proxy_switch_us.clone();
         let last_proxy_refresh_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_proxy_refresh_us_c = last_proxy_refresh_us.clone();
+        let picture_a_poll = picture_a.clone();
+        let picture_b_poll = picture_b.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -1155,13 +1157,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 )
             };
             // Apply cross-dissolve opacities to the two program monitor pictures.
-            picture_a.set_opacity(opacity_a);
-            picture_b.set_opacity(opacity_b);
+            picture_a_poll.set_opacity(opacity_a);
+            picture_b_poll.set_opacity(opacity_b);
             // Force monitor repaint while paused so post-seek paintable updates
             // become visible even when timeline position is unchanged between ticks.
             if !playing {
-                picture_a.queue_draw();
-                picture_b.queue_draw();
+                picture_a_poll.queue_draw();
+                picture_b_poll.queue_draw();
             }
             // Update VU meter with current audio peak levels.
             vu_pc.set(peaks);
@@ -1741,6 +1743,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let transform_overlay_cell = transform_overlay_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
+        let picture_a = picture_a.clone();
+        let picture_b = picture_b.clone();
         let pending_reload_ticket = pending_reload_ticket.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
@@ -1749,6 +1753,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             if clear_media_browser_on_next_reload.replace(false) {
                 on_close_preview();
                 library.borrow_mut().clear();
+                prog_player.borrow_mut().stop();
             }
 
             // Update window title
@@ -1865,6 +1870,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 (clips, media, (proj.width, proj.height), (proj.frame_rate.numerator, proj.frame_rate.denominator))
             }; // proj borrow dropped here — safe to call GStreamer below
             program_empty_hint.set_visible(clips.is_empty());
+            let has_clips = !clips.is_empty();
+            picture_a.set_visible(has_clips);
+            picture_b.set_visible(has_clips);
 
             {
                 let mut lib = library.borrow_mut();
