@@ -561,9 +561,10 @@ fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
     match (clip.reverse, has_speed) {
         (false, false) => String::new(),
         (false, true) => format!(",setpts=PTS/{:.6}", clip.speed),
-        // After `reverse`, PTS decrease. setpts=STARTPTS-PTS maps them back to 0..D.
-        (true, false) => ",reverse,setpts=STARTPTS-PTS".to_string(),
-        (true, true) => format!(",reverse,setpts=(STARTPTS-PTS)/{:.6}", clip.speed),
+        // `reverse` already emits a valid timeline in ffmpeg; STARTPTS-PTS here can
+        // cause non-monotonic DTS and near-empty video output.
+        (true, false) => ",reverse".to_string(),
+        (true, true) => format!(",reverse,setpts=PTS/{:.6}", clip.speed),
     }
 }
 

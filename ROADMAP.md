@@ -145,7 +145,7 @@ Tracking docs:
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
 - [x] Speed indicator badge on clip in timeline (yellow "2×" badge)
 - [x] Persist speed data in FCPXML (`us:speed` attribute)
-- [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies ffmpeg `reverse`/`areverse` filters on export; timeline shows `◀` badge; persisted via `us:reverse` FCPXML attribute
+- [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies to Program Monitor preview and export (`reverse`/`areverse`), timeline shows `◀` badge, and state persists via `us:reverse` FCPXML attribute
 - [ ] Variable speed ramps: multiple keyframed speed segments within a single clip
 - [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
 

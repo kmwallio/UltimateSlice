@@ -103,6 +103,8 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 
 When a clip has a speed multiplier set (see [inspector.md](inspector.md)), the program monitor plays it at that rate using GStreamer's rate-seek mechanism. Audio pitch is **not** corrected in the preview (it sounds higher/lower pitched). The exported file uses `atempo` for proper pitch correction.
 
+When **Reverse** is enabled on a clip, Program Monitor preview plays that clip backward (video and audio direction) while keeping other timeline layers audible.
+
 ## MCP Automation
 
 - `seek_playhead` seeks the timeline/program-monitor playhead to an absolute nanosecond position.

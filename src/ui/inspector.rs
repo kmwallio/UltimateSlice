@@ -554,7 +554,7 @@ pub fn build_inspector(
 
     let reverse_check = CheckButton::with_label("Reverse (play clip backwards)");
     reverse_check.set_tooltip_text(Some(
-        "Play this clip in reverse on export. A ◀ badge appears on the timeline clip.",
+        "Play this clip in reverse in Program Monitor preview and export. A ◀ badge appears on the timeline clip.",
     ));
     speed_inner.append(&reverse_check);
 

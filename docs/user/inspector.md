@@ -98,7 +98,7 @@ Controls the playback speed and direction of the clip. Changing speed adjusts th
 
 Marks at **½×**, **1×**, **2×** for quick snapping.
 
-Preview uses GStreamer rate-seek. Export uses `reverse`/`areverse` (when reversed) and `setpts`/chained `atempo` (audio) for speed.
+Program Monitor preview uses GStreamer rate-seek (including reverse direction). Export uses `reverse`/`areverse` (when reversed) and `setpts`/chained `atempo` (audio) for speed.
 
 A yellow **◀** badge appears on reversed clips in the timeline (e.g. **◀ 2×** for a reversed 2× speed clip). Reverse can be combined with any speed multiplier.
 

@@ -1849,6 +1849,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             title_x: c.title_x,
                             title_y: c.title_y,
                             speed: c.speed,
+                            reverse: c.reverse,
                             is_audio_only: audio_only,
                             track_index: t_idx,
                             transition_after: c.transition_after.clone(),
