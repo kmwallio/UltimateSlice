@@ -128,6 +128,42 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let initial_show_timeline_preview = preferences_state.borrow().show_timeline_preview;
     let (player, paintable) =
         Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
+    // Monitor the source-preview pipeline bus for errors so caps
+    // negotiation failures or decoder errors are logged and the player
+    // is stopped gracefully instead of silently freezing.
+    {
+        use gstreamer::prelude::*;
+        let pipeline = player
+            .pipeline()
+            .clone()
+            .downcast::<gstreamer::Pipeline>()
+            .ok();
+        if let Some(ref pipe) = pipeline {
+            if let Some(bus) = pipe.bus() {
+                let _watch = bus.add_watch_local(move |_bus, msg: &gstreamer::Message| {
+                    use gstreamer::MessageView;
+                    match msg.view() {
+                        MessageView::Error(err) => {
+                            log::error!(
+                                "Source preview pipeline error: {} (debug: {:?})",
+                                err.error(),
+                                err.debug()
+                            );
+                        }
+                        MessageView::Warning(warn) => {
+                            log::warn!(
+                                "Source preview pipeline warning: {} (debug: {:?})",
+                                warn.error(),
+                                warn.debug()
+                            );
+                        }
+                        _ => {}
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
+        }
+    }
     let player = Rc::new(RefCell::new(player));
 
     let (mut prog_player_raw, prog_paintable, prog_paintable2) =
@@ -1521,6 +1557,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let preview_widget = preview_widget.clone();
         let clip_name_label = clip_name_label.clone();
         let library = library.clone();
+        let proxy_cache = proxy_cache.clone();
+        let preferences_state = preferences_state.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
             preview_widget.set_visible(true);
@@ -1531,7 +1569,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 .unwrap_or(&path)
                 .to_string();
             clip_name_label.set_text(&name);
-            let uri = format!("file://{path}");
             // Guard against duplicate selection-changed emissions for the same
             // item; avoid redundant playbin reconfiguration.
             let should_reload = {
@@ -1546,7 +1583,30 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 .map(|i| i.is_audio_only)
                 .unwrap_or(false);
             if should_reload {
-                let _ = player.borrow().load(&uri);
+                // Use proxy for source preview when available to avoid
+                // freezing on high-resolution content (e.g. 5.3K HEVC).
+                let prefs = preferences_state.borrow();
+                let proxy_scale = if prefs.proxy_mode.is_enabled() {
+                    proxy_scale_for_mode(&prefs.proxy_mode)
+                } else {
+                    crate::media::proxy_cache::ProxyScale::Half
+                };
+                drop(prefs);
+                // Request proxy first so existing on-disk proxies are
+                // discovered and registered in the in-memory cache before
+                // the get() lookup below.
+                if !audio_only {
+                    proxy_cache.borrow_mut().request(&path, proxy_scale, None);
+                }
+                let load_uri = {
+                    let cache = proxy_cache.borrow();
+                    if let Some(proxy_path) = cache.get(&path, None) {
+                        format!("file://{proxy_path}")
+                    } else {
+                        format!("file://{path}")
+                    }
+                };
+                let _ = player.borrow().load(&load_uri);
             }
             let mut m = source_marks.borrow_mut();
             m.path = path;
@@ -1995,6 +2055,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let status_bar = status_bar.clone();
         let status_label = status_label.clone();
         let status_progress = status_progress.clone();
+        let player = player.clone();
+        let source_marks = source_marks.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
@@ -2003,6 +2065,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 if !resolved.is_empty() || !proxy_cache.borrow().proxies.is_empty() {
                     let paths = proxy_cache.borrow().proxies.clone();
                     prog_player.borrow_mut().update_proxy_paths(paths);
+                }
+            }
+            // Auto-reload source preview when its proxy completes.
+            if !resolved.is_empty() {
+                let current_source = source_marks.borrow().path.clone();
+                if !current_source.is_empty() {
+                    let cache = proxy_cache.borrow();
+                    for key in &resolved {
+                        if *key == current_source {
+                            if let Some(proxy_path) = cache.get(&current_source, None) {
+                                let uri = format!("file://{proxy_path}");
+                                let _ = player.borrow().load(&uri);
+                            }
+                            break;
+                        }
+                    }
                 }
             }
             let progress = proxy_cache.borrow().progress();
@@ -2052,6 +2130,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let preferences_state = preferences_state.clone();
         let proxy_cache = proxy_cache.clone();
         let on_close_preview = on_close_preview.clone();
+        let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let window_weak = window.downgrade();
@@ -2070,6 +2149,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         &preferences_state,
                         &proxy_cache,
                         &on_close_preview,
+                        &on_source_selected,
                         &on_project_changed,
                         &suppress_resume_on_next_reload,
                     );
@@ -2269,6 +2349,7 @@ fn handle_mcp_command(
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     on_close_preview: &Rc<dyn Fn()>,
+    on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -3471,6 +3552,36 @@ fn handle_mcp_command(
                         .ok();
                 }
             }
+        }
+
+        McpCommand::SelectLibraryItem { path, reply } => {
+            let item = library.borrow().iter().find(|i| i.source_path == path).cloned();
+            match item {
+                Some(media_item) => {
+                    on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
+                    reply.send(json!({
+                        "ok": true,
+                        "label": media_item.label,
+                        "duration_ns": media_item.duration_ns,
+                    })).ok();
+                }
+                None => {
+                    reply.send(json!({
+                        "ok": false,
+                        "error": format!("No library item with path: {path}"),
+                    })).ok();
+                }
+            }
+        }
+
+        McpCommand::SourcePlay { reply } => {
+            let _ = player.borrow().play();
+            reply.send(json!({"ok": true})).ok();
+        }
+
+        McpCommand::SourcePause { reply } => {
+            let _ = player.borrow().pause();
+            reply.send(json!({"ok": true})).ok();
         }
     }
 }

@@ -565,6 +565,27 @@ fn tools_list() -> Value {
             "name": "take_screenshot",
             "description": "Capture a PNG screenshot of the full application window using the GTK snapshot and renderer. The PNG is written to the current working directory with a timestamped filename and the path is returned.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "select_library_item",
+            "description": "Select a media library item by its source path, loading it into the Source Monitor for preview. The item must already be in the library (use import_media first).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path of the library item to select." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "source_play",
+            "description": "Start playback in the Source Monitor (source preview player).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "source_pause",
+            "description": "Pause playback in the Source Monitor (source preview player).",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ]})
 }
@@ -761,6 +782,12 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             reply: tx,
         },
         "take_screenshot" => McpCommand::TakeScreenshot { reply: tx },
+        "select_library_item" => McpCommand::SelectLibraryItem {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "source_play" => McpCommand::SourcePlay { reply: tx },
+        "source_pause" => McpCommand::SourcePause { reply: tx },
 
         _ => return err(id.clone(), -32602, &format!("Unknown tool: '{name}'")),
     };

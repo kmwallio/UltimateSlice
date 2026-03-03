@@ -101,6 +101,18 @@ impl Player {
                 .build()
                 .expect("capsfilter must be available");
 
+            // Leaky queue after prescale: decouples the expensive
+            // decode+prescale thread from the effects chain so that slow
+            // VA-API→CPU downloads at 5.3K don't stall the sink/main thread.
+            // leaky=downstream (2) drops oldest buffers when full.
+            let prescale_queue = gst::ElementFactory::make("queue")
+                .property("max-size-buffers", 2u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", 0u64)
+                .property_from_str("leaky", "downstream")
+                .build()
+                .expect("queue must be available");
+
             let conv1 = gst::ElementFactory::make("videoconvert")
                 .build()
                 .expect("videoconvert must be available");
@@ -119,9 +131,9 @@ impl Player {
                 let conv4 = gst::ElementFactory::make("videoconvert")
                     .build()
                     .expect("videoconvert must be available");
-                bin.add_many([&prescale, &prescale_caps, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
                     .ok();
-                gst::Element::link_many([&prescale, &prescale_caps, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
+                gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vc, &conv1, vb, &conv2, gb, &conv3, vfr, &conv4, vff])
                     .ok();
                 let sink_pad = prescale.static_pad("sink").unwrap();
                 let src_pad = vff.static_pad("src").unwrap();
@@ -130,8 +142,8 @@ impl Player {
                 bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
                     .ok();
             } else {
-                bin.add_many([&prescale, &prescale_caps, vb, &conv1, gb]).ok();
-                gst::Element::link_many([&prescale, &prescale_caps, vb, &conv1, gb]).ok();
+                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vb, &conv1, gb]).ok();
+                gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vb, &conv1, gb]).ok();
                 let sink_pad = prescale.static_pad("sink").unwrap();
                 let src_pad = gb.static_pad("src").unwrap();
                 bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
@@ -175,30 +187,57 @@ impl Player {
             .pipeline
             .state(Some(gst::ClockTime::from_mseconds(200)));
         self.pipeline.set_property("uri", uri);
+        // Start async Paused preroll. Do NOT block here — gtk4paintablesink
+        // needs the main loop to complete GL preroll. Blocking the main
+        // thread causes a STATE_LOCK deadlock if play() is called before
+        // preroll finishes.
         self.pipeline.set_state(gst::State::Paused)?;
-        let _ = self
-            .pipeline
-            .state(Some(gst::ClockTime::from_mseconds(500)));
         *self.state.lock().unwrap() = PlayerState::Paused;
         Ok(())
     }
 
     pub fn play(&self) -> Result<()> {
-        self.pipeline.set_state(gst::State::Playing)?;
+        Self::safe_set_state(&self.pipeline, gst::State::Playing);
         *self.state.lock().unwrap() = PlayerState::Playing;
         Ok(())
     }
 
     pub fn pause(&self) -> Result<()> {
-        self.pipeline.set_state(gst::State::Paused)?;
+        Self::safe_set_state(&self.pipeline, gst::State::Paused);
         *self.state.lock().unwrap() = PlayerState::Paused;
         Ok(())
     }
 
     pub fn stop(&self) -> Result<()> {
-        self.pipeline.set_state(gst::State::Ready)?;
+        Self::safe_set_state(&self.pipeline, gst::State::Ready);
         *self.state.lock().unwrap() = PlayerState::Stopped;
         Ok(())
+    }
+
+    /// Request a state change without blocking the main thread.
+    ///
+    /// If the pipeline has no pending async transition the change is applied
+    /// immediately.  Otherwise it is deferred via a repeating 50 ms timeout
+    /// so the GTK main loop can keep processing events (needed for
+    /// gtk4paintablesink GL preroll).  This prevents the STATE_LOCK
+    /// deadlock that occurs when `set_state()` is called while an async
+    /// transition is still running.
+    fn safe_set_state(pipeline: &gst::Element, target: gst::State) {
+        let (_result, _state, pending) =
+            pipeline.state(Some(gst::ClockTime::from_mseconds(0)));
+        if pending == gst::State::VoidPending {
+            let _ = pipeline.set_state(target);
+            return;
+        }
+        let pipeline = pipeline.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            let (_r, _s, p) = pipeline.state(Some(gst::ClockTime::from_mseconds(0)));
+            if p != gst::State::VoidPending {
+                return glib::ControlFlow::Continue;
+            }
+            let _ = pipeline.set_state(target);
+            glib::ControlFlow::Break
+        });
     }
 
     pub fn toggle_play_pause(&self) -> Result<()> {

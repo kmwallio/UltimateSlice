@@ -103,6 +103,7 @@ Tracking docs:
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
+- [x] `select_library_item`, `source_play`, `source_pause` tools — select media in the library and control Source Monitor playback via MCP
 
 ---
 
@@ -113,6 +114,7 @@ Tracking docs:
 - [x] Close button to hide source preview and clear current source selection
 - [x] Frame-accurate jog/shuttle control
 - [x] Mark-in / Mark-out visible as timecodes in a dedicated bar
+- [x] Source preview auto-loads proxy files when available and requests proxy transcodes for high-resolution video
 
 ### Timeline Improvements
 - [x] Time-mapped clip filmstrip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)

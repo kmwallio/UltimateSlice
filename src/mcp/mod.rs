@@ -185,6 +185,16 @@ pub enum McpCommand {
     TakeScreenshot {
         reply: SyncSender<Value>,
     },
+    SelectLibraryItem {
+        path: String,
+        reply: SyncSender<Value>,
+    },
+    SourcePlay {
+        reply: SyncSender<Value>,
+    },
+    SourcePause {
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

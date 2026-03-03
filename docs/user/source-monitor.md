@@ -62,3 +62,7 @@ Both operations target the active track (if its kind matches), or fall back to t
 - Click the **✕** button in the Source Monitor header to close it.
 - Closing clears the current media-library selection, hides the panel, stops source playback, and resets source in/out state.
 - Select any media item again to reopen and load the Source Monitor.
+
+## Proxy Preview
+
+When a proxy file exists for the selected media (see [Preferences → Proxy Preview](preferences.md)), the Source Monitor automatically loads the proxy instead of the full-resolution original. If no proxy exists yet, a proxy transcode is requested in the background; once it completes, the player reloads with the proxy automatically. This ensures smooth preview playback even with high-resolution footage (e.g. 5.3K GoPro HEVC) without any manual steps.
