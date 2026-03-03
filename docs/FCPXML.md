@@ -16,7 +16,7 @@ FCPXML separates the **definition** of a resource (like a high-res video file or
 FCPXML follows a strictly hierarchical structure, mirroring the organization of a real-world video project.
 
 ### **Attribute Meanings**
-*   **`version`**: The schema version. Version 1.10+ is required for many modern features like HDR and Cinematic mode.
+*   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`). Version 1.10+ is required for many modern features like HDR and Cinematic mode. Version 1.13 corresponds to Final Cut Pro 11.
 *   **`format`**: A unique ID referencing a `<format>` resource. This defines the "canvas" (resolution) and "heartbeat" (frame rate) of the element.
 *   **`tcStart`**: The starting timecode of the timeline. Usually `3600s` (01:00:00:00).
 *   **`tcFormat`**: Determines if the clock skips frames to stay in sync with real-time (`DF` for Drop Frame) or counts every single frame (`NDF` for Non-Drop Frame).
@@ -111,6 +111,25 @@ A **Multicam clip** is a "stack" of synchronized camera angles. In the editor, y
 </mc-clip>
 ```
 
+### Synchronized Clips
+A **Synchronized clip** (`<sync-clip>`) groups independently recorded media that should play in sync (e.g., a camera recording and a separate audio recorder). It uses `<sync-source>` children to map each source's timing.
+
+*   **`<sync-clip>`**: Container for synchronized media.
+    *   Standard clip attributes: `ref`, `offset`, `start`, `duration`, `format`.
+    *   **`audioStart` / `audioDuration`**: Allow split edits (J/L cuts) where audio timing differs from video.
+*   **`<sync-source>`**: Maps a source within the synchronized clip.
+    *   **`sourceID`**: Identifies which source stream to use.
+
+### Auditions
+An **Audition** (`<audition>`) is a container that lets editors try out alternative clips in the same timeline position. Only one clip is active (the "pick"); the rest are hidden alternatives.
+
+*   **`<audition>`**: Container for audition alternatives.
+    *   The **first child** element is the active "pick" shown in the timeline.
+    *   Subsequent children are hidden alternatives the editor can swap in.
+    *   Can contain: `<audio>`, `<video>`, `<title>`, `<ref-clip>`, `<asset-clip>`, `<clip>`, `<sync-clip>`, `<mc-clip>`.
+
+### Connected Storylines
+A `<spine>` element can appear not only as the primary storyline inside a `<sequence>`, but also as a **child of a clip**. When nested this way, it forms a "connected storyline" — a secondary storyline that is attached to and moves with the parent clip. Connected clips use the **`lane`** attribute on their parent element to position vertically relative to the primary storyline.
 
 ---
 
@@ -120,13 +139,20 @@ These elements provide context and organization. In FCPXML, "locators" are imple
 *   **`<marker>`**: A point-of-interest locator. Use it for general notes.
 *   **`<chapter-marker>`**: A locator that defines a "jump point" for DVD/Blu-ray or video players (YouTube chapters).
 *   **`<analysis-marker>`**: Created automatically by FCP for things like "Face Detection" or "Shaky Video."
+*   **`<caption>`**: A closed caption element (introduced in FCPXML v1.8).
+    *   Contains `<text>`, `<text-style-def>`, and optional `<note>`.
+    *   Has `role` attribute and standard clip attributes (`offset`, `duration`, etc.).
+*   **`<note>`**: A simple text element for attaching notes to clips or other elements.
+
+### **The Roles System**
+Roles are a hierarchical labeling system that organizes clips by function (e.g., dialogue, music, effects, titles). They use a `role.subrole` dot-separated format (e.g., `dialogue.dialogue-1`). The `role` attribute appears on many elements including `<asset-clip>`, `<clip>`, `<audio>`, `<video>`, `<caption>`, `<title>`, `<audio-channel-source>`, and `<audio-role-source>`. Roles control audio lane organization in the timeline and are used during export to create separate audio stems.
 
 ### **Developer Example: Locators & Metadata**
 ```xml
 <asset-clip ref="r2" offset="0s" duration="10s">
     <!-- A standard marker (locator) -->
     <marker start="2s" value="Good take starts here"/>
-    
+
     <!-- A chapter marker with a specific thumbnail frame -->
     <chapter-marker start="5s" duration="1/24s" value="Chapter 1" posterOffset="0s"/>
 
@@ -153,24 +179,47 @@ Unlike most graphics engines where `(0,0)` is the top-left, FCPXML uses the **ce
     *   **`enabled`**: `1` (default) or `0`. Enables/disables the adjustment.
     *   **`position`**: Translation from the center, expressed as **percentages of the frame height**. (e.g., `10 10` is 10% right and 10% up).
     *   **`scale`**: Multiplier (e.g., `1 1` is 100%, `2 2` is 200%).
-    *   **`rotation`**: Spinning the clip in degrees. **Positive is counter-clockwise**, negative is clockwise.
+    *   **`rotation`**: Spinning the clip in degrees. **Positive is counter-clockwise**, negative is clockwise. *(Note: Some sources report positive as clockwise. Verify empirically.)*
     *   **`anchor`**: The point on the clip that "sticks" to the position, expressed as **percentages of the frame height** (relative to the clip's center).
+    *   **`tracking`**: An IDREF linking to an object tracker for automated motion tracking integration.
 *   **`<adjust-conform>`**: 
     *   Determines how to fit a clip into a sequence when their formats (resolutions) don't match.
     *   **`type="fit"`**: Scales the clip to fit entirely inside the frame (letterboxing if needed).
     *   **`type="fill"`**: Scales the clip to fill the entire frame (cropping if needed).
     *   **`type="none"`**: Keeps the clip at its original pixel size.
 *   **`<adjust-crop>`**: Trims the edges of the video.
+*   **`<adjust-blend>`**: Controls opacity and compositing blend mode.
+    *   **`amount`**: Opacity from `0.0` (transparent) to `1.0` (opaque). Default: `1.0`.
+    *   **`mode`**: Blend mode (e.g., `Subtract`, `Multiply`). If omitted, uses normal compositing.
 
 ### **Audio Attributes**
 *   **`amount` (Volume)**: Measured in decibels (dB). `0dB` is the original volume. `-inf` is muted.
 *   **`fadeIn/fadeOut`**: Automatically smooths the start or end of the sound.
 
+### **Audio Channel Configuration**
+*   **`<audio-channel-source>`**: Maps source audio channels to output channels.
+    *   **`srcCh`**: Source channel(s) (e.g., `"1, 2"`).
+    *   **`outCh`**: Output channel assignment (e.g., `"L, R"`).
+    *   **`role`**: Audio role for these channels.
+    *   **`enabled`**: Whether the channel source is active (`1` or `0`).
+    *   **`active`**: Whether the channel is actively playing (`1` or `0`).
+*   **`<audio-role-source>`**: Manages role-based audio mixing.
+    *   **`role`**: The audio role (e.g., `dialogue.dialogue-1`).
+    *   **`enabled`**: Whether this role source is active (`1` or `0`).
+    *   **`active`**: Whether this role is actively playing (`1` or `0`).
+
 ### **Timing & Keyframes**
 Keyframes within an adjustment tag use the `time` attribute, which is a rational number. However, the "effective" frame they land on is determined by the `frameDuration` of the element's format.
 
+Each `<keyframe>` element also supports:
+*   **`interp`**: Interpolation mode — `linear` | `ease` | `easeIn` | `easeOut`. Default: `linear`.
+*   **`curve`**: Curve shape — `linear` | `smooth`. Default: `smooth`.
+
 ### **Transformation Math (Developer Guide)**
-When building a renderer, use these formulas to convert FCPXML values into standard graphics engine coordinates. FCPXML uses **normalized coordinates based on frame height**.
+
+> **Note:** The unit system for `position` and `anchor` is not explicitly documented in Apple's DTD (they are simply `CDATA "0 0"`). The "percentage of frame height" interpretation below is one common reading, but has not been definitively confirmed by Apple. The formulas should be verified empirically by exporting a test FCPXML from Final Cut Pro with known position values. Some community evidence suggests the values may be direct pixel/point offsets from center.
+
+When building a renderer, use these formulas to convert FCPXML values into standard graphics engine coordinates. The following assumes **normalized coordinates based on frame height** (one common interpretation).
 
 #### **1. Proportional-to-Pixel Conversion**
 FCPXML units for `position` and `anchor` are percentages of the **Frame Height**.
@@ -208,18 +257,18 @@ When a source asset (e.g., 4K) doesn't match the timeline (e.g., 1080p), calcula
     *   **Type="fit"**: Use `min(scaleX, scaleY) = 0.36`. The clip will be 1440x1080 (letterboxed).
     *   **Type="fill"**: Use `max(scaleX, scaleY) = 0.48`. The clip will be 1920x1440 (cropped).
 
-### **Developer Example: Animated Opacity Fade**
-*This clip starts invisible and takes 2 seconds to fade in to full 100% visibility.*
+### **Developer Example: Animated Opacity Fade (Blend)**
+*This clip starts invisible and takes 2 seconds to fade in to full 100% visibility. Per the DTD, opacity is controlled by `<adjust-blend>`, not `<adjust-transform>`.*
 
 ```xml
-<adjust-transform>
-    <param name="opacity">
+<adjust-blend amount="0.0">
+    <param name="amount">
         <keyframeAnimation>
             <keyframe time="0s" value="0.0"/>
             <keyframe time="2s" value="1.0"/>
         </keyframeAnimation>
     </param>
-</adjust-transform>
+</adjust-blend>
 ```
 
 ---
@@ -236,6 +285,31 @@ To build an editor, you must calculate where a frame from a source file appears 
 3.  **`Start`**: What point in the original file we began cutting from.
 
 **Formula:** `SourcePosition = (CurrentPlayhead - Offset) + Start`
+
+### **Speed & Retime Effects**
+Variable speed (retime) effects are controlled by `<timeMap>` and `<timept>` elements. These map output (timeline) time to source (media) time, allowing speed ramps, freeze frames, and reverse playback.
+
+*   **`<timeMap>`**: Container for speed mapping points.
+    *   **`frameSampling`**: Quality mode for interpolated frames: `floor` | `nearest-neighbor` | `frame-blending` | `optical-flow-classic` | `optical-flow` | `optical-flow-frc`. Default: `floor`.
+    *   **`preservesPitch`**: Whether to preserve audio pitch during speed changes (`0` | `1`). Default: `1`.
+*   **`<timept>`**: A single time mapping point within a `<timeMap>`.
+    *   **`time`**: The output (timeline) time.
+    *   **`value`**: The corresponding source (media) time.
+    *   **`interp`**: Interpolation curve between points: `smooth2` | `linear` | `smooth`. Default: `smooth2`.
+
+#### **Developer Example: 2x Speed Ramp**
+*Maps 10 seconds of timeline to 20 seconds of source media, producing 2x playback speed.*
+
+```xml
+<timeMap>
+    <timept time="0s" value="0s" interp="smooth2"/>
+    <timept time="10s" value="20s" interp="smooth2"/>
+</timeMap>
+```
+
+*   **`<conform-rate>`**: Part of timing parameters. Controls frame rate conforming when a clip's native frame rate differs from the sequence.
+    *   **`scaleEnabled`**: Whether rate conforming is active (`0` | `1`).
+    *   **`srcFrameRate`**: The source frame rate to conform from.
 
 ---
 
@@ -255,7 +329,7 @@ If you are writing code to parse FCPXML, follow these steps:
 
 ### **Root & Organizational Tags**
 *   **`<fcpxml>`**: The root element.
-    *   **`version`**: The schema version (e.g., `1.10`, `1.11`).
+    *   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`).
 *   **`<library>`**: Represents an FCP library.
     *   **`location`**: The file URL to the library on disk.
 *   **`<event>`**: A container for clips and projects.
@@ -296,6 +370,28 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`start` / `duration`**: Range within the asset.
     *   **`lane`**: Vertical position (default `0`).
     *   **`role`**: Media role (e.g., `dialogue`, `titles`).
+*   **`<clip>`**: A generic clip element (distinct from `<asset-clip>`).
+    *   Supports `format`, `audioStart` / `audioDuration` (for split edits), `tcStart` / `tcFormat`.
+    *   Can contain nested spines, captions, markers, and filters.
+*   **`<video>`**: A video-only clip referencing an asset.
+    *   **`ref`**: Reference to an `<asset>` ID.
+    *   **`srcID`**: Source identifier within the asset.
+    *   **`role`**: Video role assignment.
+    *   Can contain params, filters, and markers.
+*   **`<audio>`**: An audio-only clip referencing an asset.
+    *   **`ref`**: Reference to an `<asset>` ID.
+    *   **`srcID`**: Source identifier within the asset.
+    *   **`role`**: Audio role assignment.
+    *   **`srcCh`**: Source audio channels (e.g., `"1, 2"`).
+    *   **`outCh`**: Output channel assignment (e.g., `"L, R"`).
+    *   Can contain `<adjust-volume>`, filters, and markers.
+*   **`<sync-clip>`**: A synchronized clip grouping independently recorded media.
+    *   **`format`**: Reference to a `<format>` ID.
+    *   **`audioStart` / `audioDuration`**: For split edits.
+    *   Contains `<sync-source>` children mapping source streams.
+*   **`<audition>`**: Container for audition alternatives.
+    *   First child is the active "pick"; subsequent children are alternatives.
+    *   Can contain: `<audio>`, `<video>`, `<title>`, `<ref-clip>`, `<asset-clip>`, `<clip>`, `<sync-clip>`, `<mc-clip>`.
 *   **`<mc-clip>`**: A clip referencing a `<multicam>` media resource.
     *   **`ref`**: Reference to a `<media>` ID.
     *   **`videoAngleID` / `audioAngleID`**: Active angle IDs.
@@ -303,7 +399,15 @@ If you are writing code to parse FCPXML, follow these steps:
 *   **`<gap>`**: A placeholder for empty space.
     *   **`duration` / `offset`**: Position and length.
 *   **`<transition>`**: A transition effect between two clips.
+    *   **`name`**: Display name of the transition.
+    *   **`offset`**: Position on the timeline.
+    *   **`duration`**: Length of the transition.
+    *   Contains optional `<filter-video>`, `<filter-audio>`, markers, and metadata.
 *   **`<title>`**: A text overlay generator.
+*   **`<caption>`**: A closed caption element.
+    *   **`role`**: Caption role assignment.
+    *   Standard clip attributes (`offset`, `duration`, etc.).
+    *   Contains `<text>`, `<text-style-def>`.
 
 ### **Metadata & Locators**
 *   **`<marker>`**: A point-of-interest locator.
@@ -315,6 +419,7 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`start` / `duration`**: The range covered by the tag.
 *   **`<metadata>`**: Container for key-value metadata.
     *   **`<md>`**: A metadata entry with `key` and `value` attributes.
+*   **`<note>`**: A simple text element for attaching notes to clips or other elements.
 
 ### **Adjustments & Effects**
 *   **`<adjust-transform>`**: Spatial transformations.
@@ -322,9 +427,37 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`scale`**: XY multiplier.
     *   **`rotation`**: Rotation in degrees (positive is CCW).
     *   **`anchor`**: Center of transformation (percentage of height).
+    *   **`tracking`**: IDREF linking to an object tracker.
+*   **`<adjust-blend>`**: Opacity and compositing blend mode.
+    *   **`amount`**: Opacity from `0.0` to `1.0` (default: `1.0`).
+    *   **`mode`**: Blend mode (e.g., `Subtract`, `Multiply`). Omit for normal compositing.
 *   **`<adjust-conform>`**: Resolution scaling rules.
     *   **`type`**: `fit`, `fill`, or `none`.
+*   **`<adjust-crop>`**: Trims the edges of the video.
+    *   **`mode`**: Crop mode (`trim`, `crop`, `pan`).
 *   **`<adjust-volume>`**: Audio level controls.
     *   **`amount`**: Volume in dB.
 *   **`<filter-video>` / `<filter-audio>`**: Usage tags for effects.
     *   **`ref`**: Reference to an `<effect>` ID.
+
+### **Audio Channel Configuration**
+*   **`<audio-channel-source>`**: Maps source audio channels to output channels.
+    *   **`srcCh`**: Source channel(s) (e.g., `"1, 2"`).
+    *   **`outCh`**: Output channel assignment (e.g., `"L, R"`).
+    *   **`role`**: Audio role for these channels.
+    *   **`enabled`** / **`active`**: Boolean flags (`1` or `0`).
+*   **`<audio-role-source>`**: Manages role-based audio mixing.
+    *   **`role`**: The audio role (e.g., `dialogue.dialogue-1`).
+    *   **`enabled`** / **`active`**: Boolean flags (`1` or `0`).
+
+### **Speed & Retime**
+*   **`<timeMap>`**: Container for speed mapping points.
+    *   **`frameSampling`**: `floor` | `nearest-neighbor` | `frame-blending` | `optical-flow-classic` | `optical-flow` | `optical-flow-frc`.
+    *   **`preservesPitch`**: `0` | `1` (default: `1`).
+*   **`<timept>`**: A time mapping point.
+    *   **`time`**: Output (timeline) time.
+    *   **`value`**: Corresponding source time.
+    *   **`interp`**: `smooth2` | `linear` | `smooth` (default: `smooth2`).
+*   **`<conform-rate>`**: Frame rate conforming.
+    *   **`scaleEnabled`**: `0` | `1`.
+    *   **`srcFrameRate`**: Source frame rate to conform from.
