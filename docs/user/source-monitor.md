@@ -43,6 +43,13 @@ The selected region is highlighted in the scrubber bar.
 
 - Click anywhere on the scrubber to jump to that position.
 - Click and drag to scrub continuously.
+- Repeated scrubs that land on the same frame are deduplicated internally to avoid redundant decoder seeks.
+
+## Source Playback Priority
+
+Source seek behavior can be tuned in **Preferences → Playback → Source monitor playback priority**:
+- `Smooth` / `Balanced`: lighter keyframe seeks for higher responsiveness.
+- `Accurate`: frame-accurate seeks for precision-first work.
 
 ## Appending to Timeline
 
@@ -67,6 +74,18 @@ Both operations target the active track (if its kind matches), or fall back to t
 
 When a proxy file exists for the selected media (see [Preferences → Proxy Preview](preferences.md)), the Source Monitor automatically loads the proxy instead of the full-resolution original. If no proxy exists yet, a proxy transcode is requested in the background; once it completes, the player reloads with the proxy automatically. This ensures smooth preview playback even with high-resolution footage (e.g. 5.3K GoPro HEVC) without any manual steps.
 
+When global Proxy mode is **Off**, Source Monitor proxy scale now adapts to panel size:
+- smaller Source Monitor area → prefers **Quarter** proxy
+- larger Source Monitor area → prefers **Half** proxy
+
 ## Adaptive Quality
 
 The Source Monitor automatically adapts its internal processing resolution to match the widget size. Instead of processing video at a fixed 1920×1080, the preview pipeline scales to approximately 2× the actual display size (e.g. ~640×360 for a 320×180 widget). This dramatically reduces CPU usage — especially for high-resolution sources — while maintaining sharp visual quality. The resolution updates automatically as the panel is resized.
+
+## Playback Smoothness Policy
+
+During active Source Monitor playback, UltimateSlice prioritizes smooth visual motion by allowing late frames to be dropped under load instead of building latency. When paused or stopped, the player returns to conservative buffering behavior for stable seeking and frame display.
+
+## Hardware Decode Detection and Fallback
+
+When **Enable hardware acceleration** is on, the Source Monitor now checks for available VA-API decoders and prefers a hardware-fast decode path when possible. If the hardware path fails on a given clip (for example due to format negotiation/DMABuf issues), UltimateSlice automatically falls back to the software decode path for that clip and continues playback.

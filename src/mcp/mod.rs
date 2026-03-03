@@ -38,6 +38,10 @@ pub enum McpCommand {
         priority: String,
         reply: SyncSender<Value>,
     },
+    SetSourcePlaybackPriority {
+        priority: String,
+        reply: SyncSender<Value>,
+    },
     SetProxyMode {
         mode: String,
         reply: SyncSender<Value>,

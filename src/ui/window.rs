@@ -66,6 +66,24 @@ fn proxy_scale_for_mode(
     }
 }
 
+fn source_proxy_scale_for_widget(
+    mode: &crate::ui_state::ProxyMode,
+    widget_width: i32,
+    widget_height: i32,
+) -> crate::media::proxy_cache::ProxyScale {
+    match mode {
+        crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+        crate::ui_state::ProxyMode::HalfRes => crate::media::proxy_cache::ProxyScale::Half,
+        crate::ui_state::ProxyMode::Off => {
+            if widget_width <= 900 || widget_height <= 520 {
+                crate::media::proxy_cache::ProxyScale::Quarter
+            } else {
+                crate::media::proxy_cache::ProxyScale::Half
+            }
+        }
+    }
+}
+
 fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
     project
@@ -122,24 +140,34 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
     let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
+    let initial_source_playback_priority =
+        preferences_state.borrow().source_playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
     let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
     let initial_show_timeline_preview = preferences_state.borrow().show_timeline_preview;
-    let (player, paintable) =
+    let (player_obj, paintable) =
         Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
-    // Monitor the source-preview pipeline bus for errors so caps
-    // negotiation failures or decoder errors are logged and the player
-    // is stopped gracefully instead of silently freezing.
+    player_obj.set_source_playback_priority(initial_source_playback_priority);
+    let player = Rc::new(RefCell::new(player_obj));
+    log::info!(
+        "Source preview decoder capabilities: vaapi_available={}, mode={}",
+        player.borrow().vaapi_available(),
+        player.borrow().decode_mode_name()
+    );
+    // Monitor the source-preview pipeline bus for errors; if the HW decode
+    // path fails, downgrade to software mode and retry automatically.
     {
         use gstreamer::prelude::*;
         let pipeline = player
+            .borrow()
             .pipeline()
             .clone()
             .downcast::<gstreamer::Pipeline>()
             .ok();
         if let Some(ref pipe) = pipeline {
             if let Some(bus) = pipe.bus() {
+                let player_for_bus = player.clone();
                 let _watch = bus.add_watch_local(move |_bus, msg: &gstreamer::Message| {
                     use gstreamer::MessageView;
                     match msg.view() {
@@ -149,6 +177,30 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                                 err.error(),
                                 err.debug()
                             );
+                            let mut should_fallback = false;
+                            let err_text = err.error().to_string().to_lowercase();
+                            let dbg_text = err
+                                .debug()
+                                .map(|d| d.to_string().to_lowercase())
+                                .unwrap_or_default();
+                            if err_text.contains("not-negotiated")
+                                || dbg_text.contains("not-negotiated")
+                                || dbg_text.contains("dmabuf")
+                                || dbg_text.contains("va")
+                            {
+                                should_fallback = true;
+                            }
+                            if should_fallback {
+                                match player_for_bus.borrow().fallback_to_software_after_error() {
+                                    Ok(true) => log::warn!(
+                                        "Source preview fallback: switched to software decode mode after HW-path error"
+                                    ),
+                                    Ok(false) => {}
+                                    Err(e) => log::error!(
+                                        "Source preview fallback failed: {e:#}"
+                                    ),
+                                }
+                            }
                         }
                         MessageView::Warning(warn) => {
                             log::warn!(
@@ -164,7 +216,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
         }
     }
-    let player = Rc::new(RefCell::new(player));
 
     let (mut prog_player_raw, prog_paintable, prog_paintable2) =
         ProgramPlayer::new().expect("Failed to create program player");
@@ -248,6 +299,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         {
                             eprintln!("Failed to apply hardware acceleration setting: {e}");
                         }
+                        player
+                            .borrow()
+                            .set_source_playback_priority(new_state.source_playback_priority.clone());
                         prog_player
                             .borrow_mut()
                             .set_playback_priority(new_state.playback_priority.clone());
@@ -1586,11 +1640,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 // Use proxy for source preview when available to avoid
                 // freezing on high-resolution content (e.g. 5.3K HEVC).
                 let prefs = preferences_state.borrow();
-                let proxy_scale = if prefs.proxy_mode.is_enabled() {
-                    proxy_scale_for_mode(&prefs.proxy_mode)
-                } else {
-                    crate::media::proxy_cache::ProxyScale::Half
-                };
+                let proxy_scale = source_proxy_scale_for_widget(
+                    &prefs.proxy_mode,
+                    preview_widget.width(),
+                    preview_widget.height(),
+                );
                 drop(prefs);
                 // Request proxy first so existing on-disk proxies are
                 // discovered and registered in the in-memory cache before
@@ -2447,6 +2501,7 @@ fn handle_mcp_command(
                 .send(json!({
                     "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
                     "playback_priority": prefs.playback_priority.as_str(),
+                    "source_playback_priority": prefs.source_playback_priority.as_str(),
                     "proxy_mode": prefs.proxy_mode.as_str(),
                     "show_timeline_preview": prefs.show_timeline_preview,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
@@ -2468,7 +2523,8 @@ fn handle_mcp_command(
                         .send(json!({
                             "success": true,
                             "hardware_acceleration_enabled": enabled,
-                            "playback_priority": new_state.playback_priority.as_str()
+                            "playback_priority": new_state.playback_priority.as_str(),
+                            "source_playback_priority": new_state.source_playback_priority.as_str()
                         }))
                         .ok();
                 }
@@ -2478,6 +2534,7 @@ fn handle_mcp_command(
                             "success": false,
                             "hardware_acceleration_enabled": enabled,
                             "playback_priority": new_state.playback_priority.as_str(),
+                            "source_playback_priority": new_state.source_playback_priority.as_str(),
                             "error": e.to_string()
                         }))
                         .ok();
@@ -2498,6 +2555,25 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "playback_priority": new_state.playback_priority.as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::SetSourcePlaybackPriority { priority, reply } => {
+            let parsed = crate::ui_state::PlaybackPriority::from_str(&priority);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.source_playback_priority = parsed.clone();
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            player
+                .borrow()
+                .set_source_playback_priority(parsed.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "source_playback_priority": new_state.source_playback_priority.as_str()
                 }))
                 .ok();
         }

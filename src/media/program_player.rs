@@ -630,9 +630,7 @@ impl ProgramPlayer {
         // playbin's own "volume" property delegates to pulsesink's StreamVolume
         // interface, which under PulseAudio/PipeWire flat-volume mode can also
         // affect the main compositor pipeline's audio level.
-        let audio_volume_element = gst::ElementFactory::make("volume")
-            .build()
-            .ok();
+        let audio_volume_element = gst::ElementFactory::make("volume").build().ok();
         match (&audio_volume_element, &level_element_audio) {
             (Some(vol), Some(lv)) => {
                 let bin = gst::Bin::builder().name("audio-filter-bin").build();
@@ -640,8 +638,10 @@ impl ProgramPlayer {
                 vol.link(lv).unwrap();
                 let sink_pad = vol.static_pad("sink").unwrap();
                 let src_pad = lv.static_pad("src").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                    .unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
+                    .unwrap();
                 audio_pipeline.set_property("audio-filter", &bin.upcast::<gst::Element>());
             }
             (Some(vol), None) => {
@@ -758,8 +758,7 @@ impl ProgramPlayer {
     pub fn set_frame_rate(&mut self, numerator: u32, denominator: u32) {
         if numerator > 0 && denominator > 0 {
             // frame_duration = 1e9 * denominator / numerator (nanoseconds)
-            self.frame_duration_ns =
-                (1_000_000_000u64 * denominator as u64) / numerator as u64;
+            self.frame_duration_ns = (1_000_000_000u64 * denominator as u64) / numerator as u64;
         }
     }
 
@@ -1394,15 +1393,10 @@ impl ProgramPlayer {
                 // brightness and contrast offsets.  Not pixel-perfect but
                 // gives real-time visual feedback.  Export uses ffmpeg
                 // colorbalance for accurate per-luminance grading.
-                let eff_brightness = (brightness
-                    + shadows * 0.3
-                    + midtones * 0.2
-                    + highlights * 0.15)
-                    .clamp(-1.0, 1.0);
-                let eff_contrast = (contrast
-                    - shadows * 0.15
-                    + highlights * 0.15)
-                    .clamp(0.0, 2.0);
+                let eff_brightness =
+                    (brightness + shadows * 0.3 + midtones * 0.2 + highlights * 0.15)
+                        .clamp(-1.0, 1.0);
+                let eff_contrast = (contrast - shadows * 0.15 + highlights * 0.15).clamp(0.0, 2.0);
                 vb.set_property("brightness", eff_brightness);
                 vb.set_property("contrast", eff_contrast);
                 vb.set_property("saturation", saturation.clamp(0.0, 2.0));
@@ -1842,7 +1836,8 @@ impl ProgramPlayer {
 
     fn effective_source_path_for_clip(&self, clip: &ProgramClip) -> String {
         if self.proxy_enabled {
-            let key = crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+            let key =
+                crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
             self.proxy_paths
                 .get(&key)
                 .cloned()
@@ -2156,17 +2151,17 @@ impl ProgramPlayer {
         let effective_timeout_ms = self.effective_wait_timeout_ms(timeout_ms);
         let deadline = Instant::now() + Duration::from_millis(effective_timeout_ms);
         // Use finer sleep granularity during playback for faster response.
-        let sleep_ms = if self.state == PlayerState::Playing { 5 } else { 15 };
+        let sleep_ms = if self.state == PlayerState::Playing {
+            5
+        } else {
+            15
+        };
         loop {
-            let all_arrived = self
-                .slots
-                .iter()
-                .zip(baseline.iter())
-                .all(|(slot, &base)| {
-                    // Audio-only slots have no compositor pad — always "arrived".
-                    slot.compositor_pad.is_none()
-                        || slot.comp_arrival_seq.load(Ordering::Relaxed) > base
-                });
+            let all_arrived = self.slots.iter().zip(baseline.iter()).all(|(slot, &base)| {
+                // Audio-only slots have no compositor pad — always "arrived".
+                slot.compositor_pad.is_none()
+                    || slot.comp_arrival_seq.load(Ordering::Relaxed) > base
+            });
             if all_arrived {
                 log::info!(
                     "wait_for_compositor_arrivals: all {} slots arrived",
@@ -2772,10 +2767,7 @@ impl ProgramPlayer {
                 Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos)
             };
             if !ok {
-                log::warn!(
-                    "try_incremental_add_only: seek FAILED for clip {}",
-                    clip.id
-                );
+                log::warn!("try_incremental_add_only: seek FAILED for clip {}", clip.id);
                 if let Some(ref pad) = slot.compositor_pad {
                     let _ = pad.send_event(gst::event::Eos::new());
                 }
@@ -3124,10 +3116,8 @@ impl ProgramPlayer {
                 + clip.midtones * 0.2
                 + clip.highlights * 0.15)
                 .clamp(-1.0, 1.0);
-            let eff_contrast = (clip.contrast
-                - clip.shadows * 0.15
-                + clip.highlights * 0.15)
-                .clamp(0.0, 2.0);
+            let eff_contrast =
+                (clip.contrast - clip.shadows * 0.15 + clip.highlights * 0.15).clamp(0.0, 2.0);
             vb.set_property("brightness", eff_brightness);
             vb.set_property("contrast", eff_contrast);
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
@@ -3328,10 +3318,7 @@ impl ProgramPlayer {
 
     /// Build an audio-only slot for a fully-occluded clip.  Skips video
     /// decode, effects, and compositor pad entirely.
-    fn build_audio_only_slot_for_clip(
-        &mut self,
-        clip_idx: usize,
-    ) -> Option<VideoSlot> {
+    fn build_audio_only_slot_for_clip(&mut self, clip_idx: usize) -> Option<VideoSlot> {
         let clip = self.clips[clip_idx].clone();
         let effective_path = self.effective_source_path_for_clip(&clip);
         let uri = format!("file://{}", effective_path);
@@ -3608,7 +3595,10 @@ impl ProgramPlayer {
                             match pad.link(sink) {
                                 Ok(_) => {
                                     video_linked_for_cb.store(true, Ordering::Relaxed);
-                                    log::info!("ProgramPlayer: video linked clip={}", clip_id_for_cb);
+                                    log::info!(
+                                        "ProgramPlayer: video linked clip={}",
+                                        clip_id_for_cb
+                                    );
                                 }
                                 Err(e) => {
                                     log::warn!(
@@ -3637,7 +3627,8 @@ impl ProgramPlayer {
                 .unwrap_or_default();
             if factory_name.starts_with("avdec_h264") || factory_name.starts_with("avdec_vp8") {
                 child.set_property("max-threads", 2i32);
-            } else if factory_name.starts_with("avdec_h265") || factory_name.starts_with("avdec_vp9")
+            } else if factory_name.starts_with("avdec_h265")
+                || factory_name.starts_with("avdec_vp9")
             {
                 child.set_property("max-threads", 4i32);
             } else if tune_multiqueue && factory_name == "multiqueue" {
@@ -3791,7 +3782,9 @@ impl ProgramPlayer {
                 if let Some(slot) = self.build_audio_only_slot_for_clip(clip_idx) {
                     self.slots.push(slot);
                 }
-            } else if let Some(slot) = self.build_slot_for_clip(clip_idx, zorder_offset, was_playing) {
+            } else if let Some(slot) =
+                self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
+            {
                 self.slots.push(slot);
             }
         }

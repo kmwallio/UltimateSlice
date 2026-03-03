@@ -11,6 +11,12 @@ pub enum PlayerState {
     Paused,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceDecodeMode {
+    SoftwareFiltered,
+    HardwareFast,
+}
+
 /// Wraps a GStreamer playbin pipeline and exposes simple controls.
 /// The video sink is `gtk4paintablesink`, which produces a `gdk4::Paintable`
 /// that can be displayed in a `gtk4::Picture` widget.
@@ -35,6 +41,26 @@ pub struct Player {
     videoflip_flip: Option<gst::Element>,
     /// Prescale capsfilter — resolution updated at runtime to match widget size
     prescale_caps: Option<gst::Element>,
+    /// Queue after prescale, tuned dynamically for playback smoothness
+    prescale_queue: Option<gst::Element>,
+    /// Software filter bin used by the safe CPU decode path.
+    software_video_filter: Option<gst::Element>,
+    /// Whether VA-API decoder plugins are available in this runtime.
+    vaapi_available: bool,
+    /// Original decoder ranks for VA decoder factories (restored in HW mode).
+    va_decoder_original_ranks: Vec<(String, gst::Rank)>,
+    /// Active source decode mode.
+    decode_mode: Arc<Mutex<SourceDecodeMode>>,
+    /// Last URI loaded into the source player.
+    current_uri: Arc<Mutex<Option<String>>>,
+    /// URI that already failed in HW mode; keep software mode for this URI.
+    hw_failed_uri: Arc<Mutex<Option<String>>>,
+    /// Source monitor seek policy.
+    source_playback_priority: Arc<Mutex<crate::ui_state::PlaybackPriority>>,
+    /// Frame duration used for paused seek deduplication.
+    frame_duration_ns: Arc<Mutex<u64>>,
+    /// Last frame-quantized seek position.
+    last_seeked_frame_pos: Arc<Mutex<Option<u64>>>,
 }
 
 impl Player {
@@ -68,25 +94,21 @@ impl Player {
             .property("video-sink", video_sink)
             .build()?;
 
-        // Force software decoders so the CPU-based effects chain receives
-        // plain video/x-raw buffers.  VA-API decoders output DMABuf /
-        // VAMemory which cannot be CPU-mapped for videoconvertscale /
-        // videobalance.  Lower VA-API decoder ranks below software
-        // decoders so GStreamer auto-plugging selects avdec_* instead.
-        // The prescale caps (1920×1080) keep SW decode manageable even
-        // for 5.3K sources, and the leaky queue drops frames if slow.
-        for name in &[
+        let va_decoder_names = [
             "vah264dec",
             "vah265dec",
             "vampeg2dec",
             "vavp8dec",
             "vavp9dec",
             "vaav1dec",
-        ] {
+        ];
+        let mut va_decoder_original_ranks: Vec<(String, gst::Rank)> = Vec::new();
+        for name in &va_decoder_names {
             if let Some(factory) = gst::ElementFactory::find(name) {
-                factory.set_rank(gst::Rank::MARGINAL);
+                va_decoder_original_ranks.push(((*name).to_string(), factory.rank()));
             }
         }
+        let vaapi_available = !va_decoder_original_ranks.is_empty();
 
         // Build a filter bin:
         // prescale ! caps(I420,≤640×360) ! queue ! videocrop ! videobalance
@@ -111,6 +133,8 @@ impl Player {
         }
 
         let mut prescale_caps_field: Option<gst::Element> = None;
+        let mut prescale_queue_field: Option<gst::Element> = None;
+        let mut software_video_filter_field: Option<gst::Element> = None;
 
         if let Some(ref vb) = videobalance {
             let bin = gst::Bin::new();
@@ -139,10 +163,10 @@ impl Player {
             // decode at 5.3K doesn't stall the sink/main thread.
             // leaky=downstream (2) drops oldest buffers when full.
             let prescale_queue = gst::ElementFactory::make("queue")
-                .property("max-size-buffers", 2u32)
+                .property("max-size-buffers", 8u32)
                 .property("max-size-bytes", 0u32)
                 .property("max-size-time", 0u64)
-                .property_from_str("leaky", "downstream")
+                .property_from_str("leaky", "no")
                 .build()
                 .expect("queue must be available");
 
@@ -151,8 +175,16 @@ impl Player {
             {
                 bin.add_many([&prescale, &prescale_caps, &prescale_queue, vc, vb, vfr, vff])
                     .ok();
-                gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vc, vb, vfr, vff])
-                    .ok();
+                gst::Element::link_many([
+                    &prescale,
+                    &prescale_caps,
+                    &prescale_queue,
+                    vc,
+                    vb,
+                    vfr,
+                    vff,
+                ])
+                .ok();
                 let sink_pad = prescale.static_pad("sink").unwrap();
                 let src_pad = vff.static_pad("src").unwrap();
                 bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
@@ -160,7 +192,8 @@ impl Player {
                 bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
                     .ok();
             } else {
-                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vb]).ok();
+                bin.add_many([&prescale, &prescale_caps, &prescale_queue, vb])
+                    .ok();
                 gst::Element::link_many([&prescale, &prescale_caps, &prescale_queue, vb]).ok();
                 let sink_pad = prescale.static_pad("sink").unwrap();
                 let src_pad = vb.static_pad("src").unwrap();
@@ -170,32 +203,63 @@ impl Player {
                     .ok();
             }
             prescale_caps_field = Some(prescale_caps);
-            pipeline.set_property("video-filter", &bin);
+            prescale_queue_field = Some(prescale_queue);
+            let bin_element: gst::Element = bin.upcast();
+            software_video_filter_field = Some(bin_element.clone());
+            pipeline.set_property("video-filter", &bin_element);
         }
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let hardware_acceleration_enabled = Arc::new(Mutex::new(hardware_acceleration_enabled));
+        let decode_mode = Arc::new(Mutex::new(SourceDecodeMode::HardwareFast));
+        let current_uri = Arc::new(Mutex::new(None));
+        let hw_failed_uri = Arc::new(Mutex::new(None));
+        let source_playback_priority =
+            Arc::new(Mutex::new(crate::ui_state::PlaybackPriority::Smooth));
+        let frame_duration_ns = Arc::new(Mutex::new(41_666_667));
+        let last_seeked_frame_pos = Arc::new(Mutex::new(None));
 
-        Ok((
-            Self {
-                pipeline,
-                state,
-                paintablesink,
-                gl_video_sink,
-                hardware_acceleration_enabled,
-                videobalance,
-                gaussianblur,
-                videocrop,
-                videoflip_rotate,
-                videoflip_flip,
-                prescale_caps: prescale_caps_field,
-            },
-            paintable,
-        ))
+        let player = Self {
+            pipeline,
+            state,
+            paintablesink,
+            gl_video_sink,
+            hardware_acceleration_enabled,
+            videobalance,
+            gaussianblur,
+            videocrop,
+            videoflip_rotate,
+            videoflip_flip,
+            prescale_caps: prescale_caps_field,
+            prescale_queue: prescale_queue_field,
+            software_video_filter: software_video_filter_field,
+            vaapi_available,
+            va_decoder_original_ranks,
+            decode_mode,
+            current_uri,
+            hw_failed_uri,
+            source_playback_priority,
+            frame_duration_ns,
+            last_seeked_frame_pos,
+        };
+
+        if *player.hardware_acceleration_enabled.lock().unwrap() && player.vaapi_available {
+            player.apply_decode_mode(SourceDecodeMode::HardwareFast);
+        } else {
+            player.apply_decode_mode(SourceDecodeMode::SoftwareFiltered);
+        }
+
+        Ok((player, paintable))
     }
 
     /// Load a URI (e.g. `file:///path/to/video.mp4`)
     pub fn load(&self, uri: &str) -> Result<()> {
+        {
+            let mut current = self.current_uri.lock().unwrap();
+            *current = Some(uri.to_string());
+        }
+        *self.last_seeked_frame_pos.lock().unwrap() = None;
+        self.apply_decode_mode(self.preferred_mode_for_uri(uri));
         // Fully quiesce playbin before replacing URI. Ready-level reconfiguration
         // can still leave internal playsink children mid-transition under rapid
         // repeated loads, which may trip assertions in playsink element setup.
@@ -209,23 +273,27 @@ impl Player {
         // thread causes a STATE_LOCK deadlock if play() is called before
         // preroll finishes.
         self.pipeline.set_state(gst::State::Paused)?;
+        self.set_playback_smoothness_policy(false);
         *self.state.lock().unwrap() = PlayerState::Paused;
         Ok(())
     }
 
     pub fn play(&self) -> Result<()> {
+        self.set_playback_smoothness_policy(true);
         Self::safe_set_state(&self.pipeline, gst::State::Playing);
         *self.state.lock().unwrap() = PlayerState::Playing;
         Ok(())
     }
 
     pub fn pause(&self) -> Result<()> {
+        self.set_playback_smoothness_policy(false);
         Self::safe_set_state(&self.pipeline, gst::State::Paused);
         *self.state.lock().unwrap() = PlayerState::Paused;
         Ok(())
     }
 
     pub fn stop(&self) -> Result<()> {
+        self.set_playback_smoothness_policy(false);
         Self::safe_set_state(&self.pipeline, gst::State::Ready);
         *self.state.lock().unwrap() = PlayerState::Stopped;
         Ok(())
@@ -240,8 +308,7 @@ impl Player {
     /// deadlock that occurs when `set_state()` is called while an async
     /// transition is still running.
     fn safe_set_state(pipeline: &gst::Element, target: gst::State) {
-        let (_result, _state, pending) =
-            pipeline.state(Some(gst::ClockTime::from_mseconds(0)));
+        let (_result, _state, pending) = pipeline.state(Some(gst::ClockTime::from_mseconds(0)));
         if pending == gst::State::VoidPending {
             let _ = pipeline.set_state(target);
             return;
@@ -268,8 +335,20 @@ impl Player {
 
     /// Seek to an absolute position in nanoseconds (snaps to nearest keyframe)
     pub fn seek(&self, position_ns: u64) -> Result<()> {
+        let playing = *self.state.lock().unwrap() == PlayerState::Playing;
+        if !playing {
+            let frame_ns = (*self.frame_duration_ns.lock().unwrap()).max(1);
+            let frame_pos = (position_ns / frame_ns) * frame_ns;
+            let mut last = self.last_seeked_frame_pos.lock().unwrap();
+            if *last == Some(frame_pos) {
+                return Ok(());
+            }
+            *last = Some(frame_pos);
+        } else {
+            *self.last_seeked_frame_pos.lock().unwrap() = None;
+        }
         self.pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            self.source_seek_flags(playing),
             gst::ClockTime::from_nseconds(position_ns),
         )?;
         Ok(())
@@ -278,6 +357,9 @@ impl Player {
     /// Frame-accurate seek to an absolute position in nanoseconds.
     /// Slower than `seek()` but lands on the exact requested frame.
     pub fn seek_accurate(&self, position_ns: u64) -> Result<()> {
+        let frame_ns = (*self.frame_duration_ns.lock().unwrap()).max(1);
+        let frame_pos = (position_ns / frame_ns) * frame_ns;
+        *self.last_seeked_frame_pos.lock().unwrap() = Some(frame_pos);
         self.pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_nseconds(position_ns),
@@ -323,12 +405,25 @@ impl Player {
     }
 
     pub fn set_hardware_acceleration(&self, enabled: bool) -> Result<()> {
-        // glsinkbin is always used when available for efficient GL rendering;
-        // swapping to raw paintablesink at runtime would trigger the
-        // !element_bus assertion because paintablesink already has a bus
-        // from glsinkbin.  Track the flag for future use (decoder hints).
         *self.hardware_acceleration_enabled.lock().unwrap() = enabled;
+        if let Some(uri) = self.current_uri.lock().unwrap().clone() {
+            self.load(&uri)?;
+        } else if enabled && self.vaapi_available {
+            self.apply_decode_mode(SourceDecodeMode::HardwareFast);
+        } else {
+            self.apply_decode_mode(SourceDecodeMode::SoftwareFiltered);
+        }
         Ok(())
+    }
+
+    pub fn set_source_playback_priority(&self, priority: crate::ui_state::PlaybackPriority) {
+        *self.source_playback_priority.lock().unwrap() = priority;
+        let playing = *self.state.lock().unwrap() == PlayerState::Playing;
+        self.set_playback_smoothness_policy(playing);
+    }
+
+    pub fn set_source_frame_duration(&self, frame_duration_ns: u64) {
+        *self.frame_duration_ns.lock().unwrap() = frame_duration_ns.max(1);
     }
 
     /// Update the prescale capsfilter to match the source preview widget size.
@@ -346,6 +441,123 @@ impl Player {
                 .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                 .build();
             caps_elem.set_property("caps", &caps);
+        }
+    }
+
+    fn preferred_mode_for_uri(&self, uri: &str) -> SourceDecodeMode {
+        let hw_enabled = *self.hardware_acceleration_enabled.lock().unwrap();
+        if !hw_enabled || !self.vaapi_available {
+            return SourceDecodeMode::SoftwareFiltered;
+        }
+        let hw_failed_uri = self.hw_failed_uri.lock().unwrap();
+        if hw_failed_uri.as_deref() == Some(uri) {
+            SourceDecodeMode::SoftwareFiltered
+        } else {
+            SourceDecodeMode::HardwareFast
+        }
+    }
+
+    fn apply_decode_mode(&self, mode: SourceDecodeMode) {
+        let current = *self.decode_mode.lock().unwrap();
+        if current == mode {
+            return;
+        }
+        match mode {
+            SourceDecodeMode::SoftwareFiltered => {
+                self.set_va_decoder_rank_policy(false);
+                if let Some(ref filter) = self.software_video_filter {
+                    self.pipeline.set_property("video-filter", filter);
+                }
+            }
+            SourceDecodeMode::HardwareFast => {
+                self.set_va_decoder_rank_policy(true);
+                self.pipeline
+                    .set_property("video-filter", Option::<&gst::Element>::None);
+            }
+        }
+        *self.decode_mode.lock().unwrap() = mode;
+    }
+
+    fn set_va_decoder_rank_policy(&self, restore_original: bool) {
+        for (name, original_rank) in &self.va_decoder_original_ranks {
+            if let Some(factory) = gst::ElementFactory::find(name) {
+                if restore_original {
+                    factory.set_rank(*original_rank);
+                } else {
+                    factory.set_rank(gst::Rank::MARGINAL);
+                }
+            }
+        }
+    }
+
+    pub fn fallback_to_software_after_error(&self) -> Result<bool> {
+        if *self.decode_mode.lock().unwrap() != SourceDecodeMode::HardwareFast {
+            return Ok(false);
+        }
+        let uri = match self.current_uri.lock().unwrap().clone() {
+            Some(u) => u,
+            None => return Ok(false),
+        };
+        *self.hw_failed_uri.lock().unwrap() = Some(uri.clone());
+        let was_playing = *self.state.lock().unwrap() == PlayerState::Playing;
+        self.apply_decode_mode(SourceDecodeMode::SoftwareFiltered);
+        self.pipeline.set_state(gst::State::Null)?;
+        let _ = self
+            .pipeline
+            .state(Some(gst::ClockTime::from_mseconds(150)));
+        self.pipeline.set_property("uri", uri.as_str());
+        self.pipeline.set_state(gst::State::Paused)?;
+        self.set_playback_smoothness_policy(false);
+        if was_playing {
+            self.play()?;
+        } else {
+            *self.state.lock().unwrap() = PlayerState::Paused;
+        }
+        Ok(true)
+    }
+
+    fn set_playback_smoothness_policy(&self, playing: bool) {
+        let accurate_mode = matches!(
+            *self.source_playback_priority.lock().unwrap(),
+            crate::ui_state::PlaybackPriority::Accurate
+        );
+        if let Some(ref q) = self.prescale_queue {
+            if playing {
+                if accurate_mode {
+                    q.set_property("max-size-buffers", 6u32);
+                    q.set_property_from_str("leaky", "no");
+                } else {
+                    q.set_property("max-size-buffers", 2u32);
+                    q.set_property_from_str("leaky", "downstream");
+                }
+            } else {
+                q.set_property("max-size-buffers", 8u32);
+                q.set_property_from_str("leaky", "no");
+            }
+        }
+        Self::configure_sink_drop_late(&self.paintablesink, playing && !accurate_mode);
+        if let Some(ref sink) = self.gl_video_sink {
+            Self::configure_sink_drop_late(sink, playing && !accurate_mode);
+        }
+    }
+
+    fn source_seek_flags(&self, _playing: bool) -> gst::SeekFlags {
+        match *self.source_playback_priority.lock().unwrap() {
+            crate::ui_state::PlaybackPriority::Accurate => {
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+            }
+            crate::ui_state::PlaybackPriority::Balanced
+            | crate::ui_state::PlaybackPriority::Smooth => gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+        }
+    }
+
+    fn configure_sink_drop_late(sink: &gst::Element, playing: bool) {
+        if sink.find_property("qos").is_some() {
+            sink.set_property("qos", playing);
+        }
+        if sink.find_property("max-lateness").is_some() {
+            let max_lateness_ns: i64 = if playing { 20_000_000 } else { -1 };
+            sink.set_property("max-lateness", max_lateness_ns);
         }
     }
 
@@ -412,6 +624,17 @@ impl Player {
     /// Get the underlying GStreamer pipeline (e.g. to connect bus signals)
     pub fn pipeline(&self) -> &gst::Element {
         &self.pipeline
+    }
+
+    pub fn vaapi_available(&self) -> bool {
+        self.vaapi_available
+    }
+
+    pub fn decode_mode_name(&self) -> &'static str {
+        match *self.decode_mode.lock().unwrap() {
+            SourceDecodeMode::SoftwareFiltered => "software_filtered",
+            SourceDecodeMode::HardwareFast => "hardware_fast",
+        }
     }
 }
 

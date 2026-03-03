@@ -817,7 +817,11 @@ mod tests {
         assert_eq!(b.timeline_start, 11);
     }
 
-    fn make_project_with_clip(clip_id: &str, source_out: u64, timeline_start: u64) -> (Project, String, String) {
+    fn make_project_with_clip(
+        clip_id: &str,
+        source_out: u64,
+        timeline_start: u64,
+    ) -> (Project, String, String) {
         let mut project = Project::new("Test");
         let mut track = Track::new_video("V1");
         let track_id = track.id.clone();
@@ -1048,7 +1052,10 @@ mod tests {
         let id0 = project.tracks[0].id.clone();
         let id2 = project.tracks[2].id.clone();
 
-        let cmd = ReorderTrackCommand { from_index: 0, to_index: 2 };
+        let cmd = ReorderTrackCommand {
+            from_index: 0,
+            to_index: 2,
+        };
         cmd.execute(&mut project);
         assert_eq!(project.tracks[2].id, id0);
 
@@ -1098,23 +1105,29 @@ mod tests {
         let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
         let mut history = EditHistory::new();
 
-        history.execute(Box::new(TrimOutCommand {
-            clip_id: clip_id.clone(),
-            track_id: track_id.clone(),
-            old_source_out: 10,
-            new_source_out: 8,
-        }), &mut project);
+        history.execute(
+            Box::new(TrimOutCommand {
+                clip_id: clip_id.clone(),
+                track_id: track_id.clone(),
+                old_source_out: 10,
+                new_source_out: 8,
+            }),
+            &mut project,
+        );
 
         history.undo(&mut project);
         assert!(history.can_redo());
 
         // New action should clear redo stack
-        history.execute(Box::new(TrimOutCommand {
-            clip_id: clip_id.clone(),
-            track_id: track_id.clone(),
-            old_source_out: 10,
-            new_source_out: 6,
-        }), &mut project);
+        history.execute(
+            Box::new(TrimOutCommand {
+                clip_id: clip_id.clone(),
+                track_id: track_id.clone(),
+                old_source_out: 10,
+                new_source_out: 6,
+            }),
+            &mut project,
+        );
 
         assert!(!history.can_redo());
     }
@@ -1126,12 +1139,15 @@ mod tests {
 
         assert!(history.undo_description().is_none());
 
-        history.execute(Box::new(TrimOutCommand {
-            clip_id,
-            track_id,
-            old_source_out: 10,
-            new_source_out: 8,
-        }), &mut project);
+        history.execute(
+            Box::new(TrimOutCommand {
+                clip_id,
+                track_id,
+                old_source_out: 10,
+                new_source_out: 8,
+            }),
+            &mut project,
+        );
 
         assert_eq!(history.undo_description(), Some("Trim clip out-point"));
     }

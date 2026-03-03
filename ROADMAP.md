@@ -42,6 +42,10 @@ Tracking docs:
 - [x] In/Out timecode labels
 - [x] Play/Pause (Space), Stop transport buttons
 - [x] Timecode label (`position / duration`)
+- [x] Playback-only drop-late smoothness policy for source monitor (aggressive while playing, conservative while paused/stopped)
+- [x] Adaptive source-proxy scale when proxy mode is Off (Quarter for small source monitor sizes, Half for larger)
+- [x] Adaptive VA-API source decode mode (hardware-first when available and enabled) with automatic software fallback on hardware-path errors
+- [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
 
 ### Timeline
 - [x] Cairo-rendered `DrawingArea` with ruler (adaptive tick intervals)

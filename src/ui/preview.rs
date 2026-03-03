@@ -619,6 +619,7 @@ pub fn build_preview(
 
             // Sync local frame_ns cache from source_marks
             frame_ns.set(source_marks.borrow().frame_ns);
+            p.set_source_frame_duration(frame_ns.get());
 
             // Handle shuttle speeds != 0 and != 1 via frame stepping
             let spd = shuttle_speed.get();
