@@ -206,6 +206,10 @@ Tracking docs:
           - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
           - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
+          - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
+          - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
+          - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
+          - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
            - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick

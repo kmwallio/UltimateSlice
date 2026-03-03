@@ -72,6 +72,9 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - During overlap boundary rebuilds, delayed video-pad linking no longer forces EOS on an already-linked slot audio branch, which reduces unintended video-track audio dropouts when heavier clips enter.
 - During active overlap handoffs that start from an already-running slot set, UltimateSlice defers early pre-link EOS for newly added slots so late pad-added links can settle before post-seek arrival checks.
 - During boundary rebuilds, both the compositor and audiomixer aggregators are flushed together so their output running-time stays in sync; this prevents the audiomixer from dropping audio buffers as "late" after a video-path flush reset.
+- When a clip boundary only affects video tracks (e.g. a new video layer enters while the audio track continues), the audio pipeline is left running instead of being paused and resynced, eliminating the audible audio gap during video-only transitions.
+- Boundary rebuilds log per-phase timing (teardown, build, link wait, preroll, seek) to help diagnose and tune transition performance.
+- Post-seek wait budgets are automatically tightened when the boundary was prewarmed by a sidecar pipeline, since warm file cache enables faster decoder settle.
 - Occlusion audio-only decode substitution is currently disabled in preview rebuilds to prioritize reliable mixed audio from overlapping video tracks.
 - Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
 - Preview quality (`Full` / `Half` / `Quarter`) downscales the composed monitor output while preserving full-frame fit/framing in the Program Monitor.

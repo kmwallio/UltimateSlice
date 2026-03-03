@@ -1435,15 +1435,27 @@ impl ProgramPlayer {
                 "poll: boundary crossing at {} desired={:?} current={:?}",
                 new_pos, desired, current
             );
-            // Keep audio and video timeline progression aligned while rebuilding
-            // video slots. Rebuilds can take noticeable time under overlap, and
-            // letting audio continue during that window causes audible drift.
-            let _ = self.audio_pipeline.set_state(gst::State::Paused);
+            // Determine whether the audio-pipeline source changes at this
+            // boundary.  When it stays the same (e.g. only a video track
+            // enters/exits), we can leave audio_pipeline in Playing and
+            // avoid an audible gap during the rebuild.
+            let audio_wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(new_pos) {
+                Some(AudioCurrentSource::ReverseVideoClip(idx))
+            } else {
+                self.audio_clip_at(new_pos)
+                    .map(AudioCurrentSource::AudioClip)
+            };
+            let audio_source_changed = audio_wanted != self.audio_current_source;
+            if audio_source_changed {
+                let _ = self.audio_pipeline.set_state(gst::State::Paused);
+            }
             self.rebuild_pipeline_at(new_pos);
             let _ = self.pipeline.set_state(gst::State::Playing);
-            self.sync_audio_to(new_pos);
-            if self.audio_current_source.is_some() {
-                let _ = self.audio_pipeline.set_state(gst::State::Playing);
+            if audio_source_changed {
+                self.sync_audio_to(new_pos);
+                if self.audio_current_source.is_some() {
+                    let _ = self.audio_pipeline.set_state(gst::State::Playing);
+                }
             }
             // Reset wall-clock base after rebuild.
             self.base_timeline_ns = new_pos;
@@ -2233,6 +2245,12 @@ impl ProgramPlayer {
         };
         let timeout = gst::ClockTime::from_mseconds(per_decoder_ms);
         for slot in &self.slots {
+            // Skip decoders that already reached Paused or Playing — avoids
+            // redundant blocking time during boundary rebuilds.
+            let (_, cur, _) = slot.decoder.state(gst::ClockTime::ZERO);
+            if cur >= gst::State::Paused {
+                continue;
+            }
             let _ = slot.decoder.state(timeout);
         }
     }
@@ -3865,6 +3883,7 @@ impl ProgramPlayer {
         // Tear down pre-preroll sidecars now that the real rebuild is starting.
         // The OS file cache and codec state benefits persist after Null.
         self.teardown_prepreroll_sidecars();
+        let t_teardown = rebuild_started.elapsed().as_millis();
 
         // Avoid pipeline-wide Ready transitions here: in some media/layout
         // combinations this can deadlock in gst_pad_set_active while pads are
@@ -3914,6 +3933,7 @@ impl ProgramPlayer {
                 self.slots.push(slot);
             }
         }
+        let t_build = rebuild_started.elapsed().as_millis();
 
         // Transition pipeline to Paused so decoders preroll and can accept seeks.
         log::debug!(
@@ -3934,6 +3954,7 @@ impl ProgramPlayer {
         let _ = self
             .pipeline
             .state(gst::ClockTime::from_mseconds(link_wait_ms));
+        let t_link_wait = rebuild_started.elapsed().as_millis();
 
         // If any decoder's video pad didn't link in time, send EOS on its
         // compositor pad so the aggregator doesn't wait indefinitely for
@@ -3972,6 +3993,7 @@ impl ProgramPlayer {
         }
 
         self.wait_for_paused_preroll();
+        let t_preroll = rebuild_started.elapsed().as_millis();
         log::debug!("rebuild_pipeline_at: paused preroll done");
 
         // Atomically flush the compositor and audiomixer plus ALL their
@@ -4024,15 +4046,22 @@ impl ProgramPlayer {
             }
         }
         log::debug!("rebuild_pipeline_at: decoder seeks done");
+        let t_seeks = rebuild_started.elapsed().as_millis();
 
         // Post-seek settle
         if was_playing {
             self.wait_for_paused_preroll();
-            let arrival_budget = self.adaptive_arrival_wait_ms(1500);
+            // When the boundary was prewarmed via a sidecar pipeline, the OS
+            // file cache is warm and decoders settle faster.  Use a tighter
+            // arrival budget to reduce the visible/audible blip.
+            let prewarmed = self.prewarmed_boundary_ns == Some(timeline_pos);
+            let arrival_nominal = if prewarmed { 900 } else { 1500 };
+            let arrival_budget = self.adaptive_arrival_wait_ms(arrival_nominal);
             log::debug!(
-                "rebuild_pipeline_at: post-seek wait_for_compositor_arrivals ({}ms, scale={:.2})",
+                "rebuild_pipeline_at: post-seek wait_for_compositor_arrivals ({}ms, scale={:.2}, prewarmed={})",
                 arrival_budget,
-                self.rebuild_wait_scale()
+                self.rebuild_wait_scale(),
+                prewarmed
             );
             self.wait_for_compositor_arrivals(&baseline, arrival_budget);
         }
@@ -4099,11 +4128,12 @@ impl ProgramPlayer {
             self.record_rebuild_duration_ms(rebuild_elapsed_ms);
         }
         log::info!(
-            "rebuild_pipeline_at: END timeline_pos={}ns slots={} elapsed_ms={} scale={:.2}",
+            "rebuild_pipeline_at: END timeline_pos={}ns slots={} elapsed_ms={} scale={:.2} phases=teardown:{}|build:{}|link:{}|preroll:{}|seek:{}",
             timeline_pos,
             self.slots.len(),
             rebuild_elapsed_ms,
-            self.rebuild_wait_scale()
+            self.rebuild_wait_scale(),
+            t_teardown, t_build, t_link_wait, t_preroll, t_seeks
         );
     }
 
