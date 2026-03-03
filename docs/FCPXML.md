@@ -2,6 +2,16 @@
 
 This document provides a technical overview of the FCPXML (Final Cut Pro XML) format, its structure, key elements, and how to accurately parse its attributes. This guide is designed to be a functional blueprint for building an FCPXML-compatible video editor.
 
+> **Scope in UltimateSlice**
+>
+> This file is a broad FCPXML format reference, not a full statement of current UltimateSlice feature parity for every tag listed below.
+> UltimateSlice's currently implemented import/export subset is centered on:
+> - FCPXML versions **1.10 through 1.14** (export writes `1.14`)
+> - `format`, `asset`, nested `media-rep`, and `asset-clip` timeline structures
+> - marker + chapter-marker import
+> - `adjust-transform`, `adjust-compositing`, and `adjust-crop`/`crop-rect` mappings used by Inspector fields
+> - unknown-field preservation for imported FCPXML in clean-save and dirty-save flows
+
 ---
 
 ## 1. Overview
@@ -16,7 +26,7 @@ FCPXML separates the **definition** of a resource (like a high-res video file or
 FCPXML follows a strictly hierarchical structure, mirroring the organization of a real-world video project.
 
 ### **Attribute Meanings**
-*   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`). Version 1.10+ is required for many modern features like HDR and Cinematic mode. Version 1.13 corresponds to Final Cut Pro 11.
+*   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`, `1.14`). Version 1.10+ is required for many modern features like HDR and Cinematic mode.
 *   **`format`**: A unique ID referencing a `<format>` resource. This defines the "canvas" (resolution) and "heartbeat" (frame rate) of the element.
 *   **`tcStart`**: The starting timecode of the timeline. Usually `3600s` (01:00:00:00).
 *   **`tcFormat`**: Determines if the clock skips frames to stay in sync with real-time (`DF` for Drop Frame) or counts every single frame (`NDF` for Non-Drop Frame).
@@ -330,7 +340,7 @@ If you are writing code to parse FCPXML, follow these steps:
 
 ### **Root & Organizational Tags**
 *   **`<fcpxml>`**: The root element.
-    *   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`).
+    *   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`, `1.14`).
 *   **`<library>`**: Represents an FCP library.
     *   **`location`**: The file URL to the library on disk.
 *   **`<event>`**: A container for clips and projects.
