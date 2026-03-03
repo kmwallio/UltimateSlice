@@ -3881,6 +3881,14 @@ impl ProgramPlayer {
             if self.is_clip_video_occluded(&active, zorder_offset) {
                 if let Some(slot) = self.build_audio_only_slot_for_clip(clip_idx) {
                     self.slots.push(slot);
+                } else if let Some(slot) =
+                    self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
+                {
+                    log::warn!(
+                        "rebuild_pipeline_at: audio-only occlusion slot failed for clip {}, falling back to full slot",
+                        self.clips[clip_idx].id
+                    );
+                    self.slots.push(slot);
                 }
             } else if let Some(slot) =
                 self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
