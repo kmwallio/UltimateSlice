@@ -42,7 +42,7 @@ Use **Save…** (`Ctrl+S`) to write the project to a `.fcpxml` file. Open with *
 
 When you open an existing FCPXML and save it without making edits, UltimateSlice preserves the original document verbatim so unknown attributes/fields from other tools are retained.
 For edited saves, unsupported `asset-clip` attributes and child tags are still carried forward in regenerated output.
-When imported FCPXML media references start with `/Volumes/...` and are missing locally, UltimateSlice retries under the opened FCPXML mount root and uses the found file for runtime playback, while still saving the original imported XML source path.
+When imported FCPXML media references start with `/Volumes/...` and are missing locally, UltimateSlice URI-decodes the path (for example `%20` → space), retries common Linux external-drive mount locations (`/media/<user>/...`, `/run/media/<user>/...`, `/media/...`, `/run/media/...`, `/mnt/...`) plus the opened FCPXML mount-root fallback, then uses the found file for runtime playback while still saving the original imported XML source path.
 
 ## Auto-Save
 

@@ -73,6 +73,9 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
     let mut current_asset: Option<AssetBuilder> = None;
     let mut clip_stack: Vec<ActiveClipContext> = Vec::new();
     let mount_root = fcpxml_path.and_then(fcpxml_mount_root);
+    let mount_users = fcpxml_path
+        .map(linux_mount_users_for_fcpxml)
+        .unwrap_or_default();
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -128,7 +131,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         current_asset = build_asset_builder(&attrs);
                         if let Some(asset) = current_asset.as_mut() {
                             if let Some(src) = attrs.get("src") {
-                                asset.src = Some(src.replace("file://", ""));
+                                asset.src = Some(parse_fcpxml_src_path(src));
                             }
                         }
                     }
@@ -137,7 +140,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if let Some(asset) = current_asset.as_mut() {
                             if asset.src.is_none() {
                                 if let Some(src) = attrs.get("src") {
-                                    asset.src = Some(src.replace("file://", ""));
+                                    asset.src = Some(parse_fcpxml_src_path(src));
                                 }
                             }
                         }
@@ -150,8 +153,13 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                     }
                     "asset-clip" if in_spine => {
                         let attrs = parse_attrs(e)?;
-                        if let Some(ctx) =
-                            parse_asset_clip(&attrs, &assets, &mut track_map, mount_root.as_deref())
+                        if let Some(ctx) = parse_asset_clip(
+                            &attrs,
+                            &assets,
+                            &mut track_map,
+                            mount_root.as_deref(),
+                            &mount_users,
+                        )
                         {
                             clip_stack.push(ctx);
                         }
@@ -207,7 +215,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         let attrs = parse_attrs(e)?;
                         if let Some(mut asset) = build_asset_builder(&attrs) {
                             if let Some(src) = attrs.get("src") {
-                                asset.src = Some(src.replace("file://", ""));
+                                asset.src = Some(parse_fcpxml_src_path(src));
                             }
                             finalize_asset(asset, &mut assets);
                         }
@@ -217,14 +225,20 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if let Some(asset) = current_asset.as_mut() {
                             if asset.src.is_none() {
                                 if let Some(src) = attrs.get("src") {
-                                    asset.src = Some(src.replace("file://", ""));
+                                    asset.src = Some(parse_fcpxml_src_path(src));
                                 }
                             }
                         }
                     }
                     "asset-clip" if in_spine => {
                         let attrs = parse_attrs(e)?;
-                        parse_asset_clip(&attrs, &assets, &mut track_map, mount_root.as_deref());
+                        parse_asset_clip(
+                            &attrs,
+                            &assets,
+                            &mut track_map,
+                            mount_root.as_deref(),
+                            &mount_users,
+                        );
                     }
                     "adjust-transform" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -322,6 +336,7 @@ fn parse_asset_clip(
     assets: &HashMap<String, Asset>,
     track_map: &mut BTreeMap<(u8, usize), Track>,
     mount_root: Option<&Path>,
+    mount_users: &[String],
 ) -> Option<ActiveClipContext> {
     if let Some(asset_ref) = attrs.get("ref") {
         if let Some(asset) = assets.get(asset_ref) {
@@ -385,7 +400,7 @@ fn parse_asset_clip(
                 }
             });
 
-            let resolved_source_path = resolve_import_source_path(&asset.src, mount_root);
+            let resolved_source_path = resolve_import_source_path(&asset.src, mount_root, mount_users);
             let mut clip = Clip::new(
                 &resolved_source_path,
                 source_in + duration,
@@ -655,24 +670,125 @@ fn fcpxml_mount_root(path: &Path) -> Option<PathBuf> {
     Some(root)
 }
 
-fn resolve_import_source_path(original: &str, mount_root: Option<&Path>) -> String {
-    let original_path = Path::new(original);
-    if original_path.exists() {
-        return original.to_string();
+fn parse_fcpxml_src_path(src: &str) -> String {
+    let raw_path = src.strip_prefix("file://").unwrap_or(src);
+    decode_percent_encoded_path(raw_path)
+}
+
+fn decode_percent_encoded_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push(((hi << 4) as u8) | (lo as u8));
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
     }
-    if !original.starts_with("/Volumes/") {
-        return original.to_string();
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn resolve_import_source_path(
+    original: &str,
+    mount_root: Option<&Path>,
+    mount_users: &[String],
+) -> String {
+    for candidate in remap_candidates_for_volumes_path(original, mount_root, mount_users) {
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
     }
-    let Some(root) = mount_root else {
-        return original.to_string();
+    original.to_string()
+}
+
+fn remap_candidates_for_volumes_path(
+    original: &str,
+    mount_root: Option<&Path>,
+    mount_users: &[String],
+) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let original_path = PathBuf::from(original);
+    push_unique_path(&mut candidates, original_path.clone());
+    let Some(suffix) = original.strip_prefix("/Volumes/") else {
+        return candidates;
     };
-    let suffix = original.trim_start_matches("/Volumes/");
-    let remapped = root.join(suffix);
-    if remapped.exists() {
-        remapped.to_string_lossy().to_string()
-    } else {
-        original.to_string()
+
+    if let Some(root) = mount_root {
+        push_unique_path(&mut candidates, root.join(suffix));
     }
+
+    for user in mount_users {
+        push_unique_path(
+            &mut candidates,
+            PathBuf::from("/media").join(user).join(suffix),
+        );
+        push_unique_path(
+            &mut candidates,
+            PathBuf::from("/run/media").join(user).join(suffix),
+        );
+    }
+
+    push_unique_path(&mut candidates, PathBuf::from("/media").join(suffix));
+    push_unique_path(&mut candidates, PathBuf::from("/run/media").join(suffix));
+    push_unique_path(&mut candidates, PathBuf::from("/mnt").join(suffix));
+
+    candidates
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !paths.iter().any(|p| p == &candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn linux_mount_users_for_fcpxml(path: &Path) -> Vec<String> {
+    let mut users = Vec::new();
+    if let Ok(user) = std::env::var("USER") {
+        if !user.is_empty() {
+            users.push(user);
+        }
+    }
+    if let Some(from_path) = user_from_mount_path(path) {
+        if !users.iter().any(|u| u == &from_path) {
+            users.push(from_path);
+        }
+    }
+    users
+}
+
+fn user_from_mount_path(path: &Path) -> Option<String> {
+    let mut comps = path.components();
+    if !matches!(comps.next(), Some(Component::RootDir)) {
+        return None;
+    }
+    let first = match comps.next() {
+        Some(Component::Normal(c)) => c.to_string_lossy().to_string(),
+        _ => return None,
+    };
+    let second = match comps.next() {
+        Some(Component::Normal(c)) => c.to_string_lossy().to_string(),
+        _ => return None,
+    };
+    if first == "media" {
+        return Some(second);
+    }
+    if first == "run" {
+        let third = match comps.next() {
+            Some(Component::Normal(c)) => c.to_string_lossy().to_string(),
+            _ => return None,
+        };
+        if second == "media" {
+            return Some(third);
+        }
+    }
+    None
 }
 
 fn collect_unknown_empty_fragment(e: &quick_xml::events::BytesStart) -> Result<String> {
@@ -1485,5 +1601,88 @@ mod tests {
         assert_eq!(clip.source_path, remapped_target);
         assert_eq!(clip.fcpxml_original_source_path.as_deref(), Some(original_path.as_str()));
         let _ = std::fs::remove_file(remapped_target);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_decodes_percent_encoded_media_rep_path_before_remap() {
+        let unique = uuid::Uuid::new_v4().to_string();
+        let folder = format!("Final Cut Original Media {unique}");
+        let mount_dir = format!("/tmp/LEXAR/{folder}");
+        std::fs::create_dir_all(&mount_dir).expect("should create remap directory");
+        let remapped_target = format!("{mount_dir}/C0378.mp4");
+        std::fs::write(&remapped_target, b"test").expect("should create remap target");
+
+        let encoded_folder = folder.replace(' ', "%20");
+        let encoded_original = format!("/Volumes/LEXAR/{encoded_folder}/C0378.mp4");
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file://{encoded_original}" duration="10s"/>
+  </resources>
+  <project name="RemapEncoded">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="1s"/>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#
+        );
+
+        let project = parse_fcpxml_with_path(&xml, Some(std::path::Path::new("/tmp/project.fcpxml")))
+            .expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        let decoded_original = format!("/Volumes/LEXAR/{folder}/C0378.mp4");
+        assert_eq!(clip.source_path, remapped_target);
+        assert_eq!(
+            clip.fcpxml_original_source_path.as_deref(),
+            Some(decoded_original.as_str())
+        );
+
+        let _ = std::fs::remove_file(&remapped_target);
+        let _ = std::fs::remove_dir_all(&mount_dir);
+    }
+
+    #[test]
+    fn test_remap_candidates_include_common_linux_mount_paths() {
+        let users = vec!["alice".to_string()];
+        let candidates = remap_candidates_for_volumes_path(
+            "/Volumes/DriveA/folder/file.mp4",
+            Some(std::path::Path::new("/media")),
+            &users,
+        );
+        let as_strings: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(as_strings.contains(&"/Volumes/DriveA/folder/file.mp4".to_string()));
+        assert!(as_strings.contains(&"/media/DriveA/folder/file.mp4".to_string()));
+        assert!(as_strings.contains(&"/media/alice/DriveA/folder/file.mp4".to_string()));
+        assert!(as_strings.contains(&"/run/media/alice/DriveA/folder/file.mp4".to_string()));
+        assert!(as_strings.contains(&"/run/media/DriveA/folder/file.mp4".to_string()));
+        assert!(as_strings.contains(&"/mnt/DriveA/folder/file.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_remap_candidates_non_volumes_path_unchanged() {
+        let users = vec!["alice".to_string()];
+        let candidates = remap_candidates_for_volumes_path(
+            "/home/alice/file.mp4",
+            Some(std::path::Path::new("/media")),
+            &users,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], std::path::Path::new("/home/alice/file.mp4"));
+    }
+
+    #[test]
+    fn test_decode_percent_encoded_path() {
+        let decoded = decode_percent_encoded_path("/Volumes/LEXAR/Final%20Cut%20Original%20Media/C0378.mp4");
+        assert_eq!(
+            decoded,
+            "/Volumes/LEXAR/Final Cut Original Media/C0378.mp4"
+        );
     }
 }

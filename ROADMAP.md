@@ -103,7 +103,7 @@ Tracking docs:
 - [x] Standard Inspector mapping (phase 1): parse/write `adjust-transform` (scale/position/rotation), `adjust-compositing` (opacity), and `adjust-crop`/`crop-rect` (crop bounds) with `us:*` fallback
 - [x] Preserve unknown fields on clean round-trip save for imported FCPXML (verbatim open→save passthrough when project is unmodified)
 - [x] Preserve unknown imported `asset-clip` attributes and child tags on regenerated dirty saves while updating edited scale values (`us:scale` / `adjust-transform@scale`)
-- [x] Import fallback remaps missing `/Volumes/...` assets to the opened FCPXML mount root and still exports original imported source paths
+- [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)
