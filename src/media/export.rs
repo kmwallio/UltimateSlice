@@ -624,15 +624,44 @@ fn build_scale_position_filter(
         format!(",scale={sw}:{sh},crop={out_w}:{out_h}:{cx}:{cy}")
     } else {
         // Zoom out: scale DOWN then pad to output size.
+        // When the PIP extends beyond the frame edge (position > 1.0 or < -1.0),
+        // crop the overflow before padding — matching the preview's videobox
+        // behavior which clips content past the frame boundary.
         let sw = (pw * scale).round() as u32;
         let sh = (ph * scale).round() as u32;
         let total_x = pw * (1.0 - scale);
         let total_y = ph * (1.0 - scale);
-        // pad x,y = position of the downscaled clip within the output frame
-        let pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as u32;
-        let pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as u32;
+        let raw_pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
+        let raw_pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
+
+        // Compute overflow on each edge
+        let crop_left = if raw_pad_x < 0 { (-raw_pad_x) as u32 } else { 0 };
+        let crop_top = if raw_pad_y < 0 { (-raw_pad_y) as u32 } else { 0 };
+        let crop_right = if raw_pad_x as i64 + sw as i64 > out_w as i64 {
+            (raw_pad_x as i64 + sw as i64 - out_w as i64) as u32
+        } else {
+            0
+        };
+        let crop_bottom = if raw_pad_y as i64 + sh as i64 > out_h as i64 {
+            (raw_pad_y as i64 + sh as i64 - out_h as i64) as u32
+        } else {
+            0
+        };
+
+        let pad_x = raw_pad_x.max(0) as u32;
+        let pad_y = raw_pad_y.max(0) as u32;
         let pad_color = if transparent_pad { "black@0" } else { "black" };
-        format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
+
+        let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
+        if needs_crop {
+            let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
+            let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
+            format!(
+                ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
+            )
+        } else {
+            format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
+        }
     }
 }
 

@@ -4,6 +4,9 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Fixed
+- **Export transform position mismatch**: Overlay clips with `position_y > 1.0` (extending past the bottom frame edge) were mispositioned in exports because ffmpeg's `pad` filter clamped the placement to fit within the output frame. The export now pre-crops overflow on all four edges before padding, matching the preview's GStreamer `videobox` behavior which clips content beyond the frame boundary.
+
 ### Performance
 - **Continuing decoders at boundary crossings**: When adjacent clips share the same source file (common after splits, rough cuts from single footage), the program player now reuses existing decoder slots instead of tearing down and rebuilding the full pipeline. This avoids codec init, element creation, and stream discovery overhead, reducing boundary crossing latency from ~800-2800ms to ~200-600ms (~60-75% improvement). Falls back to full rebuild when source files differ, slot count changes, audio presence differs, speed/reverse settings differ, or effects topology changes.
 
