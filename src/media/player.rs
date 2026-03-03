@@ -63,6 +63,26 @@ impl Player {
             .property("video-sink", video_sink)
             .build()?;
 
+        // Force software decoders so the CPU-based effects chain receives
+        // plain video/x-raw buffers.  VA-API decoders output DMABuf /
+        // VAMemory which cannot be CPU-mapped for videoconvertscale /
+        // videobalance.  Lower VA-API decoder ranks below software
+        // decoders so GStreamer auto-plugging selects avdec_* instead.
+        // The prescale caps (1920×1080) keep SW decode manageable even
+        // for 5.3K sources, and the leaky queue drops frames if slow.
+        for name in &[
+            "vah264dec",
+            "vah265dec",
+            "vampeg2dec",
+            "vavp8dec",
+            "vavp9dec",
+            "vaav1dec",
+        ] {
+            if let Some(factory) = gst::ElementFactory::find(name) {
+                factory.set_rank(gst::Rank::MARGINAL);
+            }
+        }
+
         // Build a filter bin:
         // videocrop ! videoconvert ! videobalance ! videoconvert ! gaussianblur
         //   ! videoconvert ! videoflip_rotate ! videoconvert ! videoflip_flip
@@ -103,7 +123,7 @@ impl Player {
 
             // Leaky queue after prescale: decouples the expensive
             // decode+prescale thread from the effects chain so that slow
-            // VA-API→CPU downloads at 5.3K don't stall the sink/main thread.
+            // decode at 5.3K doesn't stall the sink/main thread.
             // leaky=downstream (2) drops oldest buffers when full.
             let prescale_queue = gst::ElementFactory::make("queue")
                 .property("max-size-buffers", 2u32)
