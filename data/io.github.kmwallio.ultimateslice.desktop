@@ -7,5 +7,4 @@ Icon=io.github.kmwallio.ultimateslice
 Type=Application
 Categories=AudioVideo;Video;GTK;
 Keywords=nle;video editor;video;editing;non-linear;
-MimeType=application/vnd.apple.finalcutpro.fcpxml;
 StartupNotify=true

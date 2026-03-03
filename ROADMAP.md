@@ -101,6 +101,9 @@ Tracking docs:
 - [x] Marker import compatibility: parse `chapter-marker` and convert nested clip marker times (`start`/`offset` aware) to correct timeline marker positions
 - [x] Format preset fallback: derive frame rate/resolution from known format names (e.g. `FFVideoFormat1080p30`) when numeric format fields are absent
 - [x] Standard Inspector mapping (phase 1): parse/write `adjust-transform` (scale/position/rotation), `adjust-compositing` (opacity), and `adjust-crop`/`crop-rect` (crop bounds) with `us:*` fallback
+- [x] Preserve unknown fields on clean round-trip save for imported FCPXML (verbatim open→save passthrough when project is unmodified)
+- [x] Preserve unknown imported `asset-clip` attributes and child tags on regenerated dirty saves while updating edited scale values (`us:scale` / `adjust-transform@scale`)
+- [x] Import fallback remaps missing `/Volumes/...` assets to the opened FCPXML mount root and still exports original imported source paths
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)

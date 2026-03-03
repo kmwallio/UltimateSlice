@@ -40,6 +40,10 @@ Source media references are saved as nested `<media-rep>` entries under each res
 
 Use **Save…** (`Ctrl+S`) to write the project to a `.fcpxml` file. Open with **Open…** (`Ctrl+O`) on any future session.
 
+When you open an existing FCPXML and save it without making edits, UltimateSlice preserves the original document verbatim so unknown attributes/fields from other tools are retained.
+For edited saves, unsupported `asset-clip` attributes and child tags are still carried forward in regenerated output.
+When imported FCPXML media references start with `/Volumes/...` and are missing locally, UltimateSlice retries under the opened FCPXML mount root and uses the found file for runtime playback, while still saving the original imported XML source path.
+
 ## Auto-Save
 
 UltimateSlice auto-saves every 60 seconds to `/tmp/ultimateslice-autosave.fcpxml` when the project has unsaved changes. This is a safety net — use **Save…** for permanent storage.

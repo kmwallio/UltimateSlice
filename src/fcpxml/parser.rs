@@ -4,7 +4,10 @@ use crate::model::track::Track;
 use anyhow::{anyhow, bail, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::Writer;
 use std::collections::{BTreeMap, HashMap};
+use std::io::Cursor;
+use std::path::{Component, Path, PathBuf};
 
 /// Represents a parsed FCPXML asset
 struct Asset {
@@ -42,6 +45,11 @@ struct ActiveClipContext {
 
 /// Parse an FCPXML string into a `Project`.
 pub fn parse_fcpxml(xml: &str) -> Result<Project> {
+    parse_fcpxml_with_path(xml, None)
+}
+
+/// Parse an FCPXML string into a `Project` with source file path context.
+pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<Project> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -64,6 +72,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
     let mut selected_sequence_format_applied = false;
     let mut current_asset: Option<AssetBuilder> = None;
     let mut clip_stack: Vec<ActiveClipContext> = Vec::new();
+    let mount_root = fcpxml_path.and_then(fcpxml_mount_root);
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -141,7 +150,9 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                     }
                     "asset-clip" if in_spine => {
                         let attrs = parse_attrs(e)?;
-                        if let Some(ctx) = parse_asset_clip(&attrs, &assets, &mut track_map) {
+                        if let Some(ctx) =
+                            parse_asset_clip(&attrs, &assets, &mut track_map, mount_root.as_deref())
+                        {
                             clip_stack.push(ctx);
                         }
                     }
@@ -164,6 +175,10 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                             clip_stack.last().map(|c| (c.timeline_start, c.source_in)),
                             &mut project,
                         );
+                    }
+                    _ if in_spine && clip_stack.last().is_some() => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
                     }
                     _ => {}
                 }
@@ -209,7 +224,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                     }
                     "asset-clip" if in_spine => {
                         let attrs = parse_attrs(e)?;
-                        parse_asset_clip(&attrs, &assets, &mut track_map);
+                        parse_asset_clip(&attrs, &assets, &mut track_map, mount_root.as_deref());
                     }
                     "adjust-transform" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -230,6 +245,10 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
                             clip_stack.last().map(|c| (c.timeline_start, c.source_in)),
                             &mut project,
                         );
+                    }
+                    _ if in_spine && clip_stack.last().is_some() => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
                     }
                     _ => {}
                 }
@@ -294,6 +313,7 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
         project.tracks.push(Track::new_audio("Audio 1"));
     }
 
+    project.source_fcpxml = Some(xml.to_string());
     Ok(project)
 }
 
@@ -301,6 +321,7 @@ fn parse_asset_clip(
     attrs: &HashMap<String, String>,
     assets: &HashMap<String, Asset>,
     track_map: &mut BTreeMap<(u8, usize), Track>,
+    mount_root: Option<&Path>,
 ) -> Option<ActiveClipContext> {
     if let Some(asset_ref) = attrs.get("ref") {
         if let Some(asset) = assets.get(asset_ref) {
@@ -364,11 +385,18 @@ fn parse_asset_clip(
                 }
             });
 
-            let mut clip = Clip::new(&asset.src, source_in + duration, timeline_start, clip_kind);
+            let resolved_source_path = resolve_import_source_path(&asset.src, mount_root);
+            let mut clip = Clip::new(
+                &resolved_source_path,
+                source_in + duration,
+                timeline_start,
+                clip_kind,
+            );
             clip.source_in = source_in;
             clip.source_out = source_in + duration;
             clip.timeline_start = timeline_start;
             clip.label = label;
+            clip.fcpxml_original_source_path = Some(asset.src.clone());
             // Restore color/effects from vendor attributes
             if let Some(v) = attrs.get("us:brightness") {
                 clip.brightness = v.parse().unwrap_or(0.0);
@@ -463,6 +491,11 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:transition-after-ns") {
                 clip.transition_after_ns = v.parse().unwrap_or(0);
             }
+            for (k, v) in attrs {
+                if !is_known_asset_clip_attr(k) {
+                    clip.fcpxml_unknown_attrs.push((k.clone(), v.clone()));
+                }
+            }
             let clip_index = track.clips.len();
             track.push_unsorted(clip);
             return Some(ActiveClipContext {
@@ -484,6 +517,16 @@ fn current_clip_mut<'a>(
     track_map
         .get_mut(&ctx.track_key)
         .and_then(|track| track.clips.get_mut(ctx.clip_index))
+}
+
+fn append_unknown_clip_child(
+    fragment: String,
+    active_ctx: Option<&ActiveClipContext>,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    if let Some(clip) = current_clip_mut(track_map, active_ctx) {
+        clip.fcpxml_unknown_children.push(fragment);
+    }
 }
 
 fn apply_adjust_transform(
@@ -545,8 +588,137 @@ fn parse_vec2(value: &str) -> Option<(f64, f64)> {
     Some((x, y))
 }
 
+fn is_known_asset_clip_attr(key: &str) -> bool {
+    matches!(
+        key,
+        "ref"
+            | "offset"
+            | "start"
+            | "duration"
+            | "name"
+            | "lane"
+            | "us:track-idx"
+            | "us:track-kind"
+            | "us:track-name"
+            | "us:brightness"
+            | "us:contrast"
+            | "us:saturation"
+            | "us:denoise"
+            | "us:sharpness"
+            | "us:volume"
+            | "us:pan"
+            | "us:crop-left"
+            | "us:crop-right"
+            | "us:crop-top"
+            | "us:crop-bottom"
+            | "us:rotate"
+            | "us:flip-h"
+            | "us:flip-v"
+            | "us:scale"
+            | "us:opacity"
+            | "us:position-x"
+            | "us:position-y"
+            | "us:title-text"
+            | "us:title-font"
+            | "us:title-color"
+            | "us:title-x"
+            | "us:title-y"
+            | "us:speed"
+            | "us:reverse"
+            | "us:shadows"
+            | "us:midtones"
+            | "us:highlights"
+            | "us:lut-path"
+            | "us:transition-after"
+            | "us:transition-after-ns"
+    )
+}
+
 fn parse_crop_value(value: &str) -> Option<i32> {
     value.parse::<f64>().ok().map(|v| v.round() as i32)
+}
+
+fn fcpxml_mount_root(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return None;
+    }
+    let first = components.find_map(|c| match c {
+        Component::Normal(p) => Some(p.to_os_string()),
+        _ => None,
+    })?;
+    let mut root = PathBuf::from("/");
+    root.push(first);
+    Some(root)
+}
+
+fn resolve_import_source_path(original: &str, mount_root: Option<&Path>) -> String {
+    let original_path = Path::new(original);
+    if original_path.exists() {
+        return original.to_string();
+    }
+    if !original.starts_with("/Volumes/") {
+        return original.to_string();
+    }
+    let Some(root) = mount_root else {
+        return original.to_string();
+    };
+    let suffix = original.trim_start_matches("/Volumes/");
+    let remapped = root.join(suffix);
+    if remapped.exists() {
+        remapped.to_string_lossy().to_string()
+    } else {
+        original.to_string()
+    }
+}
+
+fn collect_unknown_empty_fragment(e: &quick_xml::events::BytesStart) -> Result<String> {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer.write_event(Event::Empty(e.to_owned()))?;
+    Ok(String::from_utf8(writer.into_inner().into_inner())?)
+}
+
+fn collect_unknown_start_fragment(
+    reader: &mut Reader<&[u8]>,
+    start: &quick_xml::events::BytesStart,
+) -> Result<String> {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer.write_event(Event::Start(start.to_owned()))?;
+
+    let mut depth = 1usize;
+    let mut buf = Vec::new();
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                depth += 1;
+                writer.write_event(Event::Start(e.to_owned()))?;
+            }
+            Event::End(ref e) => {
+                depth = depth.saturating_sub(1);
+                writer.write_event(Event::End(e.to_owned()))?;
+            }
+            Event::Empty(ref e) => {
+                writer.write_event(Event::Empty(e.to_owned()))?;
+            }
+            Event::Text(ref e) => {
+                writer.write_event(Event::Text(e.to_owned()))?;
+            }
+            Event::CData(ref e) => {
+                writer.write_event(Event::CData(e.to_owned()))?;
+            }
+            Event::Comment(ref e) => {
+                writer.write_event(Event::Comment(e.to_owned()))?;
+            }
+            Event::Eof => bail!("Unexpected EOF while capturing unknown FCPXML tag"),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(String::from_utf8(writer.into_inner().into_inner())?)
 }
 
 fn build_asset_builder(attrs: &HashMap<String, String>) -> Option<AssetBuilder> {
@@ -1260,5 +1432,58 @@ mod tests {
         assert_eq!(clip.crop_right, 8);
         assert_eq!(clip.crop_top, 9);
         assert_eq!(clip.crop_bottom, 10);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_stores_original_source_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+  </resources>
+  <library>
+    <event>
+      <project name="SourceCapture">
+        <sequence duration="0/24s" format="r1">
+          <spine/>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        assert_eq!(project.source_fcpxml.as_deref(), Some(xml));
+    }
+
+    #[test]
+    fn test_parse_fcpxml_remaps_missing_volumes_to_fcpxml_mount_root() {
+        let unique = format!("ultimateslice-remap-{}.mp4", uuid::Uuid::new_v4());
+        let remapped_target = format!("/tmp/{unique}");
+        std::fs::write(&remapped_target, b"test").expect("should create remap target");
+        let original_path = format!("/Volumes/{unique}");
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file://{original_path}" duration="10s"/>
+  </resources>
+  <project name="Remap">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="1s"/>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#
+        );
+
+        let project = parse_fcpxml_with_path(&xml, Some(std::path::Path::new("/tmp/project.fcpxml")))
+            .expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.source_path, remapped_target);
+        assert_eq!(clip.fcpxml_original_source_path.as_deref(), Some(original_path.as_str()));
+        let _ = std::fs::remove_file(remapped_target);
     }
 }

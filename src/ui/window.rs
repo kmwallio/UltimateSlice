@@ -3080,7 +3080,11 @@ fn handle_mcp_command(
                 let result = std::fs::read_to_string(&path_bg)
                     .map_err(|e| e.to_string())
                     .and_then(|xml| {
-                        crate::fcpxml::parser::parse_fcpxml(&xml).map_err(|e| e.to_string())
+                        crate::fcpxml::parser::parse_fcpxml_with_path(
+                            &xml,
+                            Some(std::path::Path::new(&path_bg)),
+                        )
+                        .map_err(|e| e.to_string())
                     });
                 let _ = tx.send(result);
             });

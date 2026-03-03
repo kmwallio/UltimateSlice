@@ -2,10 +2,19 @@ use crate::model::project::Project;
 use anyhow::Result;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
 /// Serialize a `Project` to FCPXML format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
+    if let Some(original) = &project.source_fcpxml {
+        if !project.dirty {
+            return Ok(original.clone());
+        }
+        if let Some(patched) = patch_imported_fcpxml_scale(project, original) {
+            return Ok(patched);
+        }
+    }
+
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);
 
     // XML declaration
@@ -116,6 +125,11 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                     clip.transition_after_ns.to_string().as_str(),
                 ));
             }
+            for (k, v) in &clip.fcpxml_unknown_attrs {
+                if !is_writer_managed_asset_clip_attr(k) {
+                    asset_clip.push_attribute((k.as_str(), v.as_str()));
+                }
+            }
             writer.write_event(Event::Start(asset_clip))?;
 
             let mut adjust_transform = BytesStart::new("adjust-transform");
@@ -140,6 +154,9 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             adjust_crop.push_attribute(("top", clip.crop_top.to_string().as_str()));
             adjust_crop.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
             writer.write_event(Event::Empty(adjust_crop))?;
+            for fragment in &clip.fcpxml_unknown_children {
+                writer.get_mut().write_all(fragment.as_bytes())?;
+            }
 
             writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
         }
@@ -170,6 +187,67 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     Ok(String::from_utf8(result)?)
 }
 
+fn patch_imported_fcpxml_scale(project: &Project, original: &str) -> Option<String> {
+    let mut clips = project.tracks.iter().flat_map(|t| t.clips.iter());
+    let clip = clips.next()?;
+    if clips.next().is_some() {
+        return None;
+    }
+
+    let mut xml = replace_attr_in_first_tag(original, "asset-clip", "us:scale", &clip.scale.to_string())?;
+    let transform_scale = format!("{} {}", clip.scale, clip.scale);
+    if let Some(updated) = replace_attr_in_first_tag(&xml, "adjust-transform", "scale", &transform_scale) {
+        xml = updated;
+    }
+    Some(xml)
+}
+
+fn replace_attr_in_first_tag(xml: &str, tag_name: &str, attr_name: &str, new_value: &str) -> Option<String> {
+    let tag_open = format!("<{tag_name}");
+    let tag_start = xml.find(&tag_open)?;
+    let after_start = &xml[tag_start..];
+    let tag_end_rel = after_start.find('>')?;
+    let tag_end = tag_start + tag_end_rel;
+    let tag_text = &xml[tag_start..=tag_end];
+    let updated_tag = replace_or_insert_attr(tag_text, attr_name, new_value)?;
+    let mut out = String::with_capacity(xml.len() + updated_tag.len().saturating_sub(tag_text.len()));
+    out.push_str(&xml[..tag_start]);
+    out.push_str(&updated_tag);
+    out.push_str(&xml[tag_end + 1..]);
+    Some(out)
+}
+
+fn replace_or_insert_attr(tag_text: &str, attr_name: &str, new_value: &str) -> Option<String> {
+    let attr_prefix = format!(r#"{attr_name}=""#);
+    if let Some(attr_start) = tag_text.find(&attr_prefix) {
+        let value_start = attr_start + attr_prefix.len();
+        let value_end_rel = tag_text[value_start..].find('"')?;
+        let value_end = value_start + value_end_rel;
+        let mut updated = String::with_capacity(
+            tag_text.len() + new_value.len().saturating_sub(value_end.saturating_sub(value_start)),
+        );
+        updated.push_str(&tag_text[..value_start]);
+        updated.push_str(new_value);
+        updated.push_str(&tag_text[value_end..]);
+        return Some(updated);
+    }
+
+    let insert_pos = if let Some(pos) = tag_text.rfind("/>") {
+        pos
+    } else {
+        tag_text.rfind('>')?
+    };
+    let mut updated = String::with_capacity(tag_text.len() + attr_name.len() + new_value.len() + 4);
+    updated.push_str(&tag_text[..insert_pos]);
+    updated.push(' ');
+    updated.push_str(attr_name);
+    updated.push_str("=\"");
+    updated.push_str(new_value);
+    updated.push('"');
+    updated.push_str(&tag_text[insert_pos..]);
+    Some(updated)
+}
+
 fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new("resources")))?;
 
@@ -197,7 +275,11 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
             let asset_id = format!("a_{}", sanitize_id(&clip.id));
-            let uri = crate::media::thumbnail::path_to_uri(&clip.source_path);
+            let export_source_path = clip
+                .fcpxml_original_source_path
+                .as_deref()
+                .unwrap_or(&clip.source_path);
+            let uri = crate::media::thumbnail::path_to_uri(export_source_path);
             let duration = ns_to_fcpxml_time(clip.source_out, &project.frame_rate);
             let has_video = if clip.kind == crate::model::clip::ClipKind::Audio {
                 "0"
@@ -215,7 +297,7 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
             writer.write_event(Event::Start(asset))?;
 
             let mut media_rep = BytesStart::new("media-rep");
-            media_rep.push_attribute(("kind", media_rep_kind_for_path(&clip.source_path)));
+            media_rep.push_attribute(("kind", media_rep_kind_for_path(export_source_path)));
             media_rep.push_attribute(("src", uri.as_str()));
             writer.write_event(Event::Empty(media_rep))?;
 
@@ -249,9 +331,55 @@ fn media_rep_kind_for_path(source_path: &str) -> &'static str {
     }
 }
 
+fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
+    matches!(
+        key,
+        "ref"
+            | "offset"
+            | "duration"
+            | "start"
+            | "name"
+            | "us:track-idx"
+            | "us:track-kind"
+            | "us:track-name"
+            | "us:brightness"
+            | "us:contrast"
+            | "us:saturation"
+            | "us:denoise"
+            | "us:sharpness"
+            | "us:volume"
+            | "us:pan"
+            | "us:crop-left"
+            | "us:crop-right"
+            | "us:crop-top"
+            | "us:crop-bottom"
+            | "us:rotate"
+            | "us:flip-h"
+            | "us:flip-v"
+            | "us:scale"
+            | "us:opacity"
+            | "us:position-x"
+            | "us:position-y"
+            | "us:title-text"
+            | "us:title-font"
+            | "us:title-color"
+            | "us:title-x"
+            | "us:title-y"
+            | "us:speed"
+            | "us:reverse"
+            | "us:shadows"
+            | "us:midtones"
+            | "us:highlights"
+            | "us:lut-path"
+            | "us:transition-after"
+            | "us:transition-after-ns"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fcpxml::parser::parse_fcpxml;
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::Track;
@@ -300,5 +428,194 @@ mod tests {
 
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(xml.contains("<media-rep kind=\"proxy-media\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_preserves_original_document_for_clean_import() {
+        let original = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" customRoot="keep-me">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" name="clip" hasVideo="1" hasAudio="1" duration="24/24s" customAsset="yes">
+      <media-rep kind="original-media" src="file:///tmp/clip.mov" customRep="keep"/>
+      <md key="com.example.keep" value="1"/>
+    </asset>
+  </resources>
+  <library>
+    <event name="MainEvent">
+      <project name="MainProject" customProject="keep">
+        <sequence format="r1" duration="24/24s" customSequence="keep">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="24/24s" customClip="keep"/>
+          </spine>
+        </sequence>
+      </project>
+      <project name="UnselectedProject">
+        <sequence format="r1" duration="24/24s">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="24/24s"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(original).expect("parse should succeed");
+        assert!(!project.dirty);
+        let written = write_fcpxml(&project).expect("write should succeed");
+        assert_eq!(written, original);
+    }
+
+    #[test]
+    fn test_write_fcpxml_dirty_import_regenerates_document() {
+        let original = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mov" name="clip" duration="24/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="MainProject">
+        <sequence format="r1" duration="24/24s">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="24/24s" customClip="keep"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let mut project = parse_fcpxml(original).expect("parse should succeed");
+        project.dirty = true;
+        let written = write_fcpxml(&project).expect("write should succeed");
+        assert_ne!(written, original);
+        assert!(written.contains("<fcpxml version=\"1.14\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_clean_project_without_source_fcpxml_generates_xml() {
+        let mut project = Project::new("NoSource");
+        project.source_fcpxml = None;
+        project.dirty = false;
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assert!(xml.contains("<fcpxml version=\"1.14\""));
+        assert!(xml.contains("xmlns:us=\"urn:ultimateslice\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_uses_original_imported_source_path_when_present() {
+        let mut project = Project::new("OriginalPath");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/remapped.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.fcpxml_original_source_path = Some("/Volumes/original.mp4".to_string());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("src=\"file:///Volumes/original.mp4\""));
+        assert!(!xml.contains("src=\"file:///tmp/remapped.mp4\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_dirty_scale_edit_preserves_unknown_fields() {
+        let original = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" customRoot="keep-root">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mov" name="clip" duration="48/24s" customAsset="keep-asset">
+      <metadata key="com.example.unknown" value="keep-meta"/>
+    </asset>
+  </resources>
+  <library>
+    <event customEvent="keep-event">
+      <project name="MainProject">
+        <sequence format="r1" duration="48/24s" customSequence="keep-seq">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="48/24s" customClip="keep-clip" us:scale="1">
+              <adjust-transform position="0 0" scale="1 1" rotation="0"/>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let mut project = parse_fcpxml(original).expect("parse should succeed");
+        let clip = project
+            .tracks
+            .iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .next()
+            .expect("expected imported clip");
+        clip.scale = 1.75;
+        project.dirty = true;
+
+        let written = write_fcpxml(&project).expect("write should succeed");
+        assert!(written.contains("customRoot=\"keep-root\""));
+        assert!(written.contains("customAsset=\"keep-asset\""));
+        assert!(written.contains("customSequence=\"keep-seq\""));
+        assert!(written.contains("customClip=\"keep-clip\""));
+        assert!(written.contains("<metadata key=\"com.example.unknown\" value=\"keep-meta\""));
+        assert!(written.contains("us:scale=\"1.75\""));
+        assert!(written.contains("adjust-transform position=\"0 0\" scale=\"1.75 1.75\" rotation=\"0\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_regenerated_xml_preserves_unknown_clip_attrs_after_scale_edit() {
+        let original = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip1.mov" name="clip1" duration="24/24s"/>
+    <asset id="a2" src="file:///tmp/clip2.mov" name="clip2" duration="24/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="MainProject">
+        <sequence format="r1" duration="48/24s">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="24/24s" customUnsupported="keep-one" us:scale="1">
+              <customTag mode="hold">
+                <childTag value="keep-child"/>
+              </customTag>
+            </asset-clip>
+            <asset-clip ref="a2" offset="24/24s" start="0s" duration="24/24s" customUnsupported="keep-two" us:scale="1"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let mut project = parse_fcpxml(original).expect("parse should succeed");
+        assert_eq!(
+            project.tracks.iter().map(|t| t.clips.len()).sum::<usize>(),
+            2,
+            "two clips ensure dirty-save full regeneration path"
+        );
+        let first_clip = project
+            .tracks
+            .iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .next()
+            .expect("expected imported clip");
+        first_clip.scale = 2.25;
+        project.dirty = true;
+
+        let written = write_fcpxml(&project).expect("write should succeed");
+        assert_ne!(written, original);
+        assert!(written.contains("customUnsupported=\"keep-one\""));
+        assert!(written.contains("customUnsupported=\"keep-two\""));
+        assert!(written.contains("<customTag mode=\"hold\"><childTag value=\"keep-child\"/></customTag>"));
+        assert!(written.contains("us:scale=\"2.25\""));
+        assert!(written.contains("adjust-transform"));
+        assert!(written.contains("scale=\"2.25 2.25\""));
     }
 }

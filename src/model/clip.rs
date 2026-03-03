@@ -145,6 +145,15 @@ pub struct Clip {
     /// indicator on the timeline clip.
     #[serde(default)]
     pub reverse: bool,
+    /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
+    #[serde(default)]
+    pub fcpxml_unknown_attrs: Vec<(String, String)>,
+    /// Unsupported FCPXML child tags under asset-clip preserved for round-trip export.
+    #[serde(default)]
+    pub fcpxml_unknown_children: Vec<String>,
+    /// Original imported FCPXML source path (before any runtime remapping).
+    #[serde(default)]
+    pub fcpxml_original_source_path: Option<String>,
 }
 
 impl Clip {
@@ -199,6 +208,9 @@ impl Clip {
             midtones: 0.0,
             highlights: 0.0,
             reverse: false,
+            fcpxml_unknown_attrs: Vec::new(),
+            fcpxml_unknown_children: Vec::new(),
+            fcpxml_original_source_path: None,
         }
     }
 
@@ -255,6 +267,9 @@ mod tests {
         assert!(!clip.flip_v);
         assert!(clip.lut_path.is_none());
         assert!(clip.transition_after.is_empty());
+        assert!(clip.fcpxml_unknown_attrs.is_empty());
+        assert!(clip.fcpxml_unknown_children.is_empty());
+        assert!(clip.fcpxml_original_source_path.is_none());
     }
 
     #[test]
