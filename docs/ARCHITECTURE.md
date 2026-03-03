@@ -46,8 +46,8 @@ src/
     proxy_cache.rs          Background proxy transcoding (half/quarter-res H.264 via ffmpeg) for preview playback
 
   fcpxml/
-    parser.rs               FCPXML 1.10 → Project (quick-xml; parses assets, spine, asset-clip)
-    writer.rs               Project → FCPXML 1.10
+    parser.rs               FCPXML 1.10-1.14 → Project (quick-xml; parses assets, spine, asset-clip)
+    writer.rs               Project → FCPXML 1.14
 
   undo.rs                   EditCommand trait + EditHistory (undo/redo stacks)
                             Commands: MoveClip, TrimIn, TrimOut, DeleteClip, SplitClip
@@ -353,7 +353,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_project_title` | Rename the project |
-| `save_fcpxml` | Write FCPXML 1.10 to a file path |
+| `save_fcpxml` | Write FCPXML 1.14 to a file path |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
 | `list_library` | Items in the media library (not yet on timeline) |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |

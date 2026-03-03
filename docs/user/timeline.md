@@ -109,6 +109,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Markers appear as coloured flags on the ruler with their label.
 - Right-click on the ruler to remove the nearest marker.
 - Markers are exported in the FCPXML file.
+- On FCPXML import, standard markers and chapter markers are read and placed at their correct timeline positions.
 
 ## Tracks
 

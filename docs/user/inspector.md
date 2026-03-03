@@ -123,6 +123,7 @@ Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacki
 ## Notes
 
 - All Inspector values are **persisted in the FCPXML** project file.
+- Transform fields (scale/position/rotation), opacity, and crop are now also mapped to standard FCPXML adjustment elements (`adjust-transform`, `adjust-compositing`, `adjust-crop`/`crop-rect`) for improved interoperability.
 - There is no keyboard shortcut to focus the Inspector; use mouse/Tab navigation.
 - When no clip is selected, the Inspector shows an instructional message and hides edit controls.
 - To reduce first-use visual density, **Audio**, **Transform**, and **Speed** sections start collapsed by default.

@@ -94,8 +94,13 @@ Tracking docs:
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
 
 ### FCPXML
-- [x] FCPXML 1.10 import (`quick-xml`) — parses assets, spine, asset-clip elements
-- [x] FCPXML 1.10 export — writes resources/format/asset + library/event/project/sequence/spine
+- [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
+- [x] FCPXML 1.14 export — writes resources/format/asset + library/event/project/sequence/spine
+- [x] FCPXML export writes source media in nested `media-rep` entries (`original-media` for non-proxy files, `proxy-media` for detected proxy-cache paths)
+- [x] Import compatibility for Apple-authored FCPXML 1.14 files: nested `media-rep` source paths, first-project timeline selection in multi-project files, and lane/media-type fallback track routing
+- [x] Marker import compatibility: parse `chapter-marker` and convert nested clip marker times (`start`/`offset` aware) to correct timeline marker positions
+- [x] Format preset fallback: derive frame rate/resolution from known format names (e.g. `FFVideoFormat1080p30`) when numeric format fields are absent
+- [x] Standard Inspector mapping (phase 1): parse/write `adjust-transform` (scale/position/rotation), `adjust-compositing` (opacity), and `adjust-crop`/`crop-rect` (crop bounds) with `us:*` fallback
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)

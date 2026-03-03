@@ -353,7 +353,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "save_fcpxml",
-            "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file.",
+            "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file using FCPXML 1.14.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -364,7 +364,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "open_fcpxml",
-            "description": "Load a project from a Final Cut Pro XML (.fcpxml) file, replacing the current project.",
+            "description": "Load a project from a Final Cut Pro XML (.fcpxml) file (supports versions up to 1.14), replacing the current project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
