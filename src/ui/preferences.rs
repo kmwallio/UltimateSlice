@@ -203,6 +203,17 @@ pub fn show_preferences_dialog(
     playback_box.append(&experimental_check);
     playback_box.append(&experimental_hint);
 
+    let realtime_check = CheckButton::with_label("Real-time preview");
+    realtime_check.set_active(current.realtime_preview);
+    realtime_check.set_halign(gtk::Align::Start);
+    let realtime_hint = Label::new(Some("Pre-builds upcoming decoder slots so clip transitions are near-instant. Uses more CPU and memory."));
+    realtime_hint.set_halign(gtk::Align::Start);
+    realtime_hint.add_css_class("dim-label");
+    realtime_hint.set_wrap(true);
+    realtime_hint.set_max_width_chars(60);
+    playback_box.append(&realtime_check);
+    playback_box.append(&realtime_hint);
+
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     // ── Timeline section ──────────────────────────────────────────────────
@@ -288,6 +299,7 @@ pub fn show_preferences_dialog(
                     preview_quality.active_id().as_deref().unwrap_or("full"),
                 ),
                 experimental_preview_optimizations: experimental_check.is_active(),
+                realtime_preview: realtime_check.is_active(),
             });
         }
         d.close();

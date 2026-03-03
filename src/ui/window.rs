@@ -282,6 +282,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     prog_player_raw.set_experimental_preview_optimizations(
         preferences_state.borrow().experimental_preview_optimizations,
     );
+    prog_player_raw.set_realtime_preview(
+        preferences_state.borrow().realtime_preview,
+    );
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -371,6 +374,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             .borrow_mut()
                             .set_experimental_preview_optimizations(
                                 new_state.experimental_preview_optimizations,
+                            );
+                        prog_player
+                            .borrow_mut()
+                            .set_realtime_preview(
+                                new_state.realtime_preview,
                             );
                         if new_state.proxy_mode.is_enabled() {
                             // If the proxy scale changed, invalidate old entries so clips are
@@ -2827,6 +2835,24 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "preview_quality": new_state.preview_quality.as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::SetRealtimePreview { enabled, reply } => {
+            prog_player
+                .borrow_mut()
+                .set_realtime_preview(enabled);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.realtime_preview = enabled;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply
+                .send(json!({
+                    "success": true,
+                    "realtime_preview": enabled
                 }))
                 .ok();
         }

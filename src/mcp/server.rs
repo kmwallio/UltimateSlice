@@ -508,6 +508,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_realtime_preview",
+            "description": "Enable or disable real-time preview. When enabled, upcoming decoder slots are pre-built so clip transitions are near-instant. Uses more CPU and memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
             "name": "insert_clip",
             "description": "Insert a source clip at the playhead position, shifting all subsequent clips right to make room (3-point insert edit).",
             "inputSchema": {
@@ -766,6 +777,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "set_preview_quality" => McpCommand::SetPreviewQuality {
             quality: args["quality"].as_str().unwrap_or("full").to_string(),
+            reply: tx,
+        },
+
+        "set_realtime_preview" => McpCommand::SetRealtimePreview {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },
 

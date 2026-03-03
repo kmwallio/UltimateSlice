@@ -155,6 +155,10 @@ pub enum McpCommand {
         quality: String,
         reply: SyncSender<Value>,
     },
+    SetRealtimePreview {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     SeekPlayhead {
         timeline_pos_ns: u64,
         reply: SyncSender<Value>,

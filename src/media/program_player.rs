@@ -200,6 +200,9 @@ struct VideoSlot {
     /// Monotonic counter incremented when a buffer passes through queue→compositor.
     /// Used to detect when post-seek buffers have reached the compositor.
     comp_arrival_seq: Arc<AtomicU64>,
+    /// When true, the slot is hidden (alpha=0, volume=0) — kept alive for
+    /// potential re-entry but not counted as "active" for boundary detection.
+    hidden: bool,
 }
 
 /// Result of `compute_reuse_plan()`: whether all current decoder slots can be
@@ -247,6 +250,8 @@ pub struct ProgramPlayer {
     proxy_enabled: bool,
     /// Use audio-only decoder slots for fully-occluded clips (experimental).
     experimental_preview_optimizations: bool,
+    /// Pre-build upcoming decoder slots for near-instant clip transitions.
+    realtime_preview: bool,
     proxy_paths: HashMap<String, String>,
     /// Cache for per-path audio-stream probe results.
     audio_stream_probe_cache: HashMap<String, bool>,
@@ -747,6 +752,7 @@ impl ProgramPlayer {
                 playback_priority: PlaybackPriority::default(),
                 proxy_enabled: false,
                 experimental_preview_optimizations: false,
+                realtime_preview: false,
                 proxy_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
@@ -802,6 +808,10 @@ impl ProgramPlayer {
 
     pub fn set_experimental_preview_optimizations(&mut self, enabled: bool) {
         self.experimental_preview_optimizations = enabled;
+    }
+
+    pub fn set_realtime_preview(&mut self, enabled: bool) {
+        self.realtime_preview = enabled;
     }
 
     /// Enable or disable scope frame capture. When disabled (scopes panel hidden),
@@ -1444,7 +1454,12 @@ impl ProgramPlayer {
 
         // Detect clip boundary changes: have the active clips changed?
         let desired = self.clips_active_at(new_pos);
-        let current: Vec<usize> = self.slots.iter().map(|s| s.clip_idx).collect();
+        let current: Vec<usize> = self
+            .slots
+            .iter()
+            .filter(|s| !s.hidden)
+            .map(|s| s.clip_idx)
+            .collect();
         if desired != current {
             log::info!(
                 "poll: boundary crossing at {} desired={:?} current={:?}",
@@ -1452,8 +1467,11 @@ impl ProgramPlayer {
             );
             // Determine whether the audio-pipeline source changes at this
             // boundary.  When it stays the same (e.g. only a video track
-            // enters/exits), we can leave audio_pipeline in Playing and
-            // avoid an audible gap during the rebuild.
+            // enters/exits), we leave audio_pipeline in Playing during the
+            // rebuild to avoid an audible gap.  After the rebuild we always
+            // re-sync so the audio position matches the reset wall clock;
+            // without this the audio_pipeline drifts ahead by the rebuild
+            // duration and can reach EOS before the timeline ends.
             let audio_wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(new_pos) {
                 Some(AudioCurrentSource::ReverseVideoClip(idx))
             } else {
@@ -1461,20 +1479,39 @@ impl ProgramPlayer {
                     .map(AudioCurrentSource::AudioClip)
             };
             let audio_source_changed = audio_wanted != self.audio_current_source;
-            if audio_source_changed {
-                let _ = self.audio_pipeline.set_state(gst::State::Paused);
-            }
-            self.rebuild_pipeline_at(new_pos);
-            let _ = self.pipeline.set_state(gst::State::Playing);
-            if audio_source_changed {
+
+            // When realtime_preview is enabled, try the incremental pad-offset
+            // path first: hide departing clips, add entering clips with
+            // pad.set_offset() for running-time alignment.  Fall back to full
+            // rebuild on failure.
+            let used_realtime = self.realtime_preview
+                && self.try_realtime_boundary_update(new_pos, &desired, &current);
+
+            if !used_realtime {
+                if audio_source_changed {
+                    let _ = self.audio_pipeline.set_state(gst::State::Paused);
+                }
+                self.rebuild_pipeline_at(new_pos);
+                let _ = self.pipeline.set_state(gst::State::Playing);
                 self.sync_audio_to(new_pos);
                 if self.audio_current_source.is_some() {
                     let _ = self.audio_pipeline.set_state(gst::State::Playing);
                 }
+                // Reset wall-clock base after rebuild.
+                self.base_timeline_ns = new_pos;
+                self.play_start = Some(Instant::now());
+            } else {
+                // Realtime path succeeded — audio sync without full rebuild.
+                if audio_source_changed {
+                    if let Some(ref _src) = audio_wanted {
+                        let _ = self.audio_pipeline.set_state(gst::State::Paused);
+                    }
+                    self.sync_audio_to(new_pos);
+                    if self.audio_current_source.is_some() {
+                        let _ = self.audio_pipeline.set_state(gst::State::Playing);
+                    }
+                }
             }
-            // Reset wall-clock base after rebuild.
-            self.base_timeline_ns = new_pos;
-            self.play_start = Some(Instant::now());
         }
 
         // Update current_idx to highest-priority active clip.
@@ -3041,6 +3078,189 @@ impl ProgramPlayer {
         true
     }
 
+    /// Real-time boundary update using pad offsets for running-time alignment.
+    ///
+    /// Instead of tearing down the entire pipeline, this method:
+    /// 1. Hides departing clips (alpha=0, volume=0) — no pad removal.
+    /// 2. Builds new slots for entering clips with `pad.set_offset()` so
+    ///    post-FLUSH-seek buffers align with the compositor's running-time.
+    /// 3. Tears down any previously-hidden (stale) slots to bound resource use.
+    ///
+    /// Returns true on success, false to fall back to full rebuild.
+    fn try_realtime_boundary_update(
+        &mut self,
+        timeline_pos: u64,
+        desired: &[usize],
+        current_visible: &[usize],
+    ) -> bool {
+        // Fall back to full rebuild when desired is empty (gap in timeline).
+        if desired.is_empty() {
+            return false;
+        }
+
+        let retained: Vec<usize> = desired
+            .iter()
+            .copied()
+            .filter(|idx| current_visible.contains(idx))
+            .collect();
+        let added: Vec<usize> = desired
+            .iter()
+            .copied()
+            .filter(|idx| !current_visible.contains(idx))
+            .collect();
+        let removed: Vec<usize> = current_visible
+            .iter()
+            .copied()
+            .filter(|idx| !desired.contains(idx))
+            .collect();
+
+        // Limit complexity: fall back when too many clips are changing.
+        if added.len() > 3 {
+            return false;
+        }
+
+        let rebuild_started = Instant::now();
+        self.teardown_prepreroll_sidecars();
+        log::info!(
+            "try_realtime_boundary: pos={} added={:?} removed={:?} retained={:?}",
+            timeline_pos,
+            added,
+            removed,
+            retained
+        );
+
+        // 1. Garbage-collect previously-hidden slots to bound resource use.
+        let mut i = 0usize;
+        while i < self.slots.len() {
+            if self.slots[i].hidden {
+                let slot = self.slots.remove(i);
+                self.teardown_single_slot(slot);
+            } else {
+                i += 1;
+            }
+        }
+
+        // 2. Hide departing clips: zero alpha/volume, mark hidden.
+        for slot in self.slots.iter_mut() {
+            if removed.contains(&slot.clip_idx) {
+                if let Some(ref pad) = slot.compositor_pad {
+                    pad.set_property("alpha", 0.0_f64);
+                }
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    pad.set_property("volume", 0.0_f64);
+                }
+                slot.hidden = true;
+            }
+        }
+
+        // 3. Build new slots for entering clips.
+        if !added.is_empty() {
+            // Get the pipeline's current running-time for pad offset alignment.
+            let pipe_running_time_ns: i64 = self
+                .pipeline
+                .current_running_time()
+                .map(|t| t.nseconds() as i64)
+                .unwrap_or(0);
+
+            let mut added_ok = true;
+            let mut added_clip_idxs: Vec<usize> = Vec::new();
+            for clip_idx in &added {
+                // Use zorder 0 temporarily; corrected in step 4.
+                if let Some(mut slot) = self.build_slot_for_clip(*clip_idx, 0, true) {
+                    // Set pad offsets so post-seek buffers (running-time 0)
+                    // align with the compositor's current running-time.
+                    if let Some(ref pad) = slot.compositor_pad {
+                        pad.set_offset(pipe_running_time_ns);
+                    }
+                    if let Some(ref pad) = slot.audio_mixer_pad {
+                        pad.set_offset(pipe_running_time_ns);
+                    }
+                    slot.hidden = false;
+                    self.slots.push(slot);
+                    added_clip_idxs.push(*clip_idx);
+                } else {
+                    added_ok = false;
+                    break;
+                }
+            }
+
+            if !added_ok {
+                // Roll back: remove newly-added slots, un-hide departed, bail.
+                let mut j = 0usize;
+                while j < self.slots.len() {
+                    if added_clip_idxs.contains(&self.slots[j].clip_idx) {
+                        let slot = self.slots.remove(j);
+                        self.teardown_single_slot(slot);
+                    } else {
+                        j += 1;
+                    }
+                }
+                for slot in self.slots.iter_mut() {
+                    if removed.contains(&slot.clip_idx) {
+                        slot.hidden = false;
+                    }
+                }
+                return false;
+            }
+
+            // Wait for new decoders to link (stream discovery + pad-added).
+            let link_wait_ms = self.adaptive_arrival_wait_ms(400);
+            let _ = self
+                .pipeline
+                .state(gst::ClockTime::from_mseconds(link_wait_ms));
+
+            // Seek new decoders to their source positions.
+            let seek_flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
+            for slot in &self.slots {
+                if !added_clip_idxs.contains(&slot.clip_idx) {
+                    continue;
+                }
+                let clip = &self.clips[slot.clip_idx];
+                if !Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags) {
+                    log::warn!(
+                        "try_realtime_boundary: seek FAILED for clip {}",
+                        clip.id
+                    );
+                    if let Some(ref pad) = slot.compositor_pad {
+                        let _ = pad.send_event(gst::event::Eos::new());
+                    }
+                    if let Some(ref pad) = slot.audio_mixer_pad {
+                        let _ = pad.send_event(gst::event::Eos::new());
+                    }
+                }
+            }
+
+            // Brief preroll wait for new decoders only.
+            self.wait_for_paused_preroll();
+        }
+
+        // 4. Update zorder on all visible slots to match desired order.
+        for (zorder_offset, clip_idx) in desired.iter().enumerate() {
+            if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == *clip_idx && !s.hidden) {
+                if let Some(ref pad) = slot.compositor_pad {
+                    pad.set_property("zorder", (zorder_offset + 1) as u32);
+                }
+            }
+        }
+
+        // 5. Ensure pipeline stays in Playing — no state transition needed
+        //    since we never paused.
+        let _ = self.pipeline.set_state(gst::State::Playing);
+
+        self.current_idx = desired.last().copied();
+        self.slot_queue_drop_late_active = false;
+        let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
+        self.record_rebuild_duration_ms(elapsed_ms);
+        log::info!(
+            "try_realtime_boundary: pos={} visible={} hidden={} elapsed_ms={}",
+            timeline_pos,
+            self.slots.iter().filter(|s| !s.hidden).count(),
+            self.slots.iter().filter(|s| s.hidden).count(),
+            elapsed_ms
+        );
+        true
+    }
+
     // ── Pipeline rebuild ───────────────────────────────────────────────────
 
     fn teardown_single_slot(&mut self, slot: VideoSlot) {
@@ -3589,6 +3809,7 @@ impl ProgramPlayer {
             videobox_zoom: None,
             slot_queue: None,
             comp_arrival_seq: Arc::new(AtomicU64::new(0)),
+            hidden: false,
         })
     }
 
@@ -3834,6 +4055,7 @@ impl ProgramPlayer {
             videobox_zoom: videobox_zoom.clone(),
             slot_queue: Some(slot_queue.clone()),
             comp_arrival_seq: comp_arrival_seq.clone(),
+            hidden: false,
         };
         Self::apply_transform_to_slot(
             &slot_ref_for_transform,
@@ -3884,6 +4106,7 @@ impl ProgramPlayer {
             videobox_zoom,
             slot_queue: Some(slot_queue),
             comp_arrival_seq,
+            hidden: false,
         })
     }
 

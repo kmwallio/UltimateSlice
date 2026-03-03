@@ -223,6 +223,10 @@ pub struct PreferencesState {
     /// Enable experimental preview optimizations (e.g. skip video decode for occluded clips).
     #[serde(default)]
     pub experimental_preview_optimizations: bool,
+    /// Pre-build upcoming decoder slots so clip transitions are near-instant.
+    /// Uses more CPU and memory during playback.
+    #[serde(default)]
+    pub realtime_preview: bool,
 }
 
 impl Default for PreferencesState {
@@ -238,6 +242,7 @@ impl Default for PreferencesState {
             gsk_renderer: GskRenderer::default(),
             preview_quality: PreviewQuality::default(),
             experimental_preview_optimizations: false,
+            realtime_preview: false,
         }
     }
 }
