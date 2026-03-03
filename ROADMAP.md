@@ -31,6 +31,7 @@ Tracking docs:
 - [x] Selecting a library item loads it in the source preview
 - [x] Imported clips are **not** auto-added to the timeline
 - [x] Import no longer auto-loads Source Monitor; selecting a library item loads preview on demand (avoids import-time playbin reconfiguration races)
+- [x] Project replacement (New/Open/Open Recent and MCP create/open) clears the current media-browser list before syncing target-project media
 
 ### Source Preview / Monitor
 - [x] GStreamer `playbin` + `gtk4paintablesink` video display

@@ -242,6 +242,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let pending_program_seek_ticket = Rc::new(Cell::new(0u64));
     let pending_reload_ticket = Rc::new(Cell::new(0u64));
     let suppress_resume_on_next_reload = Rc::new(Cell::new(false));
+    let clear_media_browser_on_next_reload = Rc::new(Cell::new(false));
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
@@ -613,7 +614,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         },
         {
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
-            move || suppress_resume_on_next_reload.set(true)
+            let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+            move || {
+                suppress_resume_on_next_reload.set(true);
+                clear_media_browser_on_next_reload.set(true);
+            }
         },
     );
     window.set_titlebar(Some(&header));
@@ -1727,6 +1732,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let library = library.clone();
+        let on_close_preview = on_close_preview.clone();
         let window_weak = window_weak.clone();
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
@@ -1737,8 +1743,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let program_empty_hint = program_empty_hint.clone();
         let pending_reload_ticket = pending_reload_ticket.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+        let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
+            if clear_media_browser_on_next_reload.replace(false) {
+                on_close_preview();
+                library.borrow_mut().clear();
+            }
+
             // Update window title
             if let Some(win) = window_weak.upgrade() {
                 let proj = project.borrow();
@@ -2187,6 +2199,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+        let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
         let window_weak = window.downgrade();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
         glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
@@ -2206,6 +2219,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         &on_source_selected,
                         &on_project_changed,
                         &suppress_resume_on_next_reload,
+                        &clear_media_browser_on_next_reload,
                     );
                 }
             }
@@ -2387,6 +2401,33 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         on_toggle_popout();
     }
 
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let close_approved = Rc::new(Cell::new(false));
+        let close_approved_for_signal = close_approved.clone();
+        window.connect_close_request(move |w| {
+            if close_approved_for_signal.get() {
+                return glib::Propagation::Proceed;
+            }
+            let close_approved_for_continue = close_approved.clone();
+            let weak = w.downgrade();
+            let on_continue: Rc<dyn Fn()> = Rc::new(move || {
+                close_approved_for_continue.set(true);
+                if let Some(win) = weak.upgrade() {
+                    win.close();
+                }
+            });
+            crate::ui::toolbar::confirm_unsaved_then(
+                Some(w.clone().upcast::<gtk::Window>()),
+                project.clone(),
+                on_project_changed.clone(),
+                on_continue,
+            );
+            glib::Propagation::Stop
+        });
+    }
+
     window.present();
 }
 
@@ -2406,6 +2447,7 @@ fn handle_mcp_command(
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
+    clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
     use crate::mcp::McpCommand;
     use crate::model::clip::ClipKind;
@@ -2999,7 +3041,15 @@ fn handle_mcp_command(
                     .and_then(|xml| std::fs::write(&path, xml).map_err(|e| anyhow::anyhow!(e)))
             };
             match result {
-                Ok(_) => reply.send(json!({"success": true, "path": path})).ok(),
+                Ok(_) => {
+                    {
+                        let mut proj = project.borrow_mut();
+                        proj.file_path = Some(path.clone());
+                        proj.dirty = false;
+                    }
+                    on_project_changed();
+                    reply.send(json!({"success": true, "path": path})).ok()
+                }
                 Err(e) => reply
                     .send(json!({"success": false, "error": e.to_string()}))
                     .ok(),
@@ -3022,6 +3072,7 @@ fn handle_mcp_command(
             let timeline_state = timeline_state.clone();
             let on_project_changed = on_project_changed.clone();
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+            let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
                 match rx.try_recv() {
                     Ok(Ok(mut new_proj)) => {
@@ -3032,6 +3083,7 @@ fn handle_mcp_command(
                         timeline_state.borrow_mut().loading = false;
                         reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
                         suppress_resume_on_next_reload.set(true);
+                        clear_media_browser_on_next_reload.set(true);
                         let on_project_changed = on_project_changed.clone();
                         glib::timeout_add_local_once(
                             std::time::Duration::from_millis(0),
@@ -3246,6 +3298,7 @@ fn handle_mcp_command(
             }
             reply.send(json!({"success": true, "title": title})).ok();
             suppress_resume_on_next_reload.set(true);
+            clear_media_browser_on_next_reload.set(true);
             on_project_changed();
         }
 

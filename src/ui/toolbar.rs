@@ -12,6 +12,107 @@ use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+fn save_project_to_path(project: &Rc<RefCell<Project>>, path: &std::path::Path) -> Result<(), String> {
+    let xml = {
+        let proj = project.borrow();
+        fcpxml::writer::write_fcpxml(&proj).map_err(|e| format!("FCPXML write error: {e}"))?
+    };
+    std::fs::write(path, xml).map_err(|e| format!("Save error: {e}"))?;
+    if let Some(p) = path.to_str() {
+        recent::push(p);
+    }
+    {
+        let mut proj = project.borrow_mut();
+        proj.file_path = Some(path.to_string_lossy().to_string());
+        proj.dirty = false;
+    }
+    Ok(())
+}
+
+pub fn confirm_unsaved_then(
+    window: Option<gtk::Window>,
+    project: Rc<RefCell<Project>>,
+    on_project_changed: Rc<dyn Fn()>,
+    on_continue: Rc<dyn Fn()>,
+) {
+    if !project.borrow().dirty {
+        on_continue();
+        return;
+    }
+
+    let dialog = gtk::Dialog::builder()
+        .title("Unsaved changes")
+        .modal(true)
+        .default_width(420)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Discard", gtk::ResponseType::Reject);
+    dialog.add_button("Save…", gtk::ResponseType::Accept);
+    let label = gtk::Label::new(Some(
+        "You have unsaved changes. Save the current project before continuing?",
+    ));
+    label.set_wrap(true);
+    label.set_margin_start(16);
+    label.set_margin_end(16);
+    label.set_margin_top(16);
+    label.set_margin_bottom(16);
+    dialog.content_area().append(&label);
+
+    let project_c = project.clone();
+    let on_project_changed_c = on_project_changed.clone();
+    let on_continue_c = on_continue.clone();
+    dialog.connect_response(move |d, resp| {
+        match resp {
+            gtk::ResponseType::Reject => {
+                d.close();
+                on_continue_c();
+            }
+            gtk::ResponseType::Accept => {
+                d.close();
+                let existing_path = project_c.borrow().file_path.clone();
+                if let Some(path) = existing_path {
+                    match save_project_to_path(&project_c, std::path::Path::new(&path)) {
+                        Ok(()) => {
+                            on_project_changed_c();
+                            on_continue_c();
+                        }
+                        Err(e) => eprintln!("{e}"),
+                    }
+                } else {
+                    let file_dialog = gtk::FileDialog::new();
+                    file_dialog.set_title("Save FCPXML Project");
+                    file_dialog.set_initial_name(Some("project.fcpxml"));
+                    let filter = gtk::FileFilter::new();
+                    filter.add_pattern("*.fcpxml");
+                    filter.set_name(Some("FCPXML Files"));
+                    let filters = gio::ListStore::new::<gtk::FileFilter>();
+                    filters.append(&filter);
+                    file_dialog.set_filters(Some(&filters));
+                    let project_s = project_c.clone();
+                    let on_project_changed_s = on_project_changed_c.clone();
+                    let on_continue_s = on_continue_c.clone();
+                    file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                match save_project_to_path(&project_s, &path) {
+                                    Ok(()) => {
+                                        on_project_changed_s();
+                                        on_continue_s();
+                                    }
+                                    Err(e) => eprintln!("{e}"),
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            _ => d.close(),
+        }
+    });
+    dialog.present();
+}
+
 /// Build the main `HeaderBar` toolbar.
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
@@ -33,18 +134,29 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
-        btn_new.connect_clicked(move |_| {
-            *project.borrow_mut() = Project::new("Untitled");
-            {
-                let mut st = timeline_state.borrow_mut();
-                st.playhead_ns = 0;
-                st.scroll_offset = 0.0;
-                st.pixels_per_second = 100.0;
-                st.selected_clip_id = None;
-                st.selected_track_id = None;
-            }
-            on_project_reloaded();
-            on_project_changed();
+        btn_new.connect_clicked(move |btn| {
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+            let action: Rc<dyn Fn()> = Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
+                let on_project_reloaded = on_project_reloaded.clone();
+                move || {
+                    *project.borrow_mut() = Project::new("Untitled");
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        st.playhead_ns = 0;
+                        st.scroll_offset = 0.0;
+                        st.pixels_per_second = 100.0;
+                        st.selected_clip_id = None;
+                        st.selected_track_id = None;
+                    }
+                    on_project_reloaded();
+                    on_project_changed();
+                }
+            });
+            confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
         });
     }
     header.pack_start(&btn_new);
@@ -58,81 +170,94 @@ pub fn build_toolbar(
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
         btn_open.connect_clicked(move |btn| {
-            let dialog = gtk::FileDialog::new();
-            dialog.set_title("Open FCPXML Project");
-
-            let filter = gtk::FileFilter::new();
-            filter.add_pattern("*.fcpxml");
-            filter.add_pattern("*.xml");
-            filter.set_name(Some("FCPXML Files"));
-            let filters = gio::ListStore::new::<gtk::FileFilter>();
-            filters.append(&filter);
-            dialog.set_filters(Some(&filters));
-
-            let project = project.clone();
-            let on_project_changed = on_project_changed.clone();
-            let on_project_reloaded = on_project_reloaded.clone();
-            let timeline_state_cb = timeline_state.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+            let action: Rc<dyn Fn()> = Rc::new({
+                let project = project.clone();
+                let on_project_changed = on_project_changed.clone();
+                let on_project_reloaded = on_project_reloaded.clone();
+                let timeline_state_cb = timeline_state.clone();
+                let window = window.clone();
+                move || {
+                    let dialog = gtk::FileDialog::new();
+                    dialog.set_title("Open FCPXML Project");
 
-            dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        let path_str = path.to_string_lossy().to_string();
-                        // Parse FCPXML on a background thread to avoid blocking the UI.
-                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                        let path_bg = path_str.clone();
-                        std::thread::spawn(move || {
-                            let result = std::fs::read_to_string(&path_bg)
-                                .map_err(|e| format!("Failed to read file: {e}"))
-                                .and_then(|xml| {
-                                    fcpxml::parser::parse_fcpxml(&xml)
-                                        .map_err(|e| format!("FCPXML parse error: {e}"))
+                    let filter = gtk::FileFilter::new();
+                    filter.add_pattern("*.fcpxml");
+                    filter.add_pattern("*.xml");
+                    filter.set_name(Some("FCPXML Files"));
+                    let filters = gio::ListStore::new::<gtk::FileFilter>();
+                    filters.append(&filter);
+                    dialog.set_filters(Some(&filters));
+
+                    let project = project.clone();
+                    let on_project_changed = on_project_changed.clone();
+                    let on_project_reloaded = on_project_reloaded.clone();
+                    let timeline_state_cb = timeline_state_cb.clone();
+                    let window = window.clone();
+                    dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let path_str = path.to_string_lossy().to_string();
+                                // Parse FCPXML on a background thread to avoid blocking the UI.
+                                let (tx, rx) =
+                                    std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+                                let path_bg = path_str.clone();
+                                std::thread::spawn(move || {
+                                    let result = std::fs::read_to_string(&path_bg)
+                                        .map_err(|e| format!("Failed to read file: {e}"))
+                                        .and_then(|xml| {
+                                            fcpxml::parser::parse_fcpxml(&xml)
+                                                .map_err(|e| format!("FCPXML parse error: {e}"))
+                                        });
+                                    let _ = tx.send(result);
                                 });
-                            let _ = tx.send(result);
-                        });
-                        let project = project.clone();
-                        let on_project_changed = on_project_changed.clone();
-                        let on_project_reloaded = on_project_reloaded.clone();
-                        let timeline_state_cb = timeline_state_cb.clone();
-                        // Suppress timeline interaction while loading.
-                        timeline_state_cb.borrow_mut().loading = true;
-                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                            match rx.try_recv() {
-                                Ok(Ok(mut new_proj)) => {
-                                    new_proj.file_path = Some(path_str.clone());
-                                    recent::push(&path_str);
-                                    *project.borrow_mut() = new_proj;
-                                    {
-                                        let mut st = timeline_state_cb.borrow_mut();
-                                        st.playhead_ns = 0;
-                                        st.scroll_offset = 0.0;
-                                        st.pixels_per_second = 100.0;
-                                        st.selected_clip_id = None;
-                                        st.selected_track_id = None;
-                                        st.loading = false;
-                                    }
-                                    on_project_reloaded();
-                                    on_project_changed();
-                                    glib::ControlFlow::Break
-                                }
-                                Ok(Err(e)) => {
-                                    eprintln!("{e}");
-                                    timeline_state_cb.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    glib::ControlFlow::Continue
-                                }
-                                Err(_) => {
-                                    timeline_state_cb.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
+                                let project = project.clone();
+                                let on_project_changed = on_project_changed.clone();
+                                let on_project_reloaded = on_project_reloaded.clone();
+                                let timeline_state_cb = timeline_state_cb.clone();
+                                // Suppress timeline interaction while loading.
+                                timeline_state_cb.borrow_mut().loading = true;
+                                glib::timeout_add_local(
+                                    std::time::Duration::from_millis(50),
+                                    move || match rx.try_recv() {
+                                        Ok(Ok(mut new_proj)) => {
+                                            new_proj.file_path = Some(path_str.clone());
+                                            recent::push(&path_str);
+                                            *project.borrow_mut() = new_proj;
+                                            {
+                                                let mut st = timeline_state_cb.borrow_mut();
+                                                st.playhead_ns = 0;
+                                                st.scroll_offset = 0.0;
+                                                st.pixels_per_second = 100.0;
+                                                st.selected_clip_id = None;
+                                                st.selected_track_id = None;
+                                                st.loading = false;
+                                            }
+                                            on_project_reloaded();
+                                            on_project_changed();
+                                            glib::ControlFlow::Break
+                                        }
+                                        Ok(Err(e)) => {
+                                            eprintln!("{e}");
+                                            timeline_state_cb.borrow_mut().loading = false;
+                                            glib::ControlFlow::Break
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                            glib::ControlFlow::Continue
+                                        }
+                                        Err(_) => {
+                                            timeline_state_cb.borrow_mut().loading = false;
+                                            glib::ControlFlow::Break
+                                        }
+                                    },
+                                );
                             }
-                        });
-                    }
+                        }
+                    });
                 }
             });
+            confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
         });
     }
     header.pack_start(&btn_open);
@@ -194,62 +319,80 @@ pub fn build_toolbar(
                     let on_project_changed = on_project_changed.clone();
                     let on_project_reloaded = on_project_reloaded.clone();
                     let pop_weak = pop.downgrade();
+                    let row_for_window = row.clone();
                     row.connect_clicked(move |_| {
-                        if let Some(pop) = pop_weak.upgrade() {
-                            pop.popdown();
-                        }
-                        // Parse FCPXML on a background thread to avoid blocking the UI.
-                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                        let path_bg = path_owned.clone();
-                        std::thread::spawn(move || {
-                            let result = std::fs::read_to_string(&path_bg)
-                                .map_err(|e| format!("Failed to open recent project: {e}"))
-                                .and_then(|xml| {
-                                    fcpxml::parser::parse_fcpxml(&xml)
-                                        .map_err(|e| format!("FCPXML parse error: {e}"))
+                        let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+                        let action: Rc<dyn Fn()> = Rc::new({
+                            let project = project.clone();
+                            let timeline_state = timeline_state.clone();
+                            let on_project_changed = on_project_changed.clone();
+                            let on_project_reloaded = on_project_reloaded.clone();
+                            let path_owned = path_owned.clone();
+                            let pop_weak = pop_weak.clone();
+                            move || {
+                                if let Some(pop) = pop_weak.upgrade() {
+                                    pop.popdown();
+                                }
+                                // Parse FCPXML on a background thread to avoid blocking the UI.
+                                let (tx, rx) =
+                                    std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+                                let path_bg = path_owned.clone();
+                                std::thread::spawn(move || {
+                                    let result = std::fs::read_to_string(&path_bg)
+                                        .map_err(|e| format!("Failed to open recent project: {e}"))
+                                        .and_then(|xml| {
+                                            fcpxml::parser::parse_fcpxml(&xml)
+                                                .map_err(|e| format!("FCPXML parse error: {e}"))
+                                        });
+                                    let _ = tx.send(result);
                                 });
-                            let _ = tx.send(result);
-                        });
-                        let project = project.clone();
-                        let timeline_state = timeline_state.clone();
-                        let on_project_changed = on_project_changed.clone();
-                        let on_project_reloaded = on_project_reloaded.clone();
-                        let path_owned = path_owned.clone();
-                        // Suppress timeline interaction while loading.
-                        timeline_state.borrow_mut().loading = true;
-                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                            match rx.try_recv() {
-                                Ok(Ok(mut new_proj)) => {
-                                    new_proj.file_path = Some(path_owned.clone());
-                                    recent::push(&path_owned);
-                                    *project.borrow_mut() = new_proj;
-                                    {
-                                        let mut st = timeline_state.borrow_mut();
-                                        st.playhead_ns = 0;
-                                        st.scroll_offset = 0.0;
-                                        st.pixels_per_second = 100.0;
-                                        st.selected_clip_id = None;
-                                        st.selected_track_id = None;
-                                        st.loading = false;
-                                    }
-                                    on_project_reloaded();
-                                    on_project_changed();
-                                    glib::ControlFlow::Break
-                                }
-                                Ok(Err(e)) => {
-                                    eprintln!("{e}");
-                                    timeline_state.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    glib::ControlFlow::Continue
-                                }
-                                Err(_) => {
-                                    timeline_state.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
+                                let project = project.clone();
+                                let timeline_state = timeline_state.clone();
+                                let on_project_changed = on_project_changed.clone();
+                                let on_project_reloaded = on_project_reloaded.clone();
+                                let path_owned = path_owned.clone();
+                                // Suppress timeline interaction while loading.
+                                timeline_state.borrow_mut().loading = true;
+                                glib::timeout_add_local(
+                                    std::time::Duration::from_millis(50),
+                                    move || match rx.try_recv() {
+                                        Ok(Ok(mut new_proj)) => {
+                                            new_proj.file_path = Some(path_owned.clone());
+                                            recent::push(&path_owned);
+                                            *project.borrow_mut() = new_proj;
+                                            {
+                                                let mut st = timeline_state.borrow_mut();
+                                                st.playhead_ns = 0;
+                                                st.scroll_offset = 0.0;
+                                                st.pixels_per_second = 100.0;
+                                                st.selected_clip_id = None;
+                                                st.selected_track_id = None;
+                                                st.loading = false;
+                                            }
+                                            on_project_reloaded();
+                                            on_project_changed();
+                                            glib::ControlFlow::Break
+                                        }
+                                        Ok(Err(e)) => {
+                                            eprintln!("{e}");
+                                            timeline_state.borrow_mut().loading = false;
+                                            glib::ControlFlow::Break
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                            glib::ControlFlow::Continue
+                                        }
+                                        Err(_) => {
+                                            timeline_state.borrow_mut().loading = false;
+                                            glib::ControlFlow::Break
+                                        }
+                                    },
+                                );
                             }
                         });
+                        let window = row_for_window
+                            .root()
+                            .and_then(|r| r.downcast::<gtk::Window>().ok());
+                        confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
                     });
                     vbox_ref.append(&row);
                 }
@@ -261,6 +404,7 @@ pub fn build_toolbar(
     btn_save.set_tooltip_text(Some("Save as FCPXML (Ctrl+S)"));
     {
         let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
         btn_save.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Save FCPXML Project");
@@ -274,24 +418,20 @@ pub fn build_toolbar(
             dialog.set_filters(Some(&filters));
 
             let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
             dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
-                        let proj = project.borrow();
-                        match fcpxml::writer::write_fcpxml(&proj) {
-                            Ok(xml) => {
-                                if let Err(e) = std::fs::write(&path, xml) {
-                                    eprintln!("Save error: {e}");
-                                } else {
-                                    println!("Saved to {}", path.display());
-                                    if let Some(p) = path.to_str() {
-                                        recent::push(p);
-                                    }
-                                }
+                        match save_project_to_path(&project, &path) {
+                            Ok(()) => {
+                                println!("Saved to {}", path.display());
+                                on_project_changed();
                             }
-                            Err(e) => eprintln!("FCPXML write error: {e}"),
+                            Err(e) => {
+                                eprintln!("{e}");
+                            }
                         }
                     }
                 }
