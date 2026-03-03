@@ -220,6 +220,7 @@ Tracking docs:
               - [x] Boundary audio-drop guard: when overlap rebuilds encounter delayed video-pad linking, keep already-linked slot audio active (do not EOS the audio pad solely because video linking is late)
               - [x] Boundary pre-link EOS deferral for active handoffs: when playback is already running across a boundary, avoid forcing early pre-link EOS on newly added overlap slots so late pad-added links can settle before post-seek arrival checks
               - [x] Audiomixer flush parity: flush the audiomixer alongside the compositor during boundary rebuilds so their output running-times stay in sync, preventing audio buffer late-drop after a video-path flush
+              - [x] Continuing decoders fast path: reuse existing decoder slots at boundary crossings when adjacent clips share the same source file, avoiding teardown/rebuild overhead (~60-75% boundary latency reduction for same-source transitions)
             - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview

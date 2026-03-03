@@ -202,6 +202,14 @@ struct VideoSlot {
     comp_arrival_seq: Arc<AtomicU64>,
 }
 
+/// Result of `compute_reuse_plan()`: whether all current decoder slots can be
+/// reused for the next set of desired clips (continuing decoder fast path).
+struct SlotReusePlan {
+    all_reusable: bool,
+    /// For each slot index, the desired clip index it should switch to.
+    mappings: Vec<(usize, usize)>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AudioCurrentSource {
     AudioClip(usize),
@@ -2049,6 +2057,27 @@ impl ProgramPlayer {
         }
         let current_active = self.clips_active_at(timeline_pos_ns);
         let boundary_active = self.clips_active_at(boundary_ns);
+
+        // Skip prewarming when continuing decoders will handle this boundary.
+        if boundary_active.len() == self.slots.len() && !self.slots.is_empty() {
+            let all_same_source = boundary_active.iter()
+                .zip(self.slots.iter())
+                .all(|(&idx, slot)| {
+                    let boundary_clip = &self.clips[idx];
+                    let current_clip = &self.clips[slot.clip_idx];
+                    self.effective_source_path_for_clip(boundary_clip)
+                        == self.effective_source_path_for_clip(current_clip)
+                });
+            if all_same_source {
+                log::debug!(
+                    "prewarm: skipping — continuing decoders will handle boundary at {}",
+                    boundary_ns
+                );
+                self.prewarmed_boundary_ns = Some(boundary_ns);
+                return;
+            }
+        }
+
         for idx in boundary_active {
             let clip = self.clips[idx].clone();
             let incoming = !current_active.contains(&idx);
@@ -3851,6 +3880,219 @@ impl ProgramPlayer {
         })
     }
 
+    // ── Continuing decoders (fast-path boundary crossing) ────────────────
+
+    /// Returns true if two clips would produce effects bins with the same
+    /// element topology (same set of active effect elements).  When true,
+    /// a reused slot's effects bin can be updated via property sets alone,
+    /// without adding/removing GStreamer elements.
+    fn effects_topology_matches(a: &ProgramClip, b: &ProgramClip) -> bool {
+        let need_balance = |c: &ProgramClip| {
+            c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0
+        };
+        let need_blur = |c: &ProgramClip| {
+            let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
+            sigma.abs() > f64::EPSILON
+        };
+        let need_rotate = |c: &ProgramClip| c.rotate != 0;
+        let need_flip = |c: &ProgramClip| c.flip_h || c.flip_v;
+        let need_title = |c: &ProgramClip| !c.title_text.is_empty();
+
+        need_balance(a) == need_balance(b)
+            && need_blur(a) == need_blur(b)
+            && need_rotate(a) == need_rotate(b)
+            && need_flip(a) == need_flip(b)
+            && need_title(a) == need_title(b)
+    }
+
+    /// Determine whether all current slots can be reused for the desired
+    /// clip set.  Both `desired` and current slots are ordered by z-order
+    /// (track_index), so we compare positionally.
+    fn compute_reuse_plan(
+        &mut self,
+        desired: &[usize],
+    ) -> SlotReusePlan {
+        let fail = SlotReusePlan { all_reusable: false, mappings: vec![] };
+
+        // Must have same count — otherwise topology changes.
+        if desired.len() != self.slots.len() || desired.is_empty() {
+            return fail;
+        }
+
+        let mut mappings = Vec::with_capacity(desired.len());
+
+        for (slot_idx, &desired_clip_idx) in desired.iter().enumerate() {
+            let current_clip_idx = self.slots[slot_idx].clip_idx;
+
+            // 1. Same source file (accounts for proxy mode)
+            let desired_path = self.effective_source_path_for_clip(&self.clips[desired_clip_idx]);
+            let current_path = self.effective_source_path_for_clip(&self.clips[current_clip_idx]);
+            if desired_path != current_path {
+                return fail;
+            }
+
+            // 2. Same audio presence
+            let desired_has_audio_flag = self.clips[desired_clip_idx].has_audio;
+            let desired_has_audio = desired_has_audio_flag
+                && self.probe_has_audio_stream_cached(&desired_path);
+            let current_has_audio = self.slots[slot_idx].audio_mixer_pad.is_some();
+            if desired_has_audio != current_has_audio {
+                return fail;
+            }
+
+            // 3. Same speed and reverse
+            let desired_speed = self.clips[desired_clip_idx].speed;
+            let current_speed = self.clips[current_clip_idx].speed;
+            let desired_reverse = self.clips[desired_clip_idx].reverse;
+            let current_reverse = self.clips[current_clip_idx].reverse;
+            if (desired_speed - current_speed).abs() > f64::EPSILON
+                || desired_reverse != current_reverse
+            {
+                return fail;
+            }
+
+            // 4. Same effects topology
+            if !Self::effects_topology_matches(
+                &self.clips[current_clip_idx],
+                &self.clips[desired_clip_idx],
+            ) {
+                return fail;
+            }
+
+            mappings.push((slot_idx, desired_clip_idx));
+        }
+
+        SlotReusePlan { all_reusable: true, mappings }
+    }
+
+    /// Update all mutable effect properties on a reused slot without
+    /// rebuilding the effects bin.
+    fn update_slot_effects(&self, slot_idx: usize, clip: &ProgramClip) {
+        let slot = &self.slots[slot_idx];
+
+        // Videobalance (brightness/contrast/saturation + shadows/midtones/highlights)
+        if let Some(ref vb) = slot.videobalance {
+            let eff_brightness = (clip.brightness
+                + clip.shadows * 0.3 + clip.midtones * 0.2 + clip.highlights * 0.15)
+                .clamp(-1.0, 1.0);
+            let eff_contrast = (clip.contrast
+                - clip.shadows * 0.15 + clip.highlights * 0.15)
+                .clamp(0.0, 2.0);
+            vb.set_property("brightness", eff_brightness);
+            vb.set_property("contrast", eff_contrast);
+            vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
+        }
+
+        // Gaussianblur
+        if let Some(ref gb) = slot.gaussianblur {
+            let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
+            gb.set_property("sigma", sigma);
+        }
+
+        // Crop, rotate, flip
+        Self::apply_transform_to_slot(
+            slot, clip.crop_left, clip.crop_right,
+            clip.crop_top, clip.crop_bottom,
+            clip.rotate, clip.flip_h, clip.flip_v,
+        );
+
+        // Title overlay
+        Self::apply_title_to_slot(
+            slot, &clip.title_text, &clip.title_font,
+            clip.title_color, clip.title_x, clip.title_y,
+        );
+
+        // Compositor pad: opacity + zoom/position
+        if let Some(ref pad) = slot.compositor_pad {
+            pad.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
+            Self::apply_zoom_to_slot(
+                slot, pad, clip.scale, clip.position_x, clip.position_y,
+                self.project_width, self.project_height,
+            );
+        }
+
+        // Audiomixer pad: volume
+        if let Some(ref pad) = slot.audio_mixer_pad {
+            pad.set_property("volume", clip.volume.clamp(0.0, 10.0));
+        }
+    }
+
+    /// Fast-path boundary crossing: reuse existing decoder slots when the
+    /// incoming clips share the same source files.  Avoids tearing down
+    /// and rebuilding uridecodebin, effects_bin, and compositor pads.
+    fn continue_decoders_at(
+        &mut self,
+        timeline_pos: u64,
+        desired: &[usize],
+        plan: &SlotReusePlan,
+    ) {
+        let rebuild_started = Instant::now();
+        let was_playing = self.state == PlayerState::Playing;
+
+        log::info!(
+            "continue_decoders_at: START timeline_pos={}ns slots={} was_playing={}",
+            timeline_pos, self.slots.len(), was_playing
+        );
+
+        // Tear down prewarming sidecars (no longer needed).
+        self.teardown_prepreroll_sidecars();
+
+        // 1. Update slot metadata: point each slot at its new clip.
+        for &(slot_idx, desired_clip_idx) in &plan.mappings {
+            self.slots[slot_idx].clip_idx = desired_clip_idx;
+        }
+
+        // 2. Update effects properties on each reused slot.
+        for &(slot_idx, desired_clip_idx) in &plan.mappings {
+            let clip = &self.clips[desired_clip_idx];
+            self.update_slot_effects(slot_idx, clip);
+        }
+
+        // 3. Update current_idx to highest-priority clip.
+        self.current_idx = desired.last().copied();
+
+        // 4. Reset start_time for running-time alignment.
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+
+        // 5. Snapshot arrival counters, then flush compositor + audiomixer.
+        let baseline = self.snapshot_arrival_seqs();
+        let _ = self.compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        let _ = self.audiomixer
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+
+        // 6. Seek each decoder to its new source position.
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            if was_playing {
+                let _ = Self::seek_slot_decoder_with_retry(
+                    slot, clip, timeline_pos, self.clip_seek_flags(),
+                );
+            } else {
+                let _ = Self::seek_slot_decoder_paused_with_retry(
+                    slot, clip, timeline_pos,
+                );
+            }
+        }
+
+        // 7. Wait for preroll + compositor arrivals.
+        //    Tighter budget than full rebuild (no codec init needed).
+        self.wait_for_paused_preroll();
+        self.wait_for_compositor_arrivals(&baseline, 1500);
+
+        // 8. Restore playback state.
+        if was_playing {
+            let _ = self.pipeline.set_state(gst::State::Playing);
+        }
+
+        let elapsed = rebuild_started.elapsed().as_millis();
+        self.record_rebuild_duration_ms(elapsed as u64);
+        log::info!(
+            "continue_decoders_at: END timeline_pos={}ns elapsed_ms={}",
+            timeline_pos, elapsed
+        );
+    }
+
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         let rebuild_started = Instant::now();
@@ -3862,6 +4104,21 @@ impl ProgramPlayer {
             timeline_pos,
             self.slots.len()
         );
+
+        // ── Continuing decoders fast path ──────────────────────────────
+        // When all incoming clips share the same source files as the
+        // current slots, we can skip teardown/rebuild entirely and just
+        // seek the existing decoders.  This avoids the GstVideoAggregator
+        // topology-change issue because no compositor pads are added or
+        // removed.
+        if had_existing_slots {
+            let desired = self.clips_active_at(timeline_pos);
+            let plan = self.compute_reuse_plan(&desired);
+            if plan.all_reusable {
+                self.continue_decoders_at(timeline_pos, &desired, &plan);
+                return;
+            }
+        }
 
         // Incremental boundary paths are disabled.  Both add-only and
         // remove-only paths suffer from the same GstVideoAggregator limitation:

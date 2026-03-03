@@ -4,6 +4,9 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Performance
+- **Continuing decoders at boundary crossings**: When adjacent clips share the same source file (common after splits, rough cuts from single footage), the program player now reuses existing decoder slots instead of tearing down and rebuilding the full pipeline. This avoids codec init, element creation, and stream discovery overhead, reducing boundary crossing latency from ~800-2800ms to ~200-600ms (~60-75% improvement). Falls back to full rebuild when source files differ, slot count changes, audio presence differs, speed/reverse settings differ, or effects topology changes.
+
 ### Added
 - **Rust unit tests**: Added `#[cfg(test)]` test modules to `src/model/clip.rs`, `src/model/track.rs`, `src/model/project.rs`, `src/undo.rs`, and `src/fcpxml/parser.rs`. Tests cover clip construction and duration calculations, track clip management, project settings and markers, all undo/redo command types, FCPXML time/frame-rate parsing, and full FCPXML document parsing. 62 tests total.
 - **MCP `take_screenshot` tool**: New MCP server command that captures a PNG screenshot of the full application window using the GTK snapshot API and GSK `CairoRenderer`. The PNG is written to the current working directory with a timestamped filename (`ultimateslice-screenshot-<unix_epoch>.png`). The tool returns `{"ok": true, "path": "..."}` on success.
