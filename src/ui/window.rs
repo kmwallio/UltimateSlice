@@ -279,6 +279,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
     prog_player_raw.set_preview_quality(initial_preview_quality.divisor());
+    prog_player_raw.set_experimental_preview_optimizations(
+        preferences_state.borrow().experimental_preview_optimizations,
+    );
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -364,6 +367,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         prog_player
                             .borrow_mut()
                             .set_preview_quality(new_state.preview_quality.divisor());
+                        prog_player
+                            .borrow_mut()
+                            .set_experimental_preview_optimizations(
+                                new_state.experimental_preview_optimizations,
+                            );
                         if new_state.proxy_mode.is_enabled() {
                             // If the proxy scale changed, invalidate old entries so clips are
                             // re-transcoded at the new resolution.

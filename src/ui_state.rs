@@ -220,6 +220,9 @@ pub struct PreferencesState {
     /// Compositor output quality for preview playback.
     #[serde(default)]
     pub preview_quality: PreviewQuality,
+    /// Enable experimental preview optimizations (e.g. skip video decode for occluded clips).
+    #[serde(default)]
+    pub experimental_preview_optimizations: bool,
 }
 
 impl Default for PreferencesState {
@@ -234,6 +237,7 @@ impl Default for PreferencesState {
             mcp_socket_enabled: false,
             gsk_renderer: GskRenderer::default(),
             preview_quality: PreviewQuality::default(),
+            experimental_preview_optimizations: false,
         }
     }
 }

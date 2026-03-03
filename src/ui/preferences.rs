@@ -192,6 +192,17 @@ pub fn show_preferences_dialog(
     playback_box.append(&gsk_renderer);
     playback_box.append(&renderer_hint);
 
+    let experimental_check = CheckButton::with_label("Experimental preview optimizations");
+    experimental_check.set_active(current.experimental_preview_optimizations);
+    experimental_check.set_halign(gtk::Align::Start);
+    let experimental_hint = Label::new(Some("Skip video decode for fully-occluded clips during multi-track preview playback. May reduce CPU/GPU usage at overlap boundaries."));
+    experimental_hint.set_halign(gtk::Align::Start);
+    experimental_hint.add_css_class("dim-label");
+    experimental_hint.set_wrap(true);
+    experimental_hint.set_max_width_chars(60);
+    playback_box.append(&experimental_check);
+    playback_box.append(&experimental_hint);
+
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     // ── Timeline section ──────────────────────────────────────────────────
@@ -276,6 +287,7 @@ pub fn show_preferences_dialog(
                 preview_quality: PreviewQuality::from_str(
                     preview_quality.active_id().as_deref().unwrap_or("full"),
                 ),
+                experimental_preview_optimizations: experimental_check.is_active(),
             });
         }
         d.close();

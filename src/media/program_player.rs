@@ -245,6 +245,8 @@ pub struct ProgramPlayer {
     project_height: u32,
     playback_priority: PlaybackPriority,
     proxy_enabled: bool,
+    /// Use audio-only decoder slots for fully-occluded clips (experimental).
+    experimental_preview_optimizations: bool,
     proxy_paths: HashMap<String, String>,
     /// Cache for per-path audio-stream probe results.
     audio_stream_probe_cache: HashMap<String, bool>,
@@ -744,6 +746,7 @@ impl ProgramPlayer {
                 project_height: 1080,
                 playback_priority: PlaybackPriority::default(),
                 proxy_enabled: false,
+                experimental_preview_optimizations: false,
                 proxy_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
@@ -795,6 +798,10 @@ impl ProgramPlayer {
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
         self.proxy_enabled = enabled;
         self.prewarmed_boundary_ns = None;
+    }
+
+    pub fn set_experimental_preview_optimizations(&mut self, enabled: bool) {
+        self.experimental_preview_optimizations = enabled;
     }
 
     /// Enable or disable scope frame capture. When disabled (scopes panel hidden),
@@ -4168,9 +4175,10 @@ impl ProgramPlayer {
         self.current_idx = active.last().copied();
 
         for (zorder_offset, &clip_idx) in active.iter().enumerate() {
-            // Correctness-first: keep full decode slots so multitrack audio
-            // remains stable under overlap; revisit occlusion audio-only mode later.
-            if occlusion_audio_only_slots_enabled()
+            // When experimental preview optimizations are enabled, use lightweight
+            // audio-only decoder slots for clips that are fully occluded by an
+            // opaque full-frame clip above them.
+            if self.experimental_preview_optimizations
                 && self.is_clip_video_occluded(&active, zorder_offset)
             {
                 if let Some(slot) = self.build_audio_only_slot_for_clip(clip_idx) {
@@ -4638,13 +4646,9 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
         && clip.position_y.abs() < 0.000_001
 }
 
-fn occlusion_audio_only_slots_enabled() -> bool {
-    false
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{clip_can_fully_occlude, occlusion_audio_only_slots_enabled, ProgramClip};
+    use super::{clip_can_fully_occlude, ProgramClip};
 
     fn make_clip() -> ProgramClip {
         ProgramClip {
@@ -4714,8 +4718,10 @@ mod tests {
     }
 
     #[test]
-    fn occlusion_audio_only_slots_disabled_for_correctness() {
-        assert!(!occlusion_audio_only_slots_enabled());
+    fn experimental_preview_optimizations_disabled_by_default() {
+        // The feature defaults to off; users opt in via Preferences.
+        let prefs = crate::ui_state::PreferencesState::default();
+        assert!(!prefs.experimental_preview_optimizations);
     }
 
 }
