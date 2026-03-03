@@ -816,4 +816,331 @@ mod tests {
         assert_eq!(a.timeline_end(), 10);
         assert_eq!(b.timeline_start, 11);
     }
+
+    fn make_project_with_clip(clip_id: &str, source_out: u64, timeline_start: u64) -> (Project, String, String) {
+        let mut project = Project::new("Test");
+        let mut track = Track::new_video("V1");
+        let track_id = track.id.clone();
+        let mut clip = Clip::new("file.mp4", source_out, timeline_start, ClipKind::Video);
+        clip.id = clip_id.to_string();
+        track.add_clip(clip);
+        project.tracks.push(track);
+        (project, track_id, clip_id.to_string())
+    }
+
+    #[test]
+    fn test_move_clip_command() {
+        let mut project = Project::new("Test");
+        let mut track_a = Track::new_video("A");
+        let track_a_id = track_a.id.clone();
+        let mut track_b = Track::new_video("B");
+        let track_b_id = track_b.id.clone();
+
+        let mut clip = Clip::new("file.mp4", 10, 0, ClipKind::Video);
+        clip.id = "C".to_string();
+        track_a.add_clip(clip);
+        project.tracks.push(track_a);
+        project.tracks.push(track_b);
+
+        let cmd = MoveClipCommand {
+            clip_id: "C".to_string(),
+            from_track_id: track_a_id.clone(),
+            to_track_id: track_b_id.clone(),
+            old_timeline_start: 0,
+            new_timeline_start: 5,
+        };
+
+        cmd.execute(&mut project);
+        let ta = project.tracks.iter().find(|t| t.id == track_a_id).unwrap();
+        let tb = project.tracks.iter().find(|t| t.id == track_b_id).unwrap();
+        assert!(ta.clips.is_empty());
+        assert_eq!(tb.clips[0].timeline_start, 5);
+
+        cmd.undo(&mut project);
+        let ta = project.tracks.iter().find(|t| t.id == track_a_id).unwrap();
+        let tb = project.tracks.iter().find(|t| t.id == track_b_id).unwrap();
+        assert_eq!(ta.clips[0].timeline_start, 0);
+        assert!(tb.clips.is_empty());
+    }
+
+    #[test]
+    fn test_trim_clip_command() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 5);
+
+        let cmd = TrimClipCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_in: 0,
+            new_source_in: 2,
+            old_timeline_start: 5,
+            new_timeline_start: 7,
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_in, 2);
+        assert_eq!(clip.timeline_start, 7);
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_in, 0);
+        assert_eq!(clip.timeline_start, 5);
+    }
+
+    #[test]
+    fn test_trim_out_command() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
+
+        let cmd = TrimOutCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 8,
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_out, 8);
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_out, 10);
+    }
+
+    #[test]
+    fn test_delete_clip_command() {
+        let (mut project, track_id, _) = make_project_with_clip("C", 10, 0);
+        let clip_snapshot = {
+            let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+            track.clips[0].clone()
+        };
+
+        let cmd = DeleteClipCommand {
+            clip: clip_snapshot,
+            track_id: track_id.clone(),
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert!(track.clips.is_empty());
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].id, "C");
+    }
+
+    #[test]
+    fn test_slip_clip_command() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
+
+        let cmd = SlipClipCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_in: 0,
+            old_source_out: 10,
+            new_source_in: 2,
+            new_source_out: 12,
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_in, 2);
+        assert_eq!(clip.source_out, 12);
+        assert_eq!(clip.timeline_start, 0); // timeline position unchanged
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_in, 0);
+        assert_eq!(clip.source_out, 10);
+    }
+
+    #[test]
+    fn test_split_clip_command() {
+        let (mut project, track_id, _) = make_project_with_clip("ORIG", 20, 0);
+        let original_clip = {
+            let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+            track.clips[0].clone()
+        };
+
+        let mut right_clip = Clip::new("file.mp4", 20, 10, ClipKind::Video);
+        right_clip.id = "RIGHT".to_string();
+        right_clip.source_in = 10;
+        right_clip.source_out = 20;
+
+        let cmd = SplitClipCommand {
+            original_clip: original_clip.clone(),
+            track_id: track_id.clone(),
+            split_ns: 10,
+            right_clip: right_clip.clone(),
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert_eq!(track.clips.len(), 2);
+        let orig = track.clips.iter().find(|c| c.id == "ORIG").unwrap();
+        assert_eq!(orig.source_out, 10); // trimmed to split point
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].id, "ORIG");
+        assert_eq!(track.clips[0].source_out, original_clip.source_out);
+    }
+
+    #[test]
+    fn test_roll_edit_command() {
+        let mut project = Project::new("Test");
+        let mut track = Track::new_video("V1");
+        let track_id = track.id.clone();
+
+        let mut left = Clip::new("file.mp4", 10, 0, ClipKind::Video);
+        left.id = "L".to_string();
+        let mut right = Clip::new("file.mp4", 20, 10, ClipKind::Video);
+        right.id = "R".to_string();
+        right.source_in = 10;
+        track.add_clip(left);
+        track.add_clip(right);
+        project.tracks.push(track);
+
+        let cmd = RollEditCommand {
+            left_clip_id: "L".to_string(),
+            right_clip_id: "R".to_string(),
+            track_id: track_id.clone(),
+            old_left_out: 10,
+            new_left_out: 12,
+            old_right_in: 10,
+            new_right_in: 12,
+            old_right_start: 10,
+            new_right_start: 12,
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let l = track.clips.iter().find(|c| c.id == "L").unwrap();
+        let r = track.clips.iter().find(|c| c.id == "R").unwrap();
+        assert_eq!(l.source_out, 12);
+        assert_eq!(r.source_in, 12);
+        assert_eq!(r.timeline_start, 12);
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let l = track.clips.iter().find(|c| c.id == "L").unwrap();
+        let r = track.clips.iter().find(|c| c.id == "R").unwrap();
+        assert_eq!(l.source_out, 10);
+        assert_eq!(r.source_in, 10);
+        assert_eq!(r.timeline_start, 10);
+    }
+
+    #[test]
+    fn test_reorder_track_command() {
+        let mut project = Project::new("Test");
+        // project already has tracks[0]=Video1, tracks[1]=Audio1
+        // Add a third track
+        project.add_video_track(); // tracks[2] = Video 2
+
+        let id0 = project.tracks[0].id.clone();
+        let id2 = project.tracks[2].id.clone();
+
+        let cmd = ReorderTrackCommand { from_index: 0, to_index: 2 };
+        cmd.execute(&mut project);
+        assert_eq!(project.tracks[2].id, id0);
+
+        cmd.undo(&mut project);
+        assert_eq!(project.tracks[0].id, id0);
+    }
+
+    #[test]
+    fn test_edit_history_undo_redo() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
+        let mut history = EditHistory::new();
+
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+
+        let cmd = Box::new(TrimOutCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 7,
+        });
+        history.execute(cmd, &mut project);
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
+
+        let did_undo = history.undo(&mut project);
+        assert!(did_undo);
+        assert!(!history.can_undo());
+        assert!(history.can_redo());
+
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_out, 10); // restored
+
+        let did_redo = history.redo(&mut project);
+        assert!(did_redo);
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
+
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.source_out, 7); // reapplied
+    }
+
+    #[test]
+    fn test_edit_history_new_action_clears_redo() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
+        let mut history = EditHistory::new();
+
+        history.execute(Box::new(TrimOutCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 8,
+        }), &mut project);
+
+        history.undo(&mut project);
+        assert!(history.can_redo());
+
+        // New action should clear redo stack
+        history.execute(Box::new(TrimOutCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 6,
+        }), &mut project);
+
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn test_edit_history_undo_description() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
+        let mut history = EditHistory::new();
+
+        assert!(history.undo_description().is_none());
+
+        history.execute(Box::new(TrimOutCommand {
+            clip_id,
+            track_id,
+            old_source_out: 10,
+            new_source_out: 8,
+        }), &mut project);
+
+        assert_eq!(history.undo_description(), Some("Trim clip out-point"));
+    }
+
+    #[test]
+    fn test_edit_history_empty_undo_redo() {
+        let mut project = Project::new("Test");
+        let mut history = EditHistory::new();
+        assert!(!history.undo(&mut project));
+        assert!(!history.redo(&mut project));
+    }
 }
