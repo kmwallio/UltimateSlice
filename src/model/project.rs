@@ -144,3 +144,114 @@ impl Project {
         self.dirty = true;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::clip::{Clip, ClipKind};
+
+    #[test]
+    fn test_project_new_defaults() {
+        let p = Project::new("My Project");
+        assert_eq!(p.title, "My Project");
+        assert_eq!(p.width, 1920);
+        assert_eq!(p.height, 1080);
+        assert!(!p.dirty);
+        assert!(p.file_path.is_none());
+    }
+
+    #[test]
+    fn test_project_new_has_default_tracks() {
+        let p = Project::new("Test");
+        assert_eq!(p.tracks.len(), 2);
+        assert_eq!(p.video_tracks().count(), 1);
+        assert_eq!(p.audio_tracks().count(), 1);
+    }
+
+    #[test]
+    fn test_frame_rate_fps24() {
+        let fps = FrameRate::fps_24();
+        assert!((fps.as_f64() - 24.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_frame_rate_fps30() {
+        let fps = FrameRate::fps_30();
+        assert!((fps.as_f64() - 29.97).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_frame_rate_fps60() {
+        let fps = FrameRate::fps_60();
+        assert!((fps.as_f64() - 60.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_add_video_track() {
+        let mut p = Project::new("Test");
+        p.add_video_track();
+        assert_eq!(p.video_tracks().count(), 2);
+        assert!(p.dirty);
+    }
+
+    #[test]
+    fn test_add_audio_track() {
+        let mut p = Project::new("Test");
+        p.add_audio_track();
+        assert_eq!(p.audio_tracks().count(), 2);
+        assert!(p.dirty);
+    }
+
+    #[test]
+    fn test_project_duration_empty() {
+        let p = Project::new("Test");
+        assert_eq!(p.duration(), 0);
+    }
+
+    #[test]
+    fn test_project_duration_with_clips() {
+        let mut p = Project::new("Test");
+        let mut clip = Clip::new("file.mp4", 10_000_000_000, 0, ClipKind::Video);
+        clip.id = "c1".to_string();
+        p.tracks[0].add_clip(clip);
+        assert_eq!(p.duration(), 10_000_000_000);
+    }
+
+    #[test]
+    fn test_add_marker_sorted() {
+        let mut p = Project::new("Test");
+        let _id1 = p.add_marker(5_000_000_000, "Late");
+        let _id2 = p.add_marker(1_000_000_000, "Early");
+        assert_eq!(p.markers[0].position_ns, 1_000_000_000);
+        assert_eq!(p.markers[1].position_ns, 5_000_000_000);
+    }
+
+    #[test]
+    fn test_remove_marker() {
+        let mut p = Project::new("Test");
+        let id = p.add_marker(1_000_000_000, "Mark");
+        assert_eq!(p.markers.len(), 1);
+        p.remove_marker(&id);
+        assert!(p.markers.is_empty());
+        assert!(p.dirty);
+    }
+
+    #[test]
+    fn test_marker_default_color() {
+        let m = Marker::new(0, "test");
+        assert_eq!(m.color, 0xFF8C00FF);
+    }
+
+    #[test]
+    fn test_track_mut_found() {
+        let mut p = Project::new("Test");
+        let id = p.tracks[0].id.clone();
+        assert!(p.track_mut(&id).is_some());
+    }
+
+    #[test]
+    fn test_track_mut_not_found() {
+        let mut p = Project::new("Test");
+        assert!(p.track_mut("nonexistent-id").is_none());
+    }
+}

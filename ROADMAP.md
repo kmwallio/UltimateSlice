@@ -22,6 +22,7 @@ Tracking docs:
 - [x] `Project` — title, frame rate, resolution, tracks, dirty flag
 - [x] `MediaItem` — library entry (path, duration, label); separate from timeline clips
 - [x] `SourceMarks` — shared in/out selection state for the source monitor
+- [x] Unit tests for model, undo, and FCPXML parser (62 tests)
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
