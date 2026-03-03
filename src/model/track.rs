@@ -81,3 +81,97 @@ impl Track {
             .unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::clip::{Clip, ClipKind};
+
+    fn make_test_clip(id: &str, source_out: u64, timeline_start: u64) -> Clip {
+        let mut c = Clip::new("file.mp4", source_out, timeline_start, ClipKind::Video);
+        c.id = id.to_string();
+        c
+    }
+
+    #[test]
+    fn test_new_video_track() {
+        let track = Track::new_video("V1");
+        assert_eq!(track.label, "V1");
+        assert_eq!(track.kind, TrackKind::Video);
+        assert!(track.clips.is_empty());
+        assert!(!track.muted);
+        assert!(!track.locked);
+    }
+
+    #[test]
+    fn test_new_audio_track() {
+        let track = Track::new_audio("A1");
+        assert_eq!(track.label, "A1");
+        assert_eq!(track.kind, TrackKind::Audio);
+    }
+
+    #[test]
+    fn test_add_clip_sorted() {
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_test_clip("B", 5, 10));
+        track.add_clip(make_test_clip("A", 5, 0));
+        assert_eq!(track.clips[0].id, "A");
+        assert_eq!(track.clips[1].id, "B");
+    }
+
+    #[test]
+    fn test_remove_clip() {
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_test_clip("A", 5, 0));
+        track.add_clip(make_test_clip("B", 5, 10));
+        track.remove_clip("A");
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].id, "B");
+    }
+
+    #[test]
+    fn test_remove_nonexistent_clip() {
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_test_clip("A", 5, 0));
+        track.remove_clip("Z");
+        assert_eq!(track.clips.len(), 1);
+    }
+
+    #[test]
+    fn test_track_duration_empty() {
+        let track = Track::new_video("V1");
+        assert_eq!(track.duration(), 0);
+    }
+
+    #[test]
+    fn test_track_duration_with_clips() {
+        let mut track = Track::new_video("V1");
+        // clip at 0..5, clip at 10..20
+        track.add_clip(make_test_clip("A", 5, 0));
+        track.add_clip(make_test_clip("B", 10, 10));
+        assert_eq!(track.duration(), 20);
+    }
+
+    #[test]
+    fn test_compact_gap_free() {
+        let mut track = Track::new_video("V1");
+        // clip at 0..5, gap, clip at 20..30 (duration 10)
+        track.add_clip(make_test_clip("A", 5, 0));
+        track.add_clip(make_test_clip("B", 10, 20));
+        track.compact_gap_free();
+        let a = track.clips.iter().find(|c| c.id == "A").unwrap();
+        let b = track.clips.iter().find(|c| c.id == "B").unwrap();
+        assert_eq!(a.timeline_start, 0);
+        assert_eq!(b.timeline_start, 5);
+    }
+
+    #[test]
+    fn test_push_unsorted_and_sort() {
+        let mut track = Track::new_video("V1");
+        track.push_unsorted(make_test_clip("B", 5, 10));
+        track.push_unsorted(make_test_clip("A", 5, 0));
+        track.sort_clips();
+        assert_eq!(track.clips[0].id, "A");
+        assert_eq!(track.clips[1].id, "B");
+    }
+}

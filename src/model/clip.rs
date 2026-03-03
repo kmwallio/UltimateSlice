@@ -217,3 +217,93 @@ impl Clip {
         self.timeline_start + self.duration()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_clip(source_out: u64, timeline_start: u64) -> Clip {
+        Clip::new("/path/to/video.mp4", source_out, timeline_start, ClipKind::Video)
+    }
+
+    #[test]
+    fn test_clip_new_defaults() {
+        let clip = make_test_clip(10_000_000_000, 0);
+        assert_eq!(clip.source_in, 0);
+        assert_eq!(clip.source_out, 10_000_000_000);
+        assert_eq!(clip.timeline_start, 0);
+        assert_eq!(clip.brightness, 0.0);
+        assert_eq!(clip.contrast, 1.0);
+        assert_eq!(clip.saturation, 1.0);
+        assert_eq!(clip.volume, 1.0);
+        assert_eq!(clip.speed, 1.0);
+        assert_eq!(clip.scale, 1.0);
+        assert_eq!(clip.opacity, 1.0);
+        assert!(!clip.flip_h);
+        assert!(!clip.flip_v);
+        assert!(clip.lut_path.is_none());
+        assert!(clip.transition_after.is_empty());
+    }
+
+    #[test]
+    fn test_clip_label_from_filename() {
+        let clip = make_test_clip(5_000_000_000, 0);
+        assert_eq!(clip.label, "video");
+    }
+
+    #[test]
+    fn test_clip_label_fallback() {
+        let clip = Clip::new("/", 5_000_000_000, 0, ClipKind::Audio);
+        assert_eq!(clip.label, "clip");
+    }
+
+    #[test]
+    fn test_source_duration() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.source_in = 2_000_000_000;
+        assert_eq!(clip.source_duration(), 8_000_000_000);
+    }
+
+    #[test]
+    fn test_source_duration_zero_when_empty() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.source_in = 5_000_000_000;
+        assert_eq!(clip.source_duration(), 0);
+    }
+
+    #[test]
+    fn test_duration_normal_speed() {
+        let clip = make_test_clip(10_000_000_000, 0);
+        assert_eq!(clip.duration(), 10_000_000_000);
+    }
+
+    #[test]
+    fn test_duration_double_speed() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 2.0;
+        assert_eq!(clip.duration(), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_duration_half_speed() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 0.5;
+        assert_eq!(clip.duration(), 20_000_000_000);
+    }
+
+    #[test]
+    fn test_timeline_end() {
+        let clip = make_test_clip(5_000_000_000, 3_000_000_000);
+        assert_eq!(clip.timeline_end(), 8_000_000_000);
+    }
+
+    #[test]
+    fn test_clip_kind_variants() {
+        let video = Clip::new("a.mp4", 1, 0, ClipKind::Video);
+        let audio = Clip::new("b.mp3", 1, 0, ClipKind::Audio);
+        let image = Clip::new("c.png", 1, 0, ClipKind::Image);
+        assert_eq!(video.kind, ClipKind::Video);
+        assert_eq!(audio.kind, ClipKind::Audio);
+        assert_eq!(image.kind, ClipKind::Image);
+    }
+}
