@@ -18,7 +18,7 @@ Built in MCP server allows for AI collaboration.
 - Undo/Redo command history
 - Inspector panel for selected clip properties
 - MP4/H.264 export via GStreamer pipeline
-- FCPXML 1.10 import/export
+- FCPXML 1.10–1.14 import + 1.14 export
 - Optional MCP server (`--mcp`) for JSON-RPC control
 
 ## Third-Party Crates and Libraries

@@ -64,7 +64,8 @@ The application opens with an **Untitled** project containing one Video track an
 
 - Click **Open…** (`Ctrl+O`) and select a `.fcpxml` file.
 - Or click **Recent ▾** to pick from the last 10 opened/saved projects.
-- UltimateSlice reads the FCPXML 1.10 format, including all clip properties, markers, and effects.
+- UltimateSlice reads FCPXML versions 1.10 through 1.14, including all clip properties, markers, and effects.
+- For FCPXML files containing multiple projects, UltimateSlice imports the first project timeline in the file.
 - Project file read/parse runs off the GTK main thread, so the UI remains responsive while opening larger timelines.
 
 ## Keyboard Shortcuts

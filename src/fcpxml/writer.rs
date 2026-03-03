@@ -4,7 +4,7 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
 use std::io::Cursor;
 
-/// Serialize a `Project` to FCPXML 1.10 format.
+/// Serialize a `Project` to FCPXML format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);
 
@@ -15,9 +15,9 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
         None,
     )))?;
 
-    // <fcpxml version="1.10">
+    // <fcpxml version="1.14">
     let mut fcpxml = BytesStart::new("fcpxml");
-    fcpxml.push_attribute(("version", "1.10"));
+    fcpxml.push_attribute(("version", crate::fcpxml::FCPXML_EXPORT_VERSION));
     fcpxml.push_attribute(("xmlns:us", "urn:ultimateslice"));
     writer.write_event(Event::Start(fcpxml))?;
 
@@ -116,7 +116,32 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                     clip.transition_after_ns.to_string().as_str(),
                 ));
             }
-            writer.write_event(Event::Empty(asset_clip))?;
+            writer.write_event(Event::Start(asset_clip))?;
+
+            let mut adjust_transform = BytesStart::new("adjust-transform");
+            adjust_transform.push_attribute((
+                "position",
+                format!("{} {}", clip.position_x, clip.position_y).as_str(),
+            ));
+            adjust_transform.push_attribute((
+                "scale",
+                format!("{} {}", clip.scale, clip.scale).as_str(),
+            ));
+            adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
+            writer.write_event(Event::Empty(adjust_transform))?;
+
+            let mut adjust_compositing = BytesStart::new("adjust-compositing");
+            adjust_compositing.push_attribute(("opacity", clip.opacity.to_string().as_str()));
+            writer.write_event(Event::Empty(adjust_compositing))?;
+
+            let mut adjust_crop = BytesStart::new("adjust-crop");
+            adjust_crop.push_attribute(("left", clip.crop_left.to_string().as_str()));
+            adjust_crop.push_attribute(("right", clip.crop_right.to_string().as_str()));
+            adjust_crop.push_attribute(("top", clip.crop_top.to_string().as_str()));
+            adjust_crop.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
+            writer.write_event(Event::Empty(adjust_crop))?;
+
+            writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
         }
     }
 
@@ -184,11 +209,17 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
             let mut asset = BytesStart::new("asset");
             asset.push_attribute(("id", asset_id.as_str()));
             asset.push_attribute(("name", clip.label.as_str()));
-            asset.push_attribute(("src", uri.as_str()));
             asset.push_attribute(("duration", duration.as_str()));
             asset.push_attribute(("hasVideo", has_video));
             asset.push_attribute(("hasAudio", has_audio));
-            writer.write_event(Event::Empty(asset))?;
+            writer.write_event(Event::Start(asset))?;
+
+            let mut media_rep = BytesStart::new("media-rep");
+            media_rep.push_attribute(("kind", media_rep_kind_for_path(&clip.source_path)));
+            media_rep.push_attribute(("src", uri.as_str()));
+            writer.write_event(Event::Empty(media_rep))?;
+
+            writer.write_event(Event::End(BytesEnd::new("asset")))?;
         }
     }
 
@@ -208,4 +239,66 @@ fn ns_to_fcpxml_time(ns: u64, fps: &crate::model::project::FrameRate) -> String 
 
 fn sanitize_id(id: &str) -> String {
     id.replace('-', "_")
+}
+
+fn media_rep_kind_for_path(source_path: &str) -> &'static str {
+    if source_path.contains("UltimateSlice.cache") && source_path.contains(".proxy_") {
+        "proxy-media"
+    } else {
+        "original-media"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::clip::{Clip, ClipKind};
+    use crate::model::project::Project;
+    use crate::model::track::Track;
+
+    #[test]
+    fn test_write_fcpxml_emits_media_rep_with_original_media_kind() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.position_x = 0.25;
+        clip.position_y = -0.5;
+        clip.scale = 1.5;
+        clip.rotate = 90;
+        clip.opacity = 0.75;
+        clip.crop_left = 10;
+        clip.crop_right = 20;
+        clip.crop_top = 30;
+        clip.crop_bottom = 40;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("<media-rep kind=\"original-media\""));
+        assert!(xml.contains("src=\"file:///tmp/source.mov\""));
+        assert!(xml.contains("<adjust-transform"));
+        assert!(xml.contains("position=\"0.25 -0.5\""));
+        assert!(xml.contains("scale=\"1.5 1.5\""));
+        assert!(xml.contains("rotation=\"90\""));
+        assert!(xml.contains("<adjust-compositing opacity=\"0.75\""));
+        assert!(xml.contains("<adjust-crop left=\"10\" right=\"20\" top=\"30\" bottom=\"40\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_marks_proxy_media_rep_kind() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            "/tmp/UltimateSlice.cache/clip.proxy_half.mp4",
+            2_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("<media-rep kind=\"proxy-media\""));
+    }
 }
