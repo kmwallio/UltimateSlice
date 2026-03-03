@@ -140,6 +140,11 @@ pub struct Clip {
     /// Highlight grading: −1.0 (pull down highlights) to 1.0 (boost highlights). Default 0.0.
     #[serde(default)]
     pub highlights: f32,
+    /// Play the clip in reverse (backwards). Default false.
+    /// Applied as `reverse`/`areverse` filters on export; preview shows reversed playback
+    /// indicator on the timeline clip.
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 impl Clip {
@@ -193,6 +198,7 @@ impl Clip {
             shadows: 0.0,
             midtones: 0.0,
             highlights: 0.0,
+            reverse: false,
         }
     }
 
@@ -237,6 +243,7 @@ mod tests {
         assert_eq!(clip.saturation, 1.0);
         assert_eq!(clip.volume, 1.0);
         assert_eq!(clip.speed, 1.0);
+        assert!(!clip.reverse);
         assert_eq!(clip.scale, 1.0);
         assert_eq!(clip.opacity, 1.0);
         assert!(!clip.flip_h);
@@ -305,5 +312,20 @@ mod tests {
         assert_eq!(video.kind, ClipKind::Video);
         assert_eq!(audio.kind, ClipKind::Audio);
         assert_eq!(image.kind, ClipKind::Image);
+    }
+
+    #[test]
+    fn test_reverse_default_false() {
+        let clip = make_test_clip(10_000_000_000, 0);
+        assert!(!clip.reverse);
+    }
+
+    #[test]
+    fn test_reverse_does_not_affect_duration() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 2.0;
+        clip.reverse = true;
+        // Reverse does not change the timeline duration — only playback direction on export
+        assert_eq!(clip.duration(), 5_000_000_000);
     }
 }

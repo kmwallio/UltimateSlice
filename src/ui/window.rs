@@ -455,6 +455,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_reverse_changed: reverse checkbox → reload timeline and project
+        {
+            let on_project_changed = on_project_changed.clone();
+            move |_reversed: bool| {
+                // Reload clips so the timeline badge reflects the new reverse state.
+                on_project_changed();
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
