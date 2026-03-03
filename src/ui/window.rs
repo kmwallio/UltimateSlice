@@ -10,7 +10,7 @@ use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 fn auto_preview_divisor(
@@ -1762,6 +1762,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 on_close_preview();
                 library.borrow_mut().clear();
                 prog_player.borrow_mut().stop();
+                {
+                    let mut cache = proxy_cache.borrow_mut();
+                    cache.cleanup_local_cache_for_unload();
+                    cache.invalidate_all();
+                }
+                prog_player.borrow_mut().update_proxy_paths(HashMap::new());
             }
 
             // Update window title
@@ -2421,16 +2427,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     {
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
+        let proxy_cache = proxy_cache.clone();
         let close_approved = Rc::new(Cell::new(false));
         let close_approved_for_signal = close_approved.clone();
         window.connect_close_request(move |w| {
             if close_approved_for_signal.get() {
+                proxy_cache.borrow_mut().cleanup_local_cache_for_unload();
                 return glib::Propagation::Proceed;
             }
             let close_approved_for_continue = close_approved.clone();
+            let proxy_cache_for_continue = proxy_cache.clone();
             let weak = w.downgrade();
             let on_continue: Rc<dyn Fn()> = Rc::new(move || {
                 close_approved_for_continue.set(true);
+                proxy_cache_for_continue
+                    .borrow_mut()
+                    .cleanup_local_cache_for_unload();
                 if let Some(win) = weak.upgrade() {
                     win.close();
                 }
