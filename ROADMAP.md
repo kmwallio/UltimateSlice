@@ -96,6 +96,7 @@ Tracking docs:
 ### FCPXML
 - [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
 - [x] FCPXML 1.14 export — writes resources/format/asset + library/event/project/sequence/spine
+- [x] FCPXML format export metadata parity: emit canonical `format@name` only for known presets and preserve numeric format fields for all presets (avoids hardcoded 1080p24 name mismatches)
 - [x] FCPXML export writes source media in nested `media-rep` entries (`original-media` for non-proxy files, `proxy-media` for detected proxy-cache paths)
 - [x] Import compatibility for Apple-authored FCPXML 1.14 files: nested `media-rep` source paths, first-project timeline selection in multi-project files, and lane/media-type fallback track routing
 - [x] Marker import compatibility: parse `chapter-marker` and convert nested clip marker times (`start`/`offset` aware) to correct timeline marker positions

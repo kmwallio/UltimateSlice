@@ -249,4 +249,82 @@ If you are writing code to parse FCPXML, follow these steps:
     *   For every clip, check its `lane`. 
     *   Render `lane 0` (the main story) first.
     *   Then "layer" higher lanes on top based on their `position`, `scale`, and `opacity`.
-4.  **Coordinate Flip**: Most coding frameworks use `(0,0)` as the top-left corner. FCPXML uses `(0,0)` as the **center**. You will need to offset your coordinates to match.
+---
+
+## 8. Comprehensive Tag & Attribute Reference
+
+### **Root & Organizational Tags**
+*   **`<fcpxml>`**: The root element.
+    *   **`version`**: The schema version (e.g., `1.10`, `1.11`).
+*   **`<library>`**: Represents an FCP library.
+    *   **`location`**: The file URL to the library on disk.
+*   **`<event>`**: A container for clips and projects.
+    *   **`name`**: The display name of the event.
+*   **`<project>`**: Represents a Final Cut Pro project (timeline).
+    *   **`name`**: The display name of the project.
+
+### **Resource Tags (Inside `<resources>`)**
+*   **`<format>`**: Defines resolution and frame rate.
+    *   **`id`**: Unique resource ID.
+    *   **`name`**: Symbolic name (e.g., `FFVideoFormat1080p24`).
+    *   **`frameDuration`**: Frame time in rational seconds (e.g., `100/2400s`).
+    *   **`width` / `height`**: Frame dimensions in pixels.
+    *   **`colorSpace`**: The color profile (e.g., `Rec. 709`, `Rec. 2020`).
+*   **`<asset>`**: References a physical media file.
+    *   **`id`**: Unique resource ID.
+    *   **`src`**: File URL.
+    *   **`start` / `duration`**: Intrinsic bounds of the file.
+    *   **`hasVideo` / `hasAudio`**: Boolean flags (`1` or `0`).
+    *   **`uid`**: A unique ID used for media linking.
+*   **`<media>`**: Represents synthetic or nested media (Compound/Multicam).
+    *   **`id`**: Unique resource ID.
+    *   **`name`**: Display name.
+*   **`<effect>`**: Defines a plugin or filter.
+    *   **`id`**: Unique resource ID.
+    *   **`uid`**: The system path/ID for the effect plugin.
+
+### **Timeline & Story Elements**
+*   **`<sequence>`**: The main timeline container.
+    *   **`format`**: Reference to a `<format>` ID.
+    *   **`duration`**: Total length of the sequence.
+    *   **`tcStart`**: Starting timecode (usually `3600s`).
+    *   **`tcFormat`**: Timecode format (`DF` or `NDF`).
+*   **`<spine>`**: The primary "storyline" of the timeline.
+*   **`<asset-clip>`**: A clip referencing an `<asset>`.
+    *   **`ref`**: Reference to an `<asset>` ID.
+    *   **`offset`**: Start time relative to parent.
+    *   **`start` / `duration`**: Range within the asset.
+    *   **`lane`**: Vertical position (default `0`).
+    *   **`role`**: Media role (e.g., `dialogue`, `titles`).
+*   **`<mc-clip>`**: A clip referencing a `<multicam>` media resource.
+    *   **`ref`**: Reference to a `<media>` ID.
+    *   **`videoAngleID` / `audioAngleID`**: Active angle IDs.
+*   **`<ref-clip>`**: A clip referencing a `<media>` resource (Compound clip).
+*   **`<gap>`**: A placeholder for empty space.
+    *   **`duration` / `offset`**: Position and length.
+*   **`<transition>`**: A transition effect between two clips.
+*   **`<title>`**: A text overlay generator.
+
+### **Metadata & Locators**
+*   **`<marker>`**: A point-of-interest locator.
+    *   **`start`**: Position relative to the clip's start.
+    *   **`value`**: Note or name.
+*   **`<chapter-marker>`**: A locator for chapter markers.
+    *   **`posterOffset`**: Thumbnail frame position.
+*   **`<keyword>`**: A tag applied to a time range.
+    *   **`start` / `duration`**: The range covered by the tag.
+*   **`<metadata>`**: Container for key-value metadata.
+    *   **`<md>`**: A metadata entry with `key` and `value` attributes.
+
+### **Adjustments & Effects**
+*   **`<adjust-transform>`**: Spatial transformations.
+    *   **`position`**: XY translation (percentage of height).
+    *   **`scale`**: XY multiplier.
+    *   **`rotation`**: Rotation in degrees (positive is CCW).
+    *   **`anchor`**: Center of transformation (percentage of height).
+*   **`<adjust-conform>`**: Resolution scaling rules.
+    *   **`type`**: `fit`, `fill`, or `none`.
+*   **`<adjust-volume>`**: Audio level controls.
+    *   **`amount`**: Volume in dB.
+*   **`<filter-video>` / `<filter-audio>`**: Usage tags for effects.
+    *   **`ref`**: Reference to an `<effect>` ID.

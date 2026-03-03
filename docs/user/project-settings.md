@@ -35,7 +35,7 @@ All clips are automatically scaled and letterboxed/pillarboxed to fit the chosen
 
 ## Saving
 
-Project settings (resolution and frame rate) are saved as the `<format>` element in the FCPXML file.
+Project settings (resolution and frame rate) are saved as the `<format>` element in the FCPXML file. UltimateSlice always writes numeric format fields (`width`, `height`, `frameDuration`) and only writes a canonical `name` when the preset is known, which improves interoperability with other editors.
 Source media references are saved as nested `<media-rep>` entries under each resource `<asset>`; non-proxy files are tagged `kind="original-media"`.
 
 Use **Save…** (`Ctrl+S`) to write the project to a `.fcpxml` file. Open with **Open…** (`Ctrl+O`) on any future session.

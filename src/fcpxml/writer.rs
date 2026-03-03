@@ -306,7 +306,9 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
     );
     let mut fmt = BytesStart::new("format");
     fmt.push_attribute(("id", "r1"));
-    fmt.push_attribute(("name", "FFVideoFormat1080p24"));
+    if let Some(name) = known_fcpxml_format_name(project) {
+        fmt.push_attribute(("name", name));
+    }
     fmt.push_attribute((
         "frameDuration",
         format!(
@@ -355,6 +357,20 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
 
     writer.write_event(Event::End(BytesEnd::new("resources")))?;
     Ok(())
+}
+
+fn known_fcpxml_format_name(project: &Project) -> Option<&'static str> {
+    match (
+        project.width,
+        project.height,
+        project.frame_rate.numerator,
+        project.frame_rate.denominator,
+    ) {
+        (1920, 1080, 24, 1) => Some("FFVideoFormat1080p24"),
+        (1920, 1080, 30, 1) => Some("FFVideoFormat1080p30"),
+        (3840, 2160, 24, 1) => Some("FFVideoFormat2160p24"),
+        _ => None,
+    }
 }
 
 /// Convert nanoseconds to FCPXML rational time string (e.g. "48048/24000s")
@@ -689,5 +705,36 @@ mod tests {
         assert!(written.contains("us:scale=\"2.25\""));
         assert!(written.contains("adjust-transform"));
         assert!(written.contains("scale=\"2.25 2.25\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_uses_known_format_name_for_1080p24() {
+        let project = Project::new("KnownFormatName");
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains(
+                "<format id=\"r1\" name=\"FFVideoFormat1080p24\" frameDuration=\"1/24\" width=\"1920\" height=\"1080\"/>"
+            ),
+            "expected known format name for standard 1080p24 export:\n{xml}"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_omits_unknown_format_name_for_nonstandard_preset() {
+        let mut project = Project::new("UnknownFormatName");
+        project.width = 1280;
+        project.height = 720;
+        project.frame_rate.numerator = 30000;
+        project.frame_rate.denominator = 1001;
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("<format id=\"r1\" frameDuration=\"1001/30000\" width=\"1280\" height=\"720\"/>"),
+            "expected export to keep numeric format data for non-standard preset:\n{xml}"
+        );
+        assert!(
+            !xml.contains("name=\"FFVideoFormat"),
+            "expected export to omit unsupported hardcoded format names:\n{xml}"
+        );
     }
 }
