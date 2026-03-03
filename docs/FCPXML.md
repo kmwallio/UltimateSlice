@@ -118,7 +118,7 @@ A **Synchronized clip** (`<sync-clip>`) groups independently recorded media that
     *   Standard clip attributes: `ref`, `offset`, `start`, `duration`, `format`.
     *   **`audioStart` / `audioDuration`**: Allow split edits (J/L cuts) where audio timing differs from video.
 *   **`<sync-source>`**: Maps a source within the synchronized clip.
-    *   **`sourceID`**: Identifies which source stream to use.
+    *   **`sourceID`**: Identifies the source type. Enumeration: `storyline` (primary video) or `connected` (additional sources/audio).
 
 ### Auditions
 An **Audition** (`<audition>`) is a container that lets editors try out alternative clips in the same timeline position. Only one clip is active (the "pick"); the rest are hidden alternatives.
@@ -141,7 +141,8 @@ These elements provide context and organization. In FCPXML, "locators" are imple
 *   **`<analysis-marker>`**: Created automatically by FCP for things like "Face Detection" or "Shaky Video."
 *   **`<caption>`**: A closed caption element (introduced in FCPXML v1.8).
     *   Contains `<text>`, `<text-style-def>`, and optional `<note>`.
-    *   Has `role` attribute and standard clip attributes (`offset`, `duration`, etc.).
+    *   **`role`**: Caption role assignment. For standard captions, this follows the format `[Role]?captionFormat=[Format].[Language]` (e.g., `SRT?captionFormat=SRT.en`).
+    *   Has standard clip attributes (`offset`, `duration`, etc.).
 *   **`<note>`**: A simple text element for attaching notes to clips or other elements.
 
 ### **The Roles System**
@@ -179,7 +180,7 @@ Unlike most graphics engines where `(0,0)` is the top-left, FCPXML uses the **ce
     *   **`enabled`**: `1` (default) or `0`. Enables/disables the adjustment.
     *   **`position`**: Translation from the center, expressed as **percentages of the frame height**. (e.g., `10 10` is 10% right and 10% up).
     *   **`scale`**: Multiplier (e.g., `1 1` is 100%, `2 2` is 200%).
-    *   **`rotation`**: Spinning the clip in degrees. **Positive is counter-clockwise**, negative is clockwise. *(Note: Some sources report positive as clockwise. Verify empirically.)*
+    *   **`rotation`**: Spinning the clip in degrees. **Positive is counter-clockwise**, negative is clockwise.
     *   **`anchor`**: The point on the clip that "sticks" to the position, expressed as **percentages of the frame height** (relative to the clip's center).
     *   **`tracking`**: An IDREF linking to an object tracker for automated motion tracking integration.
 *   **`<adjust-conform>`**: 
@@ -217,9 +218,9 @@ Each `<keyframe>` element also supports:
 
 ### **Transformation Math (Developer Guide)**
 
-> **Note:** The unit system for `position` and `anchor` is not explicitly documented in Apple's DTD (they are simply `CDATA "0 0"`). The "percentage of frame height" interpretation below is one common reading, but has not been definitively confirmed by Apple. The formulas should be verified empirically by exporting a test FCPXML from Final Cut Pro with known position values. Some community evidence suggests the values may be direct pixel/point offsets from center.
+> **Note:** The unit system for `position` and `anchor` is not explicitly defined as pixels in the DTD. The **percentage of frame height** interpretation below is the industry standard (e.g., as used by tools like FCP.cafe and various translation layers) to ensure scaling remains proportional if a timeline's resolution is changed.
 
-When building a renderer, use these formulas to convert FCPXML values into standard graphics engine coordinates. The following assumes **normalized coordinates based on frame height** (one common interpretation).
+When building a renderer, use these formulas to convert FCPXML values into standard graphics engine coordinates. The following assumes **normalized coordinates based on frame height**.
 
 #### **1. Proportional-to-Pixel Conversion**
 FCPXML units for `position` and `anchor` are percentages of the **Frame Height**.

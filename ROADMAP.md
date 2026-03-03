@@ -106,6 +106,7 @@ Tracking docs:
 - [x] Preserve unknown fields on clean round-trip save for imported FCPXML (verbatim open→save passthrough when project is unmodified)
 - [x] Preserve unknown imported `asset-clip` attributes and child tags on regenerated dirty saves while updating edited scale values (`us:scale` / `adjust-transform@scale`)
 - [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
+- [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)
@@ -184,6 +185,7 @@ Tracking docs:
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
    - [x] Managed local proxy cache root (`$XDG_CACHE_HOME/ultimateslice/proxies`, fallback `/tmp/ultimateslice/proxies`) with fallback to alongside-media `UltimateSlice.cache` when local-cache transcodes fail
    - [x] Managed proxy cache lifecycle cleanup (startup stale prune for ownership-index entries older than 24h, plus project unload/app-close cleanup of managed cache files)
+   - [x] Eager near-playhead proxy priming during project reload (capped, proximity-ordered source requests before first program-player rebuild)
    - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
     - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops

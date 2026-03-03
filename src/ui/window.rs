@@ -115,6 +115,58 @@ fn active_video_track_count(project: &Project, timeline_pos_ns: u64) -> usize {
         .count()
 }
 
+fn collect_near_playhead_clip_sources(
+    project: &Project,
+    playhead_ns: u64,
+    window_ns: u64,
+    max_items: usize,
+) -> Vec<(String, Option<String>)> {
+    if max_items == 0 {
+        return Vec::new();
+    }
+    let window_start = playhead_ns.saturating_sub(window_ns);
+    let window_end = playhead_ns.saturating_add(window_ns);
+
+    let mut candidates: Vec<(u64, u64, String, Option<String>)> = project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video)
+        .flat_map(|t| t.clips.iter())
+        .filter(|c| c.timeline_end() >= window_start && c.timeline_start <= window_end)
+        .map(|c| {
+            let clip_end = c.timeline_end();
+            let distance = if playhead_ns < c.timeline_start {
+                c.timeline_start.saturating_sub(playhead_ns)
+            } else if playhead_ns > clip_end {
+                playhead_ns.saturating_sub(clip_end)
+            } else {
+                0
+            };
+            (
+                distance,
+                c.timeline_start,
+                c.source_path.clone(),
+                c.lut_path.clone(),
+            )
+        })
+        .collect();
+
+    candidates.sort_by_key(|(distance, timeline_start, _, _)| (*distance, *timeline_start));
+
+    let mut out = Vec::new();
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    for (_, _, path, lut) in candidates {
+        let key = (path, lut);
+        if seen.insert(key.clone()) {
+            out.push(key);
+            if out.len() >= max_items {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Build and show the main application window.
 pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let window = ApplicationWindow::builder()
@@ -1926,17 +1978,45 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     return;
                 }
                 let phase1_started = std::time::Instant::now();
+                const NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS: u64 = 8_000_000_000;
+                const NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES: usize = 8;
                 // Resolve proxy paths BEFORE load_clips so the first
                 // rebuild_pipeline_at() uses proxies instead of originals.
                 {
-                    let prefs = preferences_state_reload.borrow();
-                    if prefs.proxy_mode.is_enabled() {
-                        let scale = match prefs.proxy_mode {
-                            crate::ui_state::ProxyMode::QuarterRes => {
-                                crate::media::proxy_cache::ProxyScale::Quarter
-                            }
-                            _ => crate::media::proxy_cache::ProxyScale::Half,
-                        };
+                    let (proxy_mode, preview_quality) = {
+                        let prefs = preferences_state_reload.borrow();
+                        (prefs.proxy_mode.clone(), prefs.preview_quality.clone())
+                    };
+                    let manual_proxy_mode = proxy_mode.is_enabled();
+                    let manual_scale = match proxy_mode {
+                        crate::ui_state::ProxyMode::QuarterRes => {
+                            crate::media::proxy_cache::ProxyScale::Quarter
+                        }
+                        _ => crate::media::proxy_cache::ProxyScale::Half,
+                    };
+                    let prime_scale = if manual_proxy_mode {
+                        manual_scale
+                    } else if matches!(preview_quality, crate::ui_state::PreviewQuality::Quarter) {
+                        crate::media::proxy_cache::ProxyScale::Quarter
+                    } else {
+                        crate::media::proxy_cache::ProxyScale::Half
+                    };
+                    let near_playhead_sources: Vec<(String, Option<String>)> = {
+                        let proj = project_reload.borrow();
+                        collect_near_playhead_clip_sources(
+                            &proj,
+                            prev_pos,
+                            NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS,
+                            NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES,
+                        )
+                    };
+                    {
+                        let mut cache = proxy_cache_reload.borrow_mut();
+                        for (path, lut) in &near_playhead_sources {
+                            cache.request(path, prime_scale, lut.as_deref());
+                        }
+                    }
+                    if manual_proxy_mode {
                         let clip_sources: Vec<(String, Option<String>)> = {
                             let proj = project_reload.borrow();
                             let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
@@ -1956,12 +2036,19 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         {
                             let mut cache = proxy_cache_reload.borrow_mut();
                             for (path, lut) in &clip_sources {
-                                cache.request(path, scale, lut.as_deref());
+                                cache.request(path, manual_scale, lut.as_deref());
                             }
                         }
-                        let paths = proxy_cache_reload.borrow().proxies.clone();
-                        prog_player_reload.borrow_mut().update_proxy_paths(paths);
                     }
+                    if !near_playhead_sources.is_empty() {
+                        log::debug!(
+                            "window:on_project_changed primed {} near-playhead proxy source(s) around {}ns",
+                            near_playhead_sources.len(),
+                            prev_pos
+                        );
+                    }
+                    let paths = proxy_cache_reload.borrow().proxies.clone();
+                    prog_player_reload.borrow_mut().update_proxy_paths(paths);
                 }
 
                 {

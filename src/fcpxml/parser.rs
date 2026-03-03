@@ -15,6 +15,7 @@ struct Asset {
     src: String,
     name: String,
     duration_ns: u64,
+    start_ns: u64,
     has_video: bool,
     has_audio: bool,
 }
@@ -31,6 +32,7 @@ struct AssetBuilder {
     src: Option<String>,
     name: String,
     duration_ns: u64,
+    start_ns: u64,
     has_video: bool,
     has_audio: bool,
 }
@@ -359,10 +361,15 @@ fn parse_asset_clip(
                 .get("offset")
                 .and_then(|t| parse_fcpxml_time(t))
                 .unwrap_or(0);
-            let source_in = attrs
+            let raw_source_start = attrs
                 .get("start")
                 .and_then(|t| parse_fcpxml_time(t))
-                .unwrap_or(0);
+                .unwrap_or(asset.start_ns);
+            let source_in = if raw_source_start >= asset.start_ns {
+                raw_source_start - asset.start_ns
+            } else {
+                raw_source_start
+            };
             let duration = attrs
                 .get("duration")
                 .and_then(|t| parse_fcpxml_time(t))
@@ -418,12 +425,12 @@ fn parse_asset_clip(
             let resolved_source_path = resolve_import_source_path(&asset.src, mount_root, mount_users);
             let mut clip = Clip::new(
                 &resolved_source_path,
-                source_in + duration,
+                source_in.saturating_add(duration),
                 timeline_start,
                 clip_kind,
             );
             clip.source_in = source_in;
-            clip.source_out = source_in + duration;
+            clip.source_out = source_in.saturating_add(duration);
             clip.timeline_start = timeline_start;
             clip.label = label;
             clip.fcpxml_original_source_path = Some(asset.src.clone());
@@ -910,11 +917,16 @@ fn build_asset_builder(attrs: &HashMap<String, String>) -> Option<AssetBuilder> 
         .get("duration")
         .and_then(|d| parse_fcpxml_time(d))
         .unwrap_or(0);
+    let start_ns = attrs
+        .get("start")
+        .and_then(|d| parse_fcpxml_time(d))
+        .unwrap_or(0);
     Some(AssetBuilder {
         id,
         src: None,
         name: attrs.get("name").cloned().unwrap_or_default(),
         duration_ns,
+        start_ns,
         has_video: parse_flag(attrs.get("hasVideo"), true),
         has_audio: parse_flag(attrs.get("hasAudio"), true),
     })
@@ -929,6 +941,7 @@ fn finalize_asset(asset: AssetBuilder, assets: &mut HashMap<String, Asset>) {
                 src,
                 name: asset.name,
                 duration_ns: asset.duration_ns,
+                start_ns: asset.start_ns,
                 has_video: asset.has_video,
                 has_audio: asset.has_audio,
             },
@@ -1450,6 +1463,74 @@ mod tests {
         assert_eq!(audio_tracks.len(), 1);
         assert_eq!(video_tracks[0].clips[0].label, "video");
         assert_eq!(audio_tracks[0].clips[0].label, "audio");
+    }
+
+    #[test]
+    fn test_parse_fcpxml_asset_start_rebases_clip_start_for_lane_clips() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///video.mov" name="video" start="2400/24s" duration="480/24s" hasVideo="1" hasAudio="1"/>
+  </resources>
+  <library>
+    <event>
+      <project name="AssetStartRebase">
+        <sequence duration="480/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="2400/24s" duration="48/24s" name="video1"/>
+            <asset-clip ref="a1" lane="1" offset="0s" start="2448/24s" duration="48/24s" name="video2"/>
+            <asset-clip ref="a1" lane="-1" offset="0s" start="2448/24s" duration="48/24s" name="audio1"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let video_tracks: Vec<_> = project.video_tracks().collect();
+        let audio_tracks: Vec<_> = project.audio_tracks().collect();
+        assert_eq!(video_tracks.len(), 2);
+        assert_eq!(audio_tracks.len(), 1);
+
+        let video2 = video_tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.label == "video2")
+            .expect("video2 clip should exist");
+        let audio1 = audio_tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.label == "audio1")
+            .expect("audio1 clip should exist");
+        assert_eq!(video2.source_in, 2_000_000_000);
+        assert_eq!(video2.source_out, 4_000_000_000);
+        assert_eq!(audio1.source_in, 2_000_000_000);
+        assert_eq!(audio1.source_out, 4_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_clip_start_falls_back_to_relative_when_less_than_asset_start() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///video.mov" start="2400/24s" duration="480/24s"/>
+  </resources>
+  <project name="RelativeStartFallback">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="48/24s" duration="48/24s" name="clip"/>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.source_in, 2_000_000_000);
+        assert_eq!(clip.source_out, 4_000_000_000);
     }
 
     #[test]
