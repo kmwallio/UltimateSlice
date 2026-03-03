@@ -113,6 +113,15 @@ pub fn show_preferences_dialog(
     );
     playback_priority.set_active_id(Some(current.playback_priority.as_str()));
     playback_priority.set_halign(gtk::Align::Start);
+    let source_playback_priority = gtk4::ComboBoxText::new();
+    source_playback_priority.append(Some("smooth"), "Smooth (faster source seeks)");
+    source_playback_priority.append(Some("balanced"), "Balanced");
+    source_playback_priority.append(
+        Some("accurate"),
+        "Accurate (frame-precise source seeks)",
+    );
+    source_playback_priority.set_active_id(Some(current.source_playback_priority.as_str()));
+    source_playback_priority.set_halign(gtk::Align::Start);
     let hint = Label::new(Some(
         "Applies to source preview playback immediately (with non-GL fallback when needed).",
     ));
@@ -127,6 +136,8 @@ pub fn show_preferences_dialog(
     playback_box.append(&Label::new(Some("Program monitor playback priority")));
     playback_box.append(&playback_priority);
     playback_box.append(&priority_hint);
+    playback_box.append(&Label::new(Some("Source monitor playback priority")));
+    playback_box.append(&source_playback_priority);
 
     let proxy_label = Label::new(Some("Proxy preview mode"));
     proxy_label.set_halign(gtk::Align::Start);
@@ -248,6 +259,12 @@ pub fn show_preferences_dialog(
                 hardware_acceleration_enabled: hw_accel.is_active(),
                 playback_priority: PlaybackPriority::from_str(
                     playback_priority.active_id().as_deref().unwrap_or("smooth"),
+                ),
+                source_playback_priority: PlaybackPriority::from_str(
+                    source_playback_priority
+                        .active_id()
+                        .as_deref()
+                        .unwrap_or("smooth"),
                 ),
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),

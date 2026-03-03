@@ -202,6 +202,8 @@ pub struct PreferencesState {
     #[serde(default)]
     pub playback_priority: PlaybackPriority,
     #[serde(default)]
+    pub source_playback_priority: PlaybackPriority,
+    #[serde(default)]
     pub proxy_mode: ProxyMode,
     /// Show audio waveforms overlaid on video clips in the timeline.
     #[serde(default)]
@@ -225,6 +227,7 @@ impl Default for PreferencesState {
         Self {
             hardware_acceleration_enabled: false,
             playback_priority: PlaybackPriority::default(),
+            source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),

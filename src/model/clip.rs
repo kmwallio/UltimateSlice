@@ -229,7 +229,12 @@ mod tests {
     use super::*;
 
     fn make_test_clip(source_out: u64, timeline_start: u64) -> Clip {
-        Clip::new("/path/to/video.mp4", source_out, timeline_start, ClipKind::Video)
+        Clip::new(
+            "/path/to/video.mp4",
+            source_out,
+            timeline_start,
+            ClipKind::Video,
+        )
     }
 
     #[test]

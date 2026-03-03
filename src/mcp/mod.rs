@@ -38,6 +38,10 @@ pub enum McpCommand {
         priority: String,
         reply: SyncSender<Value>,
     },
+    SetSourcePlaybackPriority {
+        priority: String,
+        reply: SyncSender<Value>,
+    },
     SetProxyMode {
         mode: String,
         reply: SyncSender<Value>,
@@ -183,6 +187,16 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     TakeScreenshot {
+        reply: SyncSender<Value>,
+    },
+    SelectLibraryItem {
+        path: String,
+        reply: SyncSender<Value>,
+    },
+    SourcePlay {
+        reply: SyncSender<Value>,
+    },
+    SourcePause {
         reply: SyncSender<Value>,
     },
 }
