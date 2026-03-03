@@ -10,7 +10,7 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
         if !project.dirty {
             return Ok(original.clone());
         }
-        if let Some(patched) = patch_imported_fcpxml_scale(project, original) {
+        if let Some(patched) = patch_imported_fcpxml_transform(project, original) {
             return Ok(patched);
         }
     }
@@ -132,10 +132,17 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             }
             writer.write_event(Event::Start(asset_clip))?;
 
+            let (position_x, position_y) = internal_position_to_fcpxml(
+                clip.position_x,
+                clip.position_y,
+                project.width,
+                project.height,
+                clip.scale,
+            );
             let mut adjust_transform = BytesStart::new("adjust-transform");
             adjust_transform.push_attribute((
                 "position",
-                format!("{} {}", clip.position_x, clip.position_y).as_str(),
+                format!("{} {}", position_x, position_y).as_str(),
             ));
             adjust_transform.push_attribute((
                 "scale",
@@ -187,19 +194,60 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     Ok(String::from_utf8(result)?)
 }
 
-fn patch_imported_fcpxml_scale(project: &Project, original: &str) -> Option<String> {
+fn patch_imported_fcpxml_transform(project: &Project, original: &str) -> Option<String> {
     let mut clips = project.tracks.iter().flat_map(|t| t.clips.iter());
     let clip = clips.next()?;
     if clips.next().is_some() {
         return None;
     }
 
-    let mut xml = replace_attr_in_first_tag(original, "asset-clip", "us:scale", &clip.scale.to_string())?;
+    let mut xml =
+        replace_attr_in_first_tag(original, "asset-clip", "us:scale", &clip.scale.to_string())?;
+    xml = replace_attr_in_first_tag(&xml, "asset-clip", "us:position-x", &clip.position_x.to_string())?;
+    xml = replace_attr_in_first_tag(&xml, "asset-clip", "us:position-y", &clip.position_y.to_string())?;
     let transform_scale = format!("{} {}", clip.scale, clip.scale);
     if let Some(updated) = replace_attr_in_first_tag(&xml, "adjust-transform", "scale", &transform_scale) {
         xml = updated;
     }
+    let (position_x, position_y) =
+        internal_position_to_fcpxml(
+            clip.position_x,
+            clip.position_y,
+            project.width,
+            project.height,
+            clip.scale,
+        );
+    let transform_position = format!("{} {}", position_x, position_y);
+    if let Some(updated) =
+        replace_attr_in_first_tag(&xml, "adjust-transform", "position", &transform_position)
+    {
+        xml = updated;
+    }
     Some(xml)
+}
+
+fn internal_position_to_fcpxml(
+    x: f64,
+    y: f64,
+    project_width: u32,
+    project_height: u32,
+    scale: f64,
+) -> (f64, f64) {
+    let range_x = (project_width as f64) * (1.0 - scale) / 2.0;
+    let range_y = (project_height as f64) * (1.0 - scale) / 2.0;
+    let (shift_x_px, shift_y_px) = if range_x.abs() < f64::EPSILON || range_y.abs() < f64::EPSILON
+    {
+        (
+            x * (project_width as f64 / 2.0),
+            y * (project_height as f64 / 2.0),
+        )
+    } else {
+        (x * range_x, y * range_y)
+    };
+    let frame_height = project_height as f64;
+    let x_percent = shift_x_px * 100.0 / frame_height;
+    let y_percent = -shift_y_px * 100.0 / frame_height;
+    (x_percent, y_percent)
 }
 
 fn replace_attr_in_first_tag(xml: &str, tag_name: &str, attr_name: &str, new_value: &str) -> Option<String> {
@@ -406,7 +454,8 @@ mod tests {
         assert!(xml.contains("<media-rep kind=\"original-media\""));
         assert!(xml.contains("src=\"file:///tmp/source.mov\""));
         assert!(xml.contains("<adjust-transform"));
-        assert!(xml.contains("position=\"0.25 -0.5\""));
+        assert!(xml.contains("position=\"-11.111111"));
+        assert!(xml.contains(" -12.5\""));
         assert!(xml.contains("scale=\"1.5 1.5\""));
         assert!(xml.contains("rotation=\"90\""));
         assert!(xml.contains("<adjust-compositing opacity=\"0.75\""));
@@ -555,6 +604,8 @@ mod tests {
             .next()
             .expect("expected imported clip");
         clip.scale = 1.75;
+        clip.position_x = 0.25;
+        clip.position_y = -0.5;
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
@@ -564,7 +615,28 @@ mod tests {
         assert!(written.contains("customClip=\"keep-clip\""));
         assert!(written.contains("<metadata key=\"com.example.unknown\" value=\"keep-meta\""));
         assert!(written.contains("us:scale=\"1.75\""));
-        assert!(written.contains("adjust-transform position=\"0 0\" scale=\"1.75 1.75\" rotation=\"0\""));
+        assert!(written.contains("us:position-x=\"0.25\""));
+        assert!(written.contains("us:position-y=\"-0.5\""));
+        assert!(written.contains("adjust-transform position=\"-16.666666"));
+        assert!(written.contains(" scale=\"1.75 1.75\" rotation=\"0\""));
+        assert!(written.contains(" -18.75\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_allows_position_beyond_one() {
+        let mut project = Project::new("LargeOffsetExport");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.scale = 0.51;
+        clip.position_x = 1.2;
+        clip.position_y = 1.2;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("adjust-transform position=\"52.266666"));
+        assert!(xml.contains("scale=\"0.51 0.51\""));
     }
 
     #[test]

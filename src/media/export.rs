@@ -609,8 +609,8 @@ fn build_scale_position_filter(
     }
     let pw = out_w as f64;
     let ph = out_h as f64;
-    let pos_x = clip.position_x.clamp(-1.0, 1.0);
-    let pos_y = clip.position_y.clamp(-1.0, 1.0);
+    let pos_x = clip.position_x;
+    let pos_y = clip.position_y;
 
     if scale >= 1.0 {
         // Zoom in: scale UP then crop to output size.

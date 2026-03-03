@@ -41,6 +41,9 @@ struct ActiveClipContext {
     clip_index: usize,
     timeline_start: u64,
     source_in: u64,
+    has_us_position: bool,
+    has_us_scale: bool,
+    has_us_rotate: bool,
 }
 
 /// Parse an FCPXML string into a `Project`.
@@ -166,7 +169,13 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                     }
                     "adjust-transform" if in_spine => {
                         let attrs = parse_attrs(e)?;
-                        apply_adjust_transform(&attrs, clip_stack.last(), &mut track_map);
+                        apply_adjust_transform(
+                            &attrs,
+                            clip_stack.last(),
+                            &mut track_map,
+                            project.width,
+                            project.height,
+                        );
                     }
                     "adjust-compositing" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -242,7 +251,13 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                     }
                     "adjust-transform" if in_spine => {
                         let attrs = parse_attrs(e)?;
-                        apply_adjust_transform(&attrs, clip_stack.last(), &mut track_map);
+                        apply_adjust_transform(
+                            &attrs,
+                            clip_stack.last(),
+                            &mut track_map,
+                            project.width,
+                            project.height,
+                        );
                     }
                     "adjust-compositing" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -518,6 +533,10 @@ fn parse_asset_clip(
                 clip_index,
                 timeline_start,
                 source_in,
+                has_us_position: attrs.contains_key("us:position-x")
+                    || attrs.contains_key("us:position-y"),
+                has_us_scale: attrs.contains_key("us:scale"),
+                has_us_rotate: attrs.contains_key("us:rotate"),
             });
         }
     }
@@ -548,19 +567,67 @@ fn apply_adjust_transform(
     attrs: &HashMap<String, String>,
     active_ctx: Option<&ActiveClipContext>,
     track_map: &mut BTreeMap<(u8, usize), Track>,
+    project_width: u32,
+    project_height: u32,
 ) {
-    if let Some(clip) = current_clip_mut(track_map, active_ctx) {
-        if let Some(pos) = attrs.get("position").and_then(|s| parse_vec2(s)) {
-            clip.position_x = pos.0;
-            clip.position_y = pos.1;
+    let Some(ctx) = active_ctx else {
+        return;
+    };
+    if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
+        let parsed_scale = attrs.get("scale").and_then(|s| parse_vec2(s)).map(|s| s.0);
+        let effective_scale_for_position = if ctx.has_us_scale {
+            clip.scale
+        } else {
+            parsed_scale.unwrap_or(clip.scale)
+        };
+        if !ctx.has_us_position {
+            if let Some(pos) = attrs.get("position").and_then(|s| parse_vec2(s)) {
+                let (x, y) = fcpxml_position_to_internal(
+                    pos.0,
+                    pos.1,
+                    project_width,
+                    project_height,
+                    effective_scale_for_position,
+                );
+                clip.position_x = x;
+                clip.position_y = y;
+            }
         }
-        if let Some(scale) = attrs.get("scale").and_then(|s| parse_vec2(s)) {
-            clip.scale = scale.0;
+        if !ctx.has_us_scale {
+            if let Some(scale) = parsed_scale {
+                clip.scale = scale;
+            }
         }
-        if let Some(rot) = attrs.get("rotation").and_then(|s| s.parse::<f64>().ok()) {
-            clip.rotate = rot.round() as i32;
+        if !ctx.has_us_rotate {
+            if let Some(rot) = attrs.get("rotation").and_then(|s| s.parse::<f64>().ok()) {
+                clip.rotate = rot.round() as i32;
+            }
         }
     }
+}
+
+fn fcpxml_position_to_internal(
+    x: f64,
+    y: f64,
+    project_width: u32,
+    project_height: u32,
+    scale: f64,
+) -> (f64, f64) {
+    if project_width == 0 || project_height == 0 {
+        return (x, y);
+    }
+    // FCPXML position values are frame-percentage offsets based on frame height
+    // for both axes (center-origin): 100 means one frame-height of shift.
+    let shift_x_px = x * (project_height as f64) / 100.0;
+    let shift_y_px = -y * (project_height as f64) / 100.0;
+    let range_x = (project_width as f64) * (1.0 - scale) / 2.0;
+    let range_y = (project_height as f64) * (1.0 - scale) / 2.0;
+    if range_x.abs() < f64::EPSILON || range_y.abs() < f64::EPSILON {
+        let fallback_range_x = project_width as f64 / 2.0;
+        let fallback_range_y = project_height as f64 / 2.0;
+        return (shift_x_px / fallback_range_x, shift_y_px / fallback_range_y);
+    }
+    (shift_x_px / range_x, shift_y_px / range_y)
 }
 
 fn apply_adjust_compositing(
@@ -1499,7 +1566,7 @@ mod tests {
     <sequence format="r1">
       <spine>
         <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
-          <adjust-transform position="0.2 -0.3" scale="1.25 1.25" rotation="90"/>
+          <adjust-transform position="22.2222 -25" scale="0.5 0.5" rotation="90"/>
           <adjust-compositing opacity="0.6"/>
           <adjust-crop left="11" right="22" top="33" bottom="44"/>
         </asset-clip>
@@ -1510,15 +1577,17 @@ mod tests {
 
         let project = parse_fcpxml(xml).expect("parse should succeed");
         let clip = &project.video_tracks().next().unwrap().clips[0];
-        assert!((clip.position_x - 0.2).abs() < 1e-6);
-        assert!((clip.position_y + 0.3).abs() < 1e-6);
-        assert!((clip.scale - 1.25).abs() < 1e-6);
+        assert!((clip.position_x - 0.5).abs() < 1e-4);
+        assert!((clip.position_y - 1.0).abs() < 1e-6);
+        assert!((clip.scale - 0.5).abs() < 1e-6);
         assert_eq!(clip.rotate, 90);
         assert!((clip.opacity - 0.6).abs() < 1e-6);
         assert_eq!(clip.crop_left, 11);
         assert_eq!(clip.crop_right, 22);
         assert_eq!(clip.crop_top, 33);
         assert_eq!(clip.crop_bottom, 44);
+        assert_eq!(project.width, 1920);
+        assert_eq!(project.height, 1080);
     }
 
     #[test]
@@ -1548,6 +1617,130 @@ mod tests {
         assert_eq!(clip.crop_right, 8);
         assert_eq!(clip.crop_top, 9);
         assert_eq!(clip.crop_bottom, 10);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_prefers_us_transform_attrs_when_present() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///clip.mov" duration="10s"/>
+  </resources>
+  <project name="UsTransformPriority">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s"
+                    us:position-x="0.1" us:position-y="-0.2" us:scale="1.1" us:rotate="45">
+          <adjust-transform position="960 -540" scale="2 2" rotation="90"/>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert!((clip.position_x - 0.1).abs() < 1e-6);
+        assert!((clip.position_y + 0.2).abs() < 1e-6);
+        assert!((clip.scale - 1.1).abs() < 1e-6);
+        assert_eq!(clip.rotate, 45);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_scale_aware_position_conversion() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1001/30000s" width="1280" height="720"/>
+    <asset id="a1" src="file:///clip.mov" duration="10s"/>
+  </resources>
+  <project name="ScaleAwarePosition">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform position="27.7778 -27.7778" scale="0.51 0.51" rotation="0"/>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert!((clip.position_x - 0.637755).abs() < 1e-4);
+        assert!((clip.position_y - 1.133788).abs() < 1e-4);
+        assert!((clip.scale - 0.51).abs() < 1e-6);
+        assert_eq!(project.width, 1280);
+        assert_eq!(project.height, 720);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_position_uses_sequence_dimensions() {
+        let xml_1280 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1001/30000s" width="1280" height="720"/>
+    <asset id="a1" src="file:///clip.mov" duration="10s"/>
+  </resources>
+  <project name="Seq1280x720">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform position="27.7778 -27.7778" scale="0.51 0.51"/>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+        let xml_1920 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1001/30000s" width="1920" height="720"/>
+    <asset id="a1" src="file:///clip.mov" duration="10s"/>
+  </resources>
+  <project name="Seq1920x720">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform position="27.7778 -27.7778" scale="0.51 0.51"/>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let p1280 = parse_fcpxml(xml_1280).expect("parse 1280x720");
+        let p1920 = parse_fcpxml(xml_1920).expect("parse 1920x720");
+        let c1280 = &p1280.video_tracks().next().unwrap().clips[0];
+        let c1920 = &p1920.video_tracks().next().unwrap().clips[0];
+        assert!(c1280.position_x > c1920.position_x);
+        assert!((c1280.position_y - c1920.position_y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_position_import_not_clamped_to_one() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1280" height="720"/>
+    <asset id="a1" src="file:///clip.mov" duration="10s"/>
+  </resources>
+  <project name="LargeOffset">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform position="80 -80" scale="0.51 0.51" rotation="0"/>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert!(clip.position_x > 1.0);
+        assert!(clip.position_y > 1.0);
     }
 
     #[test]

@@ -2673,8 +2673,8 @@ impl ProgramPlayer {
             cf.set_property("caps", &caps);
         }
 
-        let pos_x = position_x.clamp(-1.0, 1.0);
-        let pos_y = position_y.clamp(-1.0, 1.0);
+        let pos_x = position_x;
+        let pos_y = position_y;
         let total_x = pw * (scale - 1.0);
         let total_y = ph * (scale - 1.0);
         let box_left = (total_x * (1.0 + pos_x) / 2.0) as i32;
@@ -3399,17 +3399,12 @@ impl ProgramPlayer {
     /// above it (higher zorder).  Conservative: only considers full-frame
     /// opaque clips with no scale-down as occluders.
     fn is_clip_video_occluded(&self, active: &[usize], pos: usize) -> bool {
-        // Any clip above `pos` that is fully opaque, fills the canvas (scale>=1),
-        // and has no user crop fully occludes everything below.
+        // Any clip above `pos` that is effectively default full-frame transform
+        // (opaque, centered, unrotated, unflipped, uncropped, scale>=1) is
+        // treated as a true occluder.
         for j in (pos + 1)..active.len() {
             let c = &self.clips[active[j]];
-            if c.opacity >= 1.0
-                && c.scale >= 1.0
-                && c.crop_left == 0
-                && c.crop_right == 0
-                && c.crop_top == 0
-                && c.crop_bottom == 0
-            {
+            if clip_can_fully_occlude(c) {
                 return true;
             }
         }
@@ -3877,8 +3872,11 @@ impl ProgramPlayer {
         self.current_idx = active.last().copied();
 
         for (zorder_offset, &clip_idx) in active.iter().enumerate() {
-            // Skip video decode for clips fully occluded by an opaque clip above.
-            if self.is_clip_video_occluded(&active, zorder_offset) {
+            // Correctness-first: keep full decode slots so multitrack audio
+            // remains stable under overlap; revisit occlusion audio-only mode later.
+            if occlusion_audio_only_slots_enabled()
+                && self.is_clip_video_occluded(&active, zorder_offset)
+            {
                 if let Some(slot) = self.build_audio_only_slot_for_clip(clip_idx) {
                     self.slots.push(slot);
                 } else if let Some(slot) =
@@ -4279,6 +4277,101 @@ impl ProgramPlayer {
                 }
             }
         }
+    }
+}
+
+fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
+    clip.opacity >= 0.999
+        && clip.scale >= 1.0
+        && clip.crop_left == 0
+        && clip.crop_right == 0
+        && clip.crop_top == 0
+        && clip.crop_bottom == 0
+        && clip.rotate.rem_euclid(360) == 0
+        && !clip.flip_h
+        && !clip.flip_v
+        && clip.position_x.abs() < 0.000_001
+        && clip.position_y.abs() < 0.000_001
+}
+
+fn occlusion_audio_only_slots_enabled() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clip_can_fully_occlude, occlusion_audio_only_slots_enabled, ProgramClip};
+
+    fn make_clip() -> ProgramClip {
+        ProgramClip {
+            id: "c1".to_string(),
+            source_path: "/tmp/c1.mp4".to_string(),
+            source_in_ns: 0,
+            source_out_ns: 1_000_000_000,
+            timeline_start_ns: 0,
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            denoise: 0.0,
+            sharpness: 0.0,
+            volume: 1.0,
+            pan: 0.0,
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
+            rotate: 0,
+            flip_h: false,
+            flip_v: false,
+            title_text: String::new(),
+            title_font: String::new(),
+            title_color: 0,
+            title_x: 0.0,
+            title_y: 0.0,
+            speed: 1.0,
+            reverse: false,
+            is_audio_only: false,
+            track_index: 0,
+            transition_after: String::new(),
+            transition_after_ns: 0,
+            lut_path: None,
+            scale: 1.0,
+            opacity: 1.0,
+            position_x: 0.0,
+            position_y: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            has_audio: true,
+        }
+    }
+
+    #[test]
+    fn clip_with_default_full_frame_transform_can_occlude() {
+        let clip = make_clip();
+        assert!(clip_can_fully_occlude(&clip));
+    }
+
+    #[test]
+    fn clip_with_non_center_position_cannot_occlude() {
+        let mut clip = make_clip();
+        clip.position_x = 0.2;
+        assert!(!clip_can_fully_occlude(&clip));
+    }
+
+    #[test]
+    fn clip_with_rotation_or_flip_cannot_occlude() {
+        let mut clip = make_clip();
+        clip.rotate = 90;
+        assert!(!clip_can_fully_occlude(&clip));
+        clip.rotate = 0;
+        clip.flip_h = true;
+        assert!(!clip_can_fully_occlude(&clip));
+    }
+
+    #[test]
+    fn occlusion_audio_only_slots_disabled_for_correctness() {
+        assert!(!occlusion_audio_only_slots_enabled());
     }
 }
 

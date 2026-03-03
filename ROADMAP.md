@@ -101,6 +101,7 @@ Tracking docs:
 - [x] Marker import compatibility: parse `chapter-marker` and convert nested clip marker times (`start`/`offset` aware) to correct timeline marker positions
 - [x] Format preset fallback: derive frame rate/resolution from known format names (e.g. `FFVideoFormat1080p30`) when numeric format fields are absent
 - [x] Standard Inspector mapping (phase 1): parse/write `adjust-transform` (scale/position/rotation), `adjust-compositing` (opacity), and `adjust-crop`/`crop-rect` (crop bounds) with `us:*` fallback
+- [x] Transform coordinate parity: convert FCPXML `adjust-transform@position` using frame-height percentage semantics (both axes), mapped to/from UltimateSlice's scale-aware internal position model (with Y-axis inversion), including single-clip dirty-save patch path
 - [x] Preserve unknown fields on clean round-trip save for imported FCPXML (verbatim open→save passthrough when project is unmodified)
 - [x] Preserve unknown imported `asset-clip` attributes and child tags on regenerated dirty saves while updating edited scale values (`us:scale` / `adjust-transform@scale`)
 - [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
@@ -202,9 +203,11 @@ Tracking docs:
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
            - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
-           - [x] Occlusion-based video decode skip: clips fully hidden behind an opaque full-frame overlay build audio-only slots (decoder with audio caps only), skipping video decode/effects/compositor
-           - [x] Occlusion audio continuity fallback: if an occluded clip's audio-only slot cannot be created, preview falls back to a full slot so audio is preserved
-         - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
+            - [x] Occlusion-based video decode skip: clips fully hidden behind an opaque full-frame overlay build audio-only slots (decoder with audio caps only), skipping video decode/effects/compositor
+            - [x] Occlusion audio continuity fallback: if an occluded clip's audio-only slot cannot be created, preview falls back to a full slot so audio is preserved
+            - [x] Stricter occlusion classification for correctness: only centered/unrotated/unflipped/uncropped opaque full-frame overlays trigger occlusion skip, reducing false-positive audio muting
+            - [x] Correctness guard for multitrack audio: temporarily disable occlusion audio-only substitution during active rebuilds to preserve reliable mixed audio
+          - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
   - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
