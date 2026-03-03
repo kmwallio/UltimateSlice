@@ -332,6 +332,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `get_preferences` | Get persisted application preferences |
 | `set_hardware_acceleration` | Set hardware-acceleration preference and apply to source preview playback |
 | `set_playback_priority` | Set program-monitor playback priority (`smooth` / `balanced` / `accurate`) |
+| `set_source_playback_priority` | Set source-monitor playback priority (`smooth` / `balanced` / `accurate`) |
 | `set_proxy_mode` | Set proxy preview mode (`off` / `half_res` / `quarter_res`) |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |
 | `set_preview_quality` | Set compositor preview quality (`auto` / `full` / `half` / `quarter`); takes effect immediately |

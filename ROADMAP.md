@@ -31,6 +31,7 @@ Tracking docs:
 - [x] Selecting a library item loads it in the source preview
 - [x] Imported clips are **not** auto-added to the timeline
 - [x] Import no longer auto-loads Source Monitor; selecting a library item loads preview on demand (avoids import-time playbin reconfiguration races)
+- [x] Project replacement (New/Open/Open Recent and MCP create/open) clears the current media-browser list before syncing target-project media
 
 ### Source Preview / Monitor
 - [x] GStreamer `playbin` + `gtk4paintablesink` video display
@@ -42,6 +43,10 @@ Tracking docs:
 - [x] In/Out timecode labels
 - [x] Play/Pause (Space), Stop transport buttons
 - [x] Timecode label (`position / duration`)
+- [x] Playback-only drop-late smoothness policy for source monitor (aggressive while playing, conservative while paused/stopped)
+- [x] Adaptive source-proxy scale when proxy mode is Off (Quarter for small source monitor sizes, Half for larger)
+- [x] Adaptive VA-API source decode mode (hardware-first when available and enabled) with automatic software fallback on hardware-path errors
+- [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
 
 ### Timeline
 - [x] Cairo-rendered `DrawingArea` with ruler (adaptive tick intervals)
@@ -103,6 +108,7 @@ Tracking docs:
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
+- [x] `select_library_item`, `source_play`, `source_pause` tools — select media in the library and control Source Monitor playback via MCP
 
 ---
 
@@ -113,6 +119,7 @@ Tracking docs:
 - [x] Close button to hide source preview and clear current source selection
 - [x] Frame-accurate jog/shuttle control
 - [x] Mark-in / Mark-out visible as timecodes in a dedicated bar
+- [x] Source preview auto-loads proxy files when available and requests proxy transcodes for high-resolution video
 
 ### Timeline Improvements
 - [x] Time-mapped clip filmstrip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
@@ -138,8 +145,8 @@ Tracking docs:
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
 - [x] Speed indicator badge on clip in timeline (yellow "2×" badge)
 - [x] Persist speed data in FCPXML (`us:speed` attribute)
+- [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies to Program Monitor preview and export (`reverse`/`areverse`), timeline shows `◀` badge, and state persists via `us:reverse` FCPXML attribute
 - [ ] Variable speed ramps: multiple keyframed speed segments within a single clip
-- [ ] Reverse playback
 - [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
 
 ### Program Monitor
@@ -148,6 +155,7 @@ Tracking docs:
   - Play/Stop transport controls; timecode display
   - Timeline seek (click ruler) also seeks the program monitor
   - Clips reload automatically on every project change
+  - Project replacement resets cached monitor output so empty projects do not show stale prior frames
 - [x] Program-monitor playback priority mode in Preferences (`Smooth` / `Balanced` / `Accurate`)
 - [x] Docked Program Monitor and scopes are resizable via draggable splitter (position persisted; pane collapses fully when scopes are hidden)
 - [ ] Detachable Program Monitor window (pop-out preview)
@@ -185,9 +193,10 @@ Tracking docs:
           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
-          - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
-          - [x] Occlusion-based video decode skip: clips fully hidden behind an opaque full-frame overlay build audio-only slots (decoder with audio caps only), skipping video decode/effects/compositor
-        - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
+           - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
+           - [x] Occlusion-based video decode skip: clips fully hidden behind an opaque full-frame overlay build audio-only slots (decoder with audio caps only), skipping video decode/effects/compositor
+           - [x] Occlusion audio continuity fallback: if an occluded clip's audio-only slot cannot be created, preview falls back to a full slot so audio is preserved
+         - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
   - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially

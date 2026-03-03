@@ -71,6 +71,8 @@ pub struct ProgramClip {
     pub title_y: f64,
     /// Playback speed multiplier (default 1.0). >1 = fast, <1 = slow.
     pub speed: f64,
+    /// Reverse playback when true.
+    pub reverse: bool,
     /// True for clips that have no video (audio-track clips). They are routed
     /// to a dedicated audio-only pipeline instead of the video player.
     pub is_audio_only: bool,
@@ -119,7 +121,46 @@ impl ProgramClip {
     /// Convert a timeline position offset to the corresponding source file position.
     pub fn source_pos_ns(&self, timeline_pos_ns: u64) -> u64 {
         let offset = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
-        self.source_in_ns + (offset as f64 * self.speed) as u64
+        let src_span = self.source_duration_ns();
+        if src_span == 0 {
+            return self.source_in_ns;
+        }
+        let max_delta = src_span.saturating_sub(1);
+        let delta = ((offset as f64 * self.speed) as u64).min(max_delta);
+        if self.reverse {
+            self.source_out_ns.saturating_sub(1).saturating_sub(delta)
+        } else {
+            self.source_in_ns + delta
+        }
+    }
+
+    pub fn seek_rate(&self) -> f64 {
+        let base = if self.speed > 0.0 { self.speed } else { 1.0 };
+        if self.reverse { -base } else { base }
+    }
+
+    pub fn seek_start_ns(&self, source_pos_ns: u64) -> u64 {
+        if self.reverse {
+            self.source_in_ns.min(source_pos_ns)
+        } else {
+            source_pos_ns
+        }
+    }
+
+    pub fn seek_stop_ns(&self, source_pos_ns: u64) -> u64 {
+        if self.reverse {
+            source_pos_ns.max(self.source_in_ns)
+        } else {
+            self.source_out_ns.max(source_pos_ns)
+        }
+    }
+
+    pub fn audio_seek_flags(&self) -> gst::SeekFlags {
+        if self.reverse {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+        } else {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+        }
     }
 }
 
@@ -157,6 +198,12 @@ struct VideoSlot {
     comp_arrival_seq: Arc<AtomicU64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioCurrentSource {
+    AudioClip(usize),
+    ReverseVideoClip(usize),
+}
+
 pub struct ProgramPlayer {
     /// The single GStreamer pipeline containing compositor + audiomixer.
     pipeline: gst::Pipeline,
@@ -169,7 +216,10 @@ pub struct ProgramPlayer {
     audio_clips: Vec<ProgramClip>,
     /// Separate playbin for audio-only clips (music tracks etc.).
     audio_pipeline: gst::Element,
-    audio_current_idx: Option<usize>,
+    audio_current_source: Option<AudioCurrentSource>,
+    /// Clip index whose audiomixer pad is temporarily forced to 0.0 while
+    /// reverse audio for that clip is routed through `audio_pipeline`.
+    reverse_video_ducked_clip_idx: Option<usize>,
     /// Active video decoder slots.
     slots: Vec<VideoSlot>,
     /// Cached timeline position in nanoseconds (updated by `poll`).
@@ -630,9 +680,7 @@ impl ProgramPlayer {
         // playbin's own "volume" property delegates to pulsesink's StreamVolume
         // interface, which under PulseAudio/PipeWire flat-volume mode can also
         // affect the main compositor pipeline's audio level.
-        let audio_volume_element = gst::ElementFactory::make("volume")
-            .build()
-            .ok();
+        let audio_volume_element = gst::ElementFactory::make("volume").build().ok();
         match (&audio_volume_element, &level_element_audio) {
             (Some(vol), Some(lv)) => {
                 let bin = gst::Bin::builder().name("audio-filter-bin").build();
@@ -640,8 +688,10 @@ impl ProgramPlayer {
                 vol.link(lv).unwrap();
                 let sink_pad = vol.static_pad("sink").unwrap();
                 let src_pad = lv.static_pad("src").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap()).unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                    .unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
+                    .unwrap();
                 audio_pipeline.set_property("audio-filter", &bin.upcast::<gst::Element>());
             }
             (Some(vol), None) => {
@@ -672,7 +722,8 @@ impl ProgramPlayer {
                 clips: Vec::new(),
                 audio_clips: Vec::new(),
                 audio_pipeline,
-                audio_current_idx: None,
+                audio_current_source: None,
+                reverse_video_ducked_clip_idx: None,
                 slots: Vec::new(),
                 timeline_pos_ns: 0,
                 timeline_dur_ns: 0,
@@ -758,8 +809,7 @@ impl ProgramPlayer {
     pub fn set_frame_rate(&mut self, numerator: u32, denominator: u32) {
         if numerator > 0 && denominator > 0 {
             // frame_duration = 1e9 * denominator / numerator (nanoseconds)
-            self.frame_duration_ns =
-                (1_000_000_000u64 * denominator as u64) / numerator as u64;
+            self.frame_duration_ns = (1_000_000_000u64 * denominator as u64) / numerator as u64;
         }
     }
 
@@ -1036,7 +1086,8 @@ impl ProgramPlayer {
             .unwrap_or(0);
         self.timeline_dur_ns = vdur.max(adur);
         self.current_idx = None;
-        self.audio_current_idx = None;
+        self.audio_current_source = None;
+        self.reverse_video_ducked_clip_idx = None;
         self.teardown_slots();
         // Keep the main pipeline in Paused here; moving to Ready can block on
         // pad deactivation while slot teardown is still settling on some media.
@@ -1176,19 +1227,47 @@ impl ProgramPlayer {
             self.state = PlayerState::Playing;
             self.rebuild_pipeline_at(pos);
         }
+        // Ensure playback starts with playback-rate seeks (including reverse)
+        // even when slots were already loaded by paused-seek paths.
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            let _ = Self::seek_slot_decoder_with_retry(
+                slot,
+                clip,
+                pos,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            );
+        }
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.sync_audio_to(pos);
-        if let Some(aidx) = self.audio_current_idx {
-            let aclip = &self.audio_clips[aidx];
-            let asrc = aclip.source_pos_ns(pos);
-            let _ = self.audio_pipeline.seek(
-                1.0_f64,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(asrc),
-                gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(aclip.source_out_ns),
-            );
+        match self.audio_current_source {
+            Some(AudioCurrentSource::AudioClip(aidx)) => {
+                let aclip = &self.audio_clips[aidx];
+                let asrc = aclip.source_pos_ns(pos);
+                let _ = self.audio_pipeline.seek(
+                    aclip.seek_rate(),
+                    aclip.audio_seek_flags(),
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(aclip.seek_start_ns(asrc)),
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(aclip.seek_stop_ns(asrc)),
+                );
+            }
+            Some(AudioCurrentSource::ReverseVideoClip(vidx)) => {
+                let vclip = &self.clips[vidx];
+                let asrc = vclip.source_pos_ns(pos);
+                let _ = self.audio_pipeline.seek(
+                    vclip.seek_rate(),
+                    vclip.audio_seek_flags(),
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(vclip.seek_start_ns(asrc)),
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(vclip.seek_stop_ns(asrc)),
+                );
+            }
+            None => {}
+        }
+        if self.audio_current_source.is_some() {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
         self.state = PlayerState::Playing;
@@ -1232,6 +1311,7 @@ impl ProgramPlayer {
         self.teardown_prepreroll_sidecars();
         let _ = self.pipeline.set_state(gst::State::Ready);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
+        self.apply_reverse_video_main_audio_ducking(None);
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
         self.base_timeline_ns = 0;
@@ -1239,7 +1319,7 @@ impl ProgramPlayer {
         self.prewarmed_boundary_ns = None;
         self.last_seeked_frame_pos = None;
         self.current_idx = None;
-        self.audio_current_idx = None;
+        self.audio_current_source = None;
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             return;
         }
@@ -1299,7 +1379,8 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
             self.state = PlayerState::Stopped;
             self.current_idx = None;
-            self.audio_current_idx = None;
+            self.audio_current_source = None;
+            self.apply_reverse_video_main_audio_ducking(None);
             self.play_start = None;
             self.timeline_pos_ns = self.timeline_dur_ns;
             self.prewarmed_boundary_ns = None;
@@ -1332,7 +1413,8 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
             self.state = PlayerState::Stopped;
             self.current_idx = None;
-            self.audio_current_idx = None;
+            self.audio_current_source = None;
+            self.apply_reverse_video_main_audio_ducking(None);
             self.play_start = None;
             self.timeline_pos_ns = self.timeline_dur_ns;
             self.prewarmed_boundary_ns = None;
@@ -1352,7 +1434,7 @@ impl ProgramPlayer {
             self.rebuild_pipeline_at(new_pos);
             let _ = self.pipeline.set_state(gst::State::Playing);
             self.sync_audio_to(new_pos);
-            if self.audio_current_idx.is_some() {
+            if self.audio_current_source.is_some() {
                 let _ = self.audio_pipeline.set_state(gst::State::Playing);
             }
             // Reset wall-clock base after rebuild.
@@ -1394,15 +1476,10 @@ impl ProgramPlayer {
                 // brightness and contrast offsets.  Not pixel-perfect but
                 // gives real-time visual feedback.  Export uses ffmpeg
                 // colorbalance for accurate per-luminance grading.
-                let eff_brightness = (brightness
-                    + shadows * 0.3
-                    + midtones * 0.2
-                    + highlights * 0.15)
-                    .clamp(-1.0, 1.0);
-                let eff_contrast = (contrast
-                    - shadows * 0.15
-                    + highlights * 0.15)
-                    .clamp(0.0, 2.0);
+                let eff_brightness =
+                    (brightness + shadows * 0.3 + midtones * 0.2 + highlights * 0.15)
+                        .clamp(-1.0, 1.0);
+                let eff_contrast = (contrast - shadows * 0.15 + highlights * 0.15).clamp(0.0, 2.0);
                 vb.set_property("brightness", eff_brightness);
                 vb.set_property("contrast", eff_contrast);
                 vb.set_property("saturation", saturation.clamp(0.0, 2.0));
@@ -1422,7 +1499,13 @@ impl ProgramPlayer {
         // Per-clip volume on the audiomixer pad.
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             if let Some(ref pad) = slot.audio_mixer_pad {
-                pad.set_property("volume", volume.clamp(0.0, 2.0));
+                let clipped = volume.clamp(0.0, 2.0);
+                let pad_volume = if self.reverse_video_ducked_clip_idx == self.current_idx {
+                    0.0
+                } else {
+                    clipped
+                };
+                pad.set_property("volume", pad_volume);
             }
         }
     }
@@ -1434,7 +1517,12 @@ impl ProgramPlayer {
             self.clips[i].volume = volume;
             if let Some(slot) = self.slot_for_clip(i) {
                 if let Some(ref pad) = slot.audio_mixer_pad {
-                    pad.set_property("volume", volume);
+                    let pad_volume = if self.reverse_video_ducked_clip_idx == Some(i) {
+                        0.0
+                    } else {
+                        volume
+                    };
+                    pad.set_property("volume", pad_volume);
                 }
             }
             return;
@@ -1443,7 +1531,7 @@ impl ProgramPlayer {
         // update the dedicated volume element (avoids playbin StreamVolume crosstalk).
         if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
             self.audio_clips[i].volume = volume;
-            if self.audio_current_idx == Some(i) {
+            if self.audio_current_source == Some(AudioCurrentSource::AudioClip(i)) {
                 if let Some(ref vol_elem) = self.audio_volume_element {
                     vol_elem.set_property("volume", volume);
                 } else {
@@ -1842,7 +1930,8 @@ impl ProgramPlayer {
 
     fn effective_source_path_for_clip(&self, clip: &ProgramClip) -> String {
         if self.proxy_enabled {
-            let key = crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+            let key =
+                crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
             self.proxy_paths
                 .get(&key)
                 .cloned()
@@ -2156,17 +2245,17 @@ impl ProgramPlayer {
         let effective_timeout_ms = self.effective_wait_timeout_ms(timeout_ms);
         let deadline = Instant::now() + Duration::from_millis(effective_timeout_ms);
         // Use finer sleep granularity during playback for faster response.
-        let sleep_ms = if self.state == PlayerState::Playing { 5 } else { 15 };
+        let sleep_ms = if self.state == PlayerState::Playing {
+            5
+        } else {
+            15
+        };
         loop {
-            let all_arrived = self
-                .slots
-                .iter()
-                .zip(baseline.iter())
-                .all(|(slot, &base)| {
-                    // Audio-only slots have no compositor pad — always "arrived".
-                    slot.compositor_pad.is_none()
-                        || slot.comp_arrival_seq.load(Ordering::Relaxed) > base
-                });
+            let all_arrived = self.slots.iter().zip(baseline.iter()).all(|(slot, &base)| {
+                // Audio-only slots have no compositor pad — always "arrived".
+                slot.compositor_pad.is_none()
+                    || slot.comp_arrival_seq.load(Ordering::Relaxed) > base
+            });
             if all_arrived {
                 log::info!(
                     "wait_for_compositor_arrivals: all {} slots arrived",
@@ -2281,14 +2370,19 @@ impl ProgramPlayer {
         seek_flags: gst::SeekFlags,
     ) -> bool {
         let source_ns = clip.source_pos_ns(timeline_pos_ns);
+        let effective_seek_flags = if clip.reverse {
+            (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
+        } else {
+            seek_flags
+        };
         slot.decoder
             .seek(
-                clip.speed,
-                seek_flags,
+                clip.seek_rate(),
+                effective_seek_flags,
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(source_ns),
+                gst::ClockTime::from_nseconds(clip.seek_start_ns(source_ns)),
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(clip.source_out_ns),
+                gst::ClockTime::from_nseconds(clip.seek_stop_ns(source_ns)),
             )
             .is_ok()
     }
@@ -2772,10 +2866,7 @@ impl ProgramPlayer {
                 Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos)
             };
             if !ok {
-                log::warn!(
-                    "try_incremental_add_only: seek FAILED for clip {}",
-                    clip.id
-                );
+                log::warn!("try_incremental_add_only: seek FAILED for clip {}", clip.id);
                 if let Some(ref pad) = slot.compositor_pad {
                     let _ = pad.send_event(gst::event::Eos::new());
                 }
@@ -2957,6 +3048,7 @@ impl ProgramPlayer {
         for slot in drained {
             self.teardown_single_slot(slot);
         }
+        self.reverse_video_ducked_clip_idx = None;
         self.slot_queue_drop_late_active = false;
     }
 
@@ -3124,10 +3216,8 @@ impl ProgramPlayer {
                 + clip.midtones * 0.2
                 + clip.highlights * 0.15)
                 .clamp(-1.0, 1.0);
-            let eff_contrast = (clip.contrast
-                - clip.shadows * 0.15
-                + clip.highlights * 0.15)
-                .clamp(0.0, 2.0);
+            let eff_contrast =
+                (clip.contrast - clip.shadows * 0.15 + clip.highlights * 0.15).clamp(0.0, 2.0);
             vb.set_property("brightness", eff_brightness);
             vb.set_property("contrast", eff_contrast);
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
@@ -3328,10 +3418,7 @@ impl ProgramPlayer {
 
     /// Build an audio-only slot for a fully-occluded clip.  Skips video
     /// decode, effects, and compositor pad entirely.
-    fn build_audio_only_slot_for_clip(
-        &mut self,
-        clip_idx: usize,
-    ) -> Option<VideoSlot> {
+    fn build_audio_only_slot_for_clip(&mut self, clip_idx: usize) -> Option<VideoSlot> {
         let clip = self.clips[clip_idx].clone();
         let effective_path = self.effective_source_path_for_clip(&clip);
         let uri = format!("file://{}", effective_path);
@@ -3608,7 +3695,10 @@ impl ProgramPlayer {
                             match pad.link(sink) {
                                 Ok(_) => {
                                     video_linked_for_cb.store(true, Ordering::Relaxed);
-                                    log::info!("ProgramPlayer: video linked clip={}", clip_id_for_cb);
+                                    log::info!(
+                                        "ProgramPlayer: video linked clip={}",
+                                        clip_id_for_cb
+                                    );
                                 }
                                 Err(e) => {
                                     log::warn!(
@@ -3637,7 +3727,8 @@ impl ProgramPlayer {
                 .unwrap_or_default();
             if factory_name.starts_with("avdec_h264") || factory_name.starts_with("avdec_vp8") {
                 child.set_property("max-threads", 2i32);
-            } else if factory_name.starts_with("avdec_h265") || factory_name.starts_with("avdec_vp9")
+            } else if factory_name.starts_with("avdec_h265")
+                || factory_name.starts_with("avdec_vp9")
             {
                 child.set_property("max-threads", 4i32);
             } else if tune_multiqueue && factory_name == "multiqueue" {
@@ -3790,8 +3881,18 @@ impl ProgramPlayer {
             if self.is_clip_video_occluded(&active, zorder_offset) {
                 if let Some(slot) = self.build_audio_only_slot_for_clip(clip_idx) {
                     self.slots.push(slot);
+                } else if let Some(slot) =
+                    self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
+                {
+                    log::warn!(
+                        "rebuild_pipeline_at: audio-only occlusion slot failed for clip {}, falling back to full slot",
+                        self.clips[clip_idx].id
+                    );
+                    self.slots.push(slot);
                 }
-            } else if let Some(slot) = self.build_slot_for_clip(clip_idx, zorder_offset, was_playing) {
+            } else if let Some(slot) =
+                self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
+            {
                 self.slots.push(slot);
             }
         }
@@ -4030,14 +4131,14 @@ impl ProgramPlayer {
         } else {
             self.audio_pipeline.set_property("volume", vol);
         }
-        if self.audio_current_idx == Some(idx) {
+        if self.audio_current_source == Some(AudioCurrentSource::AudioClip(idx)) {
             let _ = self.audio_pipeline.seek(
-                1.0_f64,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                clip.seek_rate(),
+                clip.audio_seek_flags(),
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::ClockTime::from_nseconds(clip.seek_start_ns(source_seek_ns)),
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(clip.source_out_ns),
+                gst::ClockTime::from_nseconds(clip.seek_stop_ns(source_seek_ns)),
             );
         } else {
             let uri = format!("file://{}", clip.source_path);
@@ -4045,37 +4146,136 @@ impl ProgramPlayer {
             self.audio_pipeline.set_property("uri", &uri);
             let _ = self.audio_pipeline.set_state(gst::State::Paused);
             let _ = self.audio_pipeline.seek(
-                1.0_f64,
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                clip.seek_rate(),
+                clip.audio_seek_flags(),
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(source_seek_ns),
+                gst::ClockTime::from_nseconds(clip.seek_start_ns(source_seek_ns)),
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(clip.source_out_ns),
+                gst::ClockTime::from_nseconds(clip.seek_stop_ns(source_seek_ns)),
             );
         }
-        self.audio_current_idx = Some(idx);
+        self.audio_current_source = Some(AudioCurrentSource::AudioClip(idx));
+    }
+
+    fn reverse_video_clip_at_for_audio(&mut self, timeline_pos_ns: u64) -> Option<usize> {
+        let idx = self.clip_at(timeline_pos_ns)?;
+        let clip = self.clips.get(idx)?.clone();
+        if clip.is_audio_only || !clip.reverse || !clip.has_audio {
+            return None;
+        }
+        let effective_path = self.effective_source_path_for_clip(&clip);
+        if self.probe_has_audio_stream_cached(&effective_path) {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    fn load_reverse_video_audio_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
+        let clip = self.clips[idx].clone();
+        let effective_path = self.effective_source_path_for_clip(&clip);
+        let uri = format!("file://{}", effective_path);
+        let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
+        let vol = clip.volume.clamp(0.0, 2.0);
+        if let Some(ref vol_elem) = self.audio_volume_element {
+            vol_elem.set_property("volume", vol);
+        } else {
+            self.audio_pipeline.set_property("volume", vol);
+        }
+        if self.audio_current_source == Some(AudioCurrentSource::ReverseVideoClip(idx)) {
+            let _ = self.audio_pipeline.seek(
+                clip.seek_rate(),
+                clip.audio_seek_flags(),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(clip.seek_start_ns(source_seek_ns)),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(clip.seek_stop_ns(source_seek_ns)),
+            );
+        } else {
+            let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.audio_pipeline.set_property("uri", &uri);
+            let _ = self.audio_pipeline.set_state(gst::State::Paused);
+            let _ = self.audio_pipeline.seek(
+                clip.seek_rate(),
+                clip.audio_seek_flags(),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(clip.seek_start_ns(source_seek_ns)),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(clip.seek_stop_ns(source_seek_ns)),
+            );
+        }
+        self.audio_current_source = Some(AudioCurrentSource::ReverseVideoClip(idx));
+    }
+
+    fn apply_reverse_video_main_audio_ducking(&mut self, reverse_video_audio_idx: Option<usize>) {
+        if self.reverse_video_ducked_clip_idx == reverse_video_audio_idx {
+            if let Some(idx) = reverse_video_audio_idx {
+                if let Some(slot) = self.slot_for_clip(idx) {
+                    if let Some(ref pad) = slot.audio_mixer_pad {
+                        pad.set_property("volume", 0.0_f64);
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(prev_idx) = self.reverse_video_ducked_clip_idx.take() {
+            if let Some(clip) = self.clips.get(prev_idx) {
+                if let Some(slot) = self.slot_for_clip(prev_idx) {
+                    if let Some(ref pad) = slot.audio_mixer_pad {
+                        pad.set_property("volume", clip.volume.clamp(0.0, 2.0));
+                    }
+                }
+            }
+        }
+
+        if let Some(idx) = reverse_video_audio_idx {
+            if let Some(slot) = self.slot_for_clip(idx) {
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    pad.set_property("volume", 0.0_f64);
+                }
+            }
+            self.reverse_video_ducked_clip_idx = Some(idx);
+        }
     }
 
     fn sync_audio_to(&mut self, timeline_pos_ns: u64) {
-        if let Some(idx) = self.audio_clip_at(timeline_pos_ns) {
+        let reverse_video_audio = self.reverse_video_clip_at_for_audio(timeline_pos_ns);
+        self.apply_reverse_video_main_audio_ducking(reverse_video_audio);
+        if let Some(idx) = reverse_video_audio {
+            self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
+        } else if let Some(idx) = self.audio_clip_at(timeline_pos_ns) {
             self.load_audio_clip_idx(idx, timeline_pos_ns);
         } else {
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
-            self.audio_current_idx = None;
+            self.audio_current_source = None;
         }
     }
 
     fn poll_audio(&mut self, timeline_pos_ns: u64) {
-        let wanted = self.audio_clip_at(timeline_pos_ns);
-        if wanted != self.audio_current_idx {
+        let wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(timeline_pos_ns) {
+            Some(AudioCurrentSource::ReverseVideoClip(idx))
+        } else {
+            self.audio_clip_at(timeline_pos_ns)
+                .map(AudioCurrentSource::AudioClip)
+        };
+        self.apply_reverse_video_main_audio_ducking(match wanted {
+            Some(AudioCurrentSource::ReverseVideoClip(idx)) => Some(idx),
+            _ => None,
+        });
+        if wanted != self.audio_current_source {
             match wanted {
-                Some(idx) => {
+                Some(AudioCurrentSource::AudioClip(idx)) => {
                     self.load_audio_clip_idx(idx, timeline_pos_ns);
+                    let _ = self.audio_pipeline.set_state(gst::State::Playing);
+                }
+                Some(AudioCurrentSource::ReverseVideoClip(idx)) => {
+                    self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
                     let _ = self.audio_pipeline.set_state(gst::State::Playing);
                 }
                 None => {
                     let _ = self.audio_pipeline.set_state(gst::State::Ready);
-                    self.audio_current_idx = None;
+                    self.audio_current_source = None;
                 }
             }
         }

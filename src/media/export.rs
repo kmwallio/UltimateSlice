@@ -307,10 +307,11 @@ pub fn export_project(
         if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
+            let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
             let vol = clip.volume;
             filter.push_str(&format!(
-                ";[{i}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
+                ";[{i}:a]{areverse}{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
             ));
             audio_labels.push(label);
         }
@@ -322,10 +323,11 @@ pub fn export_project(
         if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("sva{k}");
+            let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
             let vol = clip.volume;
             filter.push_str(&format!(
-                ";[{in_idx}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
+                ";[{in_idx}:a]{areverse}{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
             ));
             audio_labels.push(label);
         }
@@ -335,10 +337,11 @@ pub fn export_project(
     for (j, clip) in audio_clips.iter().enumerate() {
         let delay_ms = clip.timeline_start / 1_000_000;
         let label = format!("aa{j}");
+        let areverse = if clip.reverse { "areverse," } else { "" };
         let atempo = build_atempo(clip.speed);
         let vol = clip.volume;
         filter.push_str(&format!(
-            ";[{}:a]{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]",
+            ";[{}:a]{areverse}{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]",
             audio_base + j
         ));
         audio_labels.push(label);
@@ -554,10 +557,14 @@ fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
 }
 
 fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
-    if (clip.speed - 1.0).abs() > 0.001 {
-        format!(",setpts=PTS/{:.6}", clip.speed)
-    } else {
-        String::new()
+    let has_speed = (clip.speed - 1.0).abs() > 0.001;
+    match (clip.reverse, has_speed) {
+        (false, false) => String::new(),
+        (false, true) => format!(",setpts=PTS/{:.6}", clip.speed),
+        // `reverse` already emits a valid timeline in ffmpeg; STARTPTS-PTS here can
+        // cause non-monotonic DTS and near-empty video output.
+        (true, false) => ",reverse".to_string(),
+        (true, true) => format!(",reverse,setpts=PTS/{:.6}", clip.speed),
     }
 }
 

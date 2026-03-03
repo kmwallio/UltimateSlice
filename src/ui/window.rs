@@ -66,6 +66,24 @@ fn proxy_scale_for_mode(
     }
 }
 
+fn source_proxy_scale_for_widget(
+    mode: &crate::ui_state::ProxyMode,
+    widget_width: i32,
+    widget_height: i32,
+) -> crate::media::proxy_cache::ProxyScale {
+    match mode {
+        crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
+        crate::ui_state::ProxyMode::HalfRes => crate::media::proxy_cache::ProxyScale::Half,
+        crate::ui_state::ProxyMode::Off => {
+            if widget_width <= 900 || widget_height <= 520 {
+                crate::media::proxy_cache::ProxyScale::Quarter
+            } else {
+                crate::media::proxy_cache::ProxyScale::Half
+            }
+        }
+    }
+}
+
 fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
     project
@@ -122,13 +140,82 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     let initial_hw_accel = preferences_state.borrow().hardware_acceleration_enabled;
     let initial_playback_priority = preferences_state.borrow().playback_priority.clone();
+    let initial_source_playback_priority =
+        preferences_state.borrow().source_playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
     let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
     let initial_show_timeline_preview = preferences_state.borrow().show_timeline_preview;
-    let (player, paintable) =
+    let (player_obj, paintable) =
         Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
-    let player = Rc::new(RefCell::new(player));
+    player_obj.set_source_playback_priority(initial_source_playback_priority);
+    let player = Rc::new(RefCell::new(player_obj));
+    log::info!(
+        "Source preview decoder capabilities: vaapi_available={}, mode={}",
+        player.borrow().vaapi_available(),
+        player.borrow().decode_mode_name()
+    );
+    // Monitor the source-preview pipeline bus for errors; if the HW decode
+    // path fails, downgrade to software mode and retry automatically.
+    {
+        use gstreamer::prelude::*;
+        let pipeline = player
+            .borrow()
+            .pipeline()
+            .clone()
+            .downcast::<gstreamer::Pipeline>()
+            .ok();
+        if let Some(ref pipe) = pipeline {
+            if let Some(bus) = pipe.bus() {
+                let player_for_bus = player.clone();
+                let _watch = bus.add_watch_local(move |_bus, msg: &gstreamer::Message| {
+                    use gstreamer::MessageView;
+                    match msg.view() {
+                        MessageView::Error(err) => {
+                            log::error!(
+                                "Source preview pipeline error: {} (debug: {:?})",
+                                err.error(),
+                                err.debug()
+                            );
+                            let mut should_fallback = false;
+                            let err_text = err.error().to_string().to_lowercase();
+                            let dbg_text = err
+                                .debug()
+                                .map(|d| d.to_string().to_lowercase())
+                                .unwrap_or_default();
+                            if err_text.contains("not-negotiated")
+                                || dbg_text.contains("not-negotiated")
+                                || dbg_text.contains("dmabuf")
+                                || dbg_text.contains("va")
+                            {
+                                should_fallback = true;
+                            }
+                            if should_fallback {
+                                match player_for_bus.borrow().fallback_to_software_after_error() {
+                                    Ok(true) => log::warn!(
+                                        "Source preview fallback: switched to software decode mode after HW-path error"
+                                    ),
+                                    Ok(false) => {}
+                                    Err(e) => log::error!(
+                                        "Source preview fallback failed: {e:#}"
+                                    ),
+                                }
+                            }
+                        }
+                        MessageView::Warning(warn) => {
+                            log::warn!(
+                                "Source preview pipeline warning: {} (debug: {:?})",
+                                warn.error(),
+                                warn.debug()
+                            );
+                        }
+                        _ => {}
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
+        }
+    }
 
     let (mut prog_player_raw, prog_paintable, prog_paintable2) =
         ProgramPlayer::new().expect("Failed to create program player");
@@ -155,6 +242,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let pending_program_seek_ticket = Rc::new(Cell::new(0u64));
     let pending_reload_ticket = Rc::new(Cell::new(0u64));
     let suppress_resume_on_next_reload = Rc::new(Cell::new(false));
+    let clear_media_browser_on_next_reload = Rc::new(Cell::new(false));
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
@@ -212,6 +300,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         {
                             eprintln!("Failed to apply hardware acceleration setting: {e}");
                         }
+                        player
+                            .borrow()
+                            .set_source_playback_priority(new_state.source_playback_priority.clone());
                         prog_player
                             .borrow_mut()
                             .set_playback_priority(new_state.playback_priority.clone());
@@ -455,6 +546,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_reverse_changed: reverse checkbox → reload timeline and project
+        {
+            let on_project_changed = on_project_changed.clone();
+            move |_reversed: bool| {
+                // Reload clips so the timeline badge reflects the new reverse state.
+                on_project_changed();
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -523,7 +622,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         },
         {
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
-            move || suppress_resume_on_next_reload.set(true)
+            let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+            move || {
+                suppress_resume_on_next_reload.set(true);
+                clear_media_browser_on_next_reload.set(true);
+            }
         },
     );
     window.set_titlebar(Some(&header));
@@ -935,6 +1038,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let last_auto_proxy_switch_us_c = last_auto_proxy_switch_us.clone();
         let last_proxy_refresh_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_proxy_refresh_us_c = last_proxy_refresh_us.clone();
+        let picture_a_poll = picture_a.clone();
+        let picture_b_poll = picture_b.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -1060,13 +1165,13 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 )
             };
             // Apply cross-dissolve opacities to the two program monitor pictures.
-            picture_a.set_opacity(opacity_a);
-            picture_b.set_opacity(opacity_b);
+            picture_a_poll.set_opacity(opacity_a);
+            picture_b_poll.set_opacity(opacity_b);
             // Force monitor repaint while paused so post-seek paintable updates
             // become visible even when timeline position is unchanged between ticks.
             if !playing {
-                picture_a.queue_draw();
-                picture_b.queue_draw();
+                picture_a_poll.queue_draw();
+                picture_b_poll.queue_draw();
             }
             // Update VU meter with current audio peak levels.
             vu_pc.set(peaks);
@@ -1521,6 +1626,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let preview_widget = preview_widget.clone();
         let clip_name_label = clip_name_label.clone();
         let library = library.clone();
+        let proxy_cache = proxy_cache.clone();
+        let preferences_state = preferences_state.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
             preview_widget.set_visible(true);
@@ -1531,7 +1638,6 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 .unwrap_or(&path)
                 .to_string();
             clip_name_label.set_text(&name);
-            let uri = format!("file://{path}");
             // Guard against duplicate selection-changed emissions for the same
             // item; avoid redundant playbin reconfiguration.
             let should_reload = {
@@ -1546,7 +1652,30 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 .map(|i| i.is_audio_only)
                 .unwrap_or(false);
             if should_reload {
-                let _ = player.borrow().load(&uri);
+                // Use proxy for source preview when available to avoid
+                // freezing on high-resolution content (e.g. 5.3K HEVC).
+                let prefs = preferences_state.borrow();
+                let proxy_scale = source_proxy_scale_for_widget(
+                    &prefs.proxy_mode,
+                    preview_widget.width(),
+                    preview_widget.height(),
+                );
+                drop(prefs);
+                // Request proxy first so existing on-disk proxies are
+                // discovered and registered in the in-memory cache before
+                // the get() lookup below.
+                if !audio_only {
+                    proxy_cache.borrow_mut().request(&path, proxy_scale, None);
+                }
+                let load_uri = {
+                    let cache = proxy_cache.borrow();
+                    if let Some(proxy_path) = cache.get(&path, None) {
+                        format!("file://{proxy_path}")
+                    } else {
+                        format!("file://{path}")
+                    }
+                };
+                let _ = player.borrow().load(&load_uri);
             }
             let mut m = source_marks.borrow_mut();
             m.path = path;
@@ -1613,6 +1742,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let library = library.clone();
+        let on_close_preview = on_close_preview.clone();
         let window_weak = window_weak.clone();
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
@@ -1621,10 +1751,19 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let transform_overlay_cell = transform_overlay_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
+        let picture_a = picture_a.clone();
+        let picture_b = picture_b.clone();
         let pending_reload_ticket = pending_reload_ticket.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+        let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
+            if clear_media_browser_on_next_reload.replace(false) {
+                on_close_preview();
+                library.borrow_mut().clear();
+                prog_player.borrow_mut().stop();
+            }
+
             // Update window title
             if let Some(win) = window_weak.upgrade() {
                 let proj = project.borrow();
@@ -1710,6 +1849,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             title_x: c.title_x,
                             title_y: c.title_y,
                             speed: c.speed,
+                            reverse: c.reverse,
                             is_audio_only: audio_only,
                             track_index: t_idx,
                             transition_after: c.transition_after.clone(),
@@ -1739,6 +1879,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 (clips, media, (proj.width, proj.height), (proj.frame_rate.numerator, proj.frame_rate.denominator))
             }; // proj borrow dropped here — safe to call GStreamer below
             program_empty_hint.set_visible(clips.is_empty());
+            let has_clips = !clips.is_empty();
+            picture_a.set_visible(has_clips);
+            picture_b.set_visible(has_clips);
 
             {
                 let mut lib = library.borrow_mut();
@@ -1995,6 +2138,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let status_bar = status_bar.clone();
         let status_label = status_label.clone();
         let status_progress = status_progress.clone();
+        let player = player.clone();
+        let source_marks = source_marks.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
@@ -2003,6 +2148,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 if !resolved.is_empty() || !proxy_cache.borrow().proxies.is_empty() {
                     let paths = proxy_cache.borrow().proxies.clone();
                     prog_player.borrow_mut().update_proxy_paths(paths);
+                }
+            }
+            // Auto-reload source preview when its proxy completes.
+            if !resolved.is_empty() {
+                let current_source = source_marks.borrow().path.clone();
+                if !current_source.is_empty() {
+                    let cache = proxy_cache.borrow();
+                    for key in &resolved {
+                        if *key == current_source {
+                            if let Some(proxy_path) = cache.get(&current_source, None) {
+                                let uri = format!("file://{proxy_path}");
+                                let _ = player.borrow().load(&uri);
+                            }
+                            break;
+                        }
+                    }
                 }
             }
             let progress = proxy_cache.borrow().progress();
@@ -2052,8 +2213,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let preferences_state = preferences_state.clone();
         let proxy_cache = proxy_cache.clone();
         let on_close_preview = on_close_preview.clone();
+        let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+        let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
         let window_weak = window.downgrade();
         // Poll the mpsc channel every 10 ms on the GTK main thread.
         glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
@@ -2070,8 +2233,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         &preferences_state,
                         &proxy_cache,
                         &on_close_preview,
+                        &on_source_selected,
                         &on_project_changed,
                         &suppress_resume_on_next_reload,
+                        &clear_media_browser_on_next_reload,
                     );
                 }
             }
@@ -2253,6 +2418,33 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         on_toggle_popout();
     }
 
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let close_approved = Rc::new(Cell::new(false));
+        let close_approved_for_signal = close_approved.clone();
+        window.connect_close_request(move |w| {
+            if close_approved_for_signal.get() {
+                return glib::Propagation::Proceed;
+            }
+            let close_approved_for_continue = close_approved.clone();
+            let weak = w.downgrade();
+            let on_continue: Rc<dyn Fn()> = Rc::new(move || {
+                close_approved_for_continue.set(true);
+                if let Some(win) = weak.upgrade() {
+                    win.close();
+                }
+            });
+            crate::ui::toolbar::confirm_unsaved_then(
+                Some(w.clone().upcast::<gtk::Window>()),
+                project.clone(),
+                on_project_changed.clone(),
+                on_continue,
+            );
+            glib::Propagation::Stop
+        });
+    }
+
     window.present();
 }
 
@@ -2269,8 +2461,10 @@ fn handle_mcp_command(
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     on_close_preview: &Rc<dyn Fn()>,
+    on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
+    clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
     use crate::mcp::McpCommand;
     use crate::model::clip::ClipKind;
@@ -2366,6 +2560,7 @@ fn handle_mcp_command(
                 .send(json!({
                     "hardware_acceleration_enabled": prefs.hardware_acceleration_enabled,
                     "playback_priority": prefs.playback_priority.as_str(),
+                    "source_playback_priority": prefs.source_playback_priority.as_str(),
                     "proxy_mode": prefs.proxy_mode.as_str(),
                     "show_timeline_preview": prefs.show_timeline_preview,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
@@ -2387,7 +2582,8 @@ fn handle_mcp_command(
                         .send(json!({
                             "success": true,
                             "hardware_acceleration_enabled": enabled,
-                            "playback_priority": new_state.playback_priority.as_str()
+                            "playback_priority": new_state.playback_priority.as_str(),
+                            "source_playback_priority": new_state.source_playback_priority.as_str()
                         }))
                         .ok();
                 }
@@ -2397,6 +2593,7 @@ fn handle_mcp_command(
                             "success": false,
                             "hardware_acceleration_enabled": enabled,
                             "playback_priority": new_state.playback_priority.as_str(),
+                            "source_playback_priority": new_state.source_playback_priority.as_str(),
                             "error": e.to_string()
                         }))
                         .ok();
@@ -2417,6 +2614,25 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "playback_priority": new_state.playback_priority.as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::SetSourcePlaybackPriority { priority, reply } => {
+            let parsed = crate::ui_state::PlaybackPriority::from_str(&priority);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.source_playback_priority = parsed.clone();
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            player
+                .borrow()
+                .set_source_playback_priority(parsed.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "source_playback_priority": new_state.source_playback_priority.as_str()
                 }))
                 .ok();
         }
@@ -2842,7 +3058,15 @@ fn handle_mcp_command(
                     .and_then(|xml| std::fs::write(&path, xml).map_err(|e| anyhow::anyhow!(e)))
             };
             match result {
-                Ok(_) => reply.send(json!({"success": true, "path": path})).ok(),
+                Ok(_) => {
+                    {
+                        let mut proj = project.borrow_mut();
+                        proj.file_path = Some(path.clone());
+                        proj.dirty = false;
+                    }
+                    on_project_changed();
+                    reply.send(json!({"success": true, "path": path})).ok()
+                }
                 Err(e) => reply
                     .send(json!({"success": false, "error": e.to_string()}))
                     .ok(),
@@ -2865,6 +3089,7 @@ fn handle_mcp_command(
             let timeline_state = timeline_state.clone();
             let on_project_changed = on_project_changed.clone();
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+            let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
                 match rx.try_recv() {
                     Ok(Ok(mut new_proj)) => {
@@ -2875,6 +3100,7 @@ fn handle_mcp_command(
                         timeline_state.borrow_mut().loading = false;
                         reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
                         suppress_resume_on_next_reload.set(true);
+                        clear_media_browser_on_next_reload.set(true);
                         let on_project_changed = on_project_changed.clone();
                         glib::timeout_add_local_once(
                             std::time::Duration::from_millis(0),
@@ -3089,6 +3315,7 @@ fn handle_mcp_command(
             }
             reply.send(json!({"success": true, "title": title})).ok();
             suppress_resume_on_next_reload.set(true);
+            clear_media_browser_on_next_reload.set(true);
             on_project_changed();
         }
 
@@ -3471,6 +3698,36 @@ fn handle_mcp_command(
                         .ok();
                 }
             }
+        }
+
+        McpCommand::SelectLibraryItem { path, reply } => {
+            let item = library.borrow().iter().find(|i| i.source_path == path).cloned();
+            match item {
+                Some(media_item) => {
+                    on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
+                    reply.send(json!({
+                        "ok": true,
+                        "label": media_item.label,
+                        "duration_ns": media_item.duration_ns,
+                    })).ok();
+                }
+                None => {
+                    reply.send(json!({
+                        "ok": false,
+                        "error": format!("No library item with path: {path}"),
+                    })).ok();
+                }
+            }
+        }
+
+        McpCommand::SourcePlay { reply } => {
+            let _ = player.borrow().play();
+            reply.send(json!({"ok": true})).ok();
+        }
+
+        McpCommand::SourcePause { reply } => {
+            let _ = player.borrow().pause();
+            reply.send(json!({"ok": true})).ok();
         }
     }
 }

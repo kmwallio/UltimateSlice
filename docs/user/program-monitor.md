@@ -2,7 +2,7 @@
 
 The **Program Monitor** shows the assembled timeline played back in real time, clip by clip.
 
-When no timeline clips are present, the monitor area shows a short first-use hint to import media and append/insert clips.
+When no timeline clips are present, the monitor area shows a short first-use hint to import media and append/insert clips, and previous-project frames are cleared on project switch/new project.
 
 ## Canvas Aspect Ratio
 
@@ -69,6 +69,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Program Monitor normalizes preview output to square pixels (`PAR 1:1`) so 21:9/ultra-wide sources don't keep aspect-ratio bars after zoom scaling.
 - Playback priority can be set in **Preferences → Playback** (`Smooth`, `Balanced`, `Accurate`) to control smoothness vs seek precision.
 - During playback boundary handoffs (when the active clip set changes because a clip starts/ends), UltimateSlice uses accurate decoder seeks so long-GOP proxy media does not jump to an earlier keyframe.
+- When a lower-track clip is fully occluded by an opaque upper clip, preview may switch that lower clip to an audio-only decode path; if that path cannot be built, UltimateSlice falls back to a full slot so audio continuity is preserved.
 - Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
 - Preview quality (`Full` / `Half` / `Quarter`) downscales the composed monitor output while preserving full-frame fit/framing in the Program Monitor.
 - Preview quality `Auto` dynamically adjusts effective monitor output quality from the current Program Monitor canvas size (including resize/zoom changes) to balance clarity and performance.
@@ -102,6 +103,8 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 ## Speed Change Preview
 
 When a clip has a speed multiplier set (see [inspector.md](inspector.md)), the program monitor plays it at that rate using GStreamer's rate-seek mechanism. Audio pitch is **not** corrected in the preview (it sounds higher/lower pitched). The exported file uses `atempo` for proper pitch correction.
+
+When **Reverse** is enabled on a clip, Program Monitor preview plays that clip backward (video and audio direction) while keeping other timeline layers audible.
 
 ## MCP Automation
 

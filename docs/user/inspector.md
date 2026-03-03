@@ -89,15 +89,18 @@ Default: white `Sans Bold 36`, bottom-centre (`x=0.5, y=0.9`).
 
 ## Speed
 
-Controls the playback speed of the clip. Changing speed adjusts the clip's width on the timeline proportionally.
+Controls the playback speed and direction of the clip. Changing speed adjusts the clip's width on the timeline proportionally.
 
-| Slider | Range | Default | Effect |
+| Control | Range / Values | Default | Effect |
 |---|---|---|---|
 | **Speed Multiplier** | 0.25× → 4.0× | 1.0× | 0.5× = slow-motion, 2.0× = fast-forward |
+| **Reverse** | Checkbox | Off | Play the clip backwards (reversed frame order) |
 
 Marks at **½×**, **1×**, **2×** for quick snapping.
 
-Preview uses GStreamer rate-seek. Export uses `setpts` (video) and chained `atempo` (audio).
+Program Monitor preview uses GStreamer rate-seek (including reverse direction). Export uses `reverse`/`areverse` (when reversed) and `setpts`/chained `atempo` (audio) for speed.
+
+A yellow **◀** badge appears on reversed clips in the timeline (e.g. **◀ 2×** for a reversed 2× speed clip). Reverse can be combined with any speed multiplier.
 
 ---
 

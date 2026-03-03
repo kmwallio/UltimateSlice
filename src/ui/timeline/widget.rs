@@ -2426,9 +2426,21 @@ fn draw_clip(
         let _ = cr.move_to(cx + 6.0, cy + ch / 2.0 + 4.0);
         let _ = cr.show_text(&clip.label);
 
-        // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0
-        if (clip.speed - 1.0).abs() > 0.01 && cw > 60.0 {
-            let badge = if clip.speed == clip.speed.floor() {
+        // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0, and "◀" when reversed
+        let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse;
+        if has_speed_badge && cw > 60.0 {
+            let badge = if clip.reverse {
+                if (clip.speed - 1.0).abs() > 0.01 {
+                    let speed_str = if clip.speed == clip.speed.floor() {
+                        format!("{}×", clip.speed as u32)
+                    } else {
+                        format!("{:.2}×", clip.speed)
+                    };
+                    format!("◀ {speed_str}")
+                } else {
+                    "◀".to_string()
+                }
+            } else if clip.speed == clip.speed.floor() {
                 format!("{}×", clip.speed as u32)
             } else {
                 format!("{:.2}×", clip.speed)
@@ -2458,12 +2470,8 @@ fn draw_clip(
             let badge = "LUT";
             cr.set_font_size(10.0);
             if let Ok(ext) = cr.text_extents(badge) {
-                // Place to the left of the speed badge (or at the right edge)
-                let speed_offset = if (clip.speed - 1.0).abs() > 0.01 {
-                    36.0
-                } else {
-                    0.0
-                };
+                // Place to the left of the speed/reverse badge (or at the right edge)
+                let speed_offset = if has_speed_badge { 36.0 } else { 0.0 };
                 let bx = cx + cw - ext.width() - 6.0 - speed_offset;
                 let by = cy + 14.0;
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);

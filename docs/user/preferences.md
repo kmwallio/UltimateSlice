@@ -25,7 +25,8 @@ Preferences are grouped by category in a sidebar:
 - **Enable hardware acceleration** toggles the saved preference value and applies immediately to **source preview playback**.
 - The setting is persisted across launches and available via MCP automation.
 - Scope today:
-  - affects source preview sink selection (`glsinkbin` path when enabled, `gtk4paintablesink` path when disabled),
+  - affects source preview decode-mode selection (hardware-fast path when VA decoders are available, software-filtered fallback otherwise),
+  - hardware-path errors automatically downgrade the current source to software decode for stability,
   - does not change export behavior.
 
 ## Program Monitor Playback Priority
@@ -39,6 +40,17 @@ Preferences are grouped by category in a sidebar:
   - `get_preferences` returns `playback_priority`.
   - `set_playback_priority` updates the mode.
 
+## Source Monitor Playback Priority
+
+- **Source monitor playback priority** controls Source Monitor seek behavior:
+  - `Smooth`: prefer lighter keyframe seeks for responsive playback/scrub.
+  - `Balanced`: same behavior as Smooth today (reserved for future tuning).
+  - `Accurate`: prefer frame-accurate seek behavior.
+- Frame-step actions remain frame-accurate regardless of this setting.
+- MCP automation:
+  - `get_preferences` returns `source_playback_priority`.
+  - `set_source_playback_priority` updates the mode.
+
 ## Proxy Preview Mode
 
 - **Proxy preview mode** generates lightweight proxy files for smoother preview playback with large/high-bitrate media:
@@ -51,6 +63,8 @@ Preferences are grouped by category in a sidebar:
 - A yellow progress bar appears at the bottom of the window during proxy generation.
 - **Changing the proxy size** (e.g. from Half Res to Quarter Res) automatically invalidates existing proxies and re-generates them at the new resolution.
 - **LUT-baked proxies**: when a LUT is assigned to a clip via the Inspector, a new proxy is generated for that clip with the LUT baked in, so the preview reflects the color grade. Removing the LUT regenerates a plain (ungraded) proxy.
+- Source Monitor behavior in `Off` mode is adaptive: it may request **Quarter** proxies for small source-monitor sizes and **Half** proxies for larger ones to improve preview smoothness.
+- Proxy transcodes are tuned for fast preview decode (favoring playback smoothness over archival efficiency).
 - Export always uses original full-resolution media regardless of proxy mode.
 - The setting is persisted across launches.
 - MCP automation:

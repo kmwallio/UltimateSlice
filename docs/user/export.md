@@ -78,6 +78,8 @@ Clips with a speed multiplier are exported correctly:
 - Audio: chained `atempo` filters adjust playback rate while preserving pitch.
   - The `atempo` filter is limited to 0.5×–2.0× per instance; multiple are chained for 0.25× or 4×.
 
+For reversed clips, export applies `reverse`/`areverse` before speed scaling so both video and audio are rendered backward.
+
 ## Notes
 
 - Export requires **ffmpeg** to be installed and on `$PATH`.

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8" ?>
 <component type="desktop-application">
   <id>io.github.kmwallio.ultimateslice</id>
   <name>UltimateSlice</name>
@@ -10,7 +10,12 @@
       UltimateSlice is a non-linear video editor for Linux. Import media, arrange clips on the timeline, and export to MP4.
     </p>
   </description>
-  <launchable type="desktop-id">io.github.kmwallio.ultimateslice.desktop</launchable>
+  <developer id="io.github.kmwallio">
+    <name>kmwallio</name>
+  </developer>
+  <launchable
+        type="desktop-id"
+    >io.github.kmwallio.ultimateslice.desktop</launchable>
   <url type="homepage">https://ultimateslice.6km.io</url>
   <url type="bugtracker">https://github.com/kmwallio/UltimateSlice/issues</url>
   <url type="help">https://ultimateslice.6km.io/docs</url>
@@ -18,7 +23,8 @@
   <screenshots>
     <screenshot type="default">
       <caption>UltimateSlice, Main window with project loaded</caption>
-      <image>https://ultimateslice.6km.io/assets/images/ultimateslice.png</image>
+      <image
+            >https://ultimateslice.6km.io/assets/images/ultimateslice.png</image>
     </screenshot>
   </screenshots>
   <releases>
@@ -27,32 +33,49 @@
         <p>Initial release featuring:</p>
         <ul>
           <li>GTK4 application with dark theme styling</li>
-          <li>Media library import with duration probing for video, audio, and images</li>
-          <li>Source monitor with playback, scrubber, in/out marks, and timecode display</li>
-          <li>Timeline with multi-track rows, zoom/pan, clip selection, trim, move, and razor tool</li>
-          <li>Multi-track video compositing with per-clip opacity for b-roll overlays</li>
+          <li
+                    >Media library import with duration probing for video, audio, and images</li>
+          <li
+                    >Source monitor with playback, scrubber, in/out marks, and timecode display</li>
+          <li
+                    >Timeline with multi-track rows, zoom/pan, clip selection, trim, move, and razor tool</li>
+          <li
+                    >Multi-track video compositing with per-clip opacity for b-roll overlays</li>
           <li>Undo/Redo command history</li>
           <li>Inspector panel for selected clip properties</li>
-          <li>Per-clip color correction: brightness, contrast, and saturation</li>
-          <li>Advanced color grading: shadows, midtones, and highlights sliders</li>
+          <li
+                    >Per-clip color correction: brightness, contrast, and saturation</li>
+          <li
+                    >Advanced color grading: shadows, midtones, and highlights sliders</li>
           <li>Denoise and sharpness effects per clip</li>
-          <li>3D LUT support — apply .cube color look-up table files to any clip</li>
-          <li>Per-clip transform controls: scale, position offset, rotation, and horizontal/vertical flip</li>
-          <li>Per-clip crop (left, right, top, bottom) with transparent compositing</li>
-          <li>Interactive transform overlay — drag crop edges and scale handles directly in the Program Monitor</li>
+          <li
+                    >3D LUT support — apply .cube color look-up table files to any clip</li>
+          <li
+                    >Per-clip transform controls: scale, position offset, rotation, and horizontal/vertical flip</li>
+          <li
+                    >Per-clip crop (left, right, top, bottom) with transparent compositing</li>
+          <li
+                    >Interactive transform overlay — drag crop edges and scale handles directly in the Program Monitor</li>
           <li>Per-clip audio volume and stereo pan controls</li>
           <li>Per-clip speed control for fast- and slow-motion playback</li>
-          <li>Title and text overlays with font, colour, and position settings</li>
-          <li>MP4/H.264 export via ffmpeg with full color grading, LUT, crop, and speed baked in</li>
-          <li>FCPXML 1.10 import and export with round-trip preservation of all clip properties</li>
-          <li>Proxy generation for smoother editing of high-resolution media</li>
-          <li>Adaptive proxy assist: automatically switches to proxy media in regions with three or more overlapping video tracks</li>
-          <li>Occlusion-based decode skip: clips fully hidden behind an opaque overlay skip video decode entirely, reducing CPU load</li>
+          <li
+                    >Title and text overlays with font, colour, and position settings</li>
+          <li
+                    >MP4/H.264 export via ffmpeg with full color grading, LUT, crop, and speed baked in</li>
+          <li
+                    >FCPXML 1.10 import and export with round-trip preservation of all clip properties</li>
+          <li
+                    >Proxy generation for smoother editing of high-resolution media</li>
+          <li
+                    >Adaptive proxy assist: automatically switches to proxy media in regions with three or more overlapping video tracks</li>
+          <li
+                    >Occlusion-based decode skip: clips fully hidden behind an opaque overlay skip video decode entirely, reducing CPU load</li>
           <li>Cross-dissolve transitions between clips on the timeline</li>
-          <li>Optional MCP server (--mcp) for JSON-RPC AI collaboration with 55 tools covering the full edit workflow</li>
+          <li
+                    >Optional MCP server (--mcp) for JSON-RPC AI collaboration with 55 tools covering the full edit workflow</li>
         </ul>
       </description>
     </release>
   </releases>
-  <content_rating type="oars-1.1"/>
+  <content_rating type="oars-1.1" />
 </component>
