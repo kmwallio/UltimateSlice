@@ -46,7 +46,7 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 
 | Slider | Range | Default | Effect |
 |---|---|---|---|
-| **Volume** | 0.0 → 2.0 | 1.0 | Per-clip volume multiplier |
+| **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
 
 ---
@@ -124,6 +124,7 @@ Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacki
 
 - All Inspector values are **persisted in the FCPXML** project file.
 - Transform fields (scale/position/rotation), opacity, and crop are now also mapped to standard FCPXML adjustment elements (`adjust-transform`, `adjust-compositing`, `adjust-crop`/`crop-rect`) for improved interoperability.
+- Clip volume now also imports from standard FCPXML `adjust-volume@amount` (including dB values such as `-6dB` and `-96dB`) and is converted to Inspector linear volume.
 - There is no keyboard shortcut to focus the Inspector; use mouse/Tab navigation.
 - When no clip is selected, the Inspector shows an instructional message and hides edit controls.
 - To reduce first-use visual density, **Audio**, **Transform**, and **Speed** sections start collapsed by default.

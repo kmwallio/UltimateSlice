@@ -69,6 +69,9 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Program Monitor normalizes preview output to square pixels (`PAR 1:1`) so 21:9/ultra-wide sources don't keep aspect-ratio bars after zoom scaling.
 - Playback priority can be set in **Preferences → Playback** (`Smooth`, `Balanced`, `Accurate`) to control smoothness vs seek precision.
 - During playback boundary handoffs (when the active clip set changes because a clip starts/ends), UltimateSlice uses accurate decoder seeks so long-GOP proxy media does not jump to an earlier keyframe.
+- During overlap boundary rebuilds, delayed video-pad linking no longer forces EOS on an already-linked slot audio branch, which reduces unintended video-track audio dropouts when heavier clips enter.
+- During active overlap handoffs that start from an already-running slot set, UltimateSlice defers early pre-link EOS for newly added slots so late pad-added links can settle before post-seek arrival checks.
+- During boundary rebuilds, both the compositor and audiomixer aggregators are flushed together so their output running-time stays in sync; this prevents the audiomixer from dropping audio buffers as "late" after a video-path flush reset.
 - Occlusion audio-only decode substitution is currently disabled in preview rebuilds to prioritize reliable mixed audio from overlapping video tracks.
 - Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
 - Preview quality (`Full` / `Half` / `Quarter`) downscales the composed monitor output while preserving full-frame fit/framing in the Program Monitor.

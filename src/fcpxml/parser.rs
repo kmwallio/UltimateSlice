@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
+const MAX_IMPORTED_LINEAR_VOLUME: f64 = 3.981_071_705_5; // +12 dB
+
 /// Represents a parsed FCPXML asset
 struct Asset {
     id: String,
@@ -183,6 +185,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         let attrs = parse_attrs(e)?;
                         apply_adjust_compositing(&attrs, clip_stack.last(), &mut track_map);
                     }
+                    "adjust-volume" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        apply_adjust_volume(&attrs, clip_stack.last(), &mut track_map);
+                    }
                     "adjust-crop" | "crop-rect" if in_spine => {
                         let attrs = parse_attrs(e)?;
                         apply_adjust_crop(&attrs, clip_stack.last(), &mut track_map);
@@ -264,6 +270,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                     "adjust-compositing" if in_spine => {
                         let attrs = parse_attrs(e)?;
                         apply_adjust_compositing(&attrs, clip_stack.last(), &mut track_map);
+                    }
+                    "adjust-volume" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        apply_adjust_volume(&attrs, clip_stack.last(), &mut track_map);
                     }
                     "adjust-crop" | "crop-rect" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -647,6 +657,41 @@ fn apply_adjust_compositing(
             clip.opacity = opacity;
         }
     }
+}
+
+fn apply_adjust_volume(
+    attrs: &HashMap<String, String>,
+    active_ctx: Option<&ActiveClipContext>,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    if let Some(clip) = current_clip_mut(track_map, active_ctx) {
+        if let Some(volume) = attrs
+            .get("amount")
+            .and_then(|s| parse_fcpxml_volume_amount(s))
+        {
+            clip.volume = volume as f32;
+        }
+    }
+}
+
+fn parse_fcpxml_volume_amount(value: &str) -> Option<f64> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(db) = lower.strip_suffix("db") {
+        let db: f64 = db.trim().parse().ok()?;
+        if db <= -95.0 {
+            return Some(0.0);
+        }
+        return Some(
+            (10.0f64)
+                .powf(db / 20.0)
+                .clamp(0.0, MAX_IMPORTED_LINEAR_VOLUME),
+        );
+    }
+    trimmed
+        .parse::<f64>()
+        .ok()
+        .map(|v| v.clamp(0.0, MAX_IMPORTED_LINEAR_VOLUME))
 }
 
 fn apply_adjust_crop(
@@ -1669,6 +1714,47 @@ mod tests {
         assert_eq!(clip.crop_bottom, 44);
         assert_eq!(project.width, 1920);
         assert_eq!(project.height, 1080);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_adjust_volume_db_maps_to_linear_volume() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///clip.mov" duration="10s"/>
+    <asset id="a2" src="file:///clip2.mov" duration="10s"/>
+  </resources>
+  <project name="VolumeDb">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-volume amount="-6dB"/>
+        </asset-clip>
+        <asset-clip ref="a2" lane="1" offset="0s" start="0s" duration="5s">
+          <adjust-volume amount="-96dB"/>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clips: Vec<_> = project
+            .video_tracks()
+            .flat_map(|t| t.clips.iter())
+            .collect();
+        assert_eq!(clips.len(), 2);
+        let louder = clips
+            .iter()
+            .find(|c| c.source_path.ends_with("clip.mov"))
+            .expect("clip a1 exists");
+        let muted = clips
+            .iter()
+            .find(|c| c.source_path.ends_with("clip2.mov"))
+            .expect("clip a2 exists");
+        assert!(louder.volume > 0.49 && louder.volume < 0.51);
+        assert_eq!(muted.volume, 0.0);
     }
 
     #[test]
