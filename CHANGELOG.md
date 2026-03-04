@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Recent projects menu hygiene**: The Recent menu now displays at most 10 entries and skips paths that no longer exist on disk.
 - **Export progress premature 100%**: Export progress now estimates completion from ffmpeg `total_size` against the largest imported media-library source file, and in-progress updates are capped at 99% until ffmpeg exits successfully. This prevents showing 100% while muxing/final file growth is still in progress.
 - **GTK gesture_group assertion failure**: Fixed `Gtk-CRITICAL: gtk_gesture_group: assertion … failed` warning at startup. The timeline's click and drag gestures were being grouped before the drag gesture was added to the widget. Reordered to add the controller first, then group.
 - **Audio-only track ending early in preview**: When a video track and an audio-only track ended at the same timeline position, the audio could go silent before the end during playback. The audio pipeline drifted ahead of the wall-clock timeline during video pipeline rebuilds (clip boundary transitions) because it kept running while the rebuild blocked. The audio pipeline is now re-synced after every video rebuild so its position matches the reset wall clock.
@@ -26,6 +27,7 @@ All notable project changes and progress should be recorded here.
 - **Unsaved changes confirmation flow**: New project replacement/exit actions now prompt when the current project is dirty, offering **Save**, **Discard**, or **Cancel** before continuing. The guard is wired into toolbar New/Open/Open Recent actions and window close, and successful saves now clear the dirty flag and persist the current project path.
 
 ### Changed
+- **Timeline ruler zoom density**: The timeline ruler now uses multi-tier marks as you zoom (major, mid, and minor ticks), and high zoom levels add intermediate labels with sub-second precision for finer navigation without overcrowding at lower zoom.
 - **FCPXML version support**: Parser now accepts FCPXML files through version 1.14, and project export now writes FCPXML version 1.14 by default.
 - **FCPXML 1.14 import compatibility**: Parser now resolves media paths from nested `<media-rep src="...">` when `asset@src` is absent, imports only the first project timeline from multi-project FCPXML files, and falls back to lane/media-type-based track routing when UltimateSlice `us:track-*` metadata is not present.
 - **FCPXML marker + format compatibility**: Parser now imports `<chapter-marker>` elements, converts clip-contained marker/chapter timestamps from source-time into correct timeline positions using clip `start`/`offset`, and falls back to known format-name presets (for example `FFVideoFormat1080p30`) when numeric format attributes are omitted.

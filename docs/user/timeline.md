@@ -4,7 +4,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 
 ## Layout
 
-- **Ruler** — shows time positions with adaptive tick marks; click to seek the playhead.
+- **Ruler** — shows time positions with adaptive major/mid/minor tick marks; higher zoom levels add more marks and intermediate labels, while lower zoom levels reduce clutter. Click to seek the playhead.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
 - **Track header** — shows the track name; click the mute button to silence an audio track.
