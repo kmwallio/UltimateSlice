@@ -211,6 +211,9 @@ pub struct PreferencesState {
     /// Show thumbnail preview strips on timeline video clips.
     #[serde(default = "default_show_timeline_preview")]
     pub show_timeline_preview: bool,
+    /// Show per-track audio levels in timeline track labels.
+    #[serde(default = "default_show_track_audio_levels")]
+    pub show_track_audio_levels: bool,
     /// Enable the MCP Unix-domain-socket server so agents can connect to this instance.
     #[serde(default)]
     pub mcp_socket_enabled: bool,
@@ -238,6 +241,7 @@ impl Default for PreferencesState {
             proxy_mode: ProxyMode::default(),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),
+            show_track_audio_levels: default_show_track_audio_levels(),
             mcp_socket_enabled: false,
             gsk_renderer: GskRenderer::default(),
             preview_quality: PreviewQuality::default(),
@@ -248,6 +252,10 @@ impl Default for PreferencesState {
 }
 
 fn default_show_timeline_preview() -> bool {
+    true
+}
+
+fn default_show_track_audio_levels() -> bool {
     true
 }
 

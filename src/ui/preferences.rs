@@ -288,6 +288,7 @@ pub fn show_preferences_dialog(
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
+                show_track_audio_levels: current.show_track_audio_levels,
                 mcp_socket_enabled: mcp_socket_check.is_active(),
                 gsk_renderer: GskRenderer::from_str(
                     gsk_renderer.active_id().as_deref().unwrap_or("auto"),

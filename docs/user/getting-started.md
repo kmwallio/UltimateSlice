@@ -37,6 +37,7 @@ cargo run -- --mcp
 ## First Launch
 
 The application opens with an **Untitled** project containing one Video track and one Audio track.
+UltimateSlice uses a dark, GTK4/libadwaita-inspired control style so popovers, sliders, dropdowns, and tab groups remain visually consistent across panels.
 
 ### Window Layout
 

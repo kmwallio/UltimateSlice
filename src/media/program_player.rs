@@ -188,6 +188,8 @@ struct VideoSlot {
     audio_mixer_pad: Option<gst::Pad>,
     /// `audioconvert` element between decoder audio and audiomixer (must be cleaned up).
     audio_conv: Option<gst::Element>,
+    /// Optional per-slot `level` element for per-track metering.
+    audio_level: Option<gst::Element>,
     /// Per-slot video effect elements.
     videobalance: Option<gst::Element>,
     gaussianblur: Option<gst::Element>,
@@ -269,6 +271,7 @@ pub struct ProgramPlayer {
     /// the main pipeline's audio level.
     audio_volume_element: Option<gst::Element>,
     pub audio_peak_db: [f64; 2],
+    pub audio_track_peak_db: Vec<[f64; 2]>,
     jkl_rate: f64,
     /// Latest RGBA frame captured from the scope appsink.
     latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>>,
@@ -763,6 +766,7 @@ impl ProgramPlayer {
                 level_element_audio,
                 audio_volume_element,
                 audio_peak_db: [-60.0, -60.0],
+                audio_track_peak_db: Vec::new(),
                 jkl_rate: 0.0,
                 latest_scope_frame,
                 latest_compositor_frame,
@@ -1104,6 +1108,16 @@ impl ProgramPlayer {
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
         self.clips = video;
+        let max_track_index = self
+            .clips
+            .iter()
+            .chain(self.audio_clips.iter())
+            .map(|c| c.track_index)
+            .max();
+        self.audio_track_peak_db = max_track_index
+            .map(|idx| vec![[-60.0, -60.0]; idx + 1])
+            .unwrap_or_default();
+        self.audio_peak_db = [-60.0, -60.0];
         self.audio_stream_probe_cache.clear();
         let vdur = self
             .clips
@@ -1353,6 +1367,11 @@ impl ProgramPlayer {
         self.last_seeked_frame_pos = None;
         self.current_idx = None;
         self.audio_current_source = None;
+        self.audio_peak_db = [-60.0, -60.0];
+        for peaks in &mut self.audio_track_peak_db {
+            peaks[0] = -60.0;
+            peaks[1] = -60.0;
+        }
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             return;
         }
@@ -1393,12 +1412,42 @@ impl ProgramPlayer {
 
     // ── Poll ───────────────────────────────────────────────────────────────
 
+    fn push_master_peak(&mut self, l: f64, r: f64) {
+        self.audio_peak_db[0] = self.audio_peak_db[0].max(l);
+        self.audio_peak_db[1] = self.audio_peak_db[1].max(r);
+    }
+
+    fn push_track_peak(&mut self, track_index: usize, l: f64, r: f64) {
+        if track_index >= self.audio_track_peak_db.len() {
+            self.audio_track_peak_db
+                .resize(track_index + 1, [-60.0, -60.0]);
+        }
+        self.audio_track_peak_db[track_index][0] = self.audio_track_peak_db[track_index][0].max(l);
+        self.audio_track_peak_db[track_index][1] = self.audio_track_peak_db[track_index][1].max(r);
+    }
+
+    fn active_audio_track_index(&self) -> Option<usize> {
+        match self.audio_current_source {
+            Some(AudioCurrentSource::AudioClip(idx)) => {
+                self.audio_clips.get(idx).map(|c| c.track_index)
+            }
+            Some(AudioCurrentSource::ReverseVideoClip(idx)) => {
+                self.clips.get(idx).map(|c| c.track_index)
+            }
+            None => None,
+        }
+    }
+
     pub fn poll(&mut self) -> bool {
         let _eos = self.poll_bus();
 
         if self.state == PlayerState::Playing {
             self.audio_peak_db[0] = (self.audio_peak_db[0] - 3.0).max(-60.0);
             self.audio_peak_db[1] = (self.audio_peak_db[1] - 3.0).max(-60.0);
+            for peaks in &mut self.audio_track_peak_db {
+                peaks[0] = (peaks[0] - 3.0).max(-60.0);
+                peaks[1] = (peaks[1] - 3.0).max(-60.0);
+            }
         }
 
         if self.state != PlayerState::Playing {
@@ -3290,6 +3339,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             self.pipeline.remove(ac).ok();
         }
+        if let Some(ref lv) = slot.audio_level {
+            self.pipeline.remove(lv).ok();
+        }
         // 2. Stop any residual streaming work on removed elements.
         let _ = slot.decoder.set_state(gst::State::Null);
         let _ = slot.decoder.state(gst::ClockTime::from_mseconds(100));
@@ -3302,6 +3354,10 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             let _ = ac.set_state(gst::State::Null);
             let _ = ac.state(gst::ClockTime::from_mseconds(100));
+        }
+        if let Some(ref lv) = slot.audio_level {
+            let _ = lv.set_state(gst::State::Null);
+            let _ = lv.state(gst::ClockTime::from_mseconds(100));
         }
         // 3. Release aggregator request pads after branch shutdown.
         if let Some(ref pad) = slot.compositor_pad {
@@ -3740,27 +3796,54 @@ impl ProgramPlayer {
             return None;
         }
 
-        // Audio path: audioconvert → audiomixer pad.
-        let (audio_conv, amix_pad) = {
+        // Audio path: audioconvert → [level] → audiomixer pad.
+        let (audio_conv, audio_level, amix_pad) = {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let mut lv = gst::ElementFactory::make("level")
+                .property("post-messages", true)
+                .property("interval", 50_000_000u64)
+                .build()
+                .ok();
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
+                    let mut link_src = ac.static_pad("src");
+                    if let Some(ref level) = lv {
+                        if self.pipeline.add(level).is_ok() {
+                            if let (Some(ac_src), Some(level_sink)) =
+                                (ac.static_pad("src"), level.static_pad("sink"))
+                            {
+                                let _ = ac_src.link(&level_sink);
+                                link_src = level.static_pad("src");
+                            } else {
+                                self.pipeline.remove(level).ok();
+                                lv = None;
+                            }
+                        } else {
+                            lv = None;
+                        }
+                    }
                     if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
                         mp.set_property("volume", clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN));
-                        if let Some(ac_src) = ac.static_pad("src") {
-                            let _ = ac_src.link(&mp);
+                        if let Some(src) = link_src {
+                            let _ = src.link(&mp);
                         }
                         Some(mp)
                     } else {
+                        if let Some(ref level) = lv {
+                            self.pipeline.remove(level).ok();
+                        }
+                        lv = None;
                         None
                     }
                 } else {
+                    lv = None;
                     None
                 }
             } else {
+                lv = None;
                 None
             };
-            (ac, pad)
+            (ac, lv, pad)
         };
 
         // Dynamic pad-added: only link audio pads (no video sink available).
@@ -3792,6 +3875,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref lv) = audio_level {
+            let _ = lv.sync_state_with_parent();
+        }
         let _ = decoder.sync_state_with_parent();
 
         // Dummy effects_bin — never added to pipeline, harmless in teardown.
@@ -3806,6 +3892,7 @@ impl ProgramPlayer {
             compositor_pad: None,
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_level,
             videobalance: None,
             gaussianblur: None,
             videocrop: None,
@@ -3937,33 +4024,60 @@ impl ProgramPlayer {
             });
         }
 
-        // Create audio path: audioconvert → audiomixer pad.
-        let (audio_conv, amix_pad) = if clip_has_audio {
+        // Create audio path: audioconvert → [level] → audiomixer pad.
+        let (audio_conv, audio_level, amix_pad) = if clip_has_audio {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let mut lv = gst::ElementFactory::make("level")
+                .property("post-messages", true)
+                .property("interval", 50_000_000u64)
+                .build()
+                .ok();
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
+                    let mut link_src = ac.static_pad("src");
+                    if let Some(ref level) = lv {
+                        if self.pipeline.add(level).is_ok() {
+                            if let (Some(ac_src), Some(level_sink)) =
+                                (ac.static_pad("src"), level.static_pad("sink"))
+                            {
+                                let _ = ac_src.link(&level_sink);
+                                link_src = level.static_pad("src");
+                            } else {
+                                self.pipeline.remove(level).ok();
+                                lv = None;
+                            }
+                        } else {
+                            lv = None;
+                        }
+                    }
                     if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
                         mp.set_property("volume", clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN));
-                        if let Some(ac_src) = ac.static_pad("src") {
-                            let _ = ac_src.link(&mp);
+                        if let Some(src) = link_src {
+                            let _ = src.link(&mp);
                         }
                         Some(mp)
                     } else {
+                        if let Some(ref level) = lv {
+                            self.pipeline.remove(level).ok();
+                        }
+                        lv = None;
                         None
                     }
                 } else {
+                    lv = None;
                     None
                 }
             } else {
+                lv = None;
                 None
             };
-            (ac, pad)
+            (ac, lv, pad)
         } else {
             log::info!(
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (None, None)
+            (None, None, None)
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -4040,6 +4154,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref lv) = audio_level {
+            let _ = lv.sync_state_with_parent();
+        }
         let _ = decoder.sync_state_with_parent();
 
         // Apply per-clip transform.
@@ -4052,6 +4169,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad.clone()),
             audio_mixer_pad: amix_pad.clone(),
             audio_conv: audio_conv.clone(),
+            audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
             gaussianblur: gaussianblur.clone(),
             videocrop: videocrop.clone(),
@@ -4103,6 +4221,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad),
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_level,
             videobalance,
             gaussianblur,
             videocrop,
@@ -4674,8 +4793,41 @@ impl ProgramPlayer {
                                         .unwrap_or(-60.0);
                                     let r =
                                         vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
-                                    self.audio_peak_db[0] = self.audio_peak_db[0].max(l);
-                                    self.audio_peak_db[1] = self.audio_peak_db[1].max(r);
+                                    let src_name = msg
+                                        .src()
+                                        .and_then(|src| src.clone().downcast::<gst::Element>().ok())
+                                        .map(|elem| elem.name().to_string());
+                                    let mut handled = false;
+                                    if let (Some(ref main_level), Some(ref name)) =
+                                        (&self.level_element, &src_name)
+                                    {
+                                        if main_level.name().as_str() == name.as_str() {
+                                            self.push_master_peak(l, r);
+                                            handled = true;
+                                        }
+                                    }
+                                    if !handled {
+                                        if let Some(ref name) = src_name {
+                                            if let Some(track_index) =
+                                                self.slots.iter().find_map(|slot| {
+                                                    let level = slot.audio_level.as_ref()?;
+                                                    if level.name().as_str() == name.as_str() {
+                                                        self.clips
+                                                            .get(slot.clip_idx)
+                                                            .map(|c| c.track_index)
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                            {
+                                                self.push_track_peak(track_index, l, r);
+                                                handled = true;
+                                            }
+                                        }
+                                    }
+                                    if !handled {
+                                        self.push_master_peak(l, r);
+                                    }
                                 }
                             }
                         }
@@ -4703,8 +4855,10 @@ impl ProgramPlayer {
                                     .and_then(|v| v.get::<f64>().ok())
                                     .unwrap_or(-60.0);
                                 let r = vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
-                                self.audio_peak_db[0] = self.audio_peak_db[0].max(l);
-                                self.audio_peak_db[1] = self.audio_peak_db[1].max(r);
+                                self.push_master_peak(l, r);
+                                if let Some(track_index) = self.active_audio_track_index() {
+                                    self.push_track_peak(track_index, l, r);
+                                }
                             }
                         }
                     }

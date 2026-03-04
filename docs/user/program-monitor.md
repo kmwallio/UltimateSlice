@@ -28,6 +28,7 @@ or outside the export frame.
 | Timecode label | Current timeline position |
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
+| Master VU meter | Stereo (L/R) output level meter in dBFS |
 
 ## Docked Resize
 
@@ -59,6 +60,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - The program monitor uses a GStreamer **compositor** pipeline that layers all active video tracks simultaneously at the playhead position.
 - Each active clip gets its own decoder branch with per-clip effects, connected to the compositor with correct z-ordering (higher tracks render on top).
 - Audio from all active video clips is mixed through an **audiomixer** element; audio-only tracks use a separate playbin.
+- Program Monitor shows a **master stereo meter** (L/R), updated from GStreamer `level` elements.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
 - Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.

@@ -7,7 +7,8 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 - **Ruler** — shows time positions with adaptive major/mid/minor tick marks; higher zoom levels add more marks and intermediate labels, while lower zoom levels reduce clutter. Click to seek the playhead.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
-- **Track header** — shows the track name; click the mute button to silence an audio track.
+- **Track header** — shows the track name and a compact per-track stereo level meter (L/R) on the right.
+- **Status bar** — bottom-left includes a **Track Audio Levels** eye toggle to show/hide track-header meters. Proxy queue label/progress appear only while proxies are actively generating.
 
 ## Navigation
 

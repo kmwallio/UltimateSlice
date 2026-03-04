@@ -198,6 +198,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
     let initial_show_timeline_preview = preferences_state.borrow().show_timeline_preview;
+    let initial_show_track_audio_levels = preferences_state.borrow().show_track_audio_levels;
     let (player_obj, paintable) =
         Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
     player_obj.set_source_playback_priority(initial_source_playback_priority);
@@ -297,6 +298,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
     timeline_state.borrow_mut().show_waveform_on_video = initial_show_waveform_on_video;
     timeline_state.borrow_mut().show_timeline_preview = initial_show_timeline_preview;
+    timeline_state.borrow_mut().show_track_audio_levels = initial_show_track_audio_levels;
     let pending_program_seek_ticket = Rc::new(Cell::new(0u64));
     let pending_reload_ticket = Rc::new(Cell::new(0u64));
     let suppress_resume_on_next_reload = Rc::new(Cell::new(false));
@@ -411,6 +413,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             new_state.show_waveform_on_video;
                         timeline_state.borrow_mut().show_timeline_preview =
                             new_state.show_timeline_preview;
+                        timeline_state.borrow_mut().show_track_audio_levels =
+                            new_state.show_track_audio_levels;
                         // Start/stop MCP socket server based on preference change.
                         if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
                             let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
@@ -1115,7 +1119,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let picture_a_poll = picture_a.clone();
         let picture_b_poll = picture_b.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-            let (pos_ns, playing, opacity_a, opacity_b, peaks, scope_frame, jkl_rate) = {
+            let (
+                pos_ns,
+                playing,
+                opacity_a,
+                opacity_b,
+                peaks,
+                track_peaks,
+                scope_frame,
+                jkl_rate,
+            ) = {
                 let mut player = pp.borrow_mut();
                 let now_us = glib::monotonic_time();
                 if now_us - last_auto_check_us_c.get() >= 250_000 {
@@ -1229,6 +1242,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     oa,
                     ob,
                     player.audio_peak_db,
+                    player.audio_track_peak_db.clone(),
                     sf,
                     rate,
                 )
@@ -1245,6 +1259,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             // Update VU meter with current audio peak levels.
             vu_pc.set(peaks);
             vu.queue_draw();
+            ts.borrow_mut().track_audio_peak_db = track_peaks;
             // Update colour scopes with the latest video frame.
             if let Some(frame) = scope_frame {
                 crate::ui::color_scopes::update_scope_frame(&scopes_st, frame);
@@ -2229,13 +2244,32 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     status_bar.set_margin_top(4);
     status_bar.set_margin_bottom(4);
     status_bar.add_css_class("status-bar");
-    status_bar.set_visible(false);
-    let status_label = gtk::Label::new(Some("Generating proxies…"));
+    status_bar.set_visible(true);
+    let status_label = gtk::Label::new(Some("Proxy queue idle"));
     status_label.set_halign(gtk::Align::Start);
     status_label.add_css_class("status-bar-label");
+    status_label.set_visible(false);
     let status_progress = gtk::ProgressBar::new();
     status_progress.set_hexpand(true);
+    status_progress.set_show_text(true);
+    status_progress.set_text(Some("Idle"));
     status_progress.add_css_class("proxy-progress");
+    status_progress.set_visible(false);
+    let track_levels_toggle = gtk::ToggleButton::new();
+    track_levels_toggle.set_active(initial_show_track_audio_levels);
+    let track_levels_row = gtk::Box::new(Orientation::Horizontal, 4);
+    let track_levels_icon = gtk::Image::from_icon_name(if initial_show_track_audio_levels {
+        "view-reveal-symbolic"
+    } else {
+        "view-conceal-symbolic"
+    });
+    let track_levels_text = gtk::Label::new(Some("Track Audio Levels"));
+    track_levels_row.append(&track_levels_icon);
+    track_levels_row.append(&track_levels_text);
+    track_levels_toggle.set_child(Some(&track_levels_row));
+    track_levels_toggle.add_css_class("round");
+    track_levels_toggle.add_css_class("flat");
+    status_bar.append(&track_levels_toggle);
     status_bar.append(&status_label);
     status_bar.append(&status_progress);
 
@@ -2247,10 +2281,32 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     // Poll proxy cache every 500ms to drain completed transcodes and update status bar.
     {
+        let timeline_state = timeline_state.clone();
+        let preferences_state = preferences_state.clone();
+        let timeline_area = timeline_area.clone();
+        let track_levels_icon = track_levels_icon.clone();
+        track_levels_toggle.connect_toggled(move |btn| {
+            let show = btn.is_active();
+            timeline_state.borrow_mut().show_track_audio_levels = show;
+            track_levels_icon.set_icon_name(Some(if show {
+                "view-visible-symbolic"
+            } else {
+                "view-conceal-symbolic"
+            }));
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.show_track_audio_levels = show;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            timeline_area.queue_draw();
+        });
+    }
+
+    {
         let proxy_cache = proxy_cache.clone();
         let prog_player = prog_player.clone();
         let effective_proxy_enabled = effective_proxy_enabled.clone();
-        let status_bar = status_bar.clone();
         let status_label = status_label.clone();
         let status_progress = status_progress.clone();
         let player = player.clone();
@@ -2283,16 +2339,24 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             }
             let progress = proxy_cache.borrow().progress();
             if progress.in_flight {
-                status_bar.set_visible(true);
+                status_label.set_visible(true);
+                status_progress.set_visible(true);
                 status_label.set_text(&format!(
                     "Generating proxies… {}/{}",
                     progress.completed, progress.total
                 ));
                 if progress.total > 0 {
                     status_progress.set_fraction(progress.completed as f64 / progress.total as f64);
+                    status_progress.set_text(Some(&format!(
+                        "{:.0}%",
+                        (progress.completed as f64 / progress.total as f64) * 100.0
+                    )));
                 }
             } else {
-                status_bar.set_visible(false);
+                status_label.set_visible(false);
+                status_progress.set_visible(false);
+                status_progress.set_fraction(0.0);
+                status_progress.set_text(Some("Idle"));
             }
             glib::ControlFlow::Continue
         });
@@ -2684,6 +2748,7 @@ fn handle_mcp_command(
                     "source_playback_priority": prefs.source_playback_priority.as_str(),
                     "proxy_mode": prefs.proxy_mode.as_str(),
                     "show_timeline_preview": prefs.show_timeline_preview,
+                    "show_track_audio_levels": prefs.show_track_audio_levels,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
                     "preview_quality": prefs.preview_quality.as_str()
                 }))

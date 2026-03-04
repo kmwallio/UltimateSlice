@@ -286,7 +286,7 @@ entry:focus {
 }
 
 .preview-picture {
-    background-color: #000;
+    background-color: #444;
 }
 
 .transport-bar {
@@ -390,4 +390,181 @@ entry:focus {
     background-color: #e0c050;
     min-height: 8px;
     border-radius: 4px;
+}
+
+/* ── GTK4/libadwaita-style control polish ─────────────────────────────── */
+
+/* Keep flat buttons subtle (used in header + recents popover) */
+button.flat,
+togglebutton.flat,
+menubutton > button.flat {
+    background-color: transparent;
+    border-color: transparent;
+}
+
+button.flat:hover,
+togglebutton.flat:hover,
+menubutton > button.flat:hover {
+    background-color: #2a2a2e;
+    border-color: #444;
+}
+
+/* Round toggle style used by status-bar eye button */
+togglebutton.round,
+button.round {
+    border-radius: 999px;
+    padding: 4px 12px;
+}
+
+/* Linked button groups (used by color scopes tabs) */
+.linked > button,
+.linked > togglebutton {
+    border-radius: 0;
+    margin: 0;
+}
+
+.linked > button:first-child,
+.linked > togglebutton:first-child {
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+}
+
+.linked > button:last-child,
+.linked > togglebutton:last-child {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+
+/* Transitions panel helpers */
+.small-btn {
+    padding: 2px 8px;
+    min-height: 24px;
+    font-size: 11px;
+}
+
+.boxed-list {
+    background-color: #1a1a1c;
+    border: 1px solid #333338;
+    border-radius: 6px;
+}
+
+.boxed-list row {
+    border-bottom: 1px solid #2a2a2e;
+}
+
+.boxed-list row:last-child {
+    border-bottom: none;
+}
+
+.boxed-list row:hover {
+    background-color: #2a2a2e;
+}
+
+/* Media grid cards */
+.media-grid flowboxchild {
+    border-radius: 6px;
+}
+
+.media-grid flowboxchild:hover {
+    background-color: #2a2a2e;
+}
+
+.media-grid flowboxchild:selected {
+    background-color: #1565c0;
+    color: white;
+}
+
+/* Popover menus (Recent projects) */
+popover {
+    background-color: #242428;
+    color: #e0e0e0;
+    border: 1px solid #333338;
+    border-radius: 8px;
+}
+
+popover contents {
+    background-color: transparent;
+}
+
+/* ComboBoxText and DropDown controls in Preferences/export dialogs */
+combobox,
+combobox box,
+dropdown,
+dropdown > button {
+    background-color: #242428;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 4px;
+}
+
+combobox:hover,
+combobox box:hover,
+dropdown:hover,
+dropdown > button:hover {
+    background-color: #2e2e33;
+}
+
+combobox:focus,
+combobox box:focus,
+dropdown:focus,
+dropdown > button:focus,
+entry:focus,
+button:focus,
+togglebutton:focus {
+    border-color: #1565c0;
+}
+
+/* Scales used heavily in Inspector and export options */
+scale trough {
+    background-color: #2a2a2e;
+    border-radius: 999px;
+    min-height: 6px;
+}
+
+scale highlight {
+    background-color: #1565c0;
+    border-radius: 999px;
+}
+
+scale slider {
+    background-color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 999px;
+    min-width: 14px;
+    min-height: 14px;
+}
+
+scale slider:hover {
+    background-color: #ffffff;
+}
+
+/* Check/radio controls used across settings panels */
+checkbutton,
+radiobutton {
+    color: #e0e0e0;
+}
+
+checkbutton check,
+radiobutton radio {
+    background-color: #242428;
+    border: 1px solid #555560;
+}
+
+checkbutton:checked check,
+radiobutton:checked radio {
+    background-color: #1565c0;
+    border-color: #0d47a1;
+}
+
+/* Expander headers in Inspector sections */
+expander > title {
+    color: #d0d0d0;
+    font-weight: 600;
+}
+
+/* Color scopes panel shell */
+.color-scopes-panel {
+    background-color: #131315;
+    border: 1px solid #333338;
+    border-radius: 6px;
 }

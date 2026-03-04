@@ -13,6 +13,7 @@ Tracking docs:
 ### Foundation
 - [x] GTK4 + Rust project scaffold (`gtk4-rs 0.11`, `gstreamer-rs 0.25`, `glib 0.22`)
 - [x] Dark theme via custom CSS (`src/style.css`)
+- [x] GTK4/libadwaita-style control polish in dark theme (linked tabs, popovers, dropdown/combo controls, sliders, check/radio)
 - [x] GApplication entry point with CSS loading
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
@@ -244,7 +245,10 @@ Tracking docs:
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
 - [x] Volume / pan controls per clip in the inspector (volume slider now dB-based: `-100 dB` to `+12 dB`, mapped to linear gain for playback/export, persisted in FCPXML)
-- [ ] Basic audio mixing (level meters)
+- [x] Basic audio mixing (level meters)
+  - [x] Program Monitor master stereo VU meter (L/R)
+  - [x] Per-track stereo meters in timeline track labels (timeline track order)
+  - [x] Status-bar eye toggle to show/hide track audio levels
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`

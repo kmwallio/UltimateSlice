@@ -14,7 +14,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 const TRACK_HEIGHT: f64 = 60.0;
-const TRACK_LABEL_WIDTH: f64 = 80.0;
+const TRACK_LABEL_WIDTH: f64 = 110.0;
+const TRACK_LABEL_METER_WIDTH: f64 = 18.0;
 const RULER_HEIGHT: f64 = 24.0;
 const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
 const NS_PER_SECOND: f64 = 1_000_000_000.0;
@@ -132,6 +133,10 @@ pub struct TimelineState {
     pub show_timeline_preview: bool,
     /// When true, the timeline is loading a project and interaction is suppressed.
     pub loading: bool,
+    /// Per-track stereo audio peaks (dBFS) keyed by track index.
+    pub track_audio_peak_db: Vec<[f64; 2]>,
+    /// Show/hide per-track audio meters in track labels.
+    pub show_track_audio_levels: bool,
 }
 
 impl TimelineState {
@@ -158,6 +163,8 @@ impl TimelineState {
             show_waveform_on_video: false,
             show_timeline_preview: true,
             loading: false,
+            track_audio_peak_db: Vec::new(),
+            show_track_audio_levels: true,
         }
     }
 
@@ -2011,7 +2018,7 @@ fn draw_timeline(
     let proj = st.project.borrow();
     for (i, track) in proj.tracks.iter().enumerate() {
         let y = RULER_HEIGHT + i as f64 * TRACK_HEIGHT;
-        draw_track_row(cr, w, y, track, st, cache, wcache);
+        draw_track_row(cr, w, y, i, track, st, cache, wcache);
     }
 
     // Playhead (clipped to content area so it doesn't overdraw track labels)
@@ -2186,6 +2193,7 @@ fn draw_track_row(
     cr: &gtk::cairo::Context,
     width: f64,
     y: f64,
+    track_idx: usize,
     track: &crate::model::track::Track,
     st: &TimelineState,
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
@@ -2242,11 +2250,78 @@ fn draw_track_row(
     let _ = cr.move_to(6.0, y + TRACK_HEIGHT / 2.0 + 4.0);
     let _ = cr.show_text(&track.label);
 
+    if st.show_track_audio_levels {
+        let meter_x = TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - 6.0;
+        let meter_y = y + 8.0;
+        let meter_h = TRACK_HEIGHT - 16.0;
+        let [left_db, right_db] = st
+            .track_audio_peak_db
+            .get(track_idx)
+            .copied()
+            .unwrap_or([-60.0, -60.0]);
+        draw_track_label_meter(
+            cr,
+            meter_x,
+            meter_y,
+            TRACK_LABEL_METER_WIDTH,
+            meter_h,
+            left_db,
+            right_db,
+        );
+    }
+
     cr.set_source_rgb(0.1, 0.1, 0.12);
     cr.set_line_width(1.0);
     cr.move_to(0.0, y + TRACK_HEIGHT);
     cr.line_to(width, y + TRACK_HEIGHT);
     cr.stroke().ok();
+}
+
+fn draw_track_label_meter(
+    cr: &gtk::cairo::Context,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    left_db: f64,
+    right_db: f64,
+) {
+    let db_to_frac = |db: f64| -> f64 { ((db + 60.0) / 60.0).clamp(0.0, 1.0) };
+    cr.set_source_rgb(0.12, 0.12, 0.14);
+    cr.rectangle(x, y, width, height);
+    cr.fill().ok();
+
+    let gap = 2.0;
+    let bar_w = ((width - gap) / 2.0).max(2.0);
+    for (ch, db) in [(0usize, left_db), (1usize, right_db)] {
+        let bx = x + ch as f64 * (bar_w + gap);
+        let frac = db_to_frac(db);
+        let bar_h = frac * height;
+        let top = y + (height - bar_h);
+
+        let green_frac = db_to_frac(-18.0);
+        let green_h = (green_frac * height).min(bar_h);
+        if green_h > 0.0 {
+            cr.set_source_rgb(0.2, 0.8, 0.2);
+            cr.rectangle(bx, y + height - green_h, bar_w, green_h);
+            cr.fill().ok();
+        }
+
+        let yellow_frac = db_to_frac(-6.0);
+        let yellow_h = ((yellow_frac - green_frac) * height).min((bar_h - green_h).max(0.0));
+        if yellow_h > 0.0 {
+            cr.set_source_rgb(0.9, 0.85, 0.1);
+            cr.rectangle(bx, y + height - green_frac * height - yellow_h, bar_w, yellow_h);
+            cr.fill().ok();
+        }
+
+        let red_h = (bar_h - yellow_frac * height).max(0.0);
+        if red_h > 0.0 {
+            cr.set_source_rgb(0.9, 0.2, 0.1);
+            cr.rectangle(bx, top, bar_w, red_h);
+            cr.fill().ok();
+        }
+    }
 }
 
 fn draw_clip(
