@@ -15,6 +15,7 @@ Tracking docs:
 - [x] Dark theme via custom CSS (`src/style.css`)
 - [x] GApplication entry point with CSS loading
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
+- [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
 
 ### Data Model
 - [x] `Clip` — source path, source in/out (ns), timeline position, label, kind
@@ -90,6 +91,7 @@ Tracking docs:
 ### Export
 - [x] MP4/H.264 + AAC export via ffmpeg (`-filter_complex` concat + adelay/amix for audio)
 - [x] Background thread with `mpsc::channel` progress reporting
+- [x] Progress estimate based on ffmpeg `total_size` versus largest imported library file, capped to 99% until completion (100% only on successful finish)
 - [x] Audio from embedded video-clip streams and standalone audio-track clips included in export
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
 

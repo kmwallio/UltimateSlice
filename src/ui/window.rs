@@ -280,11 +280,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
     prog_player_raw.set_preview_quality(initial_preview_quality.divisor());
     prog_player_raw.set_experimental_preview_optimizations(
-        preferences_state.borrow().experimental_preview_optimizations,
+        preferences_state
+            .borrow()
+            .experimental_preview_optimizations,
     );
-    prog_player_raw.set_realtime_preview(
-        preferences_state.borrow().realtime_preview,
-    );
+    prog_player_raw.set_realtime_preview(preferences_state.borrow().realtime_preview);
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -358,9 +358,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         {
                             eprintln!("Failed to apply hardware acceleration setting: {e}");
                         }
-                        player
-                            .borrow()
-                            .set_source_playback_priority(new_state.source_playback_priority.clone());
+                        player.borrow().set_source_playback_priority(
+                            new_state.source_playback_priority.clone(),
+                        );
                         prog_player
                             .borrow_mut()
                             .set_playback_priority(new_state.playback_priority.clone());
@@ -377,9 +377,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             );
                         prog_player
                             .borrow_mut()
-                            .set_realtime_preview(
-                                new_state.realtime_preview,
-                            );
+                            .set_realtime_preview(new_state.realtime_preview);
                         if new_state.proxy_mode.is_enabled() {
                             // If the proxy scale changed, invalidate old entries so clips are
                             // re-transcoded at the new resolution.
@@ -449,9 +447,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let window_weak = window_weak.clone();
             let project = project.clone();
             move |b, c, s, d, sh, shd, mid, hil| {
-                prog_player
-                    .borrow_mut()
-                    .update_current_effects(b as f64, c as f64, s as f64, d as f64, sh as f64, shd as f64, mid as f64, hil as f64);
+                prog_player.borrow_mut().update_current_effects(
+                    b as f64, c as f64, s as f64, d as f64, sh as f64, shd as f64, mid as f64,
+                    hil as f64,
+                );
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
@@ -475,7 +474,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let mut proj = project.borrow_mut();
                     proj.dirty = true;
                 }
-                prog_player.borrow_mut().update_audio_for_clip(clip_id, vol as f64, pan as f64);
+                prog_player
+                    .borrow_mut()
+                    .update_audio_for_clip(clip_id, vol as f64, pan as f64);
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -633,10 +634,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
-        timeline_state.borrow_mut().on_clip_selected = Some(Rc::new(move |clip_id: Option<String>| {
-            let proj = project.borrow();
-            inspector_view.update(&proj, clip_id.as_deref());
-        }));
+        timeline_state.borrow_mut().on_clip_selected =
+            Some(Rc::new(move |clip_id: Option<String>| {
+                let proj = project.borrow();
+                inspector_view.update(&proj, clip_id.as_deref());
+            }));
     }
     {
         let prog_player = prog_player.clone();
@@ -662,9 +664,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     // The pipeline is in Playing; let the GTK main loop run so
                     // gtk4paintablesink can complete its preroll, then restore Paused.
                     let pp = prog_player_seek.clone();
-                    glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
-                        pp.borrow().complete_playing_pulse();
-                    });
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(250),
+                        move || {
+                            pp.borrow().complete_playing_pulse();
+                        },
+                    );
                 }
             });
         }));
@@ -683,6 +688,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     }
     let header = toolbar::build_toolbar(
         project.clone(),
+        library.clone(),
         timeline_state.clone(),
         {
             let cb = on_project_changed.clone();
@@ -1139,10 +1145,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let current_divisor = player.preview_divisor();
                     let can_switch_auto_quality = !player.is_playing()
                         || now_us - last_auto_quality_switch_us_c.get() >= 2_000_000;
-                    if divisor == current_divisor
-                        || !auto_preview_mode
-                        || can_switch_auto_quality
-                    {
+                    if divisor == current_divisor || !auto_preview_mode || can_switch_auto_quality {
                         if auto_preview_mode && divisor != current_divisor {
                             last_auto_quality_switch_us_c.set(now_us);
                         }
@@ -1181,9 +1184,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         2
                     };
                     let wants_proxy_change = current_proxy_enabled != desired_proxy_enabled;
-                    let wants_scale_change =
-                        desired_proxy_enabled
-                            && effective_proxy_scale_divisor.get() != desired_scale_divisor;
+                    let wants_scale_change = desired_proxy_enabled
+                        && effective_proxy_scale_divisor.get() != desired_scale_divisor;
                     let can_switch_auto_proxy =
                         now_us - last_auto_proxy_switch_us_c.get() >= 1_500_000;
                     if (wants_proxy_change || wants_scale_change)
@@ -1194,10 +1196,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         effective_proxy_scale_divisor.set(desired_scale_divisor);
                         last_auto_proxy_switch_us_c.set(now_us);
                     }
-                    let refresh_proxy_paths =
-                        manual_proxy_mode
-                            || (desired_proxy_enabled
-                                && now_us - last_proxy_refresh_us_c.get() >= 1_000_000);
+                    let refresh_proxy_paths = manual_proxy_mode
+                        || (desired_proxy_enabled
+                            && now_us - last_proxy_refresh_us_c.get() >= 1_000_000);
                     if desired_proxy_enabled && refresh_proxy_paths {
                         last_proxy_refresh_us_c.set(now_us);
                         let clip_sources = {
@@ -1950,7 +1951,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     .filter(|c| media_seen.insert(c.source_path.as_str()))
                     .map(|c| (c.source_path.clone(), c.source_out))
                     .collect();
-                (clips, media, (proj.width, proj.height), (proj.frame_rate.numerator, proj.frame_rate.denominator))
+                (
+                    clips,
+                    media,
+                    (proj.width, proj.height),
+                    (proj.frame_rate.numerator, proj.frame_rate.denominator),
+                )
             }; // proj borrow dropped here — safe to call GStreamer below
             program_empty_hint.set_visible(clips.is_empty());
             let has_clips = !clips.is_empty();
@@ -2741,9 +2747,7 @@ fn handle_mcp_command(
                 prefs.clone()
             };
             crate::ui_state::save_preferences_state(&new_state);
-            player
-                .borrow()
-                .set_source_playback_priority(parsed.clone());
+            player.borrow().set_source_playback_priority(parsed.clone());
             reply
                 .send(json!({
                     "success": true,
@@ -2840,9 +2844,7 @@ fn handle_mcp_command(
         }
 
         McpCommand::SetRealtimePreview { enabled, reply } => {
-            prog_player
-                .borrow_mut()
-                .set_realtime_preview(enabled);
+            prog_player.borrow_mut().set_realtime_preview(enabled);
             let new_state = {
                 let mut prefs = preferences_state.borrow_mut();
                 prefs.realtime_preview = enabled;
@@ -3274,6 +3276,7 @@ fn handle_mcp_command(
                         &proj_worker,
                         &path_worker,
                         crate::media::export::ExportOptions::default(),
+                        None,
                         tx,
                     )
                     .map_err(|e| e.to_string())
@@ -3838,21 +3841,29 @@ fn handle_mcp_command(
         }
 
         McpCommand::SelectLibraryItem { path, reply } => {
-            let item = library.borrow().iter().find(|i| i.source_path == path).cloned();
+            let item = library
+                .borrow()
+                .iter()
+                .find(|i| i.source_path == path)
+                .cloned();
             match item {
                 Some(media_item) => {
                     on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
-                    reply.send(json!({
-                        "ok": true,
-                        "label": media_item.label,
-                        "duration_ns": media_item.duration_ns,
-                    })).ok();
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "label": media_item.label,
+                            "duration_ns": media_item.duration_ns,
+                        }))
+                        .ok();
                 }
                 None => {
-                    reply.send(json!({
-                        "ok": false,
-                        "error": format!("No library item with path: {path}"),
-                    })).ok();
+                    reply
+                        .send(json!({
+                            "ok": false,
+                            "error": format!("No library item with path: {path}"),
+                        }))
+                        .ok();
                 }
             }
         }

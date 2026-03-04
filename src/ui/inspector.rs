@@ -400,7 +400,8 @@ pub fn build_inspector(
     audio_expander.set_child(Some(&audio_inner));
 
     row_label(&audio_inner, "Volume");
-    let volume_slider = Scale::with_range(Orientation::Horizontal, VOLUME_DB_MIN, VOLUME_DB_MAX, 0.1);
+    let volume_slider =
+        Scale::with_range(Orientation::Horizontal, VOLUME_DB_MIN, VOLUME_DB_MAX, 0.1);
     volume_slider.set_value(0.0);
     volume_slider.set_draw_value(true);
     volume_slider.set_digits(1);

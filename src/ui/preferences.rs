@@ -116,10 +116,7 @@ pub fn show_preferences_dialog(
     let source_playback_priority = gtk4::ComboBoxText::new();
     source_playback_priority.append(Some("smooth"), "Smooth (faster source seeks)");
     source_playback_priority.append(Some("balanced"), "Balanced");
-    source_playback_priority.append(
-        Some("accurate"),
-        "Accurate (frame-precise source seeks)",
-    );
+    source_playback_priority.append(Some("accurate"), "Accurate (frame-precise source seeks)");
     source_playback_priority.set_active_id(Some(current.source_playback_priority.as_str()));
     source_playback_priority.set_halign(gtk::Align::Start);
     let hint = Label::new(Some(

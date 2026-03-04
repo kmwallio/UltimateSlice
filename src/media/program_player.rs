@@ -138,7 +138,11 @@ impl ProgramClip {
 
     pub fn seek_rate(&self) -> f64 {
         let base = if self.speed > 0.0 { self.speed } else { 1.0 };
-        if self.reverse { -base } else { base }
+        if self.reverse {
+            -base
+        } else {
+            base
+        }
     }
 
     pub fn seek_start_ns(&self, source_pos_ns: u64) -> u64 {
@@ -1463,7 +1467,9 @@ impl ProgramPlayer {
         if desired != current {
             log::info!(
                 "poll: boundary crossing at {} desired={:?} current={:?}",
-                new_pos, desired, current
+                new_pos,
+                desired,
+                current
             );
             // Determine whether the audio-pipeline source changes at this
             // boundary.  When it stays the same (e.g. only a video track
@@ -2104,14 +2110,16 @@ impl ProgramPlayer {
 
         // Skip prewarming when continuing decoders will handle this boundary.
         if boundary_active.len() == self.slots.len() && !self.slots.is_empty() {
-            let all_same_source = boundary_active.iter()
-                .zip(self.slots.iter())
-                .all(|(&idx, slot)| {
-                    let boundary_clip = &self.clips[idx];
-                    let current_clip = &self.clips[slot.clip_idx];
-                    self.effective_source_path_for_clip(boundary_clip)
-                        == self.effective_source_path_for_clip(current_clip)
-                });
+            let all_same_source =
+                boundary_active
+                    .iter()
+                    .zip(self.slots.iter())
+                    .all(|(&idx, slot)| {
+                        let boundary_clip = &self.clips[idx];
+                        let current_clip = &self.clips[slot.clip_idx];
+                        self.effective_source_path_for_clip(boundary_clip)
+                            == self.effective_source_path_for_clip(current_clip)
+                    });
             if all_same_source {
                 log::debug!(
                     "prewarm: skipping — continuing decoders will handle boundary at {}",
@@ -3217,10 +3225,7 @@ impl ProgramPlayer {
                 }
                 let clip = &self.clips[slot.clip_idx];
                 if !Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags) {
-                    log::warn!(
-                        "try_realtime_boundary: seek FAILED for clip {}",
-                        clip.id
-                    );
+                    log::warn!("try_realtime_boundary: seek FAILED for clip {}", clip.id);
                     if let Some(ref pad) = slot.compositor_pad {
                         let _ = pad.send_event(gst::event::Eos::new());
                     }
@@ -3236,7 +3241,11 @@ impl ProgramPlayer {
 
         // 4. Update zorder on all visible slots to match desired order.
         for (zorder_offset, clip_idx) in desired.iter().enumerate() {
-            if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == *clip_idx && !s.hidden) {
+            if let Some(slot) = self
+                .slots
+                .iter()
+                .find(|s| s.clip_idx == *clip_idx && !s.hidden)
+            {
                 if let Some(ref pad) = slot.compositor_pad {
                     pad.set_property("zorder", (zorder_offset + 1) as u32);
                 }
@@ -4117,9 +4126,8 @@ impl ProgramPlayer {
     /// a reused slot's effects bin can be updated via property sets alone,
     /// without adding/removing GStreamer elements.
     fn effects_topology_matches(a: &ProgramClip, b: &ProgramClip) -> bool {
-        let need_balance = |c: &ProgramClip| {
-            c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0
-        };
+        let need_balance =
+            |c: &ProgramClip| c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0;
         let need_blur = |c: &ProgramClip| {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -4138,11 +4146,11 @@ impl ProgramPlayer {
     /// Determine whether all current slots can be reused for the desired
     /// clip set.  Both `desired` and current slots are ordered by z-order
     /// (track_index), so we compare positionally.
-    fn compute_reuse_plan(
-        &mut self,
-        desired: &[usize],
-    ) -> SlotReusePlan {
-        let fail = SlotReusePlan { all_reusable: false, mappings: vec![] };
+    fn compute_reuse_plan(&mut self, desired: &[usize]) -> SlotReusePlan {
+        let fail = SlotReusePlan {
+            all_reusable: false,
+            mappings: vec![],
+        };
 
         // Must have same count — otherwise topology changes.
         if desired.len() != self.slots.len() || desired.is_empty() {
@@ -4163,8 +4171,8 @@ impl ProgramPlayer {
 
             // 2. Same audio presence
             let desired_has_audio_flag = self.clips[desired_clip_idx].has_audio;
-            let desired_has_audio = desired_has_audio_flag
-                && self.probe_has_audio_stream_cached(&desired_path);
+            let desired_has_audio =
+                desired_has_audio_flag && self.probe_has_audio_stream_cached(&desired_path);
             let current_has_audio = self.slots[slot_idx].audio_mixer_pad.is_some();
             if desired_has_audio != current_has_audio {
                 return fail;
@@ -4192,7 +4200,10 @@ impl ProgramPlayer {
             mappings.push((slot_idx, desired_clip_idx));
         }
 
-        SlotReusePlan { all_reusable: true, mappings }
+        SlotReusePlan {
+            all_reusable: true,
+            mappings,
+        }
     }
 
     /// Update all mutable effect properties on a reused slot without
@@ -4203,11 +4214,12 @@ impl ProgramPlayer {
         // Videobalance (brightness/contrast/saturation + shadows/midtones/highlights)
         if let Some(ref vb) = slot.videobalance {
             let eff_brightness = (clip.brightness
-                + clip.shadows * 0.3 + clip.midtones * 0.2 + clip.highlights * 0.15)
+                + clip.shadows * 0.3
+                + clip.midtones * 0.2
+                + clip.highlights * 0.15)
                 .clamp(-1.0, 1.0);
-            let eff_contrast = (clip.contrast
-                - clip.shadows * 0.15 + clip.highlights * 0.15)
-                .clamp(0.0, 2.0);
+            let eff_contrast =
+                (clip.contrast - clip.shadows * 0.15 + clip.highlights * 0.15).clamp(0.0, 2.0);
             vb.set_property("brightness", eff_brightness);
             vb.set_property("contrast", eff_contrast);
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
@@ -4221,23 +4233,37 @@ impl ProgramPlayer {
 
         // Crop, rotate, flip
         Self::apply_transform_to_slot(
-            slot, clip.crop_left, clip.crop_right,
-            clip.crop_top, clip.crop_bottom,
-            clip.rotate, clip.flip_h, clip.flip_v,
+            slot,
+            clip.crop_left,
+            clip.crop_right,
+            clip.crop_top,
+            clip.crop_bottom,
+            clip.rotate,
+            clip.flip_h,
+            clip.flip_v,
         );
 
         // Title overlay
         Self::apply_title_to_slot(
-            slot, &clip.title_text, &clip.title_font,
-            clip.title_color, clip.title_x, clip.title_y,
+            slot,
+            &clip.title_text,
+            &clip.title_font,
+            clip.title_color,
+            clip.title_x,
+            clip.title_y,
         );
 
         // Compositor pad: opacity + zoom/position
         if let Some(ref pad) = slot.compositor_pad {
             pad.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
             Self::apply_zoom_to_slot(
-                slot, pad, clip.scale, clip.position_x, clip.position_y,
-                self.project_width, self.project_height,
+                slot,
+                pad,
+                clip.scale,
+                clip.position_x,
+                clip.position_y,
+                self.project_width,
+                self.project_height,
             );
         }
 
@@ -4250,18 +4276,15 @@ impl ProgramPlayer {
     /// Fast-path boundary crossing: reuse existing decoder slots when the
     /// incoming clips share the same source files.  Avoids tearing down
     /// and rebuilding uridecodebin, effects_bin, and compositor pads.
-    fn continue_decoders_at(
-        &mut self,
-        timeline_pos: u64,
-        desired: &[usize],
-        plan: &SlotReusePlan,
-    ) {
+    fn continue_decoders_at(&mut self, timeline_pos: u64, desired: &[usize], plan: &SlotReusePlan) {
         let rebuild_started = Instant::now();
         let was_playing = self.state == PlayerState::Playing;
 
         log::info!(
             "continue_decoders_at: START timeline_pos={}ns slots={} was_playing={}",
-            timeline_pos, self.slots.len(), was_playing
+            timeline_pos,
+            self.slots.len(),
+            was_playing
         );
 
         // Tear down prewarming sidecars (no longer needed).
@@ -4286,9 +4309,11 @@ impl ProgramPlayer {
 
         // 5. Snapshot arrival counters, then flush compositor + audiomixer.
         let baseline = self.snapshot_arrival_seqs();
-        let _ = self.compositor
+        let _ = self
+            .compositor
             .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
-        let _ = self.audiomixer
+        let _ = self
+            .audiomixer
             .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
 
         // 6. Seek each decoder to its new source position.
@@ -4296,12 +4321,13 @@ impl ProgramPlayer {
             let clip = &self.clips[slot.clip_idx];
             if was_playing {
                 let _ = Self::seek_slot_decoder_with_retry(
-                    slot, clip, timeline_pos, self.clip_seek_flags(),
+                    slot,
+                    clip,
+                    timeline_pos,
+                    self.clip_seek_flags(),
                 );
             } else {
-                let _ = Self::seek_slot_decoder_paused_with_retry(
-                    slot, clip, timeline_pos,
-                );
+                let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
             }
         }
 
@@ -4319,7 +4345,8 @@ impl ProgramPlayer {
         self.record_rebuild_duration_ms(elapsed as u64);
         log::info!(
             "continue_decoders_at: END timeline_pos={}ns elapsed_ms={}",
-            timeline_pos, elapsed
+            timeline_pos,
+            elapsed
         );
     }
 
@@ -4946,7 +4973,6 @@ mod tests {
         let prefs = crate::ui_state::PreferencesState::default();
         assert!(!prefs.experimental_preview_optimizations);
     }
-
 }
 
 impl Drop for ProgramPlayer {

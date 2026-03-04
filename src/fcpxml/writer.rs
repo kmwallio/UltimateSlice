@@ -144,10 +144,8 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                 "position",
                 format!("{} {}", position_x, position_y).as_str(),
             ));
-            adjust_transform.push_attribute((
-                "scale",
-                format!("{} {}", clip.scale, clip.scale).as_str(),
-            ));
+            adjust_transform
+                .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
             adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
             writer.write_event(Event::Empty(adjust_transform))?;
 
@@ -203,20 +201,31 @@ fn patch_imported_fcpxml_transform(project: &Project, original: &str) -> Option<
 
     let mut xml =
         replace_attr_in_first_tag(original, "asset-clip", "us:scale", &clip.scale.to_string())?;
-    xml = replace_attr_in_first_tag(&xml, "asset-clip", "us:position-x", &clip.position_x.to_string())?;
-    xml = replace_attr_in_first_tag(&xml, "asset-clip", "us:position-y", &clip.position_y.to_string())?;
+    xml = replace_attr_in_first_tag(
+        &xml,
+        "asset-clip",
+        "us:position-x",
+        &clip.position_x.to_string(),
+    )?;
+    xml = replace_attr_in_first_tag(
+        &xml,
+        "asset-clip",
+        "us:position-y",
+        &clip.position_y.to_string(),
+    )?;
     let transform_scale = format!("{} {}", clip.scale, clip.scale);
-    if let Some(updated) = replace_attr_in_first_tag(&xml, "adjust-transform", "scale", &transform_scale) {
+    if let Some(updated) =
+        replace_attr_in_first_tag(&xml, "adjust-transform", "scale", &transform_scale)
+    {
         xml = updated;
     }
-    let (position_x, position_y) =
-        internal_position_to_fcpxml(
-            clip.position_x,
-            clip.position_y,
-            project.width,
-            project.height,
-            clip.scale,
-        );
+    let (position_x, position_y) = internal_position_to_fcpxml(
+        clip.position_x,
+        clip.position_y,
+        project.width,
+        project.height,
+        clip.scale,
+    );
     let transform_position = format!("{} {}", position_x, position_y);
     if let Some(updated) =
         replace_attr_in_first_tag(&xml, "adjust-transform", "position", &transform_position)
@@ -235,8 +244,7 @@ fn internal_position_to_fcpxml(
 ) -> (f64, f64) {
     let range_x = (project_width as f64) * (1.0 - scale) / 2.0;
     let range_y = (project_height as f64) * (1.0 - scale) / 2.0;
-    let (shift_x_px, shift_y_px) = if range_x.abs() < f64::EPSILON || range_y.abs() < f64::EPSILON
-    {
+    let (shift_x_px, shift_y_px) = if range_x.abs() < f64::EPSILON || range_y.abs() < f64::EPSILON {
         (
             x * (project_width as f64 / 2.0),
             y * (project_height as f64 / 2.0),
@@ -250,7 +258,12 @@ fn internal_position_to_fcpxml(
     (x_percent, y_percent)
 }
 
-fn replace_attr_in_first_tag(xml: &str, tag_name: &str, attr_name: &str, new_value: &str) -> Option<String> {
+fn replace_attr_in_first_tag(
+    xml: &str,
+    tag_name: &str,
+    attr_name: &str,
+    new_value: &str,
+) -> Option<String> {
     let tag_open = format!("<{tag_name}");
     let tag_start = xml.find(&tag_open)?;
     let after_start = &xml[tag_start..];
@@ -258,7 +271,8 @@ fn replace_attr_in_first_tag(xml: &str, tag_name: &str, attr_name: &str, new_val
     let tag_end = tag_start + tag_end_rel;
     let tag_text = &xml[tag_start..=tag_end];
     let updated_tag = replace_or_insert_attr(tag_text, attr_name, new_value)?;
-    let mut out = String::with_capacity(xml.len() + updated_tag.len().saturating_sub(tag_text.len()));
+    let mut out =
+        String::with_capacity(xml.len() + updated_tag.len().saturating_sub(tag_text.len()));
     out.push_str(&xml[..tag_start]);
     out.push_str(&updated_tag);
     out.push_str(&xml[tag_end + 1..]);
@@ -272,7 +286,10 @@ fn replace_or_insert_attr(tag_text: &str, attr_name: &str, new_value: &str) -> O
         let value_end_rel = tag_text[value_start..].find('"')?;
         let value_end = value_start + value_end_rel;
         let mut updated = String::with_capacity(
-            tag_text.len() + new_value.len().saturating_sub(value_end.saturating_sub(value_start)),
+            tag_text.len()
+                + new_value
+                    .len()
+                    .saturating_sub(value_end.saturating_sub(value_start)),
         );
         updated.push_str(&tag_text[..value_start]);
         updated.push_str(new_value);
@@ -701,7 +718,8 @@ mod tests {
         assert_ne!(written, original);
         assert!(written.contains("customUnsupported=\"keep-one\""));
         assert!(written.contains("customUnsupported=\"keep-two\""));
-        assert!(written.contains("<customTag mode=\"hold\"><childTag value=\"keep-child\"/></customTag>"));
+        assert!(written
+            .contains("<customTag mode=\"hold\"><childTag value=\"keep-child\"/></customTag>"));
         assert!(written.contains("us:scale=\"2.25\""));
         assert!(written.contains("adjust-transform"));
         assert!(written.contains("scale=\"2.25 2.25\""));
@@ -729,7 +747,9 @@ mod tests {
 
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(
-            xml.contains("<format id=\"r1\" frameDuration=\"1001/30000\" width=\"1280\" height=\"720\"/>"),
+            xml.contains(
+                "<format id=\"r1\" frameDuration=\"1001/30000\" width=\"1280\" height=\"720\"/>"
+            ),
             "expected export to keep numeric format data for non-standard preset:\n{xml}"
         );
         assert!(

@@ -547,7 +547,9 @@ impl Player {
                 gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
             }
             crate::ui_state::PlaybackPriority::Balanced
-            | crate::ui_state::PlaybackPriority::Smooth => gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            | crate::ui_state::PlaybackPriority::Smooth => {
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+            }
         }
     }
 

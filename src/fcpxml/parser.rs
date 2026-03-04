@@ -166,8 +166,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             &mut track_map,
                             mount_root.as_deref(),
                             &mount_users,
-                        )
-                        {
+                        ) {
                             clip_stack.push(ctx);
                         }
                     }
@@ -432,7 +431,8 @@ fn parse_asset_clip(
                 }
             });
 
-            let resolved_source_path = resolve_import_source_path(&asset.src, mount_root, mount_users);
+            let resolved_source_path =
+                resolve_import_source_path(&asset.src, mount_root, mount_users);
             let mut clip = Clip::new(
                 &resolved_source_path,
                 source_in.saturating_add(duration),
@@ -1955,11 +1955,15 @@ mod tests {
 </fcpxml>"#
         );
 
-        let project = parse_fcpxml_with_path(&xml, Some(std::path::Path::new("/tmp/project.fcpxml")))
-            .expect("parse should succeed");
+        let project =
+            parse_fcpxml_with_path(&xml, Some(std::path::Path::new("/tmp/project.fcpxml")))
+                .expect("parse should succeed");
         let clip = &project.video_tracks().next().unwrap().clips[0];
         assert_eq!(clip.source_path, remapped_target);
-        assert_eq!(clip.fcpxml_original_source_path.as_deref(), Some(original_path.as_str()));
+        assert_eq!(
+            clip.fcpxml_original_source_path.as_deref(),
+            Some(original_path.as_str())
+        );
         let _ = std::fs::remove_file(remapped_target);
     }
 
@@ -1991,8 +1995,9 @@ mod tests {
 </fcpxml>"#
         );
 
-        let project = parse_fcpxml_with_path(&xml, Some(std::path::Path::new("/tmp/project.fcpxml")))
-            .expect("parse should succeed");
+        let project =
+            parse_fcpxml_with_path(&xml, Some(std::path::Path::new("/tmp/project.fcpxml")))
+                .expect("parse should succeed");
         let clip = &project.video_tracks().next().unwrap().clips[0];
         let decoded_original = format!("/Volumes/LEXAR/{folder}/C0378.mp4");
         assert_eq!(clip.source_path, remapped_target);
@@ -2039,10 +2044,8 @@ mod tests {
 
     #[test]
     fn test_decode_percent_encoded_path() {
-        let decoded = decode_percent_encoded_path("/Volumes/LEXAR/Final%20Cut%20Original%20Media/C0378.mp4");
-        assert_eq!(
-            decoded,
-            "/Volumes/LEXAR/Final Cut Original Media/C0378.mp4"
-        );
+        let decoded =
+            decode_percent_encoded_path("/Volumes/LEXAR/Final%20Cut%20Original%20Media/C0378.mp4");
+        assert_eq!(decoded, "/Volumes/LEXAR/Final Cut Original Media/C0378.mp4");
     }
 }

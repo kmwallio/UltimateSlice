@@ -156,7 +156,8 @@ impl ProxyCache {
             return;
         }
         // Check for pre-existing proxy on disk before spawning work.
-        if let Some(p) = existing_proxy_path_for(source_path, scale, lut_path, &self.local_cache_root)
+        if let Some(p) =
+            existing_proxy_path_for(source_path, scale, lut_path, &self.local_cache_root)
         {
             if std::fs::metadata(&p).map_or(false, |m| m.len() > 0) {
                 self.proxies.insert(key, p);
@@ -438,12 +439,7 @@ fn existing_proxy_path_for(
     None
 }
 
-fn run_transcode_command(
-    ffmpeg: &str,
-    source_path: &str,
-    proxy_path: &str,
-    filter: &str,
-) -> bool {
+fn run_transcode_command(ffmpeg: &str, source_path: &str, proxy_path: &str, filter: &str) -> bool {
     let status = std::process::Command::new(ffmpeg)
         .arg("-y")
         .arg("-hide_banner")
