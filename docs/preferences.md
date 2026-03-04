@@ -38,6 +38,13 @@ Preferences are grouped by category in a sidebar:
   - `get_preferences` returns `playback_priority`.
   - `set_playback_priority` updates the mode.
 
+## Experimental Preview Optimizations (Playback)
+
+- **Enable occlusion-based decode skip**: when enabled, clips fully hidden behind an opaque full-frame overlay (e.g. a B-roll clip covering the main track) skip video decoding and effects processing. This significantly reduces CPU/GPU load during multi-track playback.
+- **Enable continuous decoders**: reuses existing decoder slots at boundary crossings when adjacent clips share the same source file. This eliminates the teardown/rebuild overhead and can reduce boundary latency by up to 75%.
+- **Real-time preview toggle**: allows switching between prioritized real-time playback (dropping frames if needed) and frame-accurate playback (slowing down if needed to show every frame).
+- These settings are persistent and recommended for complex projects with many overlapping tracks.
+
 ## Proxy Preview Mode
 
 - **Proxy preview mode** generates lightweight proxy files for smoother preview playback with large/high-bitrate media:
@@ -108,3 +115,14 @@ Preferences are grouped by category in a sidebar:
 - Only one agent can be connected at a time; additional connections are rejected.
 - Agents using the `.mcp.json` `ultimate-slice-attach` server entry connect via `--mcp-attach`, which bridges stdio to the socket.
 - The setting is persisted across launches.
+
+## MCP Automation
+
+- **`get_preferences`**: returns current application preferences.
+- **`set_hardware_acceleration`**: toggles hardware acceleration.
+- **`set_playback_priority`**: sets Program Monitor playback priority (`smooth`, `balanced`, `accurate`).
+- **`set_source_playback_priority`**: sets Source Monitor playback priority.
+- **`set_proxy_mode`**: sets proxy preview mode (`off`, `half_res`, `quarter_res`).
+- **`set_preview_quality`**: sets compositor preview quality (`auto`, `full`, `half`, `quarter`).
+- **`set_gsk_renderer`**: sets GTK renderer backend (restart required).
+- **`set_realtime_preview`**: enables or disables real-time preview optimizations.

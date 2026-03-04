@@ -2,6 +2,33 @@
 
 This file tracks updates made to the UltimateSlice website and documentation, specifically those synchronized from the `main` development branch.
 
+## [2026-03-03] - Update from Main
+**Synchronized with main branch commit:** `c4d36f0`
+
+### Added
+- **Reverse Playback**:
+  - Documented per-clip "Reverse" toggle in Inspector and Program Monitor.
+  - Added description for the timeline `◀` badge.
+  - Updated Export documentation to include `reverse` and `areverse` filter details.
+- **Experimental Preview Optimizations**:
+  - Documented occlusion-based video decode skip and continuous decoders in Preferences.
+  - Added real-time preview prioritized playback option.
+- **MCP Tools**:
+  - **Program Monitor**: Documented `play`, `pause`, and `stop` tools.
+  - **Source Monitor**: Documented `select_library_item`, `source_play`, `source_pause`, `set_source_in`, and `set_source_out`.
+  - **Preferences**: Documented tools for proxy mode, preview quality, GSK renderer, and real-time preview settings.
+
+### Changed
+- **Project Serialization**:
+  - Added support for `*.uspxml` format alongside standard FCPXML.
+  - Documented the `application/x-ultimateslice-project+xml` MIME type association.
+- **FCPXML Interchange**:
+  - Documented improved compatibility for Apple-authored FCPXML files, chapter markers, and standard audio gain mapping.
+- **Timeline**:
+  - Updated Ruler documentation to reflect improved responsiveness for frame-accurate scrubbing.
+- **Export**:
+  - Documented overflow-aware clipping for secondary-track overlays (PIP) to ensure preview/export parity.
+
 ## [2026-03-01] - Update from Main
 **Synchronized with main branch commit:** `2de6b60`
 

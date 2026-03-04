@@ -41,9 +41,12 @@ Our current stable development branch (`main`) features:
 - **Multi-track Timeline**: Flexible editing with support for video and audio tracks.
 - **Visual Cues**: Filmstrip thumbnails for video and normalized waveforms for audio.
 - **Advanced Trimming**: Ripple-aware trimming, razor tool, and standard keyboard shortcuts (J/K/L, I/O).
+- **Reverse Playback**: Per-clip "Reverse" toggle in Inspector and Program Monitor with timeline `◀` badge.
+- **Experimental Preview Optimizations**: Occlusion-based video decode skip and continuous decoders for smoother playback.
 - **Real-time Effects**: Color correction, transforms, and transitions applied live.
-- **Project Serialization**: Save and load projects in standard FCPXML format.
-- **Background Rendering**: High-quality MP4/H.264 exports via GStreamer/FFmpeg.
+- **Project Serialization**: Save and load projects in standard FCPXML and `*.uspxml` formats.
+- **FCPXML Interchange**: Improved compatibility with Apple-authored files, markers, and standard audio gain mapping.
+- **Background Rendering**: High-quality MP4/H.264 exports via GStreamer/FFmpeg with overflow-aware overlay clipping.
 
 ## Planned Roadmap
 

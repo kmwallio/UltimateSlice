@@ -10,7 +10,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 
 ## Layout
 
-- **Ruler** — shows time positions with adaptive tick marks; click to seek the playhead.
+- **Ruler** — shows time positions with adaptive tick marks; click to seek the playhead. Improved responsiveness for frame-accurate scrubbing.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
 - **Track header** — shows the track name; click the mute button to silence an audio track.
@@ -156,4 +156,5 @@ The undo history is per-session (not persisted in the FCPXML).
 - **Waveform overlay on video**: When enabled in **Preferences**, a semi-transparent color-coded waveform is drawn on the lower portion of video clips.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
 - A **cyan LUT badge** appears on clips with an assigned Color LUT.
+- A **reverse badge** (`◀`) appears on clips with reverse playback enabled.
 - Selected clips have a yellow highlight border.

@@ -69,3 +69,11 @@ Both operations target the active track (if its kind matches), or fall back to t
 - Click the **✕** button in the Source Monitor header to close it.
 - Closing clears the current media-library selection, hides the panel, stops source playback, and resets source in/out state.
 - Select any media item again to reopen and load the Source Monitor.
+
+## MCP Automation
+
+- **`select_library_item`**: selects a media item from the library and loads it into the Source Monitor.
+- **`source_play`**: starts playback in the Source Monitor.
+- **`source_pause`**: pauses playback in the Source Monitor.
+- **`set_source_in`**: sets the source In-point to the current position (equivalent to `I`).
+- **`set_source_out`**: sets the source Out-point to the current position (equivalent to `O`).

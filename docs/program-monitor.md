@@ -109,6 +109,9 @@ When a clip has a speed multiplier set (see [Inspector](inspector)), the program
 
 ## MCP Automation
 
+- **`play`**: starts program monitor playback.
+- **`pause`**: pauses program monitor playback.
+- **`stop`**: stops playback and returns to position 0.
 - **`seek_playhead`**: seeks the timeline/program-monitor playhead to an absolute nanosecond position.
 - **`export_displayed_frame`**: exports the current displayed frame to a binary PPM (`P6`) image file.
 - **`take_screenshot`**: captures a PNG screenshot of the full application window. Returns the path to the saved file.

@@ -79,15 +79,20 @@ After choosing the output file, an export progress dialog shows:
 
 ## Speed-Changed Clips
 
-Clips with a speed multiplier are exported correctly:
-- Video: `setpts=PTS/speed` filter adjusts frame timestamps.
-- Audio: chained `atempo` filters adjust playback rate while preserving pitch.
-  - The `atempo` filter is limited to 0.5×–2.0× per instance; multiple are chained for 0.25× or 4×.
+Clips with a speed multiplier or reverse playback are exported correctly:
+- **Fast/Slow Motion**: Video `setpts=PTS/speed` and chained `atempo` filters for audio.
+- **Reverse Playback**: Video `reverse` and audio `areverse` filters applied per-clip.
+  - Reverse playback can be combined with speed changes (e.g. reverse at 2× speed).
+- The `atempo` filter is limited to 0.5×–2.0× per instance; multiple are chained for 0.25× or 4×.
+
+## Overlay Clipping
+
+- Secondary-track overlays now include **overflow clipping**: if a clip's position (via Transform Inspector) exceeds the frame boundary, the overflow edges are cropped before padding.
+- This ensures the exported PIP positions and framing match the Program Monitor preview exactly.
 
 ## Notes
 
 - Export requires **ffmpeg** to be installed and on `$PATH`.
-- All video tracks are processed in timeline order, with letterbox/pillarbox padding applied to each clip.
-- Secondary-track overlays keep transparent padding when zoomed out and honor per-clip opacity, so layered composites export closer to Program Monitor preview.
+- All video tracks are processed in timeline order.
 - Audio is mixed from all non-muted audio tracks plus embedded audio in video clips.
 - Export runs in a background thread; the UI remains responsive.
