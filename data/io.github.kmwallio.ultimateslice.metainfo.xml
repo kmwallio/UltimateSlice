@@ -28,6 +28,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.2" date="2026-03-03">
+      <description>
+        <p>File type differentiation</p>
+        <ul>
+          <li>Can import FCPXML files with basic transforms and audio levels</li>
+          <li>Allows for saving as USPXML (recommended), but will also support FCPXML export preserving unsupported features</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-03-03">
       <description>
         <p>Improved compatibilities</p>

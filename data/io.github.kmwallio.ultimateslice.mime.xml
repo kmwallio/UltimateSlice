@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ultimateslice-project+xml">
+    <comment>UltimateSlice Project</comment>
+    <sub-class-of type="application/xml"/>
+    <glob pattern="*.uspxml"/>
+    <icon name="io.github.kmwallio.ultimateslice"/>
+  </mime-type>
+</mime-info>

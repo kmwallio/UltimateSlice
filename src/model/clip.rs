@@ -154,6 +154,15 @@ pub struct Clip {
     /// Original imported FCPXML source path (before any runtime remapping).
     #[serde(default)]
     pub fcpxml_original_source_path: Option<String>,
+    /// Original imported FCPXML asset ref id from `asset-clip@ref`.
+    #[serde(default)]
+    pub fcpxml_asset_ref: Option<String>,
+    /// Unsupported FCPXML asset attributes preserved for round-trip export.
+    #[serde(default)]
+    pub fcpxml_unknown_asset_attrs: Vec<(String, String)>,
+    /// Unsupported FCPXML child tags under asset preserved for round-trip export.
+    #[serde(default)]
+    pub fcpxml_unknown_asset_children: Vec<String>,
 }
 
 impl Clip {
@@ -211,6 +220,9 @@ impl Clip {
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
+            fcpxml_asset_ref: None,
+            fcpxml_unknown_asset_attrs: Vec::new(),
+            fcpxml_unknown_asset_children: Vec::new(),
         }
     }
 

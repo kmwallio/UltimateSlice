@@ -108,6 +108,11 @@ Tracking docs:
 - [x] Transform coordinate parity: convert FCPXML `adjust-transform@position` using frame-height percentage semantics (both axes), mapped to/from UltimateSlice's scale-aware internal position model (with Y-axis inversion), including single-clip dirty-save patch path
 - [x] Preserve unknown fields on clean round-trip save for imported FCPXML (verbatim open→save passthrough when project is unmodified)
 - [x] Preserve unknown imported `asset-clip` attributes and child tags on regenerated dirty saves while updating edited scale values (`us:scale` / `adjust-transform@scale`)
+- [x] Preserve unknown imported resource `asset` attributes/children (including Final Cut metadata/md payloads) on regenerated dirty saves, emit `<!DOCTYPE fcpxml>`, and keep canonical nested `media-rep` source references
+- [x] Preserve unknown attrs/child tags across core FCPXML document structure on regenerated dirty saves (`fcpxml`, `resources`, selected `library`/`event`/`project`/`sequence`/`spine`, and selected sequence format attrs)
+- [x] Project extension UX: default Save suggestion uses `.uspxml`, Open supports `.uspxml` + `.fcpxml` (plus `.xml` fallback), and desktop metadata advertises project XML association
+- [x] Shared MIME registration for UltimateSlice projects: ship `application/x-ultimateslice-project+xml` shared-mime-info definition with `*.uspxml` glob and install it in Flatpak package metadata
+- [x] Dirty imported transform edits prefer in-place XML patching (when `adjust-transform` exists), preserving original asset IDs/document structure instead of full regeneration
 - [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
 - [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
