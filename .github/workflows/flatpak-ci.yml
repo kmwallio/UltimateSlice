@@ -1,11 +1,13 @@
 name: Flatpak CI
 
-on:
-  push:
+on: [push]
 
 jobs:
   build-flatpak:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      options: --privileged
     steps:
       - name: Checkout
         uses: actions/checkout@v4
