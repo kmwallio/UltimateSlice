@@ -8,6 +8,24 @@ use gtk4::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
+const VOLUME_DB_MIN: f64 = -100.0;
+const VOLUME_DB_MAX: f64 = 12.0;
+const VOLUME_LINEAR_MAX: f64 = 3.981_071_705_5; // +12 dB
+
+fn db_to_linear_volume(db: f64) -> f64 {
+    (10.0f64)
+        .powf(db.clamp(VOLUME_DB_MIN, VOLUME_DB_MAX) / 20.0)
+        .clamp(0.0, VOLUME_LINEAR_MAX)
+}
+
+fn linear_to_db_volume(linear: f64) -> f64 {
+    if linear <= 0.0 {
+        VOLUME_DB_MIN
+    } else {
+        (20.0 * linear.log10()).clamp(VOLUME_DB_MIN, VOLUME_DB_MAX)
+    }
+}
+
 /// Holds references to the inspector's display labels so they can be
 /// updated from outside without widget traversal.
 #[derive(Clone)]
@@ -124,7 +142,8 @@ impl InspectorView {
                 self.shadows_slider.set_value(c.shadows as f64);
                 self.midtones_slider.set_value(c.midtones as f64);
                 self.highlights_slider.set_value(c.highlights as f64);
-                self.volume_slider.set_value(c.volume as f64);
+                self.volume_slider
+                    .set_value(linear_to_db_volume(c.volume as f64));
                 self.pan_slider.set_value(c.pan as f64);
                 self.crop_left_slider.set_value(c.crop_left as f64);
                 self.crop_right_slider.set_value(c.crop_right as f64);
@@ -177,7 +196,7 @@ impl InspectorView {
                 self.shadows_slider.set_value(0.0);
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
-                self.volume_slider.set_value(1.0);
+                self.volume_slider.set_value(0.0);
                 self.pan_slider.set_value(0.0);
                 self.crop_left_slider.set_value(0.0);
                 self.crop_right_slider.set_value(0.0);
@@ -381,11 +400,13 @@ pub fn build_inspector(
     audio_expander.set_child(Some(&audio_inner));
 
     row_label(&audio_inner, "Volume");
-    let volume_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
-    volume_slider.set_value(1.0);
+    let volume_slider = Scale::with_range(Orientation::Horizontal, VOLUME_DB_MIN, VOLUME_DB_MAX, 0.1);
+    volume_slider.set_value(0.0);
     volume_slider.set_draw_value(true);
-    volume_slider.set_digits(2);
-    volume_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    volume_slider.set_digits(1);
+    volume_slider.add_mark(VOLUME_DB_MIN, gtk4::PositionType::Bottom, Some("-100 dB"));
+    volume_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0 dB"));
+    volume_slider.add_mark(VOLUME_DB_MAX, gtk4::PositionType::Bottom, Some("+12 dB"));
     audio_inner.append(&volume_slider);
 
     row_label(&audio_inner, "Pan");
@@ -659,7 +680,7 @@ pub fn build_inspector(
             if *updating.borrow() {
                 return;
             }
-            let val = s.value() as f32;
+            let val = db_to_linear_volume(s.value()) as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -841,7 +862,7 @@ pub fn build_inspector(
                 }
                 on_audio_changed(
                     clip_id,
-                    volume_slider_cb.value() as f32,
+                    db_to_linear_volume(volume_slider_cb.value()) as f32,
                     pan_slider_cb.value() as f32,
                 );
             }
@@ -873,7 +894,7 @@ pub fn build_inspector(
                 }
                 on_audio_changed(
                     clip_id,
-                    volume_slider_cb.value() as f32,
+                    db_to_linear_volume(volume_slider_cb.value()) as f32,
                     pan_slider_cb.value() as f32,
                 );
             }

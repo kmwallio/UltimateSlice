@@ -353,7 +353,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "save_fcpxml",
-            "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file.",
+            "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file using FCPXML 1.14.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -364,7 +364,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "open_fcpxml",
-            "description": "Load a project from a Final Cut Pro XML (.fcpxml) file, replacing the current project.",
+            "description": "Load a project from a Final Cut Pro XML (.fcpxml) file (supports versions up to 1.14), replacing the current project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -505,6 +505,17 @@ fn tools_list() -> Value {
                     "quality": { "type": "string", "enum": ["auto", "full", "half", "quarter"], "description": "Preview quality level. 'auto' adapts to monitor size, 'half' halves both dimensions (4x less pixels), 'quarter' quarters them (16x less pixels)." }
                 },
                 "required": ["quality"]
+            }
+        },
+        {
+            "name": "set_realtime_preview",
+            "description": "Enable or disable real-time preview. When enabled, upcoming decoder slots are pre-built so clip transitions are near-instant. Uses more CPU and memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
             }
         },
         {
@@ -766,6 +777,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "set_preview_quality" => McpCommand::SetPreviewQuality {
             quality: args["quality"].as_str().unwrap_or("full").to_string(),
+            reply: tx,
+        },
+
+        "set_realtime_preview" => McpCommand::SetRealtimePreview {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },
 

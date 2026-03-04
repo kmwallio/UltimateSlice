@@ -94,8 +94,21 @@ Tracking docs:
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
 
 ### FCPXML
-- [x] FCPXML 1.10 import (`quick-xml`) — parses assets, spine, asset-clip elements
-- [x] FCPXML 1.10 export — writes resources/format/asset + library/event/project/sequence/spine
+- [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
+- [x] FCPXML 1.14 export — writes resources/format/asset + library/event/project/sequence/spine
+- [x] FCPXML format export metadata parity: emit canonical `format@name` only for known presets and preserve numeric format fields for all presets (avoids hardcoded 1080p24 name mismatches)
+- [x] FCPXML export writes source media in nested `media-rep` entries (`original-media` for non-proxy files, `proxy-media` for detected proxy-cache paths)
+- [x] Import compatibility for Apple-authored FCPXML 1.14 files: nested `media-rep` source paths, first-project timeline selection in multi-project files, and lane/media-type fallback track routing
+- [x] Marker import compatibility: parse `chapter-marker` and convert nested clip marker times (`start`/`offset` aware) to correct timeline marker positions
+- [x] Standard audio gain import mapping: parse `adjust-volume@amount` (dB values such as `-6dB` / `-96dB`) into UltimateSlice clip volume multipliers
+- [x] Format preset fallback: derive frame rate/resolution from known format names (e.g. `FFVideoFormat1080p30`) when numeric format fields are absent
+- [x] Standard Inspector mapping (phase 1): parse/write `adjust-transform` (scale/position/rotation), `adjust-compositing` (opacity), and `adjust-crop`/`crop-rect` (crop bounds) with `us:*` fallback
+- [x] Transform coordinate parity: convert FCPXML `adjust-transform@position` using frame-height percentage semantics (both axes), mapped to/from UltimateSlice's scale-aware internal position model (with Y-axis inversion), including single-clip dirty-save patch path
+- [x] Preserve unknown fields on clean round-trip save for imported FCPXML (verbatim open→save passthrough when project is unmodified)
+- [x] Preserve unknown imported `asset-clip` attributes and child tags on regenerated dirty saves while updating edited scale values (`us:scale` / `adjust-transform@scale`)
+- [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
+- [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
+- [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)
@@ -172,6 +185,9 @@ Tracking docs:
   - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
     - [x] Frame-boundary seek deduplication: quantize paused scrub positions to frame boundaries and skip redundant pipeline work for same-frame seeks
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
+   - [x] Managed local proxy cache root (`$XDG_CACHE_HOME/ultimateslice/proxies`, fallback `/tmp/ultimateslice/proxies`) with fallback to alongside-media `UltimateSlice.cache` when local-cache transcodes fail
+   - [x] Managed proxy cache lifecycle cleanup (startup stale prune for ownership-index entries older than 24h, plus project unload/app-close cleanup of managed cache files)
+   - [x] Eager near-playhead proxy priming during project reload (capped, proximity-ordered source requests before first program-player rebuild)
    - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
     - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops
@@ -191,12 +207,22 @@ Tracking docs:
           - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
           - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
+          - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
+          - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
+          - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
+          - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
            - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
-           - [x] Occlusion-based video decode skip: clips fully hidden behind an opaque full-frame overlay build audio-only slots (decoder with audio caps only), skipping video decode/effects/compositor
-           - [x] Occlusion audio continuity fallback: if an occluded clip's audio-only slot cannot be created, preview falls back to a full slot so audio is preserved
-         - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
+            - [x] Occlusion-based video decode skip: clips fully hidden behind an opaque full-frame overlay build audio-only slots (decoder with audio caps only), skipping video decode/effects/compositor
+             - [x] Occlusion audio continuity fallback: if an occluded clip's audio-only slot cannot be created, preview falls back to a full slot so audio is preserved
+             - [x] Stricter occlusion classification for correctness: only centered/unrotated/unflipped/uncropped opaque full-frame overlays trigger occlusion skip, reducing false-positive audio muting
+             - [x] Correctness guard for multitrack audio: temporarily disable occlusion audio-only substitution during active rebuilds to preserve reliable mixed audio
+              - [x] Boundary audio-drop guard: when overlap rebuilds encounter delayed video-pad linking, keep already-linked slot audio active (do not EOS the audio pad solely because video linking is late)
+              - [x] Boundary pre-link EOS deferral for active handoffs: when playback is already running across a boundary, avoid forcing early pre-link EOS on newly added overlap slots so late pad-added links can settle before post-seek arrival checks
+              - [x] Audiomixer flush parity: flush the audiomixer alongside the compositor during boundary rebuilds so their output running-times stay in sync, preventing audio buffer late-drop after a video-path flush
+              - [x] Continuing decoders fast path: reuse existing decoder slots at boundary crossings when adjacent clips share the same source file, avoiding teardown/rebuild overhead (~60-75% boundary latency reduction for same-source transitions)
+            - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
   - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
@@ -209,7 +235,7 @@ Tracking docs:
 
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
-- [x] Volume / pan controls per clip in the inspector (sliders, GStreamer volume + audiopanorama, persisted in FCPXML)
+- [x] Volume / pan controls per clip in the inspector (volume slider now dB-based: `-100 dB` to `+12 dB`, mapped to linear gain for playback/export, persisted in FCPXML)
 - [ ] Basic audio mixing (level meters)
 
 ### Color & Effects

@@ -59,7 +59,10 @@ Preferences are grouped by category in a sidebar:
   - `Quarter Res`: generates quarter-resolution H.264 proxies.
 - When Proxy mode is `Off`, UltimateSlice now auto-enables proxies during heavy live-preview regions (3+ overlapping video tracks) to keep playback responsive, then returns to original media when overlap drops below that threshold.
 - Auto-enabled proxy scale follows current preview pressure: Half-res by default, Quarter-res when preview quality is reduced to Quarter.
-- Proxy files are transcoded in the background via ffmpeg and stored in `UltimateSlice.cache/` next to the source files.
+- Proxy files are transcoded in the background via ffmpeg and prefer a managed local cache root at `$XDG_CACHE_HOME/ultimateslice/proxies` (fallback `/tmp/ultimateslice/proxies`) for better external-drive playback.
+- If local-cache writes/transcodes fail, UltimateSlice falls back to alongside-media `UltimateSlice.cache/` for that source.
+- Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index), and project unload/app close performs managed-cache cleanup.
+- Project reload eagerly primes a capped set of near-playhead proxy sources so first playback can pick up local proxies sooner on slower/external storage.
 - A yellow progress bar appears at the bottom of the window during proxy generation.
 - **Changing the proxy size** (e.g. from Half Res to Quarter Res) automatically invalidates existing proxies and re-generates them at the new resolution.
 - **LUT-baked proxies**: when a LUT is assigned to a clip via the Inspector, a new proxy is generated for that clip with the LUT baked in, so the preview reflects the color grade. Removing the LUT regenerates a plain (ungraded) proxy.

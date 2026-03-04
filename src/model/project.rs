@@ -79,6 +79,9 @@ pub struct Project {
     /// Path to the saved project file, if any
     #[serde(skip)]
     pub file_path: Option<String>,
+    /// Original FCPXML document captured at import time for lossless clean-save passthrough.
+    #[serde(skip)]
+    pub source_fcpxml: Option<String>,
 }
 
 impl Project {
@@ -92,6 +95,7 @@ impl Project {
             markers: Vec::new(),
             dirty: false,
             file_path: None,
+            source_fcpxml: None,
         };
         // Default tracks like FCP
         project.tracks.push(Track::new_video("Video 1"));
@@ -253,5 +257,11 @@ mod tests {
     fn test_track_mut_not_found() {
         let mut p = Project::new("Test");
         assert!(p.track_mut("nonexistent-id").is_none());
+    }
+
+    #[test]
+    fn test_project_new_has_no_source_fcpxml() {
+        let p = Project::new("Test");
+        assert!(p.source_fcpxml.is_none());
     }
 }

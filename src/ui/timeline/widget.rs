@@ -576,6 +576,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             }
         });
     }
+    let click_ref = click.clone();
     area.add_controller(click);
 
     // ── Drag: move or trim clips ────────────────────────────────────────────
@@ -586,6 +587,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
         drag.connect_drag_begin({
             let state = state.clone();
+            let area_weak = area_weak.clone();
             move |_gesture, x, y| {
                 if state.borrow().loading {
                     return;
@@ -601,6 +603,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     drop(st);
                     if let Some(cb) = seek_cb {
                         cb(ns);
+                    }
+                    if let Some(a) = area_weak.upgrade() {
+                        a.queue_draw();
                     }
                     return;
                 }
@@ -1662,7 +1667,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             }
         });
     }
-    area.add_controller(drag);
+    area.add_controller(drag.clone());
+    // group_with requires both gestures to already be on the same widget.
+    drag.group_with(&click_ref);
 
     // ── Keyboard shortcuts ──────────────────────────────────────────────────
     let key_ctrl = EventControllerKey::new();

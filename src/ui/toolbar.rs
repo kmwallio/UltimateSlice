@@ -207,7 +207,10 @@ pub fn build_toolbar(
                                     let result = std::fs::read_to_string(&path_bg)
                                         .map_err(|e| format!("Failed to read file: {e}"))
                                         .and_then(|xml| {
-                                            fcpxml::parser::parse_fcpxml(&xml)
+                                            fcpxml::parser::parse_fcpxml_with_path(
+                                                &xml,
+                                                Some(std::path::Path::new(&path_bg)),
+                                            )
                                                 .map_err(|e| format!("FCPXML parse error: {e}"))
                                         });
                                     let _ = tx.send(result);
@@ -341,7 +344,10 @@ pub fn build_toolbar(
                                     let result = std::fs::read_to_string(&path_bg)
                                         .map_err(|e| format!("Failed to open recent project: {e}"))
                                         .and_then(|xml| {
-                                            fcpxml::parser::parse_fcpxml(&xml)
+                                            fcpxml::parser::parse_fcpxml_with_path(
+                                                &xml,
+                                                Some(std::path::Path::new(&path_bg)),
+                                            )
                                                 .map_err(|e| format!("FCPXML parse error: {e}"))
                                         });
                                     let _ = tx.send(result);

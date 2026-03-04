@@ -10,7 +10,7 @@ use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 fn auto_preview_divisor(
@@ -113,6 +113,58 @@ fn active_video_track_count(project: &Project, timeline_pos_ns: u64) -> usize {
                 .any(|c| timeline_pos_ns >= c.timeline_start && timeline_pos_ns < c.timeline_end())
         })
         .count()
+}
+
+fn collect_near_playhead_clip_sources(
+    project: &Project,
+    playhead_ns: u64,
+    window_ns: u64,
+    max_items: usize,
+) -> Vec<(String, Option<String>)> {
+    if max_items == 0 {
+        return Vec::new();
+    }
+    let window_start = playhead_ns.saturating_sub(window_ns);
+    let window_end = playhead_ns.saturating_add(window_ns);
+
+    let mut candidates: Vec<(u64, u64, String, Option<String>)> = project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video)
+        .flat_map(|t| t.clips.iter())
+        .filter(|c| c.timeline_end() >= window_start && c.timeline_start <= window_end)
+        .map(|c| {
+            let clip_end = c.timeline_end();
+            let distance = if playhead_ns < c.timeline_start {
+                c.timeline_start.saturating_sub(playhead_ns)
+            } else if playhead_ns > clip_end {
+                playhead_ns.saturating_sub(clip_end)
+            } else {
+                0
+            };
+            (
+                distance,
+                c.timeline_start,
+                c.source_path.clone(),
+                c.lut_path.clone(),
+            )
+        })
+        .collect();
+
+    candidates.sort_by_key(|(distance, timeline_start, _, _)| (*distance, *timeline_start));
+
+    let mut out = Vec::new();
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    for (_, _, path, lut) in candidates {
+        let key = (path, lut);
+        if seen.insert(key.clone()) {
+            out.push(key);
+            if out.len() >= max_items {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Build and show the main application window.
@@ -227,6 +279,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
     prog_player_raw.set_preview_quality(initial_preview_quality.divisor());
+    prog_player_raw.set_experimental_preview_optimizations(
+        preferences_state.borrow().experimental_preview_optimizations,
+    );
+    prog_player_raw.set_realtime_preview(
+        preferences_state.borrow().realtime_preview,
+    );
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -312,6 +370,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         prog_player
                             .borrow_mut()
                             .set_preview_quality(new_state.preview_quality.divisor());
+                        prog_player
+                            .borrow_mut()
+                            .set_experimental_preview_optimizations(
+                                new_state.experimental_preview_optimizations,
+                            );
+                        prog_player
+                            .borrow_mut()
+                            .set_realtime_preview(
+                                new_state.realtime_preview,
+                            );
                         if new_state.proxy_mode.is_enabled() {
                             // If the proxy scale changed, invalidate old entries so clips are
                             // re-transcoded at the new resolution.
@@ -1762,6 +1830,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 on_close_preview();
                 library.borrow_mut().clear();
                 prog_player.borrow_mut().stop();
+                {
+                    let mut cache = proxy_cache.borrow_mut();
+                    cache.cleanup_local_cache_for_unload();
+                    cache.invalidate_all();
+                }
+                prog_player.borrow_mut().update_proxy_paths(HashMap::new());
             }
 
             // Update window title
@@ -1920,17 +1994,45 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     return;
                 }
                 let phase1_started = std::time::Instant::now();
+                const NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS: u64 = 8_000_000_000;
+                const NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES: usize = 8;
                 // Resolve proxy paths BEFORE load_clips so the first
                 // rebuild_pipeline_at() uses proxies instead of originals.
                 {
-                    let prefs = preferences_state_reload.borrow();
-                    if prefs.proxy_mode.is_enabled() {
-                        let scale = match prefs.proxy_mode {
-                            crate::ui_state::ProxyMode::QuarterRes => {
-                                crate::media::proxy_cache::ProxyScale::Quarter
-                            }
-                            _ => crate::media::proxy_cache::ProxyScale::Half,
-                        };
+                    let (proxy_mode, preview_quality) = {
+                        let prefs = preferences_state_reload.borrow();
+                        (prefs.proxy_mode.clone(), prefs.preview_quality.clone())
+                    };
+                    let manual_proxy_mode = proxy_mode.is_enabled();
+                    let manual_scale = match proxy_mode {
+                        crate::ui_state::ProxyMode::QuarterRes => {
+                            crate::media::proxy_cache::ProxyScale::Quarter
+                        }
+                        _ => crate::media::proxy_cache::ProxyScale::Half,
+                    };
+                    let prime_scale = if manual_proxy_mode {
+                        manual_scale
+                    } else if matches!(preview_quality, crate::ui_state::PreviewQuality::Quarter) {
+                        crate::media::proxy_cache::ProxyScale::Quarter
+                    } else {
+                        crate::media::proxy_cache::ProxyScale::Half
+                    };
+                    let near_playhead_sources: Vec<(String, Option<String>)> = {
+                        let proj = project_reload.borrow();
+                        collect_near_playhead_clip_sources(
+                            &proj,
+                            prev_pos,
+                            NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS,
+                            NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES,
+                        )
+                    };
+                    {
+                        let mut cache = proxy_cache_reload.borrow_mut();
+                        for (path, lut) in &near_playhead_sources {
+                            cache.request(path, prime_scale, lut.as_deref());
+                        }
+                    }
+                    if manual_proxy_mode {
                         let clip_sources: Vec<(String, Option<String>)> = {
                             let proj = project_reload.borrow();
                             let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
@@ -1950,12 +2052,19 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         {
                             let mut cache = proxy_cache_reload.borrow_mut();
                             for (path, lut) in &clip_sources {
-                                cache.request(path, scale, lut.as_deref());
+                                cache.request(path, manual_scale, lut.as_deref());
                             }
                         }
-                        let paths = proxy_cache_reload.borrow().proxies.clone();
-                        prog_player_reload.borrow_mut().update_proxy_paths(paths);
                     }
+                    if !near_playhead_sources.is_empty() {
+                        log::debug!(
+                            "window:on_project_changed primed {} near-playhead proxy source(s) around {}ns",
+                            near_playhead_sources.len(),
+                            prev_pos
+                        );
+                    }
+                    let paths = proxy_cache_reload.borrow().proxies.clone();
+                    prog_player_reload.borrow_mut().update_proxy_paths(paths);
                 }
 
                 {
@@ -2421,16 +2530,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     {
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
+        let proxy_cache = proxy_cache.clone();
         let close_approved = Rc::new(Cell::new(false));
         let close_approved_for_signal = close_approved.clone();
         window.connect_close_request(move |w| {
             if close_approved_for_signal.get() {
+                proxy_cache.borrow_mut().cleanup_local_cache_for_unload();
                 return glib::Propagation::Proceed;
             }
             let close_approved_for_continue = close_approved.clone();
+            let proxy_cache_for_continue = proxy_cache.clone();
             let weak = w.downgrade();
             let on_continue: Rc<dyn Fn()> = Rc::new(move || {
                 close_approved_for_continue.set(true);
+                proxy_cache_for_continue
+                    .borrow_mut()
+                    .cleanup_local_cache_for_unload();
                 if let Some(win) = weak.upgrade() {
                     win.close();
                 }
@@ -2720,6 +2835,24 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "preview_quality": new_state.preview_quality.as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::SetRealtimePreview { enabled, reply } => {
+            prog_player
+                .borrow_mut()
+                .set_realtime_preview(enabled);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.realtime_preview = enabled;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply
+                .send(json!({
+                    "success": true,
+                    "realtime_preview": enabled
                 }))
                 .ok();
         }
@@ -3080,7 +3213,11 @@ fn handle_mcp_command(
                 let result = std::fs::read_to_string(&path_bg)
                     .map_err(|e| e.to_string())
                     .and_then(|xml| {
-                        crate::fcpxml::parser::parse_fcpxml(&xml).map_err(|e| e.to_string())
+                        crate::fcpxml::parser::parse_fcpxml_with_path(
+                            &xml,
+                            Some(std::path::Path::new(&path_bg)),
+                        )
+                        .map_err(|e| e.to_string())
                     });
                 let _ = tx.send(result);
             });
