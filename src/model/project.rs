@@ -19,6 +19,14 @@ fn default_marker_color() -> u32 {
     0xFF8C00FF
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FcpxmlUnknownNode {
+    #[serde(default)]
+    pub attrs: Vec<(String, String)>,
+    #[serde(default)]
+    pub children: Vec<String>,
+}
+
 impl Marker {
     pub fn new(position_ns: u64, label: impl Into<String>) -> Self {
         Self {
@@ -82,6 +90,30 @@ pub struct Project {
     /// Original FCPXML document captured at import time for lossless clean-save passthrough.
     #[serde(skip)]
     pub source_fcpxml: Option<String>,
+    /// Unknown FCPXML root (`<fcpxml>`) attrs/children preserved for dirty-save regeneration.
+    #[serde(skip)]
+    pub fcpxml_unknown_root: FcpxmlUnknownNode,
+    /// Unknown FCPXML `<resources>` attrs/children preserved for dirty-save regeneration.
+    #[serde(skip)]
+    pub fcpxml_unknown_resources: FcpxmlUnknownNode,
+    /// Unknown attrs on the selected sequence's referenced `<format>` resource.
+    #[serde(skip)]
+    pub fcpxml_unknown_format: FcpxmlUnknownNode,
+    /// Unknown FCPXML `<library>` attrs/children preserved for dirty-save regeneration.
+    #[serde(skip)]
+    pub fcpxml_unknown_library: FcpxmlUnknownNode,
+    /// Unknown FCPXML selected `<event>` attrs/children preserved for dirty-save regeneration.
+    #[serde(skip)]
+    pub fcpxml_unknown_event: FcpxmlUnknownNode,
+    /// Unknown FCPXML selected `<project>` attrs/children preserved for dirty-save regeneration.
+    #[serde(skip)]
+    pub fcpxml_unknown_project: FcpxmlUnknownNode,
+    /// Unknown FCPXML selected `<sequence>` attrs/children preserved for dirty-save regeneration.
+    #[serde(skip)]
+    pub fcpxml_unknown_sequence: FcpxmlUnknownNode,
+    /// Unknown FCPXML selected `<spine>` attrs/children preserved for dirty-save regeneration.
+    #[serde(skip)]
+    pub fcpxml_unknown_spine: FcpxmlUnknownNode,
 }
 
 impl Project {
@@ -96,6 +128,14 @@ impl Project {
             dirty: false,
             file_path: None,
             source_fcpxml: None,
+            fcpxml_unknown_root: FcpxmlUnknownNode::default(),
+            fcpxml_unknown_resources: FcpxmlUnknownNode::default(),
+            fcpxml_unknown_format: FcpxmlUnknownNode::default(),
+            fcpxml_unknown_library: FcpxmlUnknownNode::default(),
+            fcpxml_unknown_event: FcpxmlUnknownNode::default(),
+            fcpxml_unknown_project: FcpxmlUnknownNode::default(),
+            fcpxml_unknown_sequence: FcpxmlUnknownNode::default(),
+            fcpxml_unknown_spine: FcpxmlUnknownNode::default(),
         };
         // Default tracks like FCP
         project.tracks.push(Track::new_video("Video 1"));

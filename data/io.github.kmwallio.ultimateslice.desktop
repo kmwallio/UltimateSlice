@@ -6,5 +6,6 @@ Exec=ultimate-slice
 Icon=io.github.kmwallio.ultimateslice
 Type=Application
 Categories=AudioVideo;Video;GTK;
+MimeType=application/x-ultimateslice-project+xml;
 Keywords=nle;video editor;video;editing;non-linear;
 StartupNotify=true

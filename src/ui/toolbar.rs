@@ -92,11 +92,12 @@ pub fn confirm_unsaved_then(
                 }
             } else {
                 let file_dialog = gtk::FileDialog::new();
-                file_dialog.set_title("Save FCPXML Project");
-                file_dialog.set_initial_name(Some("project.fcpxml"));
+                file_dialog.set_title("Save Project XML");
+                file_dialog.set_initial_name(Some("project.uspxml"));
                 let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.uspxml");
                 filter.add_pattern("*.fcpxml");
-                filter.set_name(Some("FCPXML Files"));
+                filter.set_name(Some("Project XML Files"));
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);
                 file_dialog.set_filters(Some(&filters));
@@ -172,9 +173,9 @@ pub fn build_toolbar(
     }
     header.pack_start(&btn_new);
 
-    // Open / Import FCPXML
+    // Open project XML
     let btn_open = Button::with_label("Open…");
-    btn_open.set_tooltip_text(Some("Open FCPXML project (Ctrl+O)"));
+    btn_open.set_tooltip_text(Some("Open project XML (Ctrl+O)"));
     {
         let project = project.clone();
         let timeline_state = timeline_state.clone();
@@ -191,12 +192,13 @@ pub fn build_toolbar(
                 let window = window.clone();
                 move || {
                     let dialog = gtk::FileDialog::new();
-                    dialog.set_title("Open FCPXML Project");
+                    dialog.set_title("Open Project XML");
 
                     let filter = gtk::FileFilter::new();
+                    filter.add_pattern("*.uspxml");
                     filter.add_pattern("*.fcpxml");
                     filter.add_pattern("*.xml");
-                    filter.set_name(Some("FCPXML Files"));
+                    filter.set_name(Some("Project XML Files"));
                     let filters = gio::ListStore::new::<gtk::FileFilter>();
                     filters.append(&filter);
                     dialog.set_filters(Some(&filters));
@@ -424,18 +426,19 @@ pub fn build_toolbar(
     }
     header.pack_start(&btn_recent);
     let btn_save = Button::with_label("Save…");
-    btn_save.set_tooltip_text(Some("Save as FCPXML (Ctrl+S)"));
+    btn_save.set_tooltip_text(Some("Save project XML (Ctrl+S)"));
     {
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
         btn_save.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
-            dialog.set_title("Save FCPXML Project");
-            dialog.set_initial_name(Some("project.fcpxml"));
+            dialog.set_title("Save Project XML");
+            dialog.set_initial_name(Some("project.uspxml"));
 
             let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.uspxml");
             filter.add_pattern("*.fcpxml");
-            filter.set_name(Some("FCPXML Files"));
+            filter.set_name(Some("Project XML Files"));
             let filters = gio::ListStore::new::<gtk::FileFilter>();
             filters.append(&filter);
             dialog.set_filters(Some(&filters));

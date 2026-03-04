@@ -58,12 +58,13 @@ The application opens with an **Untitled** project containing one Video track an
 - Click **New** in the toolbar (or press `Ctrl+N`).
 - Click **⚙ Settings** to configure canvas resolution and frame rate.
 - Open **Preferences** (`Ctrl+,`) and use the **General** page's **About & Open-source credits** button to view third-party crate/library credits and license notices.
-- Use **Save…** (`Ctrl+S`) to save as FCPXML at any point.
+- Use **Save…** (`Ctrl+S`) to save as project XML at any point (default filename: `.uspxml`; `.fcpxml` also supported).
 
 ## Opening an Existing Project
 
-- Click **Open…** (`Ctrl+O`) and select a `.fcpxml` file.
+- Click **Open…** (`Ctrl+O`) and select a `.uspxml` or `.fcpxml` file (the chooser also allows generic `.xml` fallback).
 - Or click **Recent ▾** to pick from the last 10 opened/saved projects.
+- On Linux desktop environments, `.uspxml` files are registered as UltimateSlice project files and can be associated with the app.
 - UltimateSlice reads FCPXML versions 1.10 through 1.14, including all clip properties, markers, and effects.
 - For FCPXML files containing multiple projects, UltimateSlice imports the first project timeline in the file.
 - Project file read/parse runs off the GTK main thread, so the UI remains responsive while opening larger timelines.

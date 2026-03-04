@@ -20,6 +20,8 @@ struct Asset {
     start_ns: u64,
     has_video: bool,
     has_audio: bool,
+    unknown_attrs: Vec<(String, String)>,
+    unknown_children: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -27,6 +29,7 @@ struct FormatSpec {
     width: u32,
     height: u32,
     frame_rate: FrameRate,
+    unknown_attrs: Vec<(String, String)>,
 }
 
 struct AssetBuilder {
@@ -37,6 +40,8 @@ struct AssetBuilder {
     start_ns: u64,
     has_video: bool,
     has_audio: bool,
+    unknown_attrs: Vec<(String, String)>,
+    unknown_children: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -71,12 +76,18 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
     let mut track_map: BTreeMap<(u8, usize), Track> = BTreeMap::new();
     let mut buf = Vec::new();
     let mut in_spine = false;
+    let mut in_fcpxml = false;
+    let mut in_resources = false;
+    let mut in_library = false;
+    let mut in_selected_event = false;
     let mut in_selected_project = false;
+    let mut selected_event_seen = false;
     let mut selected_project_seen = false;
     let mut in_selected_sequence = false;
     let mut selected_sequence_seen = false;
     let mut selected_spine_seen = false;
     let mut selected_sequence_format_applied = false;
+    let mut selected_sequence_format_ref: Option<String> = None;
     let mut current_asset: Option<AssetBuilder> = None;
     let mut clip_stack: Vec<ActiveClipContext> = Vec::new();
     let mount_root = fcpxml_path.and_then(fcpxml_mount_root);
@@ -96,6 +107,33 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if let Some(version) = attrs.get("version") {
                             validate_fcpxml_version(version)?;
                         }
+                        in_fcpxml = true;
+                        project.fcpxml_unknown_root.attrs =
+                            collect_unknown_attrs(&attrs, is_known_fcpxml_attr);
+                    }
+                    "resources" => {
+                        let attrs = parse_attrs(e)?;
+                        in_resources = true;
+                        project.fcpxml_unknown_resources.attrs =
+                            collect_unknown_attrs(&attrs, is_known_resources_attr);
+                    }
+                    "library" => {
+                        let attrs = parse_attrs(e)?;
+                        in_library = true;
+                        project.fcpxml_unknown_library.attrs =
+                            collect_unknown_attrs(&attrs, is_known_library_attr);
+                    }
+                    "event" if in_library => {
+                        let attrs = parse_attrs(e)?;
+                        if !selected_event_seen {
+                            selected_event_seen = true;
+                            in_selected_event = true;
+                            project.fcpxml_unknown_event.attrs =
+                                collect_unknown_attrs(&attrs, is_known_event_attr);
+                        } else {
+                            let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                            project.fcpxml_unknown_library.children.push(fragment);
+                        }
                     }
                     "project" => {
                         let attrs = parse_attrs(e)?;
@@ -105,28 +143,48 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             if let Some(n) = attrs.get("name") {
                                 project.title = n.clone();
                             }
+                            project.fcpxml_unknown_project.attrs =
+                                collect_unknown_attrs(&attrs, is_known_project_attr);
+                        } else if in_selected_event {
+                            let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                            project.fcpxml_unknown_event.children.push(fragment);
+                        } else if in_library {
+                            let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                            project.fcpxml_unknown_library.children.push(fragment);
                         } else {
-                            in_selected_project = false;
+                            let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                            project.fcpxml_unknown_root.children.push(fragment);
                         }
                     }
-                    "sequence" => {
+                    "sequence" if in_selected_project => {
                         let attrs = parse_attrs(e)?;
                         if in_selected_project && !selected_sequence_seen {
                             selected_sequence_seen = true;
                             in_selected_sequence = true;
+                            selected_sequence_format_ref = attrs.get("format").cloned();
                             if let Some(fmt_ref) = attrs.get("format") {
                                 if let Some(spec) = format_specs.get(fmt_ref) {
                                     project.width = spec.width;
                                     project.height = spec.height;
                                     project.frame_rate = spec.frame_rate.clone();
+                                    project.fcpxml_unknown_format.attrs =
+                                        spec.unknown_attrs.clone();
                                     selected_sequence_format_applied = true;
                                 }
                             }
+                            project.fcpxml_unknown_sequence.attrs =
+                                collect_unknown_attrs(&attrs, is_known_sequence_attr);
+                        } else {
+                            let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                            project.fcpxml_unknown_project.children.push(fragment);
                         }
                     }
                     "format" => {
                         let attrs = parse_attrs(e)?;
                         if let Some((id, spec)) = parse_format_spec(&attrs) {
+                            if selected_sequence_format_ref.as_deref() == Some(id.as_str()) {
+                                project.fcpxml_unknown_format.attrs = spec.unknown_attrs.clone();
+                            }
                             format_specs.insert(id, spec.clone());
                             if default_format.is_none() {
                                 default_format = Some(spec);
@@ -152,10 +210,16 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             }
                         }
                     }
-                    "spine" => {
-                        if in_selected_sequence && !selected_spine_seen {
+                    "spine" if in_selected_sequence => {
+                        let attrs = parse_attrs(e)?;
+                        if !selected_spine_seen {
                             in_spine = true;
                             selected_spine_seen = true;
+                            project.fcpxml_unknown_spine.attrs =
+                                collect_unknown_attrs(&attrs, is_known_spine_attr);
+                        } else {
+                            let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                            project.fcpxml_unknown_sequence.children.push(fragment);
                         }
                     }
                     "asset-clip" if in_spine => {
@@ -204,6 +268,40 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         let fragment = collect_unknown_start_fragment(&mut reader, e)?;
                         append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
                     }
+                    _ if current_asset.is_some() => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        if let Some(asset) = current_asset.as_mut() {
+                            asset.unknown_children.push(fragment);
+                        }
+                    }
+                    _ if in_spine => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        project.fcpxml_unknown_spine.children.push(fragment);
+                    }
+                    _ if in_selected_sequence => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        project.fcpxml_unknown_sequence.children.push(fragment);
+                    }
+                    _ if in_selected_project => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        project.fcpxml_unknown_project.children.push(fragment);
+                    }
+                    _ if in_selected_event => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        project.fcpxml_unknown_event.children.push(fragment);
+                    }
+                    _ if in_library => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        project.fcpxml_unknown_library.children.push(fragment);
+                    }
+                    _ if in_resources => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        project.fcpxml_unknown_resources.children.push(fragment);
+                    }
+                    _ if in_fcpxml => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        project.fcpxml_unknown_root.children.push(fragment);
+                    }
                     _ => {}
                 }
             }
@@ -217,10 +315,78 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if let Some(version) = attrs.get("version") {
                             validate_fcpxml_version(version)?;
                         }
+                        project.fcpxml_unknown_root.attrs =
+                            collect_unknown_attrs(&attrs, is_known_fcpxml_attr);
+                    }
+                    "resources" => {
+                        let attrs = parse_attrs(e)?;
+                        project.fcpxml_unknown_resources.attrs =
+                            collect_unknown_attrs(&attrs, is_known_resources_attr);
+                    }
+                    "library" => {
+                        let attrs = parse_attrs(e)?;
+                        project.fcpxml_unknown_library.attrs =
+                            collect_unknown_attrs(&attrs, is_known_library_attr);
+                    }
+                    "event" if in_library => {
+                        let attrs = parse_attrs(e)?;
+                        if !selected_event_seen {
+                            selected_event_seen = true;
+                            project.fcpxml_unknown_event.attrs =
+                                collect_unknown_attrs(&attrs, is_known_event_attr);
+                        } else {
+                            let fragment = collect_unknown_empty_fragment(e)?;
+                            project.fcpxml_unknown_library.children.push(fragment);
+                        }
+                    }
+                    "project" => {
+                        let attrs = parse_attrs(e)?;
+                        if !selected_project_seen {
+                            selected_project_seen = true;
+                            if let Some(n) = attrs.get("name") {
+                                project.title = n.clone();
+                            }
+                            project.fcpxml_unknown_project.attrs =
+                                collect_unknown_attrs(&attrs, is_known_project_attr);
+                        } else if in_selected_event {
+                            let fragment = collect_unknown_empty_fragment(e)?;
+                            project.fcpxml_unknown_event.children.push(fragment);
+                        } else if in_library {
+                            let fragment = collect_unknown_empty_fragment(e)?;
+                            project.fcpxml_unknown_library.children.push(fragment);
+                        } else {
+                            let fragment = collect_unknown_empty_fragment(e)?;
+                            project.fcpxml_unknown_root.children.push(fragment);
+                        }
+                    }
+                    "sequence" if in_selected_project => {
+                        let attrs = parse_attrs(e)?;
+                        if !selected_sequence_seen {
+                            selected_sequence_seen = true;
+                            selected_sequence_format_ref = attrs.get("format").cloned();
+                            if let Some(fmt_ref) = attrs.get("format") {
+                                if let Some(spec) = format_specs.get(fmt_ref) {
+                                    project.width = spec.width;
+                                    project.height = spec.height;
+                                    project.frame_rate = spec.frame_rate.clone();
+                                    project.fcpxml_unknown_format.attrs =
+                                        spec.unknown_attrs.clone();
+                                    selected_sequence_format_applied = true;
+                                }
+                            }
+                            project.fcpxml_unknown_sequence.attrs =
+                                collect_unknown_attrs(&attrs, is_known_sequence_attr);
+                        } else {
+                            let fragment = collect_unknown_empty_fragment(e)?;
+                            project.fcpxml_unknown_project.children.push(fragment);
+                        }
                     }
                     "format" => {
                         let attrs = parse_attrs(e)?;
                         if let Some((id, spec)) = parse_format_spec(&attrs) {
+                            if selected_sequence_format_ref.as_deref() == Some(id.as_str()) {
+                                project.fcpxml_unknown_format.attrs = spec.unknown_attrs.clone();
+                            }
                             format_specs.insert(id, spec.clone());
                             if default_format.is_none() {
                                 default_format = Some(spec);
@@ -290,6 +456,40 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         let fragment = collect_unknown_empty_fragment(e)?;
                         append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
                     }
+                    _ if current_asset.is_some() => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        if let Some(asset) = current_asset.as_mut() {
+                            asset.unknown_children.push(fragment);
+                        }
+                    }
+                    _ if in_spine => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        project.fcpxml_unknown_spine.children.push(fragment);
+                    }
+                    _ if in_selected_sequence => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        project.fcpxml_unknown_sequence.children.push(fragment);
+                    }
+                    _ if in_selected_project => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        project.fcpxml_unknown_project.children.push(fragment);
+                    }
+                    _ if in_selected_event => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        project.fcpxml_unknown_event.children.push(fragment);
+                    }
+                    _ if in_library => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        project.fcpxml_unknown_library.children.push(fragment);
+                    }
+                    _ if in_resources => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        project.fcpxml_unknown_resources.children.push(fragment);
+                    }
+                    _ if in_fcpxml => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        project.fcpxml_unknown_root.children.push(fragment);
+                    }
                     _ => {}
                 }
             }
@@ -297,6 +497,20 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                 let name_local = e.local_name();
                 let name = std::str::from_utf8(name_local.as_ref())?;
                 match name {
+                    "fcpxml" => {
+                        in_fcpxml = false;
+                    }
+                    "resources" => {
+                        in_resources = false;
+                    }
+                    "library" => {
+                        in_library = false;
+                    }
+                    "event" => {
+                        if in_selected_event {
+                            in_selected_event = false;
+                        }
+                    }
                     "asset" => {
                         if let Some(asset) = current_asset.take() {
                             finalize_asset(asset, &mut assets);
@@ -333,10 +547,22 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
     }
 
     if !selected_sequence_format_applied {
+        if let Some(fmt_ref) = selected_sequence_format_ref.as_deref() {
+            if let Some(spec) = format_specs.get(fmt_ref) {
+                project.width = spec.width;
+                project.height = spec.height;
+                project.frame_rate = spec.frame_rate.clone();
+                project.fcpxml_unknown_format.attrs = spec.unknown_attrs.clone();
+                selected_sequence_format_applied = true;
+            }
+        }
+    }
+    if !selected_sequence_format_applied {
         if let Some(spec) = default_format {
             project.width = spec.width;
             project.height = spec.height;
             project.frame_rate = spec.frame_rate;
+            project.fcpxml_unknown_format.attrs = spec.unknown_attrs;
         }
     }
 
@@ -444,6 +670,9 @@ fn parse_asset_clip(
             clip.timeline_start = timeline_start;
             clip.label = label;
             clip.fcpxml_original_source_path = Some(asset.src.clone());
+            clip.fcpxml_asset_ref = Some(asset_ref.clone());
+            clip.fcpxml_unknown_asset_attrs = asset.unknown_attrs.clone();
+            clip.fcpxml_unknown_asset_children = asset.unknown_children.clone();
             // Restore color/effects from vendor attributes
             if let Some(v) = attrs.get("us:brightness") {
                 clip.brightness = v.parse().unwrap_or(0.0);
@@ -768,6 +997,56 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
     )
 }
 
+fn is_known_asset_attr(key: &str) -> bool {
+    matches!(
+        key,
+        "id" | "src" | "name" | "duration" | "start" | "hasVideo" | "hasAudio"
+    )
+}
+
+fn collect_unknown_attrs(
+    attrs: &HashMap<String, String>,
+    is_known: fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    attrs
+        .iter()
+        .filter(|(k, _)| !is_known(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+fn is_known_fcpxml_attr(key: &str) -> bool {
+    matches!(key, "version" | "xmlns:us")
+}
+
+fn is_known_resources_attr(_key: &str) -> bool {
+    false
+}
+
+fn is_known_library_attr(_key: &str) -> bool {
+    false
+}
+
+fn is_known_event_attr(_key: &str) -> bool {
+    false
+}
+
+fn is_known_project_attr(key: &str) -> bool {
+    matches!(key, "name")
+}
+
+fn is_known_sequence_attr(key: &str) -> bool {
+    matches!(key, "duration" | "format")
+}
+
+fn is_known_spine_attr(_key: &str) -> bool {
+    false
+}
+
+fn is_known_format_attr(key: &str) -> bool {
+    matches!(key, "id" | "name" | "frameDuration" | "width" | "height")
+}
+
 fn parse_crop_value(value: &str) -> Option<i32> {
     value.parse::<f64>().ok().map(|v| v.round() as i32)
 }
@@ -974,6 +1253,12 @@ fn build_asset_builder(attrs: &HashMap<String, String>) -> Option<AssetBuilder> 
         start_ns,
         has_video: parse_flag(attrs.get("hasVideo"), true),
         has_audio: parse_flag(attrs.get("hasAudio"), true),
+        unknown_attrs: attrs
+            .iter()
+            .filter(|(k, _)| !is_known_asset_attr(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        unknown_children: Vec::new(),
     })
 }
 
@@ -989,6 +1274,8 @@ fn finalize_asset(asset: AssetBuilder, assets: &mut HashMap<String, Asset>) {
                 start_ns: asset.start_ns,
                 has_video: asset.has_video,
                 has_audio: asset.has_audio,
+                unknown_attrs: asset.unknown_attrs,
+                unknown_children: asset.unknown_children,
             },
         );
     }
@@ -1014,12 +1301,18 @@ fn parse_format_spec(attrs: &HashMap<String, String>) -> Option<(String, FormatS
         .map(|fd| parse_frame_duration(fd))
         .or_else(|| preset.as_ref().map(|p| p.frame_rate.clone()))
         .unwrap_or_else(FrameRate::fps_24);
+    let unknown_attrs = attrs
+        .iter()
+        .filter(|(k, _)| !is_known_format_attr(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     Some((
         id,
         FormatSpec {
             width,
             height,
             frame_rate,
+            unknown_attrs,
         },
     ))
 }
@@ -1034,6 +1327,7 @@ fn parse_format_name_preset(name: &str) -> Option<FormatSpec> {
                 numerator: 30,
                 denominator: 1,
             },
+            unknown_attrs: Vec::new(),
         });
     }
     if n.contains("1080p24") {
@@ -1041,6 +1335,7 @@ fn parse_format_name_preset(name: &str) -> Option<FormatSpec> {
             width: 1920,
             height: 1080,
             frame_rate: FrameRate::fps_24(),
+            unknown_attrs: Vec::new(),
         });
     }
     if n.contains("2160p24") {
@@ -1048,6 +1343,7 @@ fn parse_format_name_preset(name: &str) -> Option<FormatSpec> {
             width: 3840,
             height: 2160,
             frame_rate: FrameRate::fps_24(),
+            unknown_attrs: Vec::new(),
         });
     }
     None
