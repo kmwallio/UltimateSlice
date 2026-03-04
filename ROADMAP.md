@@ -326,7 +326,7 @@ Tracking docs:
 - [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
 
 ### Monitoring
-- [ ] Safe area overlays (title safe 80%, action safe 90%) — toggle in toolbar, required for broadcast delivery
+- [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state
 - [ ] False color overlay — map luminance to color spectrum for exposure evaluation
 - [ ] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
 - [ ] Focus peaking — highlight in-focus edges with colored overlay

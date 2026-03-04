@@ -28,6 +28,7 @@ or outside the export frame.
 | Timecode label | Current timeline position |
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
+| Safe Areas toggle | Shows/hides action-safe (90%) and title-safe (80%) guides |
 | Master VU meter | Stereo (L/R) output level meter in dBFS |
 
 ## Docked Resize
@@ -54,6 +55,14 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
 - Keyboard nudges work when the overlay has focus (click the monitor once).
 - Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
+
+## Safe Area Guides
+
+- Use **Safe Areas** in the Program Monitor header to toggle framing guides.
+- When enabled, the monitor draws:
+  - **Action-safe** at **90%** of the canvas.
+  - **Title-safe** at **80%** of the canvas.
+- The toggle state is persisted across launches.
 
 ## Playback Behaviour
 

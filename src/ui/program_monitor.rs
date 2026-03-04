@@ -3,6 +3,7 @@ use gtk4::prelude::*;
 use gtk4::{
     self as gtk, AspectFrame, Box as GBox, Button, DrawingArea, EventControllerScroll,
     EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow,
+    ToggleButton,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -21,7 +22,7 @@ pub struct ClipTransform {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame)`.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter)`.
 /// `picture_a` displays the primary (outgoing) clip; `picture_b` displays the incoming
 /// transition clip. The caller controls cross-dissolve by setting widget opacity on
 /// each picture each poll tick via `Widget::set_opacity()`.
@@ -40,6 +41,8 @@ pub fn build_program_monitor(
     on_play_pause: impl Fn() + 'static,
     on_toggle_popout: impl Fn() + 'static,
     transform_overlay_da: Option<DrawingArea>,
+    initial_show_safe_areas: bool,
+    on_safe_area_changed: impl Fn(bool) + 'static,
 ) -> (
     GBox,
     Label,
@@ -49,6 +52,7 @@ pub fn build_program_monitor(
     DrawingArea,
     Rc<Cell<[f64; 2]>>,
     AspectFrame,
+    Rc<dyn Fn(bool)>,
 ) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -84,6 +88,11 @@ pub fn build_program_monitor(
     let btn_popout = Button::with_label("Pop Out / Dock");
     btn_popout.connect_clicked(move |_| on_toggle_popout());
     title_bar.append(&btn_popout);
+
+    let on_safe_area_changed = Rc::new(on_safe_area_changed);
+    let safe_area_btn = ToggleButton::with_label("Safe Areas");
+    safe_area_btn.set_active(initial_show_safe_areas);
+    title_bar.append(&safe_area_btn);
 
     // Zoom controls: − / zoom% label / + / Fit
     // These are appended to the title bar AFTER we build apply_zoom (below), so we
@@ -141,8 +150,37 @@ pub fn build_program_monitor(
     overlay.set_child(Some(&overlay_base));
     overlay.add_overlay(&picture_b);
     overlay.add_overlay(&picture_a);
+    let safe_area_visible = Rc::new(Cell::new(initial_show_safe_areas));
+    let safe_area_da = DrawingArea::new();
+    safe_area_da.set_hexpand(true);
+    safe_area_da.set_vexpand(true);
+    safe_area_da.set_halign(gtk::Align::Fill);
+    safe_area_da.set_valign(gtk::Align::Fill);
+    safe_area_da.set_can_target(false);
+    {
+        let safe_area_visible = safe_area_visible.clone();
+        safe_area_da.set_draw_func(move |_da, cr, width, height| {
+            if !safe_area_visible.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let w = width as f64;
+            let h = height as f64;
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.72);
+            cr.set_line_width(1.0);
+            for scale in [0.9_f64, 0.8_f64] {
+                let rw = w * scale;
+                let rh = h * scale;
+                let x = (w - rw) * 0.5;
+                let y = (h - rh) * 0.5;
+                cr.rectangle(x, y, rw, rh);
+                let _ = cr.stroke();
+            }
+        });
+    }
+    overlay.add_overlay(&safe_area_da);
     overlay.set_measure_overlay(&picture_b, false);
     overlay.set_measure_overlay(&picture_a, false);
+    overlay.set_measure_overlay(&safe_area_da, false);
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 
@@ -203,6 +241,7 @@ pub fn build_program_monitor(
         let fit_w = fit_w.clone();
         let fit_h = fit_h.clone();
         let transform_da_zoom = transform_da_for_zoom.clone();
+        let safe_area_da = safe_area_da.clone();
         move |new_z: f64| {
             let z = zoom_levels
                 .iter()
@@ -263,6 +302,7 @@ pub fn build_program_monitor(
             if let Some(ref da) = transform_da_zoom {
                 da.queue_draw();
             }
+            safe_area_da.queue_draw();
         }
     };
     let apply_zoom = Rc::new(apply_zoom);
@@ -373,6 +413,28 @@ pub fn build_program_monitor(
     // Place VU meter at the end of the title bar (right-aligned).
     title_bar.append(&vu_bar);
 
+    let safe_area_setter: Rc<dyn Fn(bool)> = {
+        let safe_area_visible = safe_area_visible.clone();
+        let safe_area_da = safe_area_da.clone();
+        let safe_area_btn = safe_area_btn.clone();
+        Rc::new(move |enabled: bool| {
+            safe_area_visible.set(enabled);
+            if safe_area_btn.is_active() != enabled {
+                safe_area_btn.set_active(enabled);
+            }
+            safe_area_da.queue_draw();
+        })
+    };
+    {
+        let safe_area_setter = safe_area_setter.clone();
+        let on_safe_area_changed = on_safe_area_changed.clone();
+        safe_area_btn.connect_toggled(move |btn| {
+            let enabled = btn.is_active();
+            safe_area_setter(enabled);
+            on_safe_area_changed(enabled);
+        });
+    }
+
     (
         root,
         pos_label,
@@ -382,6 +444,7 @@ pub fn build_program_monitor(
         vu_meter,
         peak_cell,
         canvas_frame,
+        safe_area_setter,
     )
 }
 

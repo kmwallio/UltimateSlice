@@ -11,6 +11,8 @@ pub struct ProgramMonitorState {
     pub height: i32,
     #[serde(default = "default_docked_split_pos")]
     pub docked_split_pos: i32,
+    #[serde(default)]
+    pub show_safe_areas: bool,
 }
 
 fn default_width() -> i32 {
@@ -30,6 +32,7 @@ impl Default for ProgramMonitorState {
             width: default_width(),
             height: default_height(),
             docked_split_pos: default_docked_split_pos(),
+            show_safe_areas: false,
         }
     }
 }

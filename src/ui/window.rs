@@ -842,6 +842,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         vu_meter,
         vu_peak_cell,
         prog_canvas_frame,
+        _prog_safe_area_setter,
     ) = {
         // Build the interactive transform overlay and wire its drag callback.
         let transform_overlay = Rc::new(crate::ui::transform_overlay::TransformOverlay::new(
@@ -1092,6 +1093,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 move || cb()
             },
             Some(to.drawing_area.clone()),
+            monitor_state.borrow().show_safe_areas,
+            {
+                let monitor_state = monitor_state.clone();
+                move |show| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_safe_areas != show {
+                        state.show_safe_areas = show;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
         )
     };
 
