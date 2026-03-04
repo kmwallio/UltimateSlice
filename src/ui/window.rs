@@ -13,6 +13,87 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+fn flash_window_status_title(
+    window: &gtk::ApplicationWindow,
+    project: &Rc<RefCell<Project>>,
+    message: &str,
+) {
+    let (title, dirty) = {
+        let proj = project.borrow();
+        (proj.title.clone(), proj.dirty)
+    };
+    window.set_title(Some(&format!("UltimateSlice — {title} ({message})")));
+    let window_weak = window.downgrade();
+    glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
+        if let Some(win) = window_weak.upgrade() {
+            if dirty {
+                win.set_title(Some(&format!("UltimateSlice — {title} •")));
+            } else {
+                win.set_title(Some(&format!("UltimateSlice — {title}")));
+            }
+        }
+    });
+}
+
+fn export_displayed_frame_to_image(
+    prog_player: &Rc<RefCell<ProgramPlayer>>,
+    out_path: &std::path::Path,
+) -> Result<&'static str, String> {
+    let ext = out_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .ok_or_else(|| "Missing output extension (.png, .jpg, .jpeg, or .ppm)".to_string())?;
+    let out_str = out_path
+        .to_str()
+        .ok_or_else(|| "Output path must be valid UTF-8".to_string())?;
+    if ext == "ppm" {
+        prog_player
+            .borrow_mut()
+            .export_displayed_frame_ppm(out_str)
+            .map_err(|e| e.to_string())?;
+        return Ok("ppm");
+    }
+    if ext != "png" && ext != "jpg" && ext != "jpeg" {
+        return Err("Unsupported extension; use .png, .jpg, .jpeg, or .ppm".to_string());
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_ppm = std::env::temp_dir().join(format!(
+        "ultimateslice-frame-{}-{stamp}.ppm",
+        std::process::id()
+    ));
+    let tmp_str = tmp_ppm
+        .to_str()
+        .ok_or_else(|| "Temporary path is not valid UTF-8".to_string())?;
+
+    prog_player
+        .borrow_mut()
+        .export_displayed_frame_ppm(tmp_str)
+        .map_err(|e| e.to_string())?;
+
+    let ffmpeg = crate::media::export::find_ffmpeg().map_err(|e| e.to_string())?;
+    let status = std::process::Command::new(&ffmpeg)
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(&tmp_ppm)
+        .arg("-frames:v")
+        .arg("1")
+        .arg(out_path)
+        .status()
+        .map_err(|e| format!("Failed to start ffmpeg: {e}"))?;
+    let _ = std::fs::remove_file(&tmp_ppm);
+    if !status.success() {
+        return Err("ffmpeg failed while encoding still frame".to_string());
+    }
+    Ok(if ext == "png" { "png" } else { "jpeg" })
+}
+
 fn auto_preview_divisor(
     project_width: u32,
     project_height: u32,
@@ -691,6 +772,55 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             prog_player.borrow_mut().toggle_play_pause();
         }));
     }
+    let on_export_frame_gui: Rc<dyn Fn()> = {
+        let window_weak = window_weak.clone();
+        let project = project.clone();
+        let prog_player = prog_player.clone();
+        Rc::new(move || {
+            let Some(win) = window_weak.upgrade() else {
+                return;
+            };
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Export Frame");
+            dialog.set_initial_name(Some("frame.png"));
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.png");
+            filter.add_pattern("*.jpg");
+            filter.add_pattern("*.jpeg");
+            filter.add_pattern("*.ppm");
+            filter.set_name(Some("Image Files"));
+            let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+            let project = project.clone();
+            let prog_player = prog_player.clone();
+            let win_for_save = win.clone();
+            dialog.save(Some(&win), gtk::gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(mut path) = file.path() {
+                        if path.extension().is_none() {
+                            path.set_extension("png");
+                        }
+                        match export_displayed_frame_to_image(&prog_player, &path) {
+                            Ok(fmt) => flash_window_status_title(
+                                &win_for_save,
+                                &project,
+                                &format!("Frame exported ({fmt})"),
+                            ),
+                            Err(e) => {
+                                eprintln!("[frame-export] {e}");
+                                flash_window_status_title(
+                                    &win_for_save,
+                                    &project,
+                                    "Frame export failed",
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        })
+    };
     let header = toolbar::build_toolbar(
         project.clone(),
         library.clone(),
@@ -706,6 +836,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 suppress_resume_on_next_reload.set(true);
                 clear_media_browser_on_next_reload.set(true);
             }
+        },
+        {
+            let cb = on_export_frame_gui.clone();
+            move || cb()
         },
     );
     window.set_titlebar(Some(&header));
@@ -3810,92 +3944,14 @@ fn handle_mcp_command(
                     .send(json!({"ok": false, "error": "path is required"}))
                     .ok();
             } else {
-                // Phase 1: trigger re-seek + async playing pulse (brief borrow).
-                let (
-                    start_scope_seq,
-                    start_compositor_seq,
-                    was_enabled,
-                    left_playing,
-                    scope_seq_arc,
-                    compositor_seq_arc,
-                ) = {
-                    let pp = prog_player.borrow();
-                    let (start_scope_seq, was_enabled, left_playing) = pp.prepare_export();
-                    let scope_seq_arc = pp.scope_frame_seq_arc();
-                    let compositor_seq_arc = pp.compositor_frame_seq_arc();
-                    let start_compositor_seq =
-                        compositor_seq_arc.load(std::sync::atomic::Ordering::Relaxed);
-                    (
-                        start_scope_seq,
-                        start_compositor_seq,
-                        was_enabled,
-                        left_playing,
-                        scope_seq_arc,
-                        compositor_seq_arc,
-                    )
+                match prog_player.borrow_mut().export_displayed_frame_ppm(&path) {
+                    Ok(()) => reply
+                        .send(json!({"ok": true, "path": path, "format": "ppm"}))
+                        .ok(),
+                    Err(e) => reply
+                        .send(json!({"ok": false, "error": e.to_string()}))
+                        .ok(),
                 };
-                let prog_player = prog_player.clone();
-                if left_playing {
-                    // Phase 2a: The pipeline is Playing.  Give the main loop
-                    // 250ms to service gtk4paintablesink, then complete the
-                    // pulse (Playing→Paused triggers compositor preroll).
-                    // Phase 2b: After the pulse completes, poll for the new
-                    // preroll frame from the appsink.
-                    let pulse_delay = std::time::Duration::from_millis(250);
-                    glib::timeout_add_local_once(pulse_delay, move || {
-                        {
-                            let pp = prog_player.borrow();
-                            pp.complete_playing_pulse();
-                        }
-                        // Now poll for the new scope frame.
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_millis(2000);
-                        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
-                            let scope_now =
-                                scope_seq_arc.load(std::sync::atomic::Ordering::Relaxed);
-                            let comp_now =
-                                compositor_seq_arc.load(std::sync::atomic::Ordering::Relaxed);
-                            if scope_now > start_scope_seq
-                                || comp_now > start_compositor_seq
-                                || std::time::Instant::now() >= deadline
-                            {
-                                let pp = prog_player.borrow();
-                                match pp.finish_export(
-                                    &path,
-                                    was_enabled,
-                                    start_scope_seq,
-                                    start_compositor_seq,
-                                ) {
-                                    Ok(()) => reply
-                                        .send(json!({"ok": true, "path": path, "format": "ppm"}))
-                                        .ok(),
-                                    Err(e) => reply
-                                        .send(json!({"ok": false, "error": e.to_string()}))
-                                        .ok(),
-                                };
-                                return glib::ControlFlow::Break;
-                            }
-                            glib::ControlFlow::Continue
-                        });
-                    });
-                } else {
-                    // ≤2 tracks: the pulse already completed synchronously.
-                    // The frame should already be available.
-                    let pp = prog_player.borrow();
-                    match pp.finish_export(
-                        &path,
-                        was_enabled,
-                        start_scope_seq,
-                        start_compositor_seq,
-                    ) {
-                        Ok(()) => reply
-                            .send(json!({"ok": true, "path": path, "format": "ppm"}))
-                            .ok(),
-                        Err(e) => reply
-                            .send(json!({"ok": false, "error": e.to_string()}))
-                            .ok(),
-                    };
-                }
             }
         }
 

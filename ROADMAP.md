@@ -363,7 +363,7 @@ Tracking docs:
 - [ ] ProRes / WebM / GIF export options
 - [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
 - [ ] Chapter markers in export (embed project markers as MP4/MKV chapter metadata)
-- [ ] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG)
+- [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
 - [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
 - [ ] AAF export — standard interchange for audio post-production (Pro Tools)
 - [x] Export progress dialog with cancel (ProgressBar + status label)

@@ -1,6 +1,15 @@
 # Export
 
-Click **Export…** in the toolbar to open the advanced export dialog.
+Use the toolbar linked split control **Export | ▼** (styled as one control):
+- Click **Export** to open the advanced export dialog.
+- Click **▼** for additional options such as **Export Frame…**.
+
+**Export Frame…** saves the currently displayed Program Monitor frame as:
+- **PNG** (`.png`)
+- **JPEG** (`.jpg` / `.jpeg`)
+- **PPM** (`.ppm`)
+- Frame capture is written at the **project canvas resolution** (not reduced preview quality resolution).
+- If playback is active, UltimateSlice pauses internally for capture and then resumes playback.
 
 ## Export Dialog Options
 

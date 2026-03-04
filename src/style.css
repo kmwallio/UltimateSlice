@@ -418,21 +418,56 @@ button.round {
 
 /* Linked button groups (used by color scopes tabs) */
 .linked > button,
-.linked > togglebutton {
+.linked > togglebutton,
+.linked > menubutton > button {
     border-radius: 0;
     margin: 0;
 }
 
 .linked > button:first-child,
-.linked > togglebutton:first-child {
+.linked > togglebutton:first-child,
+.linked > menubutton:first-child > button {
     border-top-left-radius: 6px;
     border-bottom-left-radius: 6px;
 }
 
 .linked > button:last-child,
-.linked > togglebutton:last-child {
+.linked > togglebutton:last-child,
+.linked > menubutton:last-child > button {
     border-top-right-radius: 6px;
     border-bottom-right-radius: 6px;
+}
+
+/* Export split control in toolbar */
+.export-split > button.suggested-action,
+.export-split > menubutton.suggested-action,
+.export-split > menubutton.suggested-action > button,
+.export-split > menubutton.suggested-action button {
+    background-color: #1565c0;
+    color: white;
+    border-color: #0d47a1;
+}
+
+.export-split > button.suggested-action:hover,
+.export-split > menubutton.suggested-action:hover,
+.export-split > menubutton.suggested-action:hover > button,
+.export-split > menubutton.suggested-action > button:hover,
+.export-split > menubutton.suggested-action button:hover {
+    background-color: #1976d2;
+}
+
+.export-split > menubutton.suggested-action > button {
+    border-left-width: 0;
+}
+
+.export-split > button.export-split-toggle {
+    border-left-width: 0;
+}
+
+button.export-split-toggle {
+    min-width: 0;
+    padding-left: 8px;
+    padding-right: 8px;
 }
 
 /* Transitions panel helpers */

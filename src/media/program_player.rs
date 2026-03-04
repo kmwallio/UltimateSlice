@@ -905,36 +905,46 @@ impl ProgramPlayer {
         self.latest_scope_frame.lock().ok()?.clone()
     }
 
-    /// Export the currently displayed scope-capture frame as a binary PPM image (P6).
-    pub fn export_displayed_frame_ppm(&self, path: &str) -> Result<()> {
-        let start_seq = self.scope_frame_seq.load(Ordering::Relaxed);
-        let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+    /// Export the current Program Monitor frame at project resolution as a PPM image (P6).
+    /// If playback is active, capture runs while paused and playback resumes afterwards.
+    pub fn export_displayed_frame_ppm(&mut self, path: &str) -> Result<()> {
+        let was_playing = self.state == PlayerState::Playing;
+        if was_playing {
+            self.pause();
+        }
+        let start_scope_seq = self.scope_frame_seq.load(Ordering::Relaxed);
+        let start_comp_seq = self.compositor_frame_seq.load(Ordering::Relaxed);
+        let was_scope_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        let was_comp_capture = self.compositor_capture_enabled.swap(true, Ordering::Relaxed);
         log::info!(
-            "export_displayed_frame: start_seq={} slots={} current_idx={:?} state={:?} timeline_ns={}",
-            start_seq, self.slots.len(), self.current_idx, self.state, self.timeline_pos_ns
+            "export_displayed_frame: start_scope_seq={} start_comp_seq={} slots={} current_idx={:?} state={:?} timeline_ns={} was_playing={}",
+            start_scope_seq,
+            start_comp_seq,
+            self.slots.len(),
+            self.current_idx,
+            self.state,
+            self.timeline_pos_ns,
+            was_playing
         );
         let result = (|| -> Result<()> {
-            if self.current_idx.is_some() && self.state != PlayerState::Playing {
-                self.reseek_all_slots_for_export();
-            }
-            let after_reseek_seq = self.scope_frame_seq.load(Ordering::Relaxed);
-            let deadline = Instant::now() + Duration::from_millis(800);
-            while self.scope_frame_seq.load(Ordering::Relaxed) <= start_seq
+            self.reseek_all_slots_for_export();
+            let deadline = Instant::now() + Duration::from_millis(1200);
+            while self.compositor_frame_seq.load(Ordering::Relaxed) <= start_comp_seq
                 && Instant::now() < deadline
             {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let end_seq = self.scope_frame_seq.load(Ordering::Relaxed);
-            log::info!(
-                "export_displayed_frame: after_reseek_seq={} end_seq={} seq_changed={}",
-                after_reseek_seq,
-                end_seq,
-                end_seq > start_seq
-            );
-            self.write_scope_frame_ppm(path)
+            let comp_now = self.compositor_frame_seq.load(Ordering::Relaxed);
+            if comp_now <= start_comp_seq {
+                return Err(anyhow!("no fresh project-resolution frame available yet"));
+            }
+            self.write_compositor_frame_ppm(path)
         })();
-        if !was_enabled {
-            self.scope_enabled.store(false, Ordering::Relaxed);
+        self.scope_enabled.store(was_scope_enabled, Ordering::Relaxed);
+        self.compositor_capture_enabled
+            .store(was_comp_capture, Ordering::Relaxed);
+        if was_playing {
+            self.play();
         }
         result
     }
@@ -2645,7 +2655,7 @@ impl ProgramPlayer {
     /// a Playing transition).  We temporarily lock the audio sink's state so
     /// the pipeline can proceed without waiting for it.
     ///
-    /// Returns `true` if a non-blocking Playing pulse was started (3+ tracks).
+    /// Keeps the pipeline paused to avoid visible playback movement during still capture.
     fn reseek_all_slots_for_export(&self) -> bool {
         if self.slots.is_empty() {
             return false;
@@ -2660,14 +2670,7 @@ impl ProgramPlayer {
         }
         self.wait_for_paused_preroll();
         self.wait_for_compositor_arrivals(&baseline, 3000);
-        self.pipeline.set_start_time(gst::ClockTime::ZERO);
-        // Always use the async playing pulse path for exports.
-        // gtk4paintablesink requires the GTK main loop to complete its
-        // state transitions, so we MUST return to the caller (and let the
-        // main loop run) before the pipeline can actually reach Playing
-        // and push fresh frames through the compositor.
-        self.start_playing_pulse();
-        true
+        false
     }
 
     /// Restore pipeline to Paused after an async export that left it Playing.

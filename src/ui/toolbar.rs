@@ -131,6 +131,7 @@ pub fn build_toolbar(
     timeline_state: Rc<RefCell<TimelineState>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
+    on_export_frame: impl Fn() + 'static + Clone,
 ) -> HeaderBar {
     let header = HeaderBar::new();
 
@@ -603,7 +604,7 @@ pub fn build_toolbar(
     header.pack_start(&btn_settings);
 
     // ── Advanced Export ──────────────────────────────────────────────────
-    let btn_export = Button::with_label("Export…");
+    let btn_export = Button::with_label("Export");
     btn_export.set_tooltip_text(Some("Export with codec and resolution options"));
     btn_export.add_css_class("suggested-action");
     {
@@ -869,7 +870,48 @@ pub fn build_toolbar(
             opt_dialog.present();
         });
     }
-    header.pack_end(&btn_export);
+    let btn_export_more = gtk::Button::with_label("▼");
+    btn_export_more.set_tooltip_text(Some("More export options"));
+    btn_export_more.add_css_class("suggested-action");
+    btn_export_more.add_css_class("export-split-toggle");
+    let export_pop = gtk::Popover::new();
+    let export_pop_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    export_pop_box.set_margin_start(4);
+    export_pop_box.set_margin_end(4);
+    export_pop_box.set_margin_top(4);
+    export_pop_box.set_margin_bottom(4);
+    let btn_export_frame = gtk::Button::with_label("Export Frame…");
+    btn_export_frame.add_css_class("flat");
+    {
+        let on_export_frame = on_export_frame.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_frame.connect_clicked(move |_| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            on_export_frame();
+        });
+    }
+    export_pop_box.append(&btn_export_frame);
+    export_pop.set_child(Some(&export_pop_box));
+    export_pop.set_parent(&btn_export_more);
+    {
+        let export_pop = export_pop.clone();
+        btn_export_more.connect_clicked(move |_| {
+            if export_pop.is_visible() {
+                export_pop.popdown();
+            } else {
+                export_pop.popup();
+            }
+        });
+    }
+
+    let export_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    export_group.add_css_class("linked");
+    export_group.add_css_class("export-split");
+    export_group.append(&btn_export);
+    export_group.append(&btn_export_more);
+    header.pack_end(&export_group);
 
     let sep_history = Separator::new(gtk::Orientation::Vertical);
     sep_history.add_css_class("toolbar-separator");
