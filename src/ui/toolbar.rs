@@ -2,6 +2,7 @@ use crate::fcpxml;
 use crate::media::export::{
     export_project, AudioCodec, Container, ExportOptions, ExportProgress, VideoCodec,
 };
+use crate::model::media_library::MediaItem;
 use crate::model::project::{FrameRate, Project};
 use crate::recent;
 use crate::ui::timeline::{ActiveTool, TimelineState};
@@ -12,7 +13,10 @@ use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn save_project_to_path(project: &Rc<RefCell<Project>>, path: &std::path::Path) -> Result<(), String> {
+fn save_project_to_path(
+    project: &Rc<RefCell<Project>>,
+    path: &std::path::Path,
+) -> Result<(), String> {
     let xml = {
         let proj = project.borrow();
         fcpxml::writer::write_fcpxml(&proj).map_err(|e| format!("FCPXML write error: {e}"))?
@@ -27,6 +31,14 @@ fn save_project_to_path(project: &Rc<RefCell<Project>>, path: &std::path::Path) 
         proj.dirty = false;
     }
     Ok(())
+}
+
+fn largest_library_file_size_bytes(library: &[MediaItem]) -> Option<u64> {
+    library
+        .iter()
+        .filter_map(|item| std::fs::metadata(&item.source_path).ok().map(|m| m.len()))
+        .max()
+        .filter(|size| *size > 0)
 }
 
 pub fn confirm_unsaved_then(
@@ -62,53 +74,51 @@ pub fn confirm_unsaved_then(
     let project_c = project.clone();
     let on_project_changed_c = on_project_changed.clone();
     let on_continue_c = on_continue.clone();
-    dialog.connect_response(move |d, resp| {
-        match resp {
-            gtk::ResponseType::Reject => {
-                d.close();
-                on_continue_c();
-            }
-            gtk::ResponseType::Accept => {
-                d.close();
-                let existing_path = project_c.borrow().file_path.clone();
-                if let Some(path) = existing_path {
-                    match save_project_to_path(&project_c, std::path::Path::new(&path)) {
-                        Ok(()) => {
-                            on_project_changed_c();
-                            on_continue_c();
-                        }
-                        Err(e) => eprintln!("{e}"),
+    dialog.connect_response(move |d, resp| match resp {
+        gtk::ResponseType::Reject => {
+            d.close();
+            on_continue_c();
+        }
+        gtk::ResponseType::Accept => {
+            d.close();
+            let existing_path = project_c.borrow().file_path.clone();
+            if let Some(path) = existing_path {
+                match save_project_to_path(&project_c, std::path::Path::new(&path)) {
+                    Ok(()) => {
+                        on_project_changed_c();
+                        on_continue_c();
                     }
-                } else {
-                    let file_dialog = gtk::FileDialog::new();
-                    file_dialog.set_title("Save FCPXML Project");
-                    file_dialog.set_initial_name(Some("project.fcpxml"));
-                    let filter = gtk::FileFilter::new();
-                    filter.add_pattern("*.fcpxml");
-                    filter.set_name(Some("FCPXML Files"));
-                    let filters = gio::ListStore::new::<gtk::FileFilter>();
-                    filters.append(&filter);
-                    file_dialog.set_filters(Some(&filters));
-                    let project_s = project_c.clone();
-                    let on_project_changed_s = on_project_changed_c.clone();
-                    let on_continue_s = on_continue_c.clone();
-                    file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                match save_project_to_path(&project_s, &path) {
-                                    Ok(()) => {
-                                        on_project_changed_s();
-                                        on_continue_s();
-                                    }
-                                    Err(e) => eprintln!("{e}"),
+                    Err(e) => eprintln!("{e}"),
+                }
+            } else {
+                let file_dialog = gtk::FileDialog::new();
+                file_dialog.set_title("Save FCPXML Project");
+                file_dialog.set_initial_name(Some("project.fcpxml"));
+                let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.fcpxml");
+                filter.set_name(Some("FCPXML Files"));
+                let filters = gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                file_dialog.set_filters(Some(&filters));
+                let project_s = project_c.clone();
+                let on_project_changed_s = on_project_changed_c.clone();
+                let on_continue_s = on_continue_c.clone();
+                file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            match save_project_to_path(&project_s, &path) {
+                                Ok(()) => {
+                                    on_project_changed_s();
+                                    on_continue_s();
                                 }
+                                Err(e) => eprintln!("{e}"),
                             }
                         }
-                    });
-                }
+                    }
+                });
             }
-            _ => d.close(),
         }
+        _ => d.close(),
     });
     dialog.present();
 }
@@ -116,6 +126,7 @@ pub fn confirm_unsaved_then(
 /// Build the main `HeaderBar` toolbar.
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
+    library: Rc<RefCell<Vec<MediaItem>>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
@@ -211,7 +222,7 @@ pub fn build_toolbar(
                                                 &xml,
                                                 Some(std::path::Path::new(&path_bg)),
                                             )
-                                                .map_err(|e| format!("FCPXML parse error: {e}"))
+                                            .map_err(|e| format!("FCPXML parse error: {e}"))
                                         });
                                     let _ = tx.send(result);
                                 });
@@ -324,7 +335,8 @@ pub fn build_toolbar(
                     let pop_weak = pop.downgrade();
                     let row_for_window = row.clone();
                     row.connect_clicked(move |_| {
-                        let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+                        let on_project_changed_cb: Rc<dyn Fn()> =
+                            Rc::new(on_project_changed.clone());
                         let action: Rc<dyn Fn()> = Rc::new({
                             let project = project.clone();
                             let timeline_state = timeline_state.clone();
@@ -348,7 +360,7 @@ pub fn build_toolbar(
                                                 &xml,
                                                 Some(std::path::Path::new(&path_bg)),
                                             )
-                                                .map_err(|e| format!("FCPXML parse error: {e}"))
+                                            .map_err(|e| format!("FCPXML parse error: {e}"))
                                         });
                                     let _ = tx.send(result);
                                 });
@@ -398,7 +410,12 @@ pub fn build_toolbar(
                         let window = row_for_window
                             .root()
                             .and_then(|r| r.downcast::<gtk::Window>().ok());
-                        confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
+                        confirm_unsaved_then(
+                            window,
+                            project.clone(),
+                            on_project_changed_cb,
+                            action,
+                        );
                     });
                     vbox_ref.append(&row);
                 }
@@ -693,6 +710,7 @@ pub fn build_toolbar(
             opt_dialog.add_button("Choose Output File…", gtk::ResponseType::Accept);
 
             let project = project.clone();
+            let library = library.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept {
                     d.close();
@@ -751,6 +769,7 @@ pub fn build_toolbar(
 
                 let window: Option<gtk::Window> = None; // no parent at this point
                 let project = project.clone();
+                let library = library.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -758,13 +777,19 @@ pub fn build_toolbar(
                             let output_clone = output.clone();
                             let proj = project.borrow().clone();
                             let opts = options.clone();
+                            let estimated_size_bytes =
+                                largest_library_file_size_bytes(&library.borrow());
 
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
-                                if let Err(e) =
-                                    export_project(&proj, &output_clone, opts, tx.clone())
-                                {
+                                if let Err(e) = export_project(
+                                    &proj,
+                                    &output_clone,
+                                    opts,
+                                    estimated_size_bytes,
+                                    tx.clone(),
+                                ) {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
                                 }
                             });
@@ -809,6 +834,7 @@ pub fn build_toolbar(
                                     while let Ok(msg) = rx.try_recv() {
                                         match msg {
                                             ExportProgress::Progress(p) => {
+                                                let p = p.clamp(0.0, 0.99);
                                                 progress_bar.set_fraction(p);
                                                 progress_bar
                                                     .set_text(Some(&format!("{:.0}%", p * 100.0)));

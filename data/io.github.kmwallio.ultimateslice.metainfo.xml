@@ -28,12 +28,12 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="0.1.1" date="2026-03-08">
+    <release version="0.1.1" date="2026-03-03">
       <description>
         <p>Improved compatibilities</p>
         <ul>
-          <li
-                    >FCPXML 1.10-1.14 import and 1.14 export with round-trip preservation of all clip properties</li>
+          <li>FCPXML 1.10-1.14 import and 1.14 export (best effort)</li>
+          <li>Real-Time Preview option (recommended for 2 video tracks or less)</li>
         </ul>
       </description>
     </release>

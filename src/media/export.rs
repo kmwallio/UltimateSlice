@@ -81,6 +81,7 @@ pub fn export_project(
     project: &Project,
     output_path: &str,
     options: ExportOptions,
+    estimated_size_bytes: Option<u64>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
     let out_w = if options.output_width == 0 {
@@ -126,6 +127,7 @@ pub fn export_project(
     let secondary_clips_flat: Vec<_> = secondary_track_clips.iter().flatten().copied().collect();
 
     let total_duration_us = project.duration().max(1) / 1_000;
+    let estimated_size_bytes = estimated_size_bytes.filter(|v| *v > 0);
     let _ = tx.send(ExportProgress::Progress(0.0));
 
     let ffmpeg = find_ffmpeg()?;
@@ -454,23 +456,15 @@ pub fn export_project(
 
     let mut error_lines: Vec<String> = Vec::new();
     for line in reader.lines().map_while(|r| r.ok()) {
-        if let Some(v) = line.strip_prefix("out_time_us=") {
-            if let Ok(us) = v.parse::<u64>() {
-                let p = (us as f64 / total_duration_us as f64).clamp(0.0, 1.0);
-                let _ = tx.send(ExportProgress::Progress(p));
-            }
-        } else if let Some(v) = line.strip_prefix("out_time_ms=") {
-            if let Ok(ms) = v.parse::<u64>() {
-                let us = ms.saturating_mul(1000);
-                let p = (us as f64 / total_duration_us as f64).clamp(0.0, 1.0);
-                let _ = tx.send(ExportProgress::Progress(p));
-            }
+        if let Some(p) = parse_progress_line(&line, total_duration_us, estimated_size_bytes) {
+            let _ = tx.send(ExportProgress::Progress(p));
         } else if !line.starts_with("frame=")
             && !line.starts_with("fps=")
             && !line.starts_with("progress=")
             && !line.starts_with("speed=")
             && !line.starts_with("bitrate=")
             && !line.starts_with("size=")
+            && !line.starts_with("total_size=")
             && !line.starts_with("out_")
             && !line.starts_with("dup_")
             && !line.starts_with("drop_")
@@ -635,8 +629,16 @@ fn build_scale_position_filter(
         let raw_pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
 
         // Compute overflow on each edge
-        let crop_left = if raw_pad_x < 0 { (-raw_pad_x) as u32 } else { 0 };
-        let crop_top = if raw_pad_y < 0 { (-raw_pad_y) as u32 } else { 0 };
+        let crop_left = if raw_pad_x < 0 {
+            (-raw_pad_x) as u32
+        } else {
+            0
+        };
+        let crop_top = if raw_pad_y < 0 {
+            (-raw_pad_y) as u32
+        } else {
+            0
+        };
         let crop_right = if raw_pad_x as i64 + sw as i64 > out_w as i64 {
             (raw_pad_x as i64 + sw as i64 - out_w as i64) as u32
         } else {
@@ -685,6 +687,32 @@ fn build_atempo(speed: f64) -> String {
     }
     filters.push_str(&format!("atempo={remaining:.6},"));
     filters
+}
+
+fn parse_progress_line(
+    line: &str,
+    total_duration_us: u64,
+    estimated_size_bytes: Option<u64>,
+) -> Option<f64> {
+    if let Some(estimate) = estimated_size_bytes {
+        if let Some(v) = line.strip_prefix("total_size=") {
+            if let Ok(bytes) = v.parse::<u64>() {
+                return Some((bytes as f64 / estimate as f64).clamp(0.0, 0.99));
+            }
+        }
+        return None;
+    }
+
+    if let Some(v) = line.strip_prefix("out_time_us=") {
+        if let Ok(us) = v.parse::<u64>() {
+            return Some((us as f64 / total_duration_us as f64).clamp(0.0, 0.99));
+        }
+    } else if let Some(v) = line.strip_prefix("out_time_ms=") {
+        if let Ok(us) = v.parse::<u64>() {
+            return Some((us as f64 / total_duration_us as f64).clamp(0.0, 0.99));
+        }
+    }
+    None
 }
 
 fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
@@ -746,4 +774,29 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
         }
     }
     Err(anyhow!("ffmpeg not found — please install ffmpeg"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_progress_line;
+
+    #[test]
+    fn total_size_progress_uses_estimate_and_caps() {
+        let p = parse_progress_line("total_size=500", 1_000_000, Some(1_000)).unwrap();
+        assert!((p - 0.5).abs() < 1e-6);
+
+        let capped = parse_progress_line("total_size=2000", 1_000_000, Some(1_000)).unwrap();
+        assert!((capped - 0.99).abs() < 1e-6);
+    }
+
+    #[test]
+    fn total_size_mode_ignores_out_time_lines() {
+        assert!(parse_progress_line("out_time_us=500000", 1_000_000, Some(1_000)).is_none());
+    }
+
+    #[test]
+    fn time_mode_out_time_ms_treated_as_microseconds() {
+        let p = parse_progress_line("out_time_ms=500000", 1_000_000, None).unwrap();
+        assert!((p - 0.5).abs() < 1e-6);
+    }
 }
