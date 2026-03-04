@@ -19,8 +19,8 @@ jobs:
           bundle: ultimate-slice.flatpak
           cache-key: flatpak-builder-${{ github.ref_name }}
 
-      - name: Upload Flatpak artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ultimate-slice-flatpak
-          path: ultimate-slice.flatpak
+      # - name: Upload Flatpak artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ultimate-slice-flatpak
+      #     path: ultimate-slice.flatpak
