@@ -375,6 +375,7 @@ fn patch_asset_clip_block_transform(
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
+        ("us:rotate", clip.rotate.to_string()),
     ] {
         let next = replace_or_insert_attr(&updated_start, attr, &value)?;
         if next != updated_start {
@@ -400,9 +401,13 @@ fn patch_asset_clip_block_transform(
     );
     let transform_position = format!("{} {}", position_x, position_y);
     let patched = replace_or_insert_attr(
-        &replace_or_insert_attr(transform_text, "scale", &transform_scale)?,
-        "position",
-        &transform_position,
+        &replace_or_insert_attr(
+            &replace_or_insert_attr(transform_text, "scale", &transform_scale)?,
+            "position",
+            &transform_position,
+        )?,
+        "rotation",
+        &clip.rotate.to_string(),
     )?;
     if patched != transform_text {
         changed = true;
@@ -1149,6 +1154,7 @@ mod tests {
             .find(|c| c.label == "overlay")
             .expect("overlay clip should exist");
         overlay.scale = 0.75;
+        overlay.rotate = 37;
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
@@ -1156,6 +1162,7 @@ mod tests {
         assert!(written.contains("<asset id=\"r2v\""));
         assert!(written.contains("<smart-collection name=\"Projects\""));
         assert!(written.contains("scale=\"0.75 0.75\""));
+        assert!(written.contains("rotation=\"37\""));
         assert!(!written.contains("us:track-idx="));
         assert!(!written.contains("<asset id=\"a_"));
         assert!(!written.contains("ref=\"a_"));
