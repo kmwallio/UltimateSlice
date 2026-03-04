@@ -130,6 +130,7 @@ pub enum McpCommand {
         scale: f64,
         position_x: f64,
         position_y: f64,
+        rotate: Option<i32>,
         reply: SyncSender<Value>,
     },
     SetClipOpacity {

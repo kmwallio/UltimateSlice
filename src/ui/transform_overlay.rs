@@ -23,6 +23,7 @@ const CROP_MAX: i32 = 500;
 #[derive(Clone, Copy, PartialEq)]
 enum Handle {
     None,
+    Rotate,
     TopLeft,
     TopRight,
     BottomLeft,
@@ -60,6 +61,7 @@ pub struct TransformOverlay {
     scale: Rc<Cell<f64>>,
     position_x: Rc<Cell<f64>>,
     position_y: Rc<Cell<f64>>,
+    rotation: Rc<Cell<f64>>,
     crop_left: Rc<Cell<i32>>,
     crop_right: Rc<Cell<i32>>,
     crop_top: Rc<Cell<i32>>,
@@ -82,6 +84,7 @@ impl TransformOverlay {
     /// called whenever the user adjusts scale or position via drag.
     pub fn new(
         on_change: impl Fn(f64, f64, f64) + 'static,
+        on_rotate_change: impl Fn(i32) + 'static,
         on_crop_change: impl Fn(i32, i32, i32, i32) + 'static,
         on_drag_begin: impl Fn() + 'static,
         on_drag_end: impl Fn() + 'static,
@@ -89,6 +92,7 @@ impl TransformOverlay {
         let scale = Rc::new(Cell::new(1.0_f64));
         let position_x = Rc::new(Cell::new(0.0_f64));
         let position_y = Rc::new(Cell::new(0.0_f64));
+        let rotation = Rc::new(Cell::new(0.0_f64));
         let crop_left = Rc::new(Cell::new(0_i32));
         let crop_right = Rc::new(Cell::new(0_i32));
         let crop_top = Rc::new(Cell::new(0_i32));
@@ -110,6 +114,7 @@ impl TransformOverlay {
             let scale = scale.clone();
             let position_x = position_x.clone();
             let position_y = position_y.clone();
+            let rotation = rotation.clone();
             let crop_left = crop_left.clone();
             let crop_right = crop_right.clone();
             let crop_top = crop_top.clone();
@@ -145,6 +150,7 @@ impl TransformOverlay {
                     s,
                     px,
                     py,
+                    rotation.get(),
                     crop_left.get(),
                     crop_right.get(),
                     crop_top.get(),
@@ -158,6 +164,7 @@ impl TransformOverlay {
         // Drag gesture -----------------------------------------------------
         let drag_state: Rc<RefCell<Option<DragState>>> = Rc::new(RefCell::new(None));
         let on_change = Rc::new(on_change);
+        let on_rotate_change = Rc::new(on_rotate_change);
         let on_crop_change = Rc::new(on_crop_change);
         let on_drag_begin = Rc::new(on_drag_begin);
 
@@ -169,6 +176,7 @@ impl TransformOverlay {
             let scale = scale.clone();
             let position_x = position_x.clone();
             let position_y = position_y.clone();
+            let rotation = rotation.clone();
             let crop_left = crop_left.clone();
             let crop_right = crop_right.clone();
             let crop_top = crop_top.clone();
@@ -195,6 +203,7 @@ impl TransformOverlay {
                 let s = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
+                let rot_rad = rotation.get().to_radians();
 
                 // Clip bounding box in widget space (same formula as draw_overlay)
                 let cx = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
@@ -220,41 +229,108 @@ impl TransformOverlay {
                 let crop_top_y = top + crop_t_px;
                 let crop_bottom_y = bottom - crop_b_px;
 
+                let to_world = |lx: f64, ly: f64| -> (f64, f64) {
+                    rotate_point_about(cx + lx, cy + ly, cx, cy, rot_rad)
+                };
                 let corners = [
-                    (left, top, Handle::TopLeft),
-                    (right, top, Handle::TopRight),
-                    (left, bottom, Handle::BottomLeft),
-                    (right, bottom, Handle::BottomRight),
+                    {
+                        let (x, y) = to_world(-hw, -hh);
+                        (x, y, Handle::TopLeft)
+                    },
+                    {
+                        let (x, y) = to_world(hw, -hh);
+                        (x, y, Handle::TopRight)
+                    },
+                    {
+                        let (x, y) = to_world(-hw, hh);
+                        (x, y, Handle::BottomLeft)
+                    },
+                    {
+                        let (x, y) = to_world(hw, hh);
+                        (x, y, Handle::BottomRight)
+                    },
                 ];
+                let rotate_handle = {
+                    let (x, y) = to_world(0.0, -hh - 24.0);
+                    (x, y, Handle::Rotate)
+                };
                 let crop_edges = [
                     (
-                        (crop_left_x + crop_right_x) / 2.0,
-                        crop_top_y,
+                        {
+                            let (x, _) = to_world(
+                                ((crop_left_x + crop_right_x) / 2.0) - cx,
+                                crop_top_y - cy,
+                            );
+                            x
+                        },
+                        {
+                            let (_, y) = to_world(
+                                ((crop_left_x + crop_right_x) / 2.0) - cx,
+                                crop_top_y - cy,
+                            );
+                            y
+                        },
                         Handle::CropTop,
                     ),
                     (
-                        (crop_left_x + crop_right_x) / 2.0,
-                        crop_bottom_y,
+                        {
+                            let (x, _) = to_world(
+                                ((crop_left_x + crop_right_x) / 2.0) - cx,
+                                crop_bottom_y - cy,
+                            );
+                            x
+                        },
+                        {
+                            let (_, y) = to_world(
+                                ((crop_left_x + crop_right_x) / 2.0) - cx,
+                                crop_bottom_y - cy,
+                            );
+                            y
+                        },
                         Handle::CropBottom,
                     ),
                     (
-                        crop_left_x,
-                        (crop_top_y + crop_bottom_y) / 2.0,
+                        {
+                            let (x, _) =
+                                to_world(crop_left_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            x
+                        },
+                        {
+                            let (_, y) =
+                                to_world(crop_left_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            y
+                        },
                         Handle::CropLeft,
                     ),
                     (
-                        crop_right_x,
-                        (crop_top_y + crop_bottom_y) / 2.0,
+                        {
+                            let (x, _) =
+                                to_world(crop_right_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            x
+                        },
+                        {
+                            let (_, y) =
+                                to_world(crop_right_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            y
+                        },
                         Handle::CropRight,
                     ),
                 ];
 
                 let mut handle = Handle::None;
-                for (hx, hy, h) in &corners {
-                    let d = ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt();
+                {
+                    let d = ((sx - rotate_handle.0).powi(2) + (sy - rotate_handle.1).powi(2)).sqrt();
                     if d <= HANDLE_HIT {
-                        handle = *h;
-                        break;
+                        handle = rotate_handle.2;
+                    }
+                }
+                if handle == Handle::None {
+                    for (hx, hy, h) in &corners {
+                        let d = ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt();
+                        if d <= HANDLE_HIT {
+                            handle = *h;
+                            break;
+                        }
                     }
                 }
                 if handle == Handle::None {
@@ -269,7 +345,8 @@ impl TransformOverlay {
 
                 if handle == Handle::None {
                     // Inside the clip bounds → pan
-                    if sx >= left && sx <= right && sy >= top && sy <= bottom {
+                    let (lx, ly) = unrotate_point_about(sx, sy, cx, cy, rot_rad);
+                    if lx >= left && lx <= right && ly >= top && ly <= bottom {
                         handle = Handle::Pan;
                     }
                 }
@@ -303,12 +380,14 @@ impl TransformOverlay {
             let scale = scale.clone();
             let position_x = position_x.clone();
             let position_y = position_y.clone();
+            let rotation_for_drag = rotation.clone();
             let crop_left = crop_left.clone();
             let crop_right = crop_right.clone();
             let crop_top = crop_top.clone();
             let crop_bottom = crop_bottom.clone();
             let drag_state = drag_state.clone();
             let on_change = on_change.clone();
+            let on_rotate_change = on_rotate_change.clone();
             let on_crop_change = on_crop_change.clone();
             let da_ref = da.clone();
 
@@ -317,8 +396,27 @@ impl TransformOverlay {
                 let Some(ref ds) = *ds_borrow else {
                     return;
                 };
+                let rot_rad = rotation_for_drag.get().to_radians();
+                let local_dx = off_x * rot_rad.cos() + off_y * rot_rad.sin();
+                let local_dy = -off_x * rot_rad.sin() + off_y * rot_rad.cos();
 
                 match ds.handle {
+                    Handle::Rotate => {
+                        let clip_cx =
+                            ds.vx + ds.vw / 2.0 + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
+                        let clip_cy =
+                            ds.vy + ds.vh / 2.0 + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
+                        let cur_x = ds.start_wx + off_x;
+                        let cur_y = ds.start_wy + off_y;
+                        let mut deg = ((cur_y - clip_cy).atan2(cur_x - clip_cx).to_degrees() + 90.0)
+                            .rem_euclid(360.0);
+                        if deg > 180.0 {
+                            deg -= 360.0;
+                        }
+                        let deg = deg.round().clamp(-180.0, 180.0);
+                        rotation_for_drag.set(deg);
+                        on_rotate_change(deg as i32);
+                    }
                     Handle::Pan => {
                         // Position sensitivity: d(pos_x) = off_x / (vw*(1-scale)/2)
                         // This gives 1:1 pixel movement of the clip centre in canvas space.
@@ -374,7 +472,7 @@ impl TransformOverlay {
                     }
                     Handle::CropLeft => {
                         let clip_w = (ds.vw * ds.start_scale).max(1.0);
-                        let delta = (off_x * ds.proj_w as f64 / clip_w).round() as i32;
+                        let delta = (local_dx * ds.proj_w as f64 / clip_w).round() as i32;
                         let mut new_left = ds.start_crop_left + delta;
                         let max_left = (ds.proj_w as i32 - 2 - crop_right.get()).clamp(0, CROP_MAX);
                         new_left = new_left.clamp(0, max_left);
@@ -388,7 +486,7 @@ impl TransformOverlay {
                     }
                     Handle::CropRight => {
                         let clip_w = (ds.vw * ds.start_scale).max(1.0);
-                        let delta = (-off_x * ds.proj_w as f64 / clip_w).round() as i32;
+                        let delta = (-local_dx * ds.proj_w as f64 / clip_w).round() as i32;
                         let mut new_right = ds.start_crop_right + delta;
                         let max_right = (ds.proj_w as i32 - 2 - crop_left.get()).clamp(0, CROP_MAX);
                         new_right = new_right.clamp(0, max_right);
@@ -402,7 +500,7 @@ impl TransformOverlay {
                     }
                     Handle::CropTop => {
                         let clip_h = (ds.vh * ds.start_scale).max(1.0);
-                        let delta = (off_y * ds.proj_h as f64 / clip_h).round() as i32;
+                        let delta = (local_dy * ds.proj_h as f64 / clip_h).round() as i32;
                         let mut new_top = ds.start_crop_top + delta;
                         let max_top = (ds.proj_h as i32 - 2 - crop_bottom.get()).clamp(0, CROP_MAX);
                         new_top = new_top.clamp(0, max_top);
@@ -416,7 +514,7 @@ impl TransformOverlay {
                     }
                     Handle::CropBottom => {
                         let clip_h = (ds.vh * ds.start_scale).max(1.0);
-                        let delta = (-off_y * ds.proj_h as f64 / clip_h).round() as i32;
+                        let delta = (-local_dy * ds.proj_h as f64 / clip_h).round() as i32;
                         let mut new_bottom = ds.start_crop_bottom + delta;
                         let max_bottom = (ds.proj_h as i32 - 2 - crop_top.get()).clamp(0, CROP_MAX);
                         new_bottom = new_bottom.clamp(0, max_bottom);
@@ -512,6 +610,7 @@ impl TransformOverlay {
             scale,
             position_x,
             position_y,
+            rotation,
             crop_left,
             crop_right,
             crop_top,
@@ -542,6 +641,12 @@ impl TransformOverlay {
         self.scale.set(s);
         self.position_x.set(px);
         self.position_y.set(py);
+        self.drawing_area.queue_draw();
+    }
+
+    /// Update displayed rotation value in degrees.
+    pub fn set_rotation(&self, rot: i32) {
+        self.rotation.set(rot as f64);
         self.drawing_area.queue_draw();
     }
 
@@ -759,6 +864,18 @@ fn crop_insets_to_overlay_px(
     (left, right, top, bottom)
 }
 
+fn rotate_point_about(x: f64, y: f64, cx: f64, cy: f64, rad: f64) -> (f64, f64) {
+    let dx = x - cx;
+    let dy = y - cy;
+    let xr = dx * rad.cos() - dy * rad.sin();
+    let yr = dx * rad.sin() + dy * rad.cos();
+    (cx + xr, cy + yr)
+}
+
+fn unrotate_point_about(x: f64, y: f64, cx: f64, cy: f64, rad: f64) -> (f64, f64) {
+    rotate_point_about(x, y, cx, cy, -rad)
+}
+
 fn draw_overlay(
     cr: &gtk4::cairo::Context,
     vx: f64,
@@ -768,6 +885,7 @@ fn draw_overlay(
     scale: f64,
     pos_x: f64,
     pos_y: f64,
+    rotation_deg: f64,
     crop_left: i32,
     crop_right: i32,
     crop_top: i32,
@@ -788,6 +906,7 @@ fn draw_overlay(
     let right = cx + hw;
     let top = cy - hh;
     let bottom = cy + hh;
+    let rot_rad = rotation_deg.to_radians();
     let (crop_l_px, crop_r_px, crop_t_px, crop_b_px) = crop_insets_to_overlay_px(
         crop_left,
         crop_right,
@@ -802,18 +921,27 @@ fn draw_overlay(
     let crop_right_x = right - crop_r_px;
     let crop_top_y = top + crop_t_px;
     let crop_bottom_y = bottom - crop_b_px;
+    let to_world = |x: f64, y: f64| -> (f64, f64) { rotate_point_about(x, y, cx, cy, rot_rad) };
 
     // Clip bounding box (white dashed)
     cr.save().ok();
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.80);
     cr.set_line_width(1.5);
     cr.set_dash(&[6.0, 4.0], 0.0);
-    cr.rectangle(left, top, right - left, bottom - top);
+    let (tlx, tly) = to_world(left, top);
+    let (trx, try_) = to_world(right, top);
+    let (brx, bry) = to_world(right, bottom);
+    let (blx, bly) = to_world(left, bottom);
+    cr.move_to(tlx, tly);
+    cr.line_to(trx, try_);
+    cr.line_to(brx, bry);
+    cr.line_to(blx, bly);
+    cr.close_path();
     cr.stroke().ok();
     cr.restore().ok();
 
     // Corner scale handles
-    for (hx, hy) in &[(left, top), (right, top), (left, bottom), (right, bottom)] {
+    for (hx, hy) in &[(tlx, tly), (trx, try_), (blx, bly), (brx, bry)] {
         cr.save().ok();
         cr.arc(*hx, *hy, HANDLE_R, 0.0, std::f64::consts::TAU);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
@@ -824,24 +952,44 @@ fn draw_overlay(
         cr.restore().ok();
     }
 
+    // Rotation handle (top-center) connected to clip box
+    let (rot_hx, rot_hy) = to_world(cx, top - 24.0);
+    let (rot_ax, rot_ay) = to_world(cx, top);
+    cr.save().ok();
+    cr.move_to(rot_ax, rot_ay);
+    cr.line_to(rot_hx, rot_hy);
+    cr.set_source_rgba(1.0, 0.65, 0.2, 0.95);
+    cr.set_line_width(1.5);
+    cr.stroke().ok();
+    cr.arc(rot_hx, rot_hy, HANDLE_R, 0.0, std::f64::consts::TAU);
+    cr.set_source_rgba(1.0, 0.75, 0.2, 0.98);
+    cr.fill_preserve().ok();
+    cr.set_source_rgba(0.55, 0.25, 0.0, 1.0);
+    cr.set_line_width(1.2);
+    cr.stroke().ok();
+    cr.restore().ok();
+
     // Crop rectangle and edge midpoint handles
     cr.save().ok();
     cr.set_source_rgba(0.3, 0.95, 0.45, 0.95);
     cr.set_line_width(1.5);
     cr.set_dash(&[5.0, 3.0], 0.0);
-    cr.rectangle(
-        crop_left_x,
-        crop_top_y,
-        (crop_right_x - crop_left_x).max(1.0),
-        (crop_bottom_y - crop_top_y).max(1.0),
-    );
+    let (ctlx, ctly) = to_world(crop_left_x, crop_top_y);
+    let (ctrx, ctry) = to_world(crop_right_x, crop_top_y);
+    let (cbrx, cbry) = to_world(crop_right_x, crop_bottom_y);
+    let (cblx, cbly) = to_world(crop_left_x, crop_bottom_y);
+    cr.move_to(ctlx, ctly);
+    cr.line_to(ctrx, ctry);
+    cr.line_to(cbrx, cbry);
+    cr.line_to(cblx, cbly);
+    cr.close_path();
     cr.stroke().ok();
     cr.restore().ok();
     for (hx, hy) in &[
-        ((crop_left_x + crop_right_x) / 2.0, crop_top_y),
-        ((crop_left_x + crop_right_x) / 2.0, crop_bottom_y),
-        (crop_left_x, (crop_top_y + crop_bottom_y) / 2.0),
-        (crop_right_x, (crop_top_y + crop_bottom_y) / 2.0),
+        to_world((crop_left_x + crop_right_x) / 2.0, crop_top_y),
+        to_world((crop_left_x + crop_right_x) / 2.0, crop_bottom_y),
+        to_world(crop_left_x, (crop_top_y + crop_bottom_y) / 2.0),
+        to_world(crop_right_x, (crop_top_y + crop_bottom_y) / 2.0),
     ] {
         cr.save().ok();
         cr.rectangle(*hx - 6.0, *hy - 6.0, 12.0, 12.0);
@@ -871,7 +1019,7 @@ fn draw_overlay(
         gtk4::cairo::FontWeight::Bold,
     );
     cr.set_font_size(11.0);
-    let label = format!("{scale:.2}×");
+    let label = format!("{scale:.2}×  {rotation_deg:.0}°");
     let te = match cr.text_extents(&label) {
         Ok(te) => te,
         Err(_) => return,

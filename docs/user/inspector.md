@@ -62,12 +62,13 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Position X** | −1.0 → 1.0 | Horizontal offset within the frame. 0.0 = center, −1.0 = full left, 1.0 = full right |
 | **Position Y** | −1.0 → 1.0 | Vertical offset within the frame. 0.0 = center, −1.0 = full top, 1.0 = full bottom |
 | **Crop Left/Right/Top/Bottom** | 0 → 500 px | Crop pixels from each edge |
-| **Rotate** | 0° / 90° / 180° / 270° | Rotation preset |
+| **Rotate** | Dial/knob + numeric angle (−180° → 180°) | Arbitrary-angle rotation |
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
 
 Program Monitor overlay integration:
 - Drag **corner handles** to scale (hold **Shift** for constrained scaling).
+- Drag the **orange rotation handle** above the clip box to set rotation angle.
 - Drag **edge midpoint handles** to adjust crop left/right/top/bottom directly in preview.
 - Use keyboard nudges in the Program Monitor overlay for fine position/scale adjustments.
 

@@ -89,7 +89,7 @@ pub struct Clip {
     pub crop_top: i32,
     #[serde(default)]
     pub crop_bottom: i32,
-    /// Rotation in degrees: 0, 90, 180, or 270
+    /// Rotation in degrees (arbitrary angle, normalized by consumers as needed).
     #[serde(default)]
     pub rotate: i32,
     #[serde(default)]

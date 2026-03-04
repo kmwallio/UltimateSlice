@@ -190,9 +190,10 @@ pub fn export_project(
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
+        let rotate_filter = build_rotation_filter(clip, false);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
         filter.push_str(&format!(
-            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter},fps={}/{},format=yuv420p{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
+            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
             project.frame_rate.numerator, project.frame_rate.denominator
         ));
     }
@@ -279,12 +280,13 @@ pub fn export_project(
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, true);
+        let rotate_filter = build_rotation_filter(clip, true);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
         let opacity = clip.opacity.clamp(0.0, 1.0);
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter},format=yuva420p{crop_filter}{scale_pos_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter},format=yuva420p{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
@@ -586,6 +588,16 @@ fn build_crop_filter(
         "black"
     };
     format!(",crop={cw}:{ch}:{cl}:{ct},pad={out_w}:{out_h}:{cl}:{ct}:{pad_color}")
+}
+
+/// Build a rotation filter for arbitrary-angle clip rotation.
+fn build_rotation_filter(clip: &crate::model::clip::Clip, transparent_pad: bool) -> String {
+    let rot = clip.rotate;
+    if rot == 0 {
+        return String::new();
+    }
+    let fill = if transparent_pad { "black@0" } else { "black" };
+    format!(",rotate={:.10}:fillcolor={fill}", (rot as f64).to_radians())
 }
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.

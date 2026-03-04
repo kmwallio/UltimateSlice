@@ -512,6 +512,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 // Keep the transform overlay in sync so drag handles reflect slider changes.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
                     to.set_transform(sc, px, py);
+                    to.set_rotation(rot);
                     to.set_crop(cl, cr, ct, cb);
                 }
                 if let Some(win) = window_weak.upgrade() {
@@ -878,11 +879,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let crv = inspector_view.crop_right_slider.value() as i32;
                     let ct = inspector_view.crop_top_slider.value() as i32;
                     let cb = inspector_view.crop_bottom_slider.value() as i32;
-                    let rot = inspector_view
-                        .rotate_combo
-                        .active_id()
-                        .and_then(|id| id.parse::<i32>().ok())
-                        .unwrap_or(0);
+                    let rot = inspector_view.rotate_spin.value().round() as i32;
                     let fh = inspector_view.flip_h_btn.is_active();
                     let fv = inspector_view.flip_v_btn.is_active();
                     let mut pp = prog_player.borrow_mut();
@@ -901,6 +898,61 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         py,
                     );
                     // 4. Update window dirty marker
+                    if let Some(win) = window_weak.upgrade() {
+                        let proj = project.borrow();
+                        win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
+                    }
+                }
+            },
+            {
+                let inspector_view = inspector_view.clone();
+                let player = player.clone();
+                let prog_player = prog_player.clone();
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let window_weak = window_weak.clone();
+                move |rot: i32| {
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(ref clip_id) = selected {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                clip.rotate = rot;
+                                proj.dirty = true;
+                                break;
+                            }
+                        }
+                    }
+                    {
+                        *inspector_view.updating.borrow_mut() = true;
+                        inspector_view.rotate_spin.set_value(rot as f64);
+                        *inspector_view.updating.borrow_mut() = false;
+                    }
+                    let cl = inspector_view.crop_left_slider.value() as i32;
+                    let cr = inspector_view.crop_right_slider.value() as i32;
+                    let ct = inspector_view.crop_top_slider.value() as i32;
+                    let cb = inspector_view.crop_bottom_slider.value() as i32;
+                    let fh = inspector_view.flip_h_btn.is_active();
+                    let fv = inspector_view.flip_v_btn.is_active();
+                    let sc = inspector_view.scale_slider.value();
+                    let px = inspector_view.position_x_slider.value();
+                    let py = inspector_view.position_y_slider.value();
+                    player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    let mut pp = prog_player.borrow_mut();
+                    pp.enter_transform_live_mode();
+                    pp.set_transform_properties_only(
+                        selected.as_deref(),
+                        cl,
+                        cr,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        sc,
+                        px,
+                        py,
+                    );
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
                         win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
@@ -938,10 +990,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         *inspector_view.updating.borrow_mut() = false;
                     }
                     let rot = inspector_view
-                        .rotate_combo
-                        .active_id()
-                        .and_then(|id| id.parse::<i32>().ok())
-                        .unwrap_or(0);
+                        .rotate_spin
+                        .value()
+                        .round() as i32;
                     let fh = inspector_view.flip_h_btn.is_active();
                     let fv = inspector_view.flip_v_btn.is_active();
                     let sc = inspector_view.scale_slider.value();
@@ -1894,6 +1945,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             let is_visual = c.kind != ClipKind::Audio;
                             if is_visual {
                                 to.set_transform(c.scale, c.position_x, c.position_y);
+                                to.set_rotation(c.rotate);
                                 to.set_crop(c.crop_left, c.crop_right, c.crop_top, c.crop_bottom);
                                 to.set_clip_selected(true);
                             } else {
@@ -3197,6 +3249,7 @@ fn handle_mcp_command(
             scale,
             position_x,
             position_y,
+            rotate,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -3207,6 +3260,9 @@ fn handle_mcp_command(
                         clip.scale = scale.clamp(0.1, 4.0);
                         clip.position_x = position_x.clamp(-1.0, 1.0);
                         clip.position_y = position_y.clamp(-1.0, 1.0);
+                        if let Some(rot) = rotate {
+                            clip.rotate = rot.clamp(-180, 180);
+                        }
                         proj.dirty = true;
                         found = true;
                         break 'outer;

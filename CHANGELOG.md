@@ -5,6 +5,10 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Arbitrary rotation follow-up fixes**: Resolved three regressions after the arbitrary-angle rotation rollout: (1) rotated clips no longer get prematurely clipped when scaled down before rotation, (2) transform overlay handles now follow the clip's rotation angle, and (3) export rotation direction now matches Program Monitor/Inspector direction.
+- **Live preview rotation at identity start**: Rotation now updates immediately in Program Monitor even when a clip initially loaded with `0°` rotation. The rotation/flip transform path is now always present in slot effects bins, so changing from 0° to any angle no longer requires a pipeline rebuild.
+- **Tool/preview rotation direction parity**: Program Monitor rotation now uses the same clockwise-positive convention as the transform overlay and Inspector controls (GStreamer `rotate` angle sign corrected).
+- **Preview/export rotation parity**: Export rotation mapping now matches Program Monitor orientation; ffmpeg rotate angle conversion now preserves the clip's signed degree value directly so clockwise/counterclockwise direction is consistent between preview and output.
 - **Recent projects menu hygiene**: The Recent menu now displays at most 10 entries and skips paths that no longer exist on disk.
 - **Export progress premature 100%**: Export progress now estimates completion from ffmpeg `total_size` against the largest imported media-library source file, and in-progress updates are capped at 99% until ffmpeg exits successfully. This prevents showing 100% while muxing/final file growth is still in progress.
 - **GTK gesture_group assertion failure**: Fixed `Gtk-CRITICAL: gtk_gesture_group: assertion … failed` warning at startup. The timeline's click and drag gestures were being grouped before the drag gesture was added to the widget. Reordered to add the controller first, then group.
@@ -28,6 +32,7 @@ All notable project changes and progress should be recorded here.
 - **Unsaved changes confirmation flow**: New project replacement/exit actions now prompt when the current project is dirty, offering **Save**, **Discard**, or **Cancel** before continuing. The guard is wired into toolbar New/Open/Open Recent actions and window close, and successful saves now clear the dirty flag and persist the current project path.
 
 ### Changed
+- **Arbitrary clip rotation controls**: Transform rotation is now arbitrary-angle instead of preset-only. The Inspector now uses a dial/knob plus numeric degree input (−180° to 180°), the Program Monitor transform overlay includes a rotation handle, preview rotation uses GStreamer's arbitrary-angle `rotate` element path, and export applies matching ffmpeg `rotate` filtering so output matches preview.
 - **GTK4/libadwaita control styling parity**: Expanded `src/style.css` with Adwaita-style dark-theme rules for controls already used in the app, including linked scope tabs, flat/round buttons, transitions list styling (`small-btn`, `boxed-list`), popovers (Recent menu), `DropDown`/`ComboBoxText`, slider trough/knob styling, check/radio controls, and color-scopes panel chrome. This keeps native GTK4 widgets visually consistent with UltimateSlice's existing dark palette.
 - **Timeline ruler zoom density**: The timeline ruler now uses multi-tier marks as you zoom (major, mid, and minor ticks), and high zoom levels add intermediate labels with sub-second precision for finer navigation without overcrowding at lower zoom.
 - **FCPXML version support**: Parser now accepts FCPXML files through version 1.14, and project export now writes FCPXML version 1.14 by default.

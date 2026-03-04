@@ -5,7 +5,7 @@ use gtk4::{
     self as gtk, Box as GBox, Button, CheckButton, Entry, Expander, Label, Orientation, Scale,
     Separator,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const VOLUME_DB_MIN: f64 = -100.0;
@@ -57,7 +57,7 @@ pub struct InspectorView {
     pub crop_right_slider: Scale,
     pub crop_top_slider: Scale,
     pub crop_bottom_slider: Scale,
-    pub rotate_combo: gtk4::ComboBoxText,
+    pub rotate_spin: gtk4::SpinButton,
     pub flip_h_btn: gtk4::ToggleButton,
     pub flip_v_btn: gtk4::ToggleButton,
     pub scale_slider: Scale,
@@ -149,7 +149,7 @@ impl InspectorView {
                 self.crop_right_slider.set_value(c.crop_right as f64);
                 self.crop_top_slider.set_value(c.crop_top as f64);
                 self.crop_bottom_slider.set_value(c.crop_bottom as f64);
-                self.rotate_combo.set_active_id(Some(&c.rotate.to_string()));
+                self.rotate_spin.set_value(c.rotate as f64);
                 self.flip_h_btn.set_active(c.flip_h);
                 self.flip_v_btn.set_active(c.flip_v);
                 self.scale_slider.set_value(c.scale);
@@ -202,7 +202,7 @@ impl InspectorView {
                 self.crop_right_slider.set_value(0.0);
                 self.crop_top_slider.set_value(0.0);
                 self.crop_bottom_slider.set_value(0.0);
-                self.rotate_combo.set_active_id(Some("0"));
+                self.rotate_spin.set_value(0.0);
                 self.flip_h_btn.set_active(false);
                 self.flip_v_btn.set_active(false);
                 self.scale_slider.set_value(1.0);
@@ -508,13 +508,55 @@ pub fn build_inspector(
     transform_inner.append(&crop_bottom_slider);
 
     row_label(&transform_inner, "Rotate");
-    let rotate_combo = gtk4::ComboBoxText::new();
-    rotate_combo.append(Some("0"), "0°");
-    rotate_combo.append(Some("90"), "90° CW");
-    rotate_combo.append(Some("180"), "180°");
-    rotate_combo.append(Some("270"), "270° CW");
-    rotate_combo.set_active_id(Some("0"));
-    transform_inner.append(&rotate_combo);
+    let rotate_row = GBox::new(Orientation::Horizontal, 8);
+    let rotate_value = Rc::new(Cell::new(0.0_f64));
+    let rotate_dial = gtk4::DrawingArea::new();
+    rotate_dial.set_content_width(72);
+    rotate_dial.set_content_height(72);
+    rotate_dial.set_hexpand(false);
+    rotate_dial.set_vexpand(false);
+    rotate_dial.set_tooltip_text(Some("Drag dial to rotate clip (−180° to +180°)"));
+    {
+        let rotate_value = rotate_value.clone();
+        rotate_dial.set_draw_func(move |_da, cr, ww, wh| {
+            let w = ww as f64;
+            let h = wh as f64;
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let r = w.min(h) * 0.42;
+            cr.save().ok();
+            cr.set_source_rgba(0.15, 0.15, 0.15, 0.95);
+            cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
+            cr.fill_preserve().ok();
+            cr.set_source_rgba(0.85, 0.85, 0.85, 0.9);
+            cr.set_line_width(1.5);
+            cr.stroke().ok();
+            // 0° marker (up)
+            cr.move_to(cx, cy - r + 4.0);
+            cr.line_to(cx, cy - r - 6.0);
+            cr.set_source_rgba(1.0, 0.95, 0.3, 0.9);
+            cr.set_line_width(2.0);
+            cr.stroke().ok();
+            // Needle
+            let rad = (rotate_value.get() - 90.0).to_radians();
+            let nx = cx + rad.cos() * (r - 8.0);
+            let ny = cy + rad.sin() * (r - 8.0);
+            cr.move_to(cx, cy);
+            cr.line_to(nx, ny);
+            cr.set_source_rgba(0.25, 0.55, 1.0, 1.0);
+            cr.set_line_width(2.2);
+            cr.stroke().ok();
+            cr.restore().ok();
+        });
+    }
+    let rotate_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    rotate_spin.set_digits(0);
+    rotate_spin.set_value(0.0);
+    rotate_spin.set_hexpand(true);
+    rotate_spin.set_tooltip_text(Some("Rotation angle in degrees"));
+    rotate_row.append(&rotate_dial);
+    rotate_row.append(&rotate_spin);
+    transform_inner.append(&rotate_row);
 
     row_label(&transform_inner, "Flip");
     let flip_row = GBox::new(Orientation::Horizontal, 8);
@@ -914,7 +956,7 @@ pub fn build_inspector(
         crop_right_s: Scale,
         crop_top_s: Scale,
         crop_bottom_s: Scale,
-        rotate_c: gtk4::ComboBoxText,
+        rotate_s: gtk4::SpinButton,
         flip_h_b: gtk4::ToggleButton,
         flip_v_b: gtk4::ToggleButton,
         scale_s: Scale,
@@ -943,10 +985,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 let sc = scale_s.value();
@@ -967,7 +1006,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -985,7 +1024,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -1003,7 +1042,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -1021,7 +1060,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -1030,12 +1069,14 @@ pub fn build_inspector(
         |clip, v| clip.crop_bottom = v,
     );
 
-    // Wire rotate combo
+    // Wire rotate dial + numeric spin
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_transform_changed = on_transform_changed.clone();
+        let rotate_value = rotate_value.clone();
+        let rotate_dial = rotate_dial.clone();
         let crop_left_s = crop_left_slider.clone();
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
@@ -1045,14 +1086,13 @@ pub fn build_inspector(
         let scale_s = scale_slider.clone();
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
-        rotate_combo.connect_changed(move |combo| {
+        rotate_spin.connect_value_changed(move |spin| {
+            let rot = spin.value().clamp(-180.0, 180.0).round() as i32;
+            rotate_value.set(rot as f64);
+            rotate_dial.queue_draw();
             if *updating.borrow() {
                 return;
             }
-            let rot = combo
-                .active_id()
-                .and_then(|id| id.parse::<i32>().ok())
-                .unwrap_or(0);
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -1086,6 +1126,68 @@ pub fn build_inspector(
             }
         });
     }
+    {
+        let rotate_spin = rotate_spin.clone();
+        let rotate_dial = rotate_dial.clone();
+        let updating = updating.clone();
+        let rotate_dial_for_click = rotate_dial.clone();
+        let click = gtk4::GestureClick::new();
+        click.set_button(1);
+        click.connect_pressed(move |_g, _n, x, y| {
+            if *updating.borrow() {
+                return;
+            }
+            let rot = dial_point_to_degrees(
+                x,
+                y,
+                rotate_dial_for_click.width() as f64,
+                rotate_dial_for_click.height() as f64,
+            );
+            rotate_spin.set_value(rot as f64);
+        });
+        rotate_dial.add_controller(click);
+    }
+    {
+        let rotate_spin = rotate_spin.clone();
+        let rotate_dial = rotate_dial.clone();
+        let updating = updating.clone();
+        let drag_start = Rc::new(RefCell::new((0.0_f64, 0.0_f64)));
+        let drag = gtk4::GestureDrag::new();
+        drag.set_button(1);
+        {
+            let drag_start = drag_start.clone();
+            let rotate_spin = rotate_spin.clone();
+            let rotate_dial = rotate_dial.clone();
+            let updating = updating.clone();
+            drag.connect_drag_begin(move |_g, x, y| {
+                if *updating.borrow() {
+                    return;
+                }
+                *drag_start.borrow_mut() = (x, y);
+                let rot =
+                    dial_point_to_degrees(x, y, rotate_dial.width() as f64, rotate_dial.height() as f64);
+                rotate_spin.set_value(rot as f64);
+            });
+        }
+        {
+            let drag_start = drag_start.clone();
+            let rotate_spin = rotate_spin.clone();
+            let rotate_dial = rotate_dial.clone();
+            let updating = updating.clone();
+            drag.connect_drag_update(move |_g, off_x, off_y| {
+                if *updating.borrow() {
+                    return;
+                }
+                let (sx, sy) = *drag_start.borrow();
+                let x = sx + off_x;
+                let y = sy + off_y;
+                let rot =
+                    dial_point_to_degrees(x, y, rotate_dial.width() as f64, rotate_dial.height() as f64);
+                rotate_spin.set_value(rot as f64);
+            });
+        }
+        rotate_dial.add_controller(drag);
+    }
 
     // Wire flip buttons
     {
@@ -1097,7 +1199,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_v_b = flip_v_btn.clone();
         let scale_s = scale_slider.clone();
         let pos_x_s = position_x_slider.clone();
@@ -1123,10 +1225,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
                     cl,
@@ -1152,7 +1251,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let scale_s = scale_slider.clone();
         let pos_x_s = position_x_slider.clone();
@@ -1178,10 +1277,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 on_transform_changed(
                     cl,
@@ -1209,7 +1305,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let flip_v_b = flip_v_btn.clone();
         let pos_x_s = position_x_slider.clone();
@@ -1236,10 +1332,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
@@ -1293,7 +1386,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let flip_v_b = flip_v_btn.clone();
         let scale_s = scale_slider.clone();
@@ -1320,10 +1413,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
@@ -1351,7 +1441,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let flip_v_b = flip_v_btn.clone();
         let scale_s = scale_slider.clone();
@@ -1378,10 +1468,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
@@ -1649,7 +1736,7 @@ pub fn build_inspector(
         crop_right_slider,
         crop_top_slider,
         crop_bottom_slider,
-        rotate_combo,
+        rotate_spin,
         flip_h_btn,
         flip_v_btn,
         scale_slider,
@@ -1675,6 +1762,16 @@ pub fn build_inspector(
     });
 
     (vbox, view)
+}
+
+fn dial_point_to_degrees(x: f64, y: f64, width: f64, height: f64) -> i32 {
+    let cx = width / 2.0;
+    let cy = height / 2.0;
+    let mut deg = ((y - cy).atan2(x - cx).to_degrees() + 90.0).rem_euclid(360.0);
+    if deg > 180.0 {
+        deg -= 360.0;
+    }
+    deg.round().clamp(-180.0, 180.0) as i32
 }
 
 fn row_label(parent: &GBox, text: &str) {

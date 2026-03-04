@@ -61,7 +61,7 @@ pub struct ProgramClip {
     pub crop_right: i32,
     pub crop_top: i32,
     pub crop_bottom: i32,
-    /// Rotation in degrees: 0, 90, 180, 270
+    /// Rotation in degrees (arbitrary angle).
     pub rotate: i32,
     pub flip_h: bool,
     pub flip_v: bool,
@@ -2756,13 +2756,18 @@ impl ProgramPlayer {
             vb.set_property("border-alpha", 0.0_f64);
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
-            let method = match rotate {
-                90 => "clockwise",
-                180 => "rotate-180",
-                270 => "counterclockwise",
-                _ => "none",
-            };
-            vfr.set_property_from_str("method", method);
+            if vfr.find_property("angle").is_some() {
+                // UI positive rotation is clockwise; GstRotate positive is counterclockwise.
+                vfr.set_property("angle", -(rotate as f64).to_radians());
+            } else {
+                let method = match rotate.rem_euclid(360) {
+                    90 => "clockwise",
+                    180 => "rotate-180",
+                    270 => "counterclockwise",
+                    _ => "none",
+                };
+                vfr.set_property_from_str("method", method);
+            }
         }
         if let Some(ref vff) = slot.videoflip_flip {
             let method = match (flip_h, flip_v) {
@@ -3477,8 +3482,6 @@ impl ProgramPlayer {
         let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
         let blur_sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
-        let need_rotate = clip.rotate != 0;
-        let need_flip = clip.flip_h || clip.flip_v;
         let need_title = !clip.title_text.is_empty();
 
         // Always create videocrop + videobox_crop_alpha so live crop editing
@@ -3508,28 +3511,19 @@ impl ProgramPlayer {
             (None, None)
         };
 
-        // conv3 + videoflip_rotate: only if rotation is active.
-        let (conv3, videoflip_rotate) = if need_rotate {
-            (
-                gst::ElementFactory::make("videoconvert").build().ok(),
-                gst::ElementFactory::make("videoflip").build().ok(),
-            )
-        } else {
-            (None, None)
-        };
+        // Always build rotation/flip path so live inspector edits work even
+        // when clips start at identity transform (no full pipeline rebuild).
+        let conv3 = gst::ElementFactory::make("videoconvert").build().ok();
+        let videoflip_rotate = gst::ElementFactory::make("rotate")
+            .build()
+            .ok()
+            .or_else(|| gst::ElementFactory::make("videoflip").build().ok());
 
-        // conv4 + videoflip_flip: only if flip is active.
-        let (conv4, videoflip_flip) = if need_flip {
-            (
-                gst::ElementFactory::make("videoconvert").build().ok(),
-                gst::ElementFactory::make("videoflip")
-                    .name("videoflip_flip")
-                    .build()
-                    .ok(),
-            )
-        } else {
-            (None, None)
-        };
+        let conv4 = gst::ElementFactory::make("videoconvert").build().ok();
+        let videoflip_flip = gst::ElementFactory::make("videoflip")
+            .name("videoflip_flip")
+            .build()
+            .ok();
 
         // Alpha filter: skipped — opacity is applied via compositor pad property.
         let alpha_filter: Option<gst::Element> = None;
@@ -3611,7 +3605,8 @@ impl ProgramPlayer {
 
         // Build chain: downscale to project resolution EARLY so all effects
         // process at 1080p instead of source resolution (e.g. 5.3K for GoPro).
-        // Order: convertscale to project res → [crop + alpha repad] → [effects] → zoom/position.
+        // Order: convertscale to project res → [crop + alpha repad] → [effects]
+        // → zoom/position → rotate/flip → title.
         let mut chain: Vec<gst::Element> = Vec::new();
         // 1. Convert + downscale to project resolution in a single pass.
         if let Some(ref e) = convertscale {
@@ -3641,6 +3636,21 @@ impl ProgramPlayer {
         if let Some(ref e) = gaussianblur {
             chain.push(e.clone());
         }
+        if let Some(ref e) = alpha_filter {
+            chain.push(e.clone());
+        }
+        // 4. Zoom / position adjustment.
+        if let Some(ref e) = videoscale_zoom {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = capsfilter_zoom {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = videobox_zoom {
+            chain.push(e.clone());
+        }
+        // 5. Rotate / flip after zoom so scaled-down clips don't get
+        // prematurely clipped by rotation at full-frame size.
         if let Some(ref e) = conv3 {
             chain.push(e.clone());
         }
@@ -3653,20 +3663,7 @@ impl ProgramPlayer {
         if let Some(ref e) = videoflip_flip {
             chain.push(e.clone());
         }
-        if let Some(ref e) = alpha_filter {
-            chain.push(e.clone());
-        }
         if let Some(ref e) = textoverlay {
-            chain.push(e.clone());
-        }
-        // 4. Zoom / position adjustment.
-        if let Some(ref e) = videoscale_zoom {
-            chain.push(e.clone());
-        }
-        if let Some(ref e) = capsfilter_zoom {
-            chain.push(e.clone());
-        }
-        if let Some(ref e) = videobox_zoom {
             chain.push(e.clone());
         }
 
@@ -4251,7 +4248,7 @@ impl ProgramPlayer {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
         };
-        let need_rotate = |c: &ProgramClip| c.rotate != 0;
+        let need_rotate = |c: &ProgramClip| c.rotate.rem_euclid(360) != 0;
         let need_flip = |c: &ProgramClip| c.flip_h || c.flip_v;
         let need_title = |c: &ProgramClip| !c.title_text.is_empty();
 

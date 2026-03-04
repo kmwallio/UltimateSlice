@@ -162,6 +162,16 @@ Tracking docs:
 - [x] Ripple edit mode (Trim In/Out)
 - [x] Roll edit mode
 - [x] Slip/slide edit modes
+- [ ] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
+- [ ] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
+- [ ] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
+- [ ] Clip grouping / ungrouping (link multiple clips to move/delete/trim as a unit)
+- [ ] Audio/video linking (auto-link video and audio from same source)
+- [ ] Solo track (play only selected tracks, complement to muted/locked)
+- [ ] Freeze frame (hold single frame for arbitrary duration)
+- [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
+- [ ] Select clips forward/backward from playhead for bulk operations
+- [ ] Clip display options / adjustable per-track height, clip color labels
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
@@ -170,6 +180,10 @@ Tracking docs:
 - [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies to Program Monitor preview and export (`reverse`/`areverse`), timeline shows `◀` badge, and state persists via `us:reverse` FCPXML attribute
 - [ ] Variable speed ramps: multiple keyframed speed segments within a single clip
 - [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
+
+### Keyframe Animation
+- [ ] Property keyframes with interpolation (position, scale, opacity, volume over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
+- [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
 
 ### Program Monitor
 - [x] Program Monitor panel showing assembled timeline playback
@@ -249,6 +263,7 @@ Tracking docs:
   - [x] Program Monitor master stereo VU meter (L/R)
   - [x] Per-track stereo meters in timeline track labels (timeline track order)
   - [x] Status-bar eye toggle to show/hide track audio levels
+- [ ] Audio crossfades (automatic crossfade at audio edit points, equal-power or linear, adjustable duration)
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
@@ -261,13 +276,21 @@ Tracking docs:
 - [ ] Advanced color grading
 - [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)
 - [ ] HDR workflow (PQ/HLG preview + export metadata)
+- [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Transition effects (fade to black, wipe right, wipe left)
+
+### Visual Effects
+- [ ] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls
+- [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
+- [ ] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
+- [ ] Adjustment layers — clip on a track that applies its effects to everything below
+- [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
 
 ### Video Transform (per clip)
 - [x] Scale / resize clip (zoom in/out within frame) via GStreamer `videoscale` + `videobox`
 - [x] Crop clip (left / right / top / bottom margins) via GStreamer `videocrop`
-- [x] Rotate clip (90° / 180° / 270° presets) via GStreamer `videoflip`
+- [x] Rotate clip by arbitrary angle via Inspector dial/numeric control and GStreamer `rotate` preview path
 - [x] Flip horizontal / flip vertical via GStreamer `videoflip`
 - [x] Position offset (X / Y translation within the output frame) via GStreamer `videobox`
 - [x] Transform edits (Scale/Position) now refresh immediately in Program Monitor preview/playback without stale black-bar framing
@@ -297,15 +320,30 @@ Tracking docs:
   - Inspector shows which track layer a clip is on; layer order controls composite z-order
   - [x] Per-clip opacity control so tracks can blend softly over each other
 - [x] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
+- [x] Rotation handle in transform overlay — drag the top-center handle to set clip rotation, synchronized with Inspector rotation controls
 - [x] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
 - [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 - [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
+
+### Monitoring
+- [ ] Safe area overlays (title safe 80%, action safe 90%) — toggle in toolbar, required for broadcast delivery
+- [ ] False color overlay — map luminance to color spectrum for exposure evaluation
+- [ ] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
+- [ ] Focus peaking — highlight in-focus edges with colored overlay
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [ ] Proxy media generation and management
+- [ ] Auto-backup with versioned history (timestamped backups to dedicated directory with restore UI)
+
+### Media Management
+- [ ] Relink dialog — general-purpose UI to find and repoint all offline/missing media
+- [ ] Bins / folders — hierarchical media browser organization for large projects
+- [ ] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
+- [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
+- [ ] Metadata display & filtering — show resolution, codec, frame rate, duration, file size in media browser
 
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
@@ -323,6 +361,11 @@ Tracking docs:
   - Audio sample rate and channel layout (stereo / mono)
 - [ ] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
 - [ ] ProRes / WebM / GIF export options
+- [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
+- [ ] Chapter markers in export (embed project markers as MP4/MKV chapter metadata)
+- [ ] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG)
+- [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
+- [ ] AAF export — standard interchange for audio post-production (Pro Tools)
 - [x] Export progress dialog with cancel (ProgressBar + status label)
 
 ### Polish
@@ -335,6 +378,11 @@ Tracking docs:
 - [ ] Welcome window for choosing recent project or new one
 - [ ] Help documentation and tutorials
 - [ ] Application icon and desktop integration (`.desktop` file)
+- [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
+- [ ] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
+- [ ] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
+- [ ] Customizable workspace layouts (save/restore panel arrangements for different tasks)
+- [ ] Named project snapshots (create named versions at milestones without separate files)
 
 ### Professional Workflow (The "Pro" Edge)
 - [ ] Multicam editing (sync by audio or timecode)
@@ -353,6 +401,8 @@ Tracking docs:
 - [ ] Voiceover recording tool with countdown and punch-in
 - [ ] Automatic Ducking (music volume lowers during dialogue)
 - [ ] Audio normalization and peak-matching
+- [ ] Built-in parametric EQ (3-band minimum: low/mid/high with frequency/gain/Q)
+- [ ] Waveform sync (align external audio to camera reference audio by waveform analysis)
 
 ### AI & Automation
 - [ ] Speech-to-Text: Automatic subtitle generation and transcription

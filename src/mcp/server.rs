@@ -451,14 +451,15 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_transform",
-            "description": "Set scale and position offset for a clip. scale > 1.0 zooms in (crops), scale < 1.0 zooms out (letterbox). position_x/y shift the frame from -1.0 (full left/top) to 1.0 (full right/bottom).",
+            "description": "Set scale, position, and optional rotation offset for a clip. scale > 1.0 zooms in (crops), scale < 1.0 zooms out (letterbox). position_x/y shift the frame from -1.0 (full left/top) to 1.0 (full right/bottom). rotate is in degrees (-180 to 180 typical).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id":    { "type": "string", "description": "Clip id (from list_clips)." },
                     "scale":      { "type": "number", "description": "Zoom scale factor: 1.0 = normal, 2.0 = 2× zoom in, 0.5 = half size. Range 0.1–4.0." },
                     "position_x": { "type": "number", "description": "Horizontal offset: -1.0 (left) to 1.0 (right). Default 0.0 (center)." },
-                    "position_y": { "type": "number", "description": "Vertical offset: -1.0 (top) to 1.0 (bottom). Default 0.0 (center)." }
+                    "position_y": { "type": "number", "description": "Vertical offset: -1.0 (top) to 1.0 (bottom). Default 0.0 (center)." },
+                    "rotate":     { "type": "integer", "description": "Rotation in degrees. Optional; omit to keep existing value." }
                 },
                 "required": ["clip_id"]
             }
@@ -757,6 +758,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             scale: args["scale"].as_f64().unwrap_or(1.0),
             position_x: args["position_x"].as_f64().unwrap_or(0.0),
             position_y: args["position_y"].as_f64().unwrap_or(0.0),
+            rotate: args["rotate"].as_i64().map(|v| v as i32),
             reply: tx,
         },
         "set_clip_opacity" => McpCommand::SetClipOpacity {
