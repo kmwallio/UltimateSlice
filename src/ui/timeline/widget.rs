@@ -1667,8 +1667,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             }
         });
     }
+    area.add_controller(drag.clone());
+    // group_with requires both gestures to already be on the same widget.
     drag.group_with(&click_ref);
-    area.add_controller(drag);
 
     // ── Keyboard shortcuts ──────────────────────────────────────────────────
     let key_ctrl = EventControllerKey::new();

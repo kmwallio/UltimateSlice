@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **GTK gesture_group assertion failure**: Fixed `Gtk-CRITICAL: gtk_gesture_group: assertion … failed` warning at startup. The timeline's click and drag gestures were being grouped before the drag gesture was added to the widget. Reordered to add the controller first, then group.
 - **Audio-only track ending early in preview**: When a video track and an audio-only track ended at the same timeline position, the audio could go silent before the end during playback. The audio pipeline drifted ahead of the wall-clock timeline during video pipeline rebuilds (clip boundary transitions) because it kept running while the rebuild blocked. The audio pipeline is now re-synced after every video rebuild so its position matches the reset wall clock.
 - **Export transform position mismatch**: Overlay clips with `position_y > 1.0` (extending past the bottom frame edge) were mispositioned in exports because ffmpeg's `pad` filter clamped the placement to fit within the output frame. The export now pre-crops overflow on all four edges before padding, matching the preview's GStreamer `videobox` behavior which clips content beyond the frame boundary.
 
