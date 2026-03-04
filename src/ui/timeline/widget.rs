@@ -2103,21 +2103,45 @@ fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState) {
 
     let visible_secs = (width - TRACK_LABEL_WIDTH) / st.pixels_per_second;
     let start_sec = st.scroll_offset / st.pixels_per_second;
-    let tick_interval = choose_tick_interval(st.pixels_per_second);
+    let major_tick_interval = choose_tick_interval(st.pixels_per_second);
+    let major_tick_px = major_tick_interval * st.pixels_per_second;
+    let subdivisions = choose_tick_subdivisions(major_tick_px);
+    let tick_interval = major_tick_interval / subdivisions as f64;
     let first_tick = (start_sec / tick_interval).floor() * tick_interval;
+    let show_mid_labels = subdivisions >= 4 && (major_tick_px / 2.0) >= 70.0;
+    let midpoint_step = (subdivisions / 2).max(1) as i64;
 
     let mut t = first_tick;
+    let mut tick_index = (first_tick / tick_interval).round() as i64;
     while t <= start_sec + visible_secs + tick_interval {
         let x = TRACK_LABEL_WIDTH + (t - start_sec) * st.pixels_per_second;
         if x >= TRACK_LABEL_WIDTH && x <= width {
-            cr.move_to(x, RULER_HEIGHT - 8.0);
+            let major_mod = tick_index.rem_euclid(subdivisions as i64);
+            let is_major = major_mod == 0;
+            let is_mid = !is_major && show_mid_labels && major_mod.rem_euclid(midpoint_step) == 0;
+            let tick_height = if is_major {
+                8.0
+            } else if is_mid {
+                6.0
+            } else {
+                4.0
+            };
+            cr.move_to(x, RULER_HEIGHT - tick_height);
             cr.line_to(x, RULER_HEIGHT);
             cr.stroke().ok();
-            let label = format_timecode(t);
-            let _ = cr.move_to(x + 2.0, RULER_HEIGHT - 10.0);
-            let _ = cr.show_text(&label);
+            if is_major || is_mid {
+                let label_interval = if is_major {
+                    major_tick_interval
+                } else {
+                    major_tick_interval / 2.0
+                };
+                let label = format_timecode(t, label_interval);
+                let _ = cr.move_to(x + 2.0, RULER_HEIGHT - 10.0);
+                let _ = cr.show_text(&label);
+            }
         }
         t += tick_interval;
+        tick_index += 1;
     }
 
     // Draw timeline markers (chapter points)
@@ -2601,15 +2625,45 @@ fn choose_tick_interval(pixels_per_second: f64) -> f64 {
     600.0
 }
 
-fn format_timecode(secs: f64) -> String {
-    let secs = secs.max(0.0) as u64;
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
+fn choose_tick_subdivisions(major_tick_px: f64) -> usize {
+    if major_tick_px >= 320.0 {
+        8
+    } else if major_tick_px >= 160.0 {
+        4
+    } else if major_tick_px >= 90.0 {
+        2
     } else {
-        format!("{m}:{s:02}")
+        1
+    }
+}
+
+fn format_timecode(secs: f64, label_interval: f64) -> String {
+    let total_ms = (secs.max(0.0) * 1000.0).round() as u64;
+    let h = total_ms / 3_600_000;
+    let m = (total_ms % 3_600_000) / 60_000;
+    let s = (total_ms % 60_000) / 1000;
+    let ms = total_ms % 1000;
+
+    if label_interval >= 1.0 {
+        if h > 0 {
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{m}:{s:02}")
+        }
+    } else if label_interval >= 0.1 {
+        let tenths = ms / 100;
+        if h > 0 {
+            format!("{h}:{m:02}:{s:02}.{tenths}")
+        } else {
+            format!("{m}:{s:02}.{tenths}")
+        }
+    } else {
+        let hundredths = ms / 10;
+        if h > 0 {
+            format!("{h}:{m:02}:{s:02}.{hundredths:02}")
+        } else {
+            format!("{m}:{s:02}.{hundredths:02}")
+        }
     }
 }
 

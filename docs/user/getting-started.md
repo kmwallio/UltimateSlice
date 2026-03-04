@@ -63,7 +63,7 @@ The application opens with an **Untitled** project containing one Video track an
 ## Opening an Existing Project
 
 - Click **Open…** (`Ctrl+O`) and select a `.uspxml` or `.fcpxml` file (the chooser also allows generic `.xml` fallback).
-- Or click **Recent ▾** to pick from the last 10 opened/saved projects.
+- Or click **Recent ▾** to pick from up to 10 opened/saved projects that still exist on disk.
 - On Linux desktop environments, `.uspxml` files are registered as UltimateSlice project files and can be associated with the app.
 - UltimateSlice reads FCPXML versions 1.10 through 1.14, including all clip properties, markers, and effects.
 - For FCPXML files containing multiple projects, UltimateSlice imports the first project timeline in the file.

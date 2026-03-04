@@ -22,7 +22,10 @@ pub fn load() -> Vec<String> {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
-    serde_json::from_str::<Vec<String>>(&text).unwrap_or_default()
+    let mut entries = serde_json::from_str::<Vec<String>>(&text).unwrap_or_default();
+    entries.retain(|p| std::path::Path::new(p).exists());
+    entries.truncate(MAX_RECENT);
+    entries
 }
 
 /// Push `path` to the front of the recent list and persist it.

@@ -50,7 +50,7 @@ Tracking docs:
 - [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
 
 ### Timeline
-- [x] Cairo-rendered `DrawingArea` with ruler (adaptive tick intervals)
+- [x] Cairo-rendered `DrawingArea` with ruler (adaptive multi-tier tick/label density while zooming)
 - [x] Multi-track rows (currently 1 Video + 1 Audio track created on project init)
 - [x] Clip rendering with rounded rectangles, labels, selected highlight
 - [x] Trim handles (in-edge / out-edge) shown when clip is selected
@@ -80,6 +80,7 @@ Tracking docs:
 
 ### Toolbar / Header
 - [x] New / Open / Save / Export MP4 buttons
+- [x] Recent projects menu limits to 10 entries and omits missing files
 - [x] Undo / Redo buttons
 - [x] Select / Razor tool toggle buttons
 
