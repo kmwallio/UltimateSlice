@@ -2,8 +2,8 @@ use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 use crate::undo::{
-    DeleteClipCommand, EditHistory, MoveClipCommand, ReorderTrackCommand, SetTrackClipsCommand,
-    SplitClipCommand, TrimClipCommand, TrimOutCommand,
+    EditHistory, MoveClipCommand, ReorderTrackCommand, SetTrackClipsCommand, SplitClipCommand,
+    TrimClipCommand, TrimOutCommand,
 };
 use glib;
 use gtk4::prelude::*;
@@ -11,6 +11,7 @@ use gtk4::{
     self as gtk, DrawingArea, EventControllerKey, EventControllerScroll, GestureClick, GestureDrag,
 };
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 const TRACK_HEIGHT: f64 = 60.0;
@@ -102,6 +103,18 @@ struct TimelineClipboard {
     source_track_id: String,
 }
 
+#[derive(Debug, Clone)]
+struct MarqueeSelection {
+    start_x: f64,
+    start_y: f64,
+    current_x: f64,
+    current_y: f64,
+    additive: bool,
+    base_ids: HashSet<String>,
+    base_primary: Option<String>,
+    base_track_id: Option<String>,
+}
+
 /// Shared state for the timeline widget
 pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
@@ -145,6 +158,12 @@ pub struct TimelineState {
     pub show_track_audio_levels: bool,
     /// Single-clip timeline clipboard payload for copy/paste operations.
     clipboard: Option<TimelineClipboard>,
+    /// Multi-selection set (primary selection remains in `selected_clip_id`).
+    selected_clip_ids: HashSet<String>,
+    /// Anchor clip used for Shift+click range selection.
+    selection_anchor_clip_id: Option<String>,
+    /// Active marquee-selection drag state.
+    marquee_selection: Option<MarqueeSelection>,
 }
 
 impl TimelineState {
@@ -174,6 +193,9 @@ impl TimelineState {
             track_audio_peak_db: Vec::new(),
             show_track_audio_levels: true,
             clipboard: None,
+            selected_clip_ids: HashSet::new(),
+            selection_anchor_clip_id: None,
+            marquee_selection: None,
         }
     }
 
@@ -199,39 +221,67 @@ impl TimelineState {
 
     /// Delete the currently selected clip
     pub fn delete_selected(&mut self) {
-        let Some(clip_id) = self.selected_clip_id.clone() else {
+        self.delete_selected_internal(self.magnetic_mode, if self.magnetic_mode {
+            "Delete clip(s) (magnetic)"
+        } else {
+            "Delete clip(s)"
+        });
+    }
+
+    pub fn ripple_delete_selected(&mut self) {
+        self.delete_selected_internal(true, "Ripple delete");
+    }
+
+    fn delete_selected_internal(&mut self, compact: bool, label: &str) {
+        let Some(primary_clip_id) = self.selected_clip_id.clone() else {
             return;
         };
-        let found_track = {
+        let mut target_ids = if self.selected_clip_ids.is_empty() {
+            let mut ids = HashSet::new();
+            ids.insert(primary_clip_id);
+            ids
+        } else {
+            self.selected_clip_ids.clone()
+        };
+        if target_ids.is_empty() {
+            return;
+        }
+        let track_updates = {
             let proj = self.project.borrow();
             proj.tracks
                 .iter()
-                .find(|t| t.clips.iter().any(|c| c.id == clip_id))
-                .map(|t| (t.id.clone(), t.clips.clone()))
+                .filter_map(|t| {
+                    let old_clips = t.clips.clone();
+                    let mut new_clips: Vec<Clip> = old_clips
+                        .iter()
+                        .filter(|c| !target_ids.contains(&c.id))
+                        .cloned()
+                        .collect();
+                    if compact {
+                        compact_gap_free_clips(&mut new_clips);
+                    }
+                    if new_clips != old_clips {
+                        Some((t.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
         };
-        if let Some((track_id, old_clips)) = found_track {
-            if self.magnetic_mode {
-                let mut new_clips = old_clips.clone();
-                new_clips.retain(|c| c.id != clip_id);
-                compact_gap_free_clips(&mut new_clips);
-                if new_clips != old_clips {
-                    let cmd = SetTrackClipsCommand {
-                        track_id,
-                        old_clips,
-                        new_clips,
-                        label: "Delete clip (magnetic)".to_string(),
-                    };
-                    let mut proj = self.project.borrow_mut();
-                    self.history.execute(Box::new(cmd), &mut proj);
-                }
-            } else if let Some(clip) = old_clips.iter().find(|c| c.id == clip_id).cloned() {
-                let mut proj = self.project.borrow_mut();
-                self.history
-                    .execute(Box::new(DeleteClipCommand { clip, track_id }), &mut proj);
+        if !track_updates.is_empty() {
+            let mut proj = self.project.borrow_mut();
+            for (track_id, old_clips, new_clips) in track_updates {
+                let cmd = SetTrackClipsCommand {
+                    track_id,
+                    old_clips,
+                    new_clips,
+                    label: label.to_string(),
+                };
+                self.history.execute(Box::new(cmd), &mut proj);
             }
         }
-        self.selected_clip_id = None;
-        self.selected_track_id = None;
+        target_ids.clear();
+        self.clear_clip_selection();
     }
 
     pub fn copy_selected_to_clipboard(&mut self) -> bool {
@@ -337,8 +387,8 @@ impl TimelineState {
         };
         let mut proj = self.project.borrow_mut();
         self.history.execute(Box::new(cmd), &mut proj);
-        self.selected_track_id = Some(target_track_id);
-        self.selected_clip_id = Some(pasted_id);
+        drop(proj);
+        self.set_single_clip_selection(pasted_id, target_track_id);
         true
     }
 
@@ -384,6 +434,220 @@ impl TimelineState {
         let mut proj = self.project.borrow_mut();
         self.history.execute(Box::new(cmd), &mut proj);
         true
+    }
+
+    fn clear_clip_selection(&mut self) {
+        self.selected_clip_id = None;
+        self.selected_clip_ids.clear();
+        self.selection_anchor_clip_id = None;
+    }
+
+    fn set_single_clip_selection(&mut self, clip_id: String, track_id: String) {
+        self.selected_clip_ids.clear();
+        self.selected_clip_ids.insert(clip_id.clone());
+        self.selected_clip_id = Some(clip_id.clone());
+        self.selection_anchor_clip_id = Some(clip_id);
+        self.selected_track_id = Some(track_id);
+    }
+
+    fn is_clip_selected(&self, clip_id: &str) -> bool {
+        if self.selected_clip_id.is_none() {
+            return false;
+        }
+        if self.selected_clip_ids.is_empty() {
+            self.selected_clip_id.as_deref() == Some(clip_id)
+        } else {
+            self.selected_clip_ids.contains(clip_id)
+        }
+    }
+
+    fn select_all_clips(&mut self) -> bool {
+        let mut all_ids = Vec::new();
+        let mut primary: Option<(String, String)> = None;
+        {
+            let proj = self.project.borrow();
+            for track in &proj.tracks {
+                for clip in &track.clips {
+                    if primary.is_none() {
+                        primary = Some((clip.id.clone(), track.id.clone()));
+                    }
+                    all_ids.push(clip.id.clone());
+                }
+            }
+        }
+        let Some((primary_id, primary_track_id)) = primary else {
+            return false;
+        };
+        self.selected_clip_ids = all_ids.into_iter().collect();
+        self.selected_clip_id = Some(primary_id.clone());
+        self.selected_track_id = Some(primary_track_id);
+        self.selection_anchor_clip_id = Some(primary_id);
+        true
+    }
+
+    fn shift_select_range_to(&mut self, track_id: &str, to_clip_id: &str) -> bool {
+        let anchor = self
+            .selection_anchor_clip_id
+            .clone()
+            .or_else(|| self.selected_clip_id.clone())
+            .unwrap_or_else(|| to_clip_id.to_string());
+        let range_ids = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+                return false;
+            };
+            let mut clips = track.clips.clone();
+            clips.sort_by_key(|c| c.timeline_start);
+            let Some(a_idx) = clips.iter().position(|c| c.id == anchor) else {
+                return false;
+            };
+            let Some(b_idx) = clips.iter().position(|c| c.id == to_clip_id) else {
+                return false;
+            };
+            let (start, end) = if a_idx <= b_idx {
+                (a_idx, b_idx)
+            } else {
+                (b_idx, a_idx)
+            };
+            clips[start..=end]
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>()
+        };
+        if range_ids.is_empty() {
+            return false;
+        }
+        for id in range_ids {
+            self.selected_clip_ids.insert(id);
+        }
+        self.selected_clip_id = Some(to_clip_id.to_string());
+        self.selected_track_id = Some(track_id.to_string());
+        true
+    }
+
+    fn toggle_clip_selection(&mut self, clip_id: &str, track_id: &str) -> bool {
+        if self.selected_clip_ids.contains(clip_id) {
+            self.selected_clip_ids.remove(clip_id);
+            if self.selected_clip_id.as_deref() == Some(clip_id) {
+                self.selected_clip_id = self.selected_clip_ids.iter().next().cloned();
+            }
+            if self.selected_clip_id.is_none() {
+                self.selection_anchor_clip_id = None;
+            }
+        } else {
+            self.selected_clip_ids.insert(clip_id.to_string());
+            self.selected_clip_id = Some(clip_id.to_string());
+            if self.selection_anchor_clip_id.is_none() {
+                self.selection_anchor_clip_id = Some(clip_id.to_string());
+            }
+            self.selected_track_id = Some(track_id.to_string());
+        }
+        true
+    }
+
+    fn begin_marquee_selection(&mut self, x: f64, y: f64, additive: bool) {
+        let base_ids = if additive {
+            if self.selected_clip_ids.is_empty() {
+                self.selected_clip_id
+                    .clone()
+                    .map(|id| {
+                        let mut s = HashSet::new();
+                        s.insert(id);
+                        s
+                    })
+                    .unwrap_or_default()
+            } else {
+                self.selected_clip_ids.clone()
+            }
+        } else {
+            HashSet::new()
+        };
+        self.marquee_selection = Some(MarqueeSelection {
+            start_x: x,
+            start_y: y,
+            current_x: x,
+            current_y: y,
+            additive,
+            base_ids,
+            base_primary: self.selected_clip_id.clone(),
+            base_track_id: self.selected_track_id.clone(),
+        });
+    }
+
+    fn update_marquee_selection(&mut self, current_x: f64, current_y: f64) -> bool {
+        let Some(mut marquee) = self.marquee_selection.clone() else {
+            return false;
+        };
+        marquee.current_x = current_x;
+        marquee.current_y = current_y;
+        let hits = self.clips_in_rect(marquee.start_x, marquee.start_y, current_x, current_y);
+        let mut next_ids = if marquee.additive {
+            marquee.base_ids.clone()
+        } else {
+            HashSet::new()
+        };
+        for (id, _) in &hits {
+            next_ids.insert(id.clone());
+        }
+        self.selected_clip_ids = next_ids;
+        if self.selected_clip_ids.is_empty() {
+            if marquee.additive {
+                self.selected_clip_id = marquee.base_primary.clone();
+                self.selected_track_id = marquee.base_track_id.clone();
+            } else {
+                self.selected_clip_id = None;
+            }
+        } else if let Some((primary_id, primary_track_id)) = hits.last().cloned() {
+            self.selected_clip_id = Some(primary_id);
+            self.selected_track_id = Some(primary_track_id);
+        } else if let Some(primary_id) = self.selected_clip_ids.iter().next().cloned() {
+            self.selected_clip_id = Some(primary_id);
+        }
+        self.marquee_selection = Some(marquee);
+        true
+    }
+
+    fn end_marquee_selection(&mut self) {
+        self.marquee_selection = None;
+        if self.selected_clip_id.is_none() {
+            self.selection_anchor_clip_id = None;
+        } else if self.selection_anchor_clip_id.is_none() {
+            self.selection_anchor_clip_id = self.selected_clip_id.clone();
+        }
+    }
+
+    fn clips_in_rect(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(String, String)> {
+        let left = x0.min(x1).max(TRACK_LABEL_WIDTH);
+        let right = x0.max(x1);
+        let top = y0.min(y1).max(RULER_HEIGHT);
+        let bottom = y0.max(y1);
+        if right <= left || bottom <= top {
+            return Vec::new();
+        }
+        let proj = self.project.borrow();
+        let mut hits = Vec::new();
+        for (track_idx, track) in proj.tracks.iter().enumerate() {
+            let track_y = RULER_HEIGHT + track_idx as f64 * TRACK_HEIGHT;
+            let clip_top = track_y + 2.0;
+            let clip_bottom = clip_top + TRACK_HEIGHT - 4.0;
+            if clip_bottom < top || clip_top > bottom {
+                continue;
+            }
+            for clip in &track.clips {
+                let cx = self.ns_to_x(clip.timeline_start);
+                let cw = (clip.duration() as f64 / NS_PER_SECOND) * self.pixels_per_second;
+                let clip_left = cx;
+                let clip_right = cx + cw;
+                if clip_right >= left
+                    && clip_left <= right
+                    && clip_bottom >= top
+                    && clip_top <= bottom
+                {
+                    hits.push((clip.id.clone(), track.id.clone()));
+                }
+            }
+        }
+        hits
     }
 
     /// Razor cut the selected clip (or any clip at playhead) at the playhead position
@@ -673,25 +937,39 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     | ActiveTool::Roll
                     | ActiveTool::Slip
                     | ActiveTool::Slide => {
+                        let mods = gesture.current_event_state();
+                        let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                        let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                            || mods.contains(gtk::gdk::ModifierType::META_MASK);
                         // Select clip
                         let hit = st.hit_test(x, y);
                         match hit {
                             Some(h) => {
-                                st.selected_clip_id = Some(h.clip_id);
-                                st.selected_track_id = Some(h.track_id);
+                                if shift {
+                                    if !st.shift_select_range_to(&h.track_id, &h.clip_id) {
+                                        st.set_single_clip_selection(h.clip_id, h.track_id);
+                                    }
+                                } else if ctrl_or_meta {
+                                    st.toggle_clip_selection(&h.clip_id, &h.track_id);
+                                } else {
+                                    st.set_single_clip_selection(h.clip_id, h.track_id);
+                                }
                             }
                             None => {
-                                st.selected_clip_id = None;
-                                // Click on empty track area still selects the track
-                                if y > RULER_HEIGHT {
-                                    let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
-                                    let tid = {
-                                        let proj = st.project.borrow();
-                                        proj.tracks.get(track_idx).map(|t| t.id.clone())
-                                    };
-                                    st.selected_track_id = tid;
+                                if !shift && !ctrl_or_meta {
+                                    st.clear_clip_selection();
+                                    // Click on empty track area still selects the track
+                                    if y > RULER_HEIGHT {
+                                        let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
+                                        let tid = {
+                                            let proj = st.project.borrow();
+                                            proj.tracks.get(track_idx).map(|t| t.id.clone())
+                                        };
+                                        st.selected_track_id = tid;
+                                    } else {
+                                        st.selected_track_id = None;
+                                    }
                                 } else {
-                                    st.selected_track_id = None;
                                 }
                             }
                         }
@@ -767,8 +1045,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     // Right-click → context actions (for now: select clip for Delete key)
                     let hit = st.hit_test(x, y);
                     if let Some(h) = hit {
-                        st.selected_clip_id = Some(h.clip_id);
-                        st.selected_track_id = Some(h.track_id);
+                        st.set_single_clip_selection(h.clip_id, h.track_id);
                     }
                     let sel_cb = st.on_clip_selected.clone();
                     let new_sel = st.selected_clip_id.clone();
@@ -799,7 +1076,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         drag.connect_drag_begin({
             let state = state.clone();
             let area_weak = area_weak.clone();
-            move |_gesture, x, y| {
+            move |gesture, x, y| {
                 if state.borrow().loading {
                     return;
                 }
@@ -932,8 +1209,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 }
                             }
                         };
-                        st.selected_clip_id = Some(h.clip_id);
-                        st.selected_track_id = Some(h.track_id);
+                        st.set_single_clip_selection(h.clip_id, h.track_id);
                     }
                 } else if x < TRACK_LABEL_WIDTH && y > RULER_HEIGHT {
                     // Drag started in track label area → track reorder
@@ -945,6 +1221,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             target_idx: track_idx,
                         };
                     }
+                } else if st.active_tool == ActiveTool::Select && y > RULER_HEIGHT {
+                    let mods = gesture.current_event_state();
+                    let additive = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                        || mods.contains(gtk::gdk::ModifierType::META_MASK);
+                    st.begin_marquee_selection(x, y, additive);
                 }
             }
         });
@@ -1457,7 +1738,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             *target_idx = new_target;
                         }
                     }
-                    DragOp::None => {}
+                    DragOp::None => {
+                        if st.marquee_selection.is_some() {
+                            st.update_marquee_selection(current_x, current_y);
+                        }
+                    }
                 }
 
                 if let Some(a) = area_weak.upgrade() {
@@ -1471,6 +1756,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             move |_, _, _| {
                 let mut st = state.borrow_mut();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
+                let should_notify_project = !matches!(&drag_op, DragOp::None);
+                let had_marquee = st.marquee_selection.is_some();
+                if had_marquee {
+                    st.end_marquee_selection();
+                }
                 let magnetic_mode = st.magnetic_mode;
 
                 // Commit drag to undo history
@@ -1870,10 +2160,23 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     DragOp::None => {}
                 }
 
-                let proj_cb = st.on_project_changed.clone();
+                let proj_cb = if should_notify_project {
+                    st.on_project_changed.clone()
+                } else {
+                    None
+                };
+                let sel_cb = if had_marquee {
+                    st.on_clip_selected.clone()
+                } else {
+                    None
+                };
+                let new_sel = st.selected_clip_id.clone();
                 drop(st);
                 if let Some(cb) = proj_cb {
                     cb();
+                }
+                if let Some(cb) = sel_cb {
+                    cb(new_sel);
                 }
             }
         });
@@ -1895,6 +2198,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
             // Track whether we need to fire on_project_changed after releasing the borrow
             let mut notify_project = false;
+            let mut notify_selection = false;
 
             let handled = match key {
                 Key::z if ctrl && !shift => {
@@ -1912,6 +2216,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     notify_project = true;
                     true
                 }
+                Key::a | Key::A if ctrl => {
+                    let changed = st.select_all_clips();
+                    if changed {
+                        notify_selection = true;
+                    }
+                    changed
+                }
                 Key::c | Key::C if ctrl => st.copy_selected_to_clipboard(),
                 Key::v | Key::V if ctrl && shift => {
                     let changed = st.paste_attributes_from_clipboard();
@@ -1926,6 +2237,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         notify_project = true;
                     }
                     changed
+                }
+                Key::Delete | Key::BackSpace if shift => {
+                    st.ripple_delete_selected();
+                    notify_project = true;
+                    true
                 }
                 Key::Delete | Key::BackSpace => {
                     st.delete_selected();
@@ -2010,6 +2326,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             } else {
                 None
             };
+            let sel_cb = if notify_selection {
+                st.on_clip_selected.clone()
+            } else {
+                None
+            };
+            let new_sel = st.selected_clip_id.clone();
             if handled {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
@@ -2018,6 +2340,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             drop(st);
             if let Some(cb) = proj_cb {
                 cb();
+            }
+            if let Some(cb) = sel_cb {
+                cb(new_sel);
             }
 
             if handled {
@@ -2307,6 +2632,22 @@ fn draw_timeline(
             cr.stroke().ok();
         }
     }
+
+    if let Some(m) = &st.marquee_selection {
+        let left = m.start_x.min(m.current_x).max(TRACK_LABEL_WIDTH);
+        let right = m.start_x.max(m.current_x);
+        let top = m.start_y.min(m.current_y).max(RULER_HEIGHT);
+        let bottom = m.start_y.max(m.current_y);
+        if right > left && bottom > top {
+            cr.set_source_rgba(0.25, 0.55, 1.0, 0.18);
+            cr.rectangle(left, top, right - left, bottom - top);
+            cr.fill().ok();
+            cr.set_source_rgba(0.45, 0.75, 1.0, 0.95);
+            cr.set_line_width(1.5);
+            cr.rectangle(left, top, right - left, bottom - top);
+            cr.stroke().ok();
+        }
+    }
 }
 
 fn compact_gap_free_clips(clips: &mut Vec<Clip>) {
@@ -2567,7 +2908,7 @@ fn draw_clip(
         return;
     }
 
-    let is_selected = st.selected_clip_id.as_deref() == Some(&clip.id);
+    let is_selected = st.is_clip_selected(&clip.id);
     let is_transition_hover = st
         .hover_transition_pair
         .as_ref()
@@ -3003,7 +3344,12 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Y", "Toggle Slip edit tool"),
         ("U", "Toggle Slide edit tool"),
         ("Escape", "Switch to Select tool"),
-        ("Delete / Bksp", "Delete selected clip"),
+        ("Delete / Bksp", "Delete selected clip(s)"),
+        ("Shift+Delete / Shift+Bksp", "Ripple delete selected clip(s)"),
+        ("Shift+Click (Timeline)", "Range-select clips on the same track"),
+        ("Ctrl/Cmd+Click (Timeline)", "Toggle clip in current selection"),
+        ("Ctrl+A", "Select all timeline clips"),
+        ("Drag empty timeline body", "Marquee-select intersecting clips"),
         ("M", "Add marker at playhead"),
         ("Right-click ruler", "Remove nearest marker"),
         ("Right-click transition", "Remove transition at boundary"),

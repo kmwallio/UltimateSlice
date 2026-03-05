@@ -168,8 +168,10 @@ Tracking docs:
 - [x] Roll edit mode
 - [x] Slip/slide edit modes
 - [x] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
-- [ ] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
-- [ ] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
+- [x] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
+  - [x] Phase 1: Shift+click range select, Ctrl/Cmd+click toggle selection, Ctrl+A select all
+  - [x] Phase 2: rubber-band marquee selection
+- [x] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
 - [ ] Clip grouping / ungrouping (link multiple clips to move/delete/trim as a unit)
 - [ ] Audio/video linking (auto-link video and audio from same source)
 - [ ] Solo track (play only selected tracks, complement to muted/locked)

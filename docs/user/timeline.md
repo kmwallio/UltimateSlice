@@ -88,6 +88,20 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Paste attributes (`Ctrl+Shift+V`)** applies copied clip attributes (color/effects/audio/transform/title settings) onto the currently selected clip.
 - Copy/paste currently operates on a single selected clip.
 
+### Multi-Select (staged rollout)
+
+- **Shift+Click** adds a same-track range between the anchor clip and the clicked clip.
+- **Ctrl/Cmd+Click** toggles individual clips in the current selection.
+- **Ctrl+A** selects all clips in the timeline.
+- **Marquee drag** (drag in empty timeline body) selects clips intersecting the rectangle.
+- The Inspector still follows the primary selected clip.
+
+### Ripple Delete (`Shift+Delete`)
+
+- Removes selected clip(s) and closes gaps on the affected track(s) only.
+- Works with single selection and multi-selection.
+- Uses track-local compaction (does not shift unrelated tracks).
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -101,10 +115,15 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `,` | Insert at playhead (from source monitor) |
 | `.` | Overwrite at playhead (from source monitor) |
 | `Escape` | Switch to Select tool |
-| `Delete` / `Backspace` | Delete selected clip |
+| `Delete` / `Backspace` | Delete selected clip(s) |
+| `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
+| `Shift+Click` (timeline) | Add a same-track range to selection |
+| `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
+| `Ctrl+A` | Select all timeline clips |
+| `Drag in empty timeline body` | Marquee-select clips intersecting the rectangle |
 | `M` | Add chapter marker at current playhead position |
 | `Right-click ruler` | Remove the nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |

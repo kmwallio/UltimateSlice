@@ -50,10 +50,15 @@
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
 | `Escape` | Switch to Select tool |
-| `Delete` / `Backspace` | Delete selected clip |
+| `Delete` / `Backspace` | Delete selected clip(s) |
+| `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
+| `Shift+Click` (timeline) | Add a range of clips on the same track to selection |
+| `Ctrl`/`Cmd` + Click (timeline) | Toggle a clip in the current selection |
+| `Ctrl+A` | Select all timeline clips |
+| Drag in empty timeline body | Marquee-select clips intersecting the rectangle |
 | `M` | Add chapter marker at playhead |
 | `Right-click ruler` | Remove nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |
