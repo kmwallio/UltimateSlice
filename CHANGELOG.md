@@ -44,6 +44,7 @@ All notable project changes and progress should be recorded here.
 - **Continuing decoders at boundary crossings**: When adjacent clips share the same source file (common after splits, rough cuts from single footage), the program player now reuses existing decoder slots instead of tearing down and rebuilding the full pipeline. This avoids codec init, element creation, and stream discovery overhead, reducing boundary crossing latency from ~800-2800ms to ~200-600ms (~60-75% improvement). Falls back to full rebuild when source files differ, slot count changes, audio presence differs, speed/reverse settings differ, or effects topology changes.
 
 ### Added
+- **Timeline copy/paste shortcuts**: Added `Ctrl+C` (copy selected timeline clip), `Ctrl+V` (paste-insert at playhead), and `Ctrl+Shift+V` (paste copied attributes onto selected clip), with undo/redo integration.
 - **Background prerender preference + MCP control**: Added a new Playback preference and MCP tool (`set_background_prerender`) to toggle temporary disk prerender behavior for complex sections.
 - **Status-bar Background Render toggle**: Added a bottom status-bar toggle next to **Track Audio Levels** to quickly enable/disable background prerender without opening Preferences.
 - **Preview LUTs preference + MCP control**: Added a new Playback preference and MCP tool (`set_preview_luts`) to generate/use project-resolution LUT-baked preview media when Proxy mode is Off.

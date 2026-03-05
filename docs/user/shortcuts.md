@@ -51,6 +51,9 @@
 | `.` | Overwrite at playhead (replace existing material) |
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip |
+| `Ctrl+C` | Copy selected timeline clip |
+| `Ctrl+V` | Paste copied clip as insert at playhead |
+| `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
 | `M` | Add chapter marker at playhead |
 | `Right-click ruler` | Remove nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |

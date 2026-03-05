@@ -81,6 +81,13 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Also available via the **⏺ Overwrite** button in the source monitor transport bar.
 - Requires a source to be loaded with valid in/out marks.
 
+### Timeline Copy/Paste (`Ctrl+C`, `Ctrl+V`, `Ctrl+Shift+V`)
+
+- **Copy (`Ctrl+C`)** stores the currently selected timeline clip in the timeline clipboard.
+- **Paste insert (`Ctrl+V`)** inserts the copied clip at the current playhead and shifts clips at/after the playhead to the right on the target track.
+- **Paste attributes (`Ctrl+Shift+V`)** applies copied clip attributes (color/effects/audio/transform/title settings) onto the currently selected clip.
+- Copy/paste currently operates on a single selected clip.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -95,6 +102,9 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `.` | Overwrite at playhead (from source monitor) |
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip |
+| `Ctrl+C` | Copy selected timeline clip |
+| `Ctrl+V` | Paste copied clip as insert at playhead |
+| `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
 | `M` | Add chapter marker at current playhead position |
 | `Right-click ruler` | Remove the nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |

@@ -18,8 +18,8 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -808,10 +808,7 @@ impl ProgramPlayer {
         let (prerender_result_tx, prerender_result_rx) = mpsc::channel::<PrerenderJobResult>();
         let prerender_cache_root = std::env::temp_dir()
             .join("ultimateslice")
-            .join(format!(
-                "prerender-v{}",
-                BACKGROUND_PRERENDER_CACHE_VERSION
-            ));
+            .join(format!("prerender-v{}", BACKGROUND_PRERENDER_CACHE_VERSION));
         let _ = std::fs::create_dir_all(&prerender_cache_root);
 
         Ok((
@@ -1070,7 +1067,9 @@ impl ProgramPlayer {
         let start_scope_seq = self.scope_frame_seq.load(Ordering::Relaxed);
         let start_comp_seq = self.compositor_frame_seq.load(Ordering::Relaxed);
         let was_scope_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
-        let was_comp_capture = self.compositor_capture_enabled.swap(true, Ordering::Relaxed);
+        let was_comp_capture = self
+            .compositor_capture_enabled
+            .swap(true, Ordering::Relaxed);
         log::info!(
             "export_displayed_frame: start_scope_seq={} start_comp_seq={} slots={} current_idx={:?} state={:?} timeline_ns={} was_playing={}",
             start_scope_seq,
@@ -1095,7 +1094,8 @@ impl ProgramPlayer {
             }
             self.write_compositor_frame_ppm(path)
         })();
-        self.scope_enabled.store(was_scope_enabled, Ordering::Relaxed);
+        self.scope_enabled
+            .store(was_scope_enabled, Ordering::Relaxed);
         self.compositor_capture_enabled
             .store(was_comp_capture, Ordering::Relaxed);
         if was_playing {
@@ -1729,7 +1729,8 @@ impl ProgramPlayer {
                 // re-sync so the audio position matches the reset wall clock;
                 // without this the audio_pipeline drifts ahead by the rebuild
                 // duration and can reach EOS before the timeline ends.
-                let audio_wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(new_pos) {
+                let audio_wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(new_pos)
+                {
                     Some(AudioCurrentSource::ReverseVideoClip(idx))
                 } else {
                     self.audio_clip_at(new_pos)
@@ -1913,15 +1914,7 @@ impl ProgramPlayer {
             );
             if let Some(ref pad) = slot.compositor_pad {
                 let (proc_w, proc_h) = self.preview_processing_dimensions();
-                Self::apply_zoom_to_slot(
-                    slot,
-                    pad,
-                    scale,
-                    position_x,
-                    position_y,
-                    proc_w,
-                    proc_h,
-                );
+                Self::apply_zoom_to_slot(slot, pad, scale, position_x, position_y, proc_w, proc_h);
             }
         }
     }
@@ -2033,13 +2026,7 @@ impl ProgramPlayer {
                 if let Some(ref pad) = slot.compositor_pad {
                     let (proc_w, proc_h) = self.preview_processing_dimensions();
                     Self::apply_zoom_to_slot(
-                        slot,
-                        pad,
-                        scale,
-                        position_x,
-                        position_y,
-                        proc_w,
-                        proc_h,
+                        slot, pad, scale, position_x, position_y, proc_w, proc_h,
                     );
                 }
             }
@@ -2098,13 +2085,7 @@ impl ProgramPlayer {
                 if let Some(ref pad) = slot.compositor_pad {
                     let (proc_w, proc_h) = self.preview_processing_dimensions();
                     Self::apply_zoom_to_slot(
-                        slot,
-                        pad,
-                        scale,
-                        position_x,
-                        position_y,
-                        proc_w,
-                        proc_h,
+                        slot, pad, scale, position_x, position_y, proc_w, proc_h,
                     );
                 }
             }
@@ -2423,7 +2404,8 @@ impl ProgramPlayer {
                         signature: result.signature,
                     },
                 );
-                if self.state == PlayerState::Playing && !self.slots.iter().any(|s| s.is_prerender_slot)
+                if self.state == PlayerState::Playing
+                    && !self.slots.iter().any(|s| s.is_prerender_slot)
                 {
                     let active = self.clips_active_at(self.timeline_pos_ns);
                     if active.len() >= 3 {
@@ -2512,10 +2494,7 @@ impl ProgramPlayer {
         let signature = self.prerender_signature_for_active(active);
         let key = format!(
             "seg_v{}_{:016x}_{}_{}",
-            BACKGROUND_PRERENDER_CACHE_VERSION,
-            signature,
-            boundary_ns,
-            end_ns
+            BACKGROUND_PRERENDER_CACHE_VERSION, signature, boundary_ns, end_ns
         );
         if self.prerender_segments.contains_key(&key)
             || self.prerender_pending.contains(&key)
@@ -2554,7 +2533,9 @@ impl ProgramPlayer {
             return;
         }
         let fps = if self.frame_duration_ns > 0 {
-            (1_000_000_000f64 / self.frame_duration_ns as f64).round().max(1.0) as u32
+            (1_000_000_000f64 / self.frame_duration_ns as f64)
+                .round()
+                .max(1.0) as u32
         } else {
             24
         };
@@ -2599,7 +2580,11 @@ impl ProgramPlayer {
         );
     }
 
-    fn find_prerender_segment_for(&self, timeline_pos: u64, signature: u64) -> Option<PrerenderSegment> {
+    fn find_prerender_segment_for(
+        &self,
+        timeline_pos: u64,
+        signature: u64,
+    ) -> Option<PrerenderSegment> {
         self.prerender_segments
             .values()
             .filter(|seg| {
@@ -2635,7 +2620,8 @@ impl ProgramPlayer {
                 let Some(scan_boundary_ns) = self.next_video_boundary_after(cursor) else {
                     break;
                 };
-                if scan_boundary_ns.saturating_sub(timeline_pos_ns) > BACKGROUND_PLAYING_LOOKAHEAD_NS
+                if scan_boundary_ns.saturating_sub(timeline_pos_ns)
+                    > BACKGROUND_PLAYING_LOOKAHEAD_NS
                 {
                     break;
                 }
@@ -2654,7 +2640,9 @@ impl ProgramPlayer {
             self.teardown_prepreroll_sidecars();
             return;
         };
-        if boundary_ns.saturating_sub(timeline_pos_ns) > prewarm_window_ns && !prerender_playback_active {
+        if boundary_ns.saturating_sub(timeline_pos_ns) > prewarm_window_ns
+            && !prerender_playback_active
+        {
             self.prewarmed_boundary_ns = None;
             if !self.background_prerender {
                 self.teardown_prepreroll_sidecars();
@@ -2669,7 +2657,10 @@ impl ProgramPlayer {
         self.maybe_request_background_prerender_segment(boundary_ns, &boundary_active);
 
         // Skip prewarming when continuing decoders will handle this boundary.
-        if !prerender_playback_active && boundary_active.len() == self.slots.len() && !self.slots.is_empty() {
+        if !prerender_playback_active
+            && boundary_active.len() == self.slots.len()
+            && !self.slots.is_empty()
+        {
             let all_same_source =
                 boundary_active
                     .iter()
@@ -4319,7 +4310,10 @@ impl ProgramPlayer {
         if !declared_has_audio {
             return false;
         }
-        self.audio_stream_probe_cache.get(path).copied().unwrap_or(true)
+        self.audio_stream_probe_cache
+            .get(path)
+            .copied()
+            .unwrap_or(true)
     }
 
     /// Returns true if clip at `pos` in `active` is fully occluded by a clip
@@ -4951,7 +4945,11 @@ impl ProgramPlayer {
         }
         let cw = out_w.saturating_sub(cl + cr).max(1);
         let ch = out_h.saturating_sub(ct + cb).max(1);
-        let pad_color = if transparent_pad { "black@0.0" } else { "black" };
+        let pad_color = if transparent_pad {
+            "black@0.0"
+        } else {
+            "black"
+        };
         format!(",crop={cw}:{ch}:{cl}:{ct},pad={out_w}:{out_h}:{cl}:{ct}:{pad_color}")
     }
 
@@ -4999,8 +4997,16 @@ impl ProgramPlayer {
             let total_y = ph * (1.0 - scale);
             let raw_pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
             let raw_pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
-            let crop_left = if raw_pad_x < 0 { (-raw_pad_x) as u32 } else { 0 };
-            let crop_top = if raw_pad_y < 0 { (-raw_pad_y) as u32 } else { 0 };
+            let crop_left = if raw_pad_x < 0 {
+                (-raw_pad_x) as u32
+            } else {
+                0
+            };
+            let crop_top = if raw_pad_y < 0 {
+                (-raw_pad_y) as u32
+            } else {
+                0
+            };
             let crop_right = if raw_pad_x + sw as i64 > out_w as i64 {
                 (raw_pad_x + sw as i64 - out_w as i64) as u32
             } else {
@@ -5567,8 +5573,11 @@ impl ProgramPlayer {
         }
 
         // Keep compositor z-order aligned to desired track order.
-        let slot_for_clip: HashMap<usize, usize> =
-            plan.mappings.iter().map(|(slot_idx, clip_idx)| (*clip_idx, *slot_idx)).collect();
+        let slot_for_clip: HashMap<usize, usize> = plan
+            .mappings
+            .iter()
+            .map(|(slot_idx, clip_idx)| (*clip_idx, *slot_idx))
+            .collect();
         for (zorder_offset, &desired_clip_idx) in desired.iter().enumerate() {
             if let Some(&slot_idx) = slot_for_clip.get(&desired_clip_idx) {
                 if let Some(ref pad) = self.slots[slot_idx].compositor_pad {
@@ -5704,7 +5713,8 @@ impl ProgramPlayer {
                     );
                     self.slots.push(slot);
                 }
-            } else if let Some(slot) = self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
+            } else if let Some(slot) =
+                self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
             {
                 self.slots.push(slot);
             }
@@ -5737,7 +5747,8 @@ impl ProgramPlayer {
                 && !self.slots.iter().any(|s| s.is_prerender_slot)
             {
                 let signature = self.prerender_signature_for_active(&desired);
-                self.find_prerender_segment_for(timeline_pos, signature).is_some()
+                self.find_prerender_segment_for(timeline_pos, signature)
+                    .is_some()
             } else {
                 false
             };
@@ -5835,7 +5846,8 @@ impl ProgramPlayer {
             );
         }
 
-        let used_prerender = self.try_use_background_prerender_slots(timeline_pos, &active, was_playing);
+        let used_prerender =
+            self.try_use_background_prerender_slots(timeline_pos, &active, was_playing);
         if !used_prerender {
             self.build_live_video_slots_for_active(&active, was_playing);
         }

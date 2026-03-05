@@ -167,7 +167,7 @@ Tracking docs:
 - [x] Ripple edit mode (Trim In/Out)
 - [x] Roll edit mode
 - [x] Slip/slide edit modes
-- [ ] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
+- [x] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
 - [ ] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
 - [ ] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
 - [ ] Clip grouping / ungrouping (link multiple clips to move/delete/trim as a unit)

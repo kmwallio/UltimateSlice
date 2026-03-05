@@ -137,15 +137,14 @@ impl ProxyCache {
                 match item {
                     Ok((source_path, scale, lut_path)) => {
                         let key = proxy_key(&source_path, lut_path.as_deref());
-                        let (proxy_path, success, owned_local) =
-                            transcode_proxy(
-                                &source_path,
-                                scale,
-                                lut_path.as_deref(),
-                                &local_root,
-                                &key,
-                                &tx,
-                            );
+                        let (proxy_path, success, owned_local) = transcode_proxy(
+                            &source_path,
+                            scale,
+                            lut_path.as_deref(),
+                            &local_root,
+                            &key,
+                            &tx,
+                        );
                         if tx
                             .send(ProxyWorkerUpdate::Done(ProxyResult {
                                 cache_key: key,
@@ -189,21 +188,20 @@ impl ProxyCache {
             return;
         }
         // Check for pre-existing proxy on disk before spawning work.
-        if let Some(p) =
-            existing_proxy_path_for(
-                source_path,
-                scale,
-                lut_path,
-                &self.local_cache_root,
-                self.ffprobe_path.as_deref(),
-            )
-        {
+        if let Some(p) = existing_proxy_path_for(
+            source_path,
+            scale,
+            lut_path,
+            &self.local_cache_root,
+            self.ffprobe_path.as_deref(),
+        ) {
             self.proxies.insert(key, p);
             return;
         }
         self.pending.insert(key);
         self.total_requested += 1;
-        self.written_bytes.insert(proxy_key(source_path, lut_path), 0);
+        self.written_bytes
+            .insert(proxy_key(source_path, lut_path), 0);
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send((
                 source_path.to_string(),
@@ -233,8 +231,10 @@ impl ProxyCache {
                     if result.success {
                         self.proxies
                             .insert(result.cache_key.clone(), result.proxy_path.clone());
-                        if let Some(estimate) = self.estimated_bytes.get(&result.cache_key).copied() {
-                            self.written_bytes.insert(result.cache_key.clone(), estimate);
+                        if let Some(estimate) = self.estimated_bytes.get(&result.cache_key).copied()
+                        {
+                            self.written_bytes
+                                .insert(result.cache_key.clone(), estimate);
                         }
                         if result.owned_local {
                             self.runtime_owned_local_files
@@ -651,8 +651,8 @@ fn estimate_proxy_output_bitrate_bps(scale: ProxyScale, has_lut: bool) -> u64 {
         ProxyScale::Half => 1_600_000f64,
         ProxyScale::Quarter => 850_000f64,
         ProxyScale::Project { width, height } => {
-            let pixel_scale = ((width.max(1) as f64 * height.max(1) as f64) / (1920.0 * 1080.0))
-                .clamp(0.25, 4.0);
+            let pixel_scale =
+                ((width.max(1) as f64 * height.max(1) as f64) / (1920.0 * 1080.0)).clamp(0.25, 4.0);
             (3_200_000f64 * pixel_scale).clamp(1_200_000.0, 12_000_000.0)
         }
     };
@@ -691,7 +691,8 @@ fn estimate_proxy_size_bytes(
 ) -> Option<u64> {
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
     let duration_secs = probe_duration_seconds(&ffprobe, source_path)?;
-    let bitrate_bps = estimate_proxy_output_bitrate_bps(scale, lut_path.is_some_and(|p| !p.is_empty()));
+    let bitrate_bps =
+        estimate_proxy_output_bitrate_bps(scale, lut_path.is_some_and(|p| !p.is_empty()));
     Some(((bitrate_bps as f64 * duration_secs) / 8.0).round() as u64)
 }
 

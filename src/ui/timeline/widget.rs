@@ -1,4 +1,4 @@
-use crate::model::clip::Clip;
+use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 use crate::undo::{
@@ -96,6 +96,12 @@ enum DragOp {
     },
 }
 
+#[derive(Debug, Clone)]
+struct TimelineClipboard {
+    clip: Clip,
+    source_track_id: String,
+}
+
 /// Shared state for the timeline widget
 pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
@@ -137,6 +143,8 @@ pub struct TimelineState {
     pub track_audio_peak_db: Vec<[f64; 2]>,
     /// Show/hide per-track audio meters in track labels.
     pub show_track_audio_levels: bool,
+    /// Single-clip timeline clipboard payload for copy/paste operations.
+    clipboard: Option<TimelineClipboard>,
 }
 
 impl TimelineState {
@@ -165,6 +173,7 @@ impl TimelineState {
             loading: false,
             track_audio_peak_db: Vec::new(),
             show_track_audio_levels: true,
+            clipboard: None,
         }
     }
 
@@ -223,6 +232,158 @@ impl TimelineState {
         }
         self.selected_clip_id = None;
         self.selected_track_id = None;
+    }
+
+    pub fn copy_selected_to_clipboard(&mut self) -> bool {
+        let Some(clip_id) = self.selected_clip_id.clone() else {
+            return false;
+        };
+        let copied = {
+            let proj = self.project.borrow();
+            proj.tracks.iter().find_map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .cloned()
+                    .map(|clip| TimelineClipboard {
+                        clip,
+                        source_track_id: track.id.clone(),
+                    })
+            })
+        };
+        if let Some(payload) = copied {
+            self.clipboard = Some(payload);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn paste_insert_from_clipboard(&mut self) -> bool {
+        let Some(payload) = self.clipboard.clone() else {
+            return false;
+        };
+        let clip_duration = payload.clip.duration();
+        if clip_duration == 0 {
+            return false;
+        }
+        let target_kind = clip_kind_to_track_kind(&payload.clip.kind);
+        let target_track_id = {
+            let proj = self.project.borrow();
+            if let Some(ref selected_tid) = self.selected_track_id {
+                if proj
+                    .tracks
+                    .iter()
+                    .any(|t| t.id == *selected_tid && t.kind == target_kind)
+                {
+                    Some(selected_tid.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            .or_else(|| {
+                proj.tracks
+                    .iter()
+                    .find(|t| t.id == payload.source_track_id && t.kind == target_kind)
+                    .map(|t| t.id.clone())
+            })
+            .or_else(|| {
+                proj.tracks
+                    .iter()
+                    .find(|t| t.kind == target_kind)
+                    .map(|t| t.id.clone())
+            })
+        };
+        let Some(target_track_id) = target_track_id else {
+            return false;
+        };
+
+        let playhead = self.playhead_ns;
+        let mut pasted = payload.clip.clone();
+        pasted.id = uuid::Uuid::new_v4().to_string();
+        pasted.timeline_start = playhead;
+        let pasted_id = pasted.id.clone();
+
+        let (old_clips, new_clips) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.iter().find(|t| t.id == target_track_id) else {
+                return false;
+            };
+            let old_clips = track.clips.clone();
+            let mut new_clips = old_clips.clone();
+            for clip in &mut new_clips {
+                if clip.timeline_start >= playhead {
+                    clip.timeline_start += clip_duration;
+                }
+            }
+            new_clips.push(pasted);
+            new_clips.sort_by_key(|c| c.timeline_start);
+            if self.magnetic_mode {
+                compact_gap_free_clips(&mut new_clips);
+            }
+            (old_clips, new_clips)
+        };
+        if old_clips == new_clips {
+            return false;
+        }
+        let cmd = SetTrackClipsCommand {
+            track_id: target_track_id.clone(),
+            old_clips,
+            new_clips,
+            label: "Paste insert clip".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        self.selected_track_id = Some(target_track_id);
+        self.selected_clip_id = Some(pasted_id);
+        true
+    }
+
+    pub fn paste_attributes_from_clipboard(&mut self) -> bool {
+        let Some(payload) = self.clipboard.clone() else {
+            return false;
+        };
+        let Some(selected_clip_id) = self.selected_clip_id.clone() else {
+            return false;
+        };
+
+        let (track_id, old_clips, mut new_clips) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj
+                .tracks
+                .iter()
+                .find(|t| t.clips.iter().any(|c| c.id == selected_clip_id))
+            else {
+                return false;
+            };
+            let Some(target_idx) = track.clips.iter().position(|c| c.id == selected_clip_id) else {
+                return false;
+            };
+            if track.clips[target_idx].kind != payload.clip.kind {
+                return false;
+            }
+            let old_clips = track.clips.clone();
+            let mut new_clips = old_clips.clone();
+            if !apply_pasted_attributes(&mut new_clips[target_idx], &payload.clip) {
+                return false;
+            }
+            (track.id.clone(), old_clips, new_clips)
+        };
+        if old_clips == new_clips {
+            return false;
+        }
+        let cmd = SetTrackClipsCommand {
+            track_id,
+            old_clips,
+            new_clips: std::mem::take(&mut new_clips),
+            label: "Paste clip attributes".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
     }
 
     /// Razor cut the selected clip (or any clip at playhead) at the playhead position
@@ -322,6 +483,49 @@ impl TimelineState {
         }
         None
     }
+}
+
+fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
+    match kind {
+        ClipKind::Audio => TrackKind::Audio,
+        ClipKind::Video | ClipKind::Image => TrackKind::Video,
+    }
+}
+
+fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
+    let before = target.clone();
+    target.brightness = source.brightness;
+    target.contrast = source.contrast;
+    target.saturation = source.saturation;
+    target.denoise = source.denoise;
+    target.sharpness = source.sharpness;
+    target.volume = source.volume;
+    target.pan = source.pan;
+    target.speed = source.speed;
+    target.crop_left = source.crop_left;
+    target.crop_right = source.crop_right;
+    target.crop_top = source.crop_top;
+    target.crop_bottom = source.crop_bottom;
+    target.rotate = source.rotate;
+    target.flip_h = source.flip_h;
+    target.flip_v = source.flip_v;
+    target.title_text = source.title_text.clone();
+    target.title_font = source.title_font.clone();
+    target.title_color = source.title_color;
+    target.title_x = source.title_x;
+    target.title_y = source.title_y;
+    target.transition_after = source.transition_after.clone();
+    target.transition_after_ns = source.transition_after_ns;
+    target.lut_path = source.lut_path.clone();
+    target.scale = source.scale;
+    target.opacity = source.opacity;
+    target.position_x = source.position_x;
+    target.position_y = source.position_y;
+    target.shadows = source.shadows;
+    target.midtones = source.midtones;
+    target.highlights = source.highlights;
+    target.reverse = source.reverse;
+    before != *target
 }
 
 struct HitResult {
@@ -1708,6 +1912,21 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     notify_project = true;
                     true
                 }
+                Key::c | Key::C if ctrl => st.copy_selected_to_clipboard(),
+                Key::v | Key::V if ctrl && shift => {
+                    let changed = st.paste_attributes_from_clipboard();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::v | Key::V if ctrl => {
+                    let changed = st.paste_insert_from_clipboard();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
                 Key::Delete | Key::BackSpace => {
                     st.delete_selected();
                     notify_project = true;
@@ -2311,7 +2530,12 @@ fn draw_track_label_meter(
         let yellow_h = ((yellow_frac - green_frac) * height).min((bar_h - green_h).max(0.0));
         if yellow_h > 0.0 {
             cr.set_source_rgb(0.9, 0.85, 0.1);
-            cr.rectangle(bx, y + height - green_frac * height - yellow_h, bar_w, yellow_h);
+            cr.rectangle(
+                bx,
+                y + height - green_frac * height - yellow_h,
+                bar_w,
+                yellow_h,
+            );
             cr.fill().ok();
         }
 
@@ -2786,6 +3010,9 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Ctrl+,", "Open Preferences"),
         ("Ctrl+Z", "Undo"),
         ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
+        ("Ctrl+C", "Copy selected timeline clip"),
+        ("Ctrl+V", "Paste insert clip at playhead"),
+        ("Ctrl+Shift+V", "Paste copied clip attributes"),
         ("Scroll", "Zoom timeline (vertical scroll)"),
         ("Scroll (H)", "Pan timeline (horizontal scroll)"),
         ("? / /", "Show this help"),
