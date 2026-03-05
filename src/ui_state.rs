@@ -233,6 +233,10 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub realtime_preview: bool,
+    /// Prewarm upcoming playback boundaries earlier in the background.
+    /// Uses more CPU and memory during playback.
+    #[serde(default)]
+    pub background_prerender: bool,
 }
 
 impl Default for PreferencesState {
@@ -250,6 +254,7 @@ impl Default for PreferencesState {
             preview_quality: PreviewQuality::default(),
             experimental_preview_optimizations: false,
             realtime_preview: false,
+            background_prerender: false,
         }
     }
 }

@@ -522,9 +522,7 @@ popover contents {
 }
 
 /* ComboBoxText and DropDown controls in Preferences/export dialogs */
-combobox,
-combobox box,
-dropdown,
+combobox > box > button,
 dropdown > button {
     background-color: #242428;
     color: #e0e0e0;
@@ -532,16 +530,12 @@ dropdown > button {
     border-radius: 4px;
 }
 
-combobox:hover,
-combobox box:hover,
-dropdown:hover,
+combobox > box > button:hover,
 dropdown > button:hover {
     background-color: #2e2e33;
 }
 
-combobox:focus,
-combobox box:focus,
-dropdown:focus,
+combobox > box > button:focus,
 dropdown > button:focus,
 entry:focus,
 button:focus,

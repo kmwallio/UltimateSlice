@@ -1,6 +1,7 @@
 # Preferences
 
 The **Preferences** window contains application-level settings (not per-project settings).
+Selector controls in this window use a single control frame (no nested double-border styling).
 
 ## Opening Preferences
 
@@ -63,7 +64,7 @@ Preferences are grouped by category in a sidebar:
 - If local-cache writes/transcodes fail, UltimateSlice falls back to alongside-media `UltimateSlice.cache/` for that source.
 - Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index), and project unload/app close performs managed-cache cleanup.
 - Project reload eagerly primes a capped set of near-playhead proxy sources so first playback can pick up local proxies sooner on slower/external storage.
-- A yellow progress bar appears at the bottom of the window during proxy generation.
+- A yellow progress bar appears at the bottom of the window during proxy generation (and now also when background timeline prerender jobs are in flight).
 - **Changing the proxy size** (e.g. from Half Res to Quarter Res) automatically invalidates existing proxies and re-generates them at the new resolution.
 - **LUT-baked proxies**: when a LUT is assigned to a clip via the Inspector, a new proxy is generated for that clip with the LUT baked in, so the preview reflects the color grade. Removing the LUT regenerates a plain (ungraded) proxy.
 - Source Monitor behavior in `Off` mode is adaptive: it may request **Quarter** proxies for small source-monitor sizes and **Half** proxies for larger ones to improve preview smoothness.
@@ -76,7 +77,7 @@ Preferences are grouped by category in a sidebar:
 
 ## Preview Quality (Playback)
 
-- **Preview quality** scales down the compositor output resolution for preview playback:
+- **Preview quality** scales down Program Monitor preview processing resolution (effects/compositor) and output resolution for preview playback:
   - `Auto`: adapts quality to the current Program Monitor canvas size.
   - `Full` (default): renders at project resolution (e.g. 1920×1080).
   - `Half`: halves both dimensions (e.g. 960×540) — 4× fewer pixels, significantly less memory and CPU.
@@ -89,6 +90,46 @@ Preferences are grouped by category in a sidebar:
 - MCP automation:
   - `get_preferences` returns `preview_quality`.
   - `set_preview_quality` updates the quality level (`auto`, `full`, `half`, `quarter`).
+
+## Experimental Preview Optimizations (Playback)
+
+- **Experimental preview optimizations** enables an occlusion optimization path for multi-track playback.
+- When enabled, clips fully hidden behind opaque full-frame clips can use audio-only decode paths during preview.
+- This can reduce decode load on heavy overlaps; visual output remains driven by visible clips.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `experimental_preview_optimizations`.
+  - `set_experimental_preview_optimizations` toggles the setting.
+
+## Real-time Preview (Playback)
+
+- **Real-time preview** pre-builds upcoming decoder slots so boundary transitions are faster.
+- This can improve responsiveness at clip boundaries but may increase CPU/memory usage.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `realtime_preview`.
+  - `set_realtime_preview` toggles the setting.
+
+## Background Prerender (Playback)
+
+- **Background prerender** pre-renders complex upcoming overlap sections (3+ active video tracks) to temporary disk clips in the background.
+- When available, Program Monitor playback can use the prerendered section clip instead of rebuilding all video layers live for that segment.
+- If both **Real-time preview** and **Background prerender** are enabled, 3+ track overlap boundaries now prefer the prerender-capable path so prerender clips are still used during full playthrough.
+- Prerender playback uses the same preview-processing dimensions as live playback, so reduced Preview Quality modes do not crop prerender output to a top-left region.
+- If a prerender segment finishes while playback is already inside that overlap region, UltimateSlice can now switch into the prerender path mid-segment (via a short rebuild) instead of waiting for the next boundary.
+- While paused or stopped, UltimateSlice also schedules nearby prerender jobs around the current playhead so heavy sections can be ready before playback starts.
+- While playing, background prerender scheduling is bounded to upcoming boundaries (not every playhead tick) to reduce job churn and keep readiness stable.
+- Prototype path: prerender segments currently include mixed audio, and prerender playback can run as a single prerender decoder branch (video + audio) during heavy overlap sections.
+- Prerender segment duration now covers the full overlap span to the next boundary (not a fixed ~4s chunk), reducing black tails when long overlap regions are active.
+- Prerender activity is surfaced in the existing bottom status/progress bar used for proxy generation.
+- Only active when enabled in Preferences.
+- Prerender cache files are temporary and are cleaned up when the project/player is closed.
+- If a prerender boundary clip fails to link reliably, UltimateSlice automatically falls back to the normal live rebuild path for stability.
+- When a boundary is not warm, playback falls back to the normal live rebuild path.
+- Uses more CPU/memory while playing and is disabled by default.
+- MCP automation:
+  - `get_preferences` returns `background_prerender`.
+  - `set_background_prerender` toggles the setting.
 
 ## Saving
 

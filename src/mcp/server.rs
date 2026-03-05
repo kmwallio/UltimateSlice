@@ -193,6 +193,11 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_playhead_position",
+            "description": "Return the current program playhead position in nanoseconds.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "set_magnetic_mode",
             "description": "Enable or disable magnetic timeline mode (gap-free edits on the edited track).",
             "inputSchema": {
@@ -520,6 +525,28 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_experimental_preview_optimizations",
+            "description": "Enable or disable experimental preview optimizations (audio-only decode for fully-occluded clips) during multi-track playback.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_background_prerender",
+            "description": "Enable or disable background disk prerender for upcoming complex overlap playback sections.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
             "name": "insert_clip",
             "description": "Insert a source clip at the playhead position, shifting all subsequent clips right to make room (3-point insert edit).",
             "inputSchema": {
@@ -627,6 +654,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "list_tracks" => McpCommand::ListTracks { reply: tx },
         "list_clips" => McpCommand::ListClips { reply: tx },
         "get_timeline_settings" => McpCommand::GetTimelineSettings { reply: tx },
+        "get_playhead_position" => McpCommand::GetPlayheadPosition { reply: tx },
         "set_magnetic_mode" => McpCommand::SetMagneticMode {
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
@@ -783,6 +811,18 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "set_realtime_preview" => McpCommand::SetRealtimePreview {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+
+        "set_experimental_preview_optimizations" => {
+            McpCommand::SetExperimentalPreviewOptimizations {
+                enabled: args["enabled"].as_bool().unwrap_or(false),
+                reply: tx,
+            }
+        },
+
+        "set_background_prerender" => McpCommand::SetBackgroundPrerender {
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },

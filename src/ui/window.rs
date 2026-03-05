@@ -367,6 +367,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             .experimental_preview_optimizations,
     );
     prog_player_raw.set_realtime_preview(preferences_state.borrow().realtime_preview);
+    prog_player_raw.set_background_prerender(preferences_state.borrow().background_prerender);
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -461,6 +462,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         prog_player
                             .borrow_mut()
                             .set_realtime_preview(new_state.realtime_preview);
+                        prog_player
+                            .borrow_mut()
+                            .set_background_prerender(new_state.background_prerender);
                         if new_state.proxy_mode.is_enabled() {
                             // If the proxy scale changed, invalidate old entries so clips are
                             // re-transcoded at the new resolution.
@@ -2535,19 +2539,50 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                 }
             }
-            let progress = proxy_cache.borrow().progress();
-            if progress.in_flight {
+            let proxy_progress = proxy_cache.borrow().progress();
+            let prerender_progress = prog_player.borrow().background_prerender_progress();
+            let proxy_active = proxy_progress.in_flight;
+            let prerender_active = prerender_progress.in_flight;
+            if proxy_active || prerender_active {
+                let active_total = (if proxy_active { proxy_progress.total } else { 0 })
+                    + if prerender_active {
+                        prerender_progress.total
+                    } else {
+                        0
+                    };
+                let active_completed = (if proxy_active {
+                    proxy_progress.completed
+                } else {
+                    0
+                }) + if prerender_active {
+                    prerender_progress.completed
+                } else {
+                    0
+                };
                 status_label.set_visible(true);
                 status_progress.set_visible(true);
-                status_label.set_text(&format!(
-                    "Generating proxies… {}/{}",
-                    progress.completed, progress.total
-                ));
-                if progress.total > 0 {
-                    status_progress.set_fraction(progress.completed as f64 / progress.total as f64);
+                let label = if proxy_active && prerender_active {
+                    format!(
+                        "Generating proxies + prerender… {}/{}",
+                        active_completed, active_total
+                    )
+                } else if proxy_active {
+                    format!(
+                        "Generating proxies… {}/{}",
+                        proxy_progress.completed, proxy_progress.total
+                    )
+                } else {
+                    format!(
+                        "Prerendering timeline… {}/{}",
+                        prerender_progress.completed, prerender_progress.total
+                    )
+                };
+                status_label.set_text(&label);
+                if active_total > 0 {
+                    status_progress.set_fraction(active_completed as f64 / active_total as f64);
                     status_progress.set_text(Some(&format!(
                         "{:.0}%",
-                        (progress.completed as f64 / progress.total as f64) * 100.0
+                        (active_completed as f64 / active_total as f64) * 100.0
                     )));
                 }
             } else {
@@ -2924,6 +2959,15 @@ fn handle_mcp_command(
                 .ok();
         }
 
+        McpCommand::GetPlayheadPosition { reply } => {
+            let timeline_pos_ns = prog_player.borrow().timeline_pos_ns;
+            reply
+                .send(json!({
+                    "timeline_pos_ns": timeline_pos_ns
+                }))
+                .ok();
+        }
+
         McpCommand::SetMagneticMode { enabled, reply } => {
             timeline_state.borrow_mut().magnetic_mode = enabled;
             reply
@@ -2948,7 +2992,10 @@ fn handle_mcp_command(
                     "show_timeline_preview": prefs.show_timeline_preview,
                     "show_track_audio_levels": prefs.show_track_audio_levels,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
-                    "preview_quality": prefs.preview_quality.as_str()
+                    "preview_quality": prefs.preview_quality.as_str(),
+                    "experimental_preview_optimizations": prefs.experimental_preview_optimizations,
+                    "realtime_preview": prefs.realtime_preview,
+                    "background_prerender": prefs.background_prerender
                 }))
                 .ok();
         }
@@ -3118,6 +3165,40 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "realtime_preview": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetExperimentalPreviewOptimizations { enabled, reply } => {
+            prog_player
+                .borrow_mut()
+                .set_experimental_preview_optimizations(enabled);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.experimental_preview_optimizations = enabled;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply
+                .send(json!({
+                    "success": true,
+                    "experimental_preview_optimizations": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetBackgroundPrerender { enabled, reply } => {
+            prog_player.borrow_mut().set_background_prerender(enabled);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.background_prerender = enabled;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply
+                .send(json!({
+                    "success": true,
+                    "background_prerender": enabled
                 }))
                 .ok();
         }

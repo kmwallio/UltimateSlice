@@ -327,6 +327,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `list_tracks` | Track index, id, kind, clip count |
 | `list_clips` | All clips with id, path, track\_index, ns positions |
 | `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
+| `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
 | `close_source_preview` | Deselect current source media and hide the source preview |
 | `get_preferences` | Get persisted application preferences |
@@ -336,6 +337,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_proxy_mode` | Set proxy preview mode (`off` / `half_res` / `quarter_res`) |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |
 | `set_preview_quality` | Set compositor preview quality (`auto` / `full` / `half` / `quarter`); takes effect immediately |
+| `set_realtime_preview` | Toggle real-time preview decoder prebuilds (`true` / `false`) |
+| `set_experimental_preview_optimizations` | Toggle occlusion optimization (audio-only decode for fully-occluded clips) |
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |

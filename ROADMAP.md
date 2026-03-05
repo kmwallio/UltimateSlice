@@ -14,6 +14,7 @@ Tracking docs:
 - [x] GTK4 + Rust project scaffold (`gtk4-rs 0.11`, `gstreamer-rs 0.25`, `glib 0.22`)
 - [x] Dark theme via custom CSS (`src/style.css`)
 - [x] GTK4/libadwaita-style control polish in dark theme (linked tabs, popovers, dropdown/combo controls, sliders, check/radio)
+- [x] Preferences selector styling fix: narrowed ComboBox/DropDown CSS selectors to avoid nested/double borders on settings selectors
 - [x] GApplication entry point with CSS loading
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
@@ -126,9 +127,13 @@ Tracking docs:
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
 - [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
+- [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
+- [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
+- [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
+- [x] Local perf tooling scripts: `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py`
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
 - [x] `select_library_item`, `source_play`, `source_pause` tools — select media in the library and control Source Monitor playback via MCP
 
@@ -212,6 +217,7 @@ Tracking docs:
    - [x] Managed proxy cache lifecycle cleanup (startup stale prune for ownership-index entries older than 24h, plus project unload/app-close cleanup of managed cache files)
    - [x] Eager near-playhead proxy priming during project reload (capped, proximity-ordered source requests before first program-player rebuild)
    - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
+   - [x] Apply preview quality divisor to Program Monitor processing resolution (slot effects/compositor), reducing heavy-overlap playback cost when `Half`/`Quarter` preview is selected
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
     - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops
       - [x] Ensure paused timeline seek in compositor preview re-prerolls after decoder seek so Program Monitor/transform overlay frame refresh remains reliable while scrubbing
@@ -227,13 +233,26 @@ Tracking docs:
           - [x] Enable audio-master drop-late preview policy during 3+ track playback overlap (leaky display queue + sink QoS/max-lateness) so displayed frames stay closer to audio clock under decode pressure
           - [x] Apply adaptive per-slot queue drop-late policy during heavy-overlap playback to reduce compositor-branch backpressure at handoff
           - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
-          - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
-          - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
+           - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
+           - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to temporary disk clips and use them at boundary rebuilds when available
+           - [x] Background prerender boundary correctness hardening: track prerender-active clip sets for boundary transitions and normalize prerender segment timestamps to avoid freeze/black handoff regressions
+           - [x] Background prerender safety fallback: when a prerender video slot fails to link at boundary rebuild, immediately rebuild with normal live slots; cache keys are versioned with timeline/track identity to prevent stale segment reuse
+           - [x] Background prerender link-race guard: allow a short post-preroll link grace for prerender slots, then force live fallback + segment invalidation when still unlinked to prevent unstable playback states
+           - [x] Background prerender priority over realtime boundary path for 3+ overlaps: when both settings are enabled, boundary handling now chooses prerender-capable rebuilds so prerender clips are consumed during full playthrough
+           - [x] Background prerender scheduling bounded during playback: queue by upcoming boundaries only (not moving playhead ticks) to avoid excessive in-flight segment churn
+           - [x] Background prerender slot sizing parity: prerender decode branch now scales to current preview-processing dimensions before compositor to avoid top-left crop artifacts at reduced preview quality
+           - [x] Background prerender A/V prototype: prerender segments now include mixed audio and prerender playback uses a single prerender decoder branch for both video and audio
+           - [x] Background prerender segment window now spans full overlap to next boundary (no fixed 4s truncation), preventing mid-overlap black tails when prerender is active
+           - [x] Correctness-first 3+ track boundary settle: relax playback arrival wait cap so compositor frames arrive before boundary resume (avoids audio-only/black-video handoffs), and add prerender queued/ready/failed telemetry logs
+           - [x] Prerender promotion correctness: when prerender becomes ready mid-overlap, force full rebuild (bypass continue-decoder short-circuit) so prerender segment is actually consumed; add explicit unavailable/promote/used diagnostics
+           - [x] Idle prerender warmup + shared status bar: when background prerender is enabled, schedule nearby prerender jobs while paused/stopped and surface progress in the existing proxy generation status bar
+           - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
-          - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
-          - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
-          - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
+           - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
+           - [x] Debounce duplicate playback boundary rebuild attempts (same desired clip set within ~120ms) to reduce transient rebuild thrash
+           - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
+           - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
            - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick

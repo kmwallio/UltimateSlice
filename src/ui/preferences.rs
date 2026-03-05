@@ -211,6 +211,17 @@ pub fn show_preferences_dialog(
     playback_box.append(&realtime_check);
     playback_box.append(&realtime_hint);
 
+    let background_prerender_check = CheckButton::with_label("Background prerender");
+    background_prerender_check.set_active(current.background_prerender);
+    background_prerender_check.set_halign(gtk::Align::Start);
+    let background_prerender_hint = Label::new(Some("Renders upcoming complex overlap sections (3+ video tracks) to temporary disk clips in the background and uses them when available. Falls back to normal playback when unavailable."));
+    background_prerender_hint.set_halign(gtk::Align::Start);
+    background_prerender_hint.add_css_class("dim-label");
+    background_prerender_hint.set_wrap(true);
+    background_prerender_hint.set_max_width_chars(60);
+    playback_box.append(&background_prerender_check);
+    playback_box.append(&background_prerender_hint);
+
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     // ── Timeline section ──────────────────────────────────────────────────
@@ -298,6 +309,7 @@ pub fn show_preferences_dialog(
                 ),
                 experimental_preview_optimizations: experimental_check.is_active(),
                 realtime_preview: realtime_check.is_active(),
+                background_prerender: background_prerender_check.is_active(),
             });
         }
         d.close();

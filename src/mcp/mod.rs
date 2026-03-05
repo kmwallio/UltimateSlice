@@ -20,6 +20,9 @@ pub enum McpCommand {
     GetTimelineSettings {
         reply: SyncSender<Value>,
     },
+    GetPlayheadPosition {
+        reply: SyncSender<Value>,
+    },
     SetMagneticMode {
         enabled: bool,
         reply: SyncSender<Value>,
@@ -157,6 +160,14 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     SetRealtimePreview {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetExperimentalPreviewOptimizations {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetBackgroundPrerender {
         enabled: bool,
         reply: SyncSender<Value>,
     },
