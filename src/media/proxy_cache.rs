@@ -23,24 +23,29 @@ pub struct ProxyProgress {
 }
 
 /// Scale factor for proxy transcodes.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProxyScale {
     Half,
     Quarter,
+    Project { width: u32, height: u32 },
 }
 
 impl ProxyScale {
-    pub fn ffmpeg_scale_filter(&self) -> &'static str {
+    pub fn ffmpeg_scale_filter(&self) -> String {
         match self {
-            ProxyScale::Half => "scale=iw/2:ih/2",
-            ProxyScale::Quarter => "scale=iw/4:ih/4",
+            ProxyScale::Half => "scale=iw/2:ih/2".to_string(),
+            ProxyScale::Quarter => "scale=iw/4:ih/4".to_string(),
+            ProxyScale::Project { width, height } => format!(
+                "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+            ),
         }
     }
 
-    fn suffix(&self) -> &'static str {
+    fn suffix(&self) -> String {
         match self {
-            ProxyScale::Half => "half",
-            ProxyScale::Quarter => "quarter",
+            ProxyScale::Half => "half".to_string(),
+            ProxyScale::Quarter => "quarter".to_string(),
+            ProxyScale::Project { width, height } => format!("proj{width}x{height}"),
         }
     }
 }
@@ -373,7 +378,7 @@ fn prune_stale_owned_entries(root: &Path, max_age_secs: u64) -> usize {
 fn source_identity_hash(source_path: &str, scale: ProxyScale, lut_path: Option<&str>) -> u64 {
     let mut hasher = DefaultHasher::new();
     source_path.hash(&mut hasher);
-    scale.suffix().hash(&mut hasher);
+    scale.hash(&mut hasher);
     lut_path.unwrap_or("").hash(&mut hasher);
     if let Ok(meta) = std::fs::metadata(source_path) {
         meta.len().hash(&mut hasher);

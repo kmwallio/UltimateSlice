@@ -288,6 +288,8 @@ pub struct ProgramPlayer {
     project_height: u32,
     playback_priority: PlaybackPriority,
     proxy_enabled: bool,
+    preview_luts: bool,
+    proxy_scale_divisor: u32,
     /// Use audio-only decoder slots for fully-occluded clips (experimental).
     experimental_preview_optimizations: bool,
     /// Pre-build upcoming decoder slots for near-instant clip transitions.
@@ -831,6 +833,8 @@ impl ProgramPlayer {
                 project_height: 1080,
                 playback_priority: PlaybackPriority::default(),
                 proxy_enabled: false,
+                preview_luts: false,
+                proxy_scale_divisor: 2,
                 experimental_preview_optimizations: false,
                 realtime_preview: false,
                 background_prerender: false,
@@ -900,6 +904,15 @@ impl ProgramPlayer {
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
         self.proxy_enabled = enabled;
         self.prewarmed_boundary_ns = None;
+    }
+
+    pub fn set_preview_luts(&mut self, enabled: bool) {
+        self.preview_luts = enabled;
+        self.prewarmed_boundary_ns = None;
+    }
+
+    pub fn set_proxy_scale_divisor(&mut self, divisor: u32) {
+        self.proxy_scale_divisor = divisor.max(1);
     }
 
     pub fn set_experimental_preview_optimizations(&mut self, enabled: bool) {
@@ -2278,6 +2291,20 @@ impl ProgramPlayer {
                 .cloned()
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
+        } else if self.preview_luts
+            && clip
+                .lut_path
+                .as_deref()
+                .map(|p| !p.is_empty())
+                .unwrap_or(false)
+        {
+            let key =
+                crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+            self.proxy_paths
+                .get(&key)
+                .cloned()
+                .map(|p| (p, true, key.clone()))
+                .unwrap_or_else(|| (clip.source_path.clone(), false, key))
         } else {
             (clip.source_path.clone(), false, String::new())
         }
@@ -2429,6 +2456,8 @@ impl ProgramPlayer {
         self.project_width.hash(&mut hasher);
         self.project_height.hash(&mut hasher);
         self.preview_divisor.hash(&mut hasher);
+        self.proxy_enabled.hash(&mut hasher);
+        self.proxy_scale_divisor.hash(&mut hasher);
         for &idx in active {
             if let Some(c) = self.clips.get(idx) {
                 c.id.hash(&mut hasher);
@@ -2530,8 +2559,13 @@ impl ProgramPlayer {
         let key_for_log = key.clone();
         let input_count = inputs.len();
         let tx = self.prerender_result_tx.clone();
-        let out_w = self.project_width.max(2);
-        let out_h = self.project_height.max(2);
+        let prerender_divisor = if self.proxy_enabled {
+            self.proxy_scale_divisor.max(1)
+        } else {
+            1
+        };
+        let out_w = (self.project_width / prerender_divisor).max(2);
+        let out_h = (self.project_height / prerender_divisor).max(2);
         std::thread::spawn(move || {
             let success = Self::render_prerender_segment_video_file(
                 &output_path,
@@ -2580,6 +2614,7 @@ impl ProgramPlayer {
         const BACKGROUND_PREWARM_WINDOW_NS: u64 = 3_000_000_000;
         const BACKGROUND_PLAYING_LOOKAHEAD_NS: u64 = 12_000_000_000;
         const BACKGROUND_PLAYING_MAX_BOUNDARIES: usize = 2;
+        let prerender_playback_active = self.slots.iter().any(|s| s.is_prerender_slot);
         if self.state != PlayerState::Playing {
             self.prewarmed_boundary_ns = None;
             self.teardown_prepreroll_sidecars();
@@ -2615,7 +2650,7 @@ impl ProgramPlayer {
             self.teardown_prepreroll_sidecars();
             return;
         };
-        if boundary_ns.saturating_sub(timeline_pos_ns) > prewarm_window_ns {
+        if boundary_ns.saturating_sub(timeline_pos_ns) > prewarm_window_ns && !prerender_playback_active {
             self.prewarmed_boundary_ns = None;
             if !self.background_prerender {
                 self.teardown_prepreroll_sidecars();
@@ -2630,7 +2665,7 @@ impl ProgramPlayer {
         self.maybe_request_background_prerender_segment(boundary_ns, &boundary_active);
 
         // Skip prewarming when continuing decoders will handle this boundary.
-        if boundary_active.len() == self.slots.len() && !self.slots.is_empty() {
+        if !prerender_playback_active && boundary_active.len() == self.slots.len() && !self.slots.is_empty() {
             let all_same_source =
                 boundary_active
                     .iter()
@@ -2653,7 +2688,11 @@ impl ProgramPlayer {
 
         for idx in boundary_active {
             let clip = self.clips[idx].clone();
-            let incoming = !current_active.contains(&idx);
+            let incoming = if prerender_playback_active {
+                true
+            } else {
+                !current_active.contains(&idx)
+            };
             if clip.has_audio {
                 let effective_path = self.effective_source_path_for_clip(&clip);
                 let _ = self.probe_has_audio_stream_cached(&effective_path);
@@ -2663,9 +2702,10 @@ impl ProgramPlayer {
             }
         }
         log::debug!(
-            "prewarm_upcoming_boundary: timeline_pos={} boundary={}",
+            "prewarm_upcoming_boundary: timeline_pos={} boundary={} prerender_active={}",
             timeline_pos_ns,
-            boundary_ns
+            boundary_ns,
+            prerender_playback_active
         );
         self.prewarmed_boundary_ns = Some(boundary_ns);
     }

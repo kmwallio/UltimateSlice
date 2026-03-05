@@ -5,6 +5,8 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Prerender-exit boundary cold-starts**: While playing inside a prerender slot, the next boundary now prewarms post-prerender clip resources immediately (instead of relying on logical incoming-only diffing), reducing handoff stalls when exiting prerender playback.
+- **Background prerender proxy-resolution alignment**: When proxy mode is enabled, complex-section prerender segments now render at the active proxy scale (Half/Quarter) instead of full project resolution, reducing prerender cost and matching configured proxy behavior.
 - **Prerender overlap truncation causing black tail**: Background prerender segment duration now spans the full active 3+ overlap window up to the next boundary (instead of a hard 4s cap), avoiding mid-overlap prerender exhaustion that could black the Program Monitor.
 - **Background prerender A/V prototype path**: Prerender segments now include mixed audio and the prerender slot links both video and audio to the main pipeline, so overlap playback can use a single prerender decoder branch instead of synthetic per-clip audio-only slots.
 - **Prerender top-left zoom/crop artifact in Quarter/Half preview**: Prerender playback slots now pass through a preview-processing-size scale/caps stage before the compositor, matching live slot sizing and preventing full-resolution prerender frames from being clipped to the compositor's smaller output caps.
@@ -41,6 +43,8 @@ All notable project changes and progress should be recorded here.
 
 ### Added
 - **Background prerender preference + MCP control**: Added a new Playback preference and MCP tool (`set_background_prerender`) to toggle temporary disk prerender behavior for complex sections.
+- **Status-bar Background Render toggle**: Added a bottom status-bar toggle next to **Track Audio Levels** to quickly enable/disable background prerender without opening Preferences.
+- **Preview LUTs preference + MCP control**: Added a new Playback preference and MCP tool (`set_preview_luts`) to generate/use project-resolution LUT-baked preview media when Proxy mode is Off.
 - **MCP playhead query for FPS checks**: Added `get_playhead_position` MCP tool returning `timeline_pos_ns`, used by automated relative FPS regression checks.
 - **Perf/FPS regression harness scripts**: Added `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py` for repeatable local profiling and relative FPS regression testing.
 - **MCP occlusion toggle**: Added `set_experimental_preview_optimizations` MCP tool to toggle occlusion optimization runtime behavior for automated playback testing and tuning.
@@ -59,6 +63,7 @@ All notable project changes and progress should be recorded here.
 - **Unsaved changes confirmation flow**: New project replacement/exit actions now prompt when the current project is dirty, offering **Save**, **Discard**, or **Cancel** before continuing. The guard is wired into toolbar New/Open/Open Recent actions and window close, and successful saves now clear the dirty flag and persist the current project path.
 
 ### Changed
+- **Background Render status toggle icon states**: The status-bar Background Render toggle now shows `process-stop-symbolic` when disabled and `system-run-symbolic` when enabled.
 - **Export split-button workflow**: Toolbar export is now a linked split control (**Export | ▼**) styled as a single control. The main **Export** action opens video export settings, while the dropdown hosts extra actions (currently **Export Frame…**). The standalone Program Monitor **Export Frame…** button was removed.
 - **Export split-control styling polish**: Updated the **Export | ▼** control to use a regular button + popover for the dropdown segment (instead of a `MenuButton`) so both segments share identical primary-button styling.
 - **Still-frame export behavior update**: Exported frames now capture at project canvas resolution (full compositor frame, not preview-divisor monitor resolution). During frame export while playing, playback is paused internally for capture and then resumed automatically.

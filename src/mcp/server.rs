@@ -547,6 +547,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_preview_luts",
+            "description": "Enable or disable LUT-baked project-resolution preview media generation when Proxy mode is Off.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
             "name": "insert_clip",
             "description": "Insert a source clip at the playhead position, shifting all subsequent clips right to make room (3-point insert edit).",
             "inputSchema": {
@@ -823,6 +834,10 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "set_background_prerender" => McpCommand::SetBackgroundPrerender {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "set_preview_luts" => McpCommand::SetPreviewLuts {
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },

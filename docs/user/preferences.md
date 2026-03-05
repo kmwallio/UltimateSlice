@@ -75,6 +75,16 @@ Preferences are grouped by category in a sidebar:
   - `get_preferences` returns `proxy_mode`.
   - `set_proxy_mode` updates the mode and re-generates proxies as needed.
 
+## Preview LUTs (Playback)
+
+- **Preview LUTs (Proxy Off mode)** pre-renders project-resolution preview media for clips that have a LUT assigned when Proxy mode is `Off`.
+- This keeps LUT-heavy timelines smoother without requiring global proxy mode.
+- When Proxy mode is enabled (`Half Res` or `Quarter Res`), normal proxy behavior takes precedence.
+- The setting is persisted across launches.
+- MCP automation:
+  - `get_preferences` returns `preview_luts`.
+  - `set_preview_luts` toggles the setting.
+
 ## Preview Quality (Playback)
 
 - **Preview quality** scales down Program Monitor preview processing resolution (effects/compositor) and output resolution for preview playback:
@@ -113,14 +123,18 @@ Preferences are grouped by category in a sidebar:
 ## Background Prerender (Playback)
 
 - **Background prerender** pre-renders complex upcoming overlap sections (3+ active video tracks) to temporary disk clips in the background.
+- You can quickly toggle it from the bottom status bar via **Background Render** (next to **Track Audio Levels**) without opening Preferences.
+- The toggle uses run/stop symbolic icons (`process-stop-symbolic` when off, `system-run-symbolic` when on) to make state visible at a glance.
 - When available, Program Monitor playback can use the prerendered section clip instead of rebuilding all video layers live for that segment.
 - If both **Real-time preview** and **Background prerender** are enabled, 3+ track overlap boundaries now prefer the prerender-capable path so prerender clips are still used during full playthrough.
 - Prerender playback uses the same preview-processing dimensions as live playback, so reduced Preview Quality modes do not crop prerender output to a top-left region.
 - If a prerender segment finishes while playback is already inside that overlap region, UltimateSlice can now switch into the prerender path mid-segment (via a short rebuild) instead of waiting for the next boundary.
 - While paused or stopped, UltimateSlice also schedules nearby prerender jobs around the current playhead so heavy sections can be ready before playback starts.
 - While playing, background prerender scheduling is bounded to upcoming boundaries (not every playhead tick) to reduce job churn and keep readiness stable.
+- While currently inside a prerendered overlap segment, UltimateSlice prewarms the immediate boundary after that segment so post-prerender preview playback is ready sooner.
 - Prototype path: prerender segments currently include mixed audio, and prerender playback can run as a single prerender decoder branch (video + audio) during heavy overlap sections.
 - Prerender segment duration now covers the full overlap span to the next boundary (not a fixed ~4s chunk), reducing black tails when long overlap regions are active.
+- When Proxy mode is enabled, background prerender segments render at the active proxy scale (Half/Quarter) for faster prerender generation.
 - Prerender activity is surfaced in the existing bottom status/progress bar used for proxy generation.
 - Only active when enabled in Preferences.
 - Prerender cache files are temporary and are cleaned up when the project/player is closed.

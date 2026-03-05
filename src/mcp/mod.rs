@@ -171,6 +171,10 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetPreviewLuts {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     SeekPlayhead {
         timeline_pos_ns: u64,
         reply: SyncSender<Value>,

@@ -153,6 +153,17 @@ pub fn show_preferences_dialog(
     playback_box.append(&proxy_mode);
     playback_box.append(&proxy_hint);
 
+    let preview_luts_check = CheckButton::with_label("Preview LUTs (Proxy Off mode)");
+    preview_luts_check.set_active(current.preview_luts);
+    preview_luts_check.set_halign(gtk::Align::Start);
+    let preview_luts_hint = Label::new(Some("When Proxy mode is Off, render project-size LUT-baked preview media for LUT-assigned clips."));
+    preview_luts_hint.set_halign(gtk::Align::Start);
+    preview_luts_hint.add_css_class("dim-label");
+    preview_luts_hint.set_wrap(true);
+    preview_luts_hint.set_max_width_chars(60);
+    playback_box.append(&preview_luts_check);
+    playback_box.append(&preview_luts_hint);
+
     let pq_label = Label::new(Some("Preview quality"));
     pq_label.set_halign(gtk::Align::Start);
     let preview_quality = gtk4::ComboBoxText::new();
@@ -310,6 +321,7 @@ pub fn show_preferences_dialog(
                 experimental_preview_optimizations: experimental_check.is_active(),
                 realtime_preview: realtime_check.is_active(),
                 background_prerender: background_prerender_check.is_active(),
+                preview_luts: preview_luts_check.is_active(),
             });
         }
         d.close();

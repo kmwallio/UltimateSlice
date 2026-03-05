@@ -237,6 +237,9 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub background_prerender: bool,
+    /// Pre-render LUT-assigned clips at project resolution for preview use when proxy mode is Off.
+    #[serde(default)]
+    pub preview_luts: bool,
 }
 
 impl Default for PreferencesState {
@@ -255,6 +258,7 @@ impl Default for PreferencesState {
             experimental_preview_optimizations: false,
             realtime_preview: false,
             background_prerender: false,
+            preview_luts: false,
         }
     }
 }
