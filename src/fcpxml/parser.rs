@@ -749,6 +749,9 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:reverse") {
                 clip.reverse = v.parse().unwrap_or(false);
             }
+            if let Some(v) = attrs.get("us:group-id") {
+                clip.group_id = if v.is_empty() { None } else { Some(v.clone()) };
+            }
             if let Some(v) = attrs.get("us:shadows") {
                 clip.shadows = v.parse().unwrap_or(0.0);
             }
@@ -988,6 +991,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:reverse"
+            | "us:group-id"
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"

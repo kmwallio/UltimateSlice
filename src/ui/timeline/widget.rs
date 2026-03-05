@@ -45,6 +45,9 @@ enum DragOp {
         original_start: u64,
         clip_offset_ns: u64,
         original_track_clips: Vec<Clip>,
+        move_clip_ids: Vec<String>,
+        original_member_starts: Vec<(String, u64)>,
+        original_tracks: Vec<(String, Vec<Clip>)>,
     },
     /// Trimming the in-point of a clip
     TrimIn {
@@ -233,16 +236,11 @@ impl TimelineState {
     }
 
     fn delete_selected_internal(&mut self, compact: bool, label: &str) {
-        let Some(primary_clip_id) = self.selected_clip_id.clone() else {
+        let Some(_primary_clip_id) = self.selected_clip_id.clone() else {
             return;
         };
-        let mut target_ids = if self.selected_clip_ids.is_empty() {
-            let mut ids = HashSet::new();
-            ids.insert(primary_clip_id);
-            ids
-        } else {
-            self.selected_clip_ids.clone()
-        };
+        let mut target_ids = self.selected_ids_or_primary();
+        target_ids = self.expand_with_group_members(&target_ids);
         if target_ids.is_empty() {
             return;
         }
@@ -282,6 +280,109 @@ impl TimelineState {
         }
         target_ids.clear();
         self.clear_clip_selection();
+    }
+
+    pub fn group_selected_clips(&mut self) -> bool {
+        let target_ids = self.selected_ids_or_primary();
+        if target_ids.len() < 2 {
+            return false;
+        }
+        let group_id = uuid::Uuid::new_v4().to_string();
+        let track_updates = {
+            let proj = self.project.borrow();
+            proj.tracks
+                .iter()
+                .filter_map(|t| {
+                    let old_clips = t.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut changed = false;
+                    for clip in &mut new_clips {
+                        if target_ids.contains(&clip.id) && clip.group_id.as_deref() != Some(&group_id) {
+                            clip.group_id = Some(group_id.clone());
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        Some((t.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        if track_updates.is_empty() {
+            return false;
+        }
+        let mut proj = self.project.borrow_mut();
+        for (track_id, old_clips, new_clips) in track_updates {
+            let cmd = SetTrackClipsCommand {
+                track_id,
+                old_clips,
+                new_clips,
+                label: "Group clips".to_string(),
+            };
+            self.history.execute(Box::new(cmd), &mut proj);
+        }
+        true
+    }
+
+    pub fn ungroup_selected_clips(&mut self) -> bool {
+        let target_ids = self.selected_ids_or_primary();
+        if target_ids.is_empty() {
+            return false;
+        }
+        let target_groups: HashSet<String> = {
+            let proj = self.project.borrow();
+            proj.tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| target_ids.contains(&c.id))
+                .filter_map(|c| c.group_id.clone())
+                .collect()
+        };
+        if target_groups.is_empty() {
+            return false;
+        }
+        let track_updates = {
+            let proj = self.project.borrow();
+            proj.tracks
+                .iter()
+                .filter_map(|t| {
+                    let old_clips = t.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut changed = false;
+                    for clip in &mut new_clips {
+                        if clip
+                            .group_id
+                            .as_deref()
+                            .is_some_and(|gid| target_groups.contains(gid))
+                        {
+                            clip.group_id = None;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        Some((t.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        if track_updates.is_empty() {
+            return false;
+        }
+        let mut proj = self.project.borrow_mut();
+        for (track_id, old_clips, new_clips) in track_updates {
+            let cmd = SetTrackClipsCommand {
+                track_id,
+                old_clips,
+                new_clips,
+                label: "Ungroup clips".to_string(),
+            };
+            self.history.execute(Box::new(cmd), &mut proj);
+        }
+        true
     }
 
     pub fn copy_selected_to_clipboard(&mut self) -> bool {
@@ -443,10 +544,21 @@ impl TimelineState {
     }
 
     fn set_single_clip_selection(&mut self, clip_id: String, track_id: String) {
-        self.selected_clip_ids.clear();
-        self.selected_clip_ids.insert(clip_id.clone());
-        self.selected_clip_id = Some(clip_id.clone());
-        self.selection_anchor_clip_id = Some(clip_id);
+        let mut ids = HashSet::new();
+        ids.insert(clip_id.clone());
+        self.set_selection_with_primary(clip_id, track_id, ids);
+    }
+
+    fn set_selection_with_primary(
+        &mut self,
+        primary_clip_id: String,
+        track_id: String,
+        mut selected_ids: HashSet<String>,
+    ) {
+        selected_ids.insert(primary_clip_id.clone());
+        self.selected_clip_ids = selected_ids;
+        self.selected_clip_id = Some(primary_clip_id.clone());
+        self.selection_anchor_clip_id = Some(primary_clip_id);
         self.selected_track_id = Some(track_id);
     }
 
@@ -483,6 +595,55 @@ impl TimelineState {
         self.selected_track_id = Some(primary_track_id);
         self.selection_anchor_clip_id = Some(primary_id);
         true
+    }
+
+    fn selected_ids_or_primary(&self) -> HashSet<String> {
+        if !self.selected_clip_ids.is_empty() {
+            return self.selected_clip_ids.clone();
+        }
+        let mut ids = HashSet::new();
+        if let Some(id) = self.selected_clip_id.clone() {
+            ids.insert(id);
+        }
+        ids
+    }
+
+    fn expand_with_group_members(&self, ids: &HashSet<String>) -> HashSet<String> {
+        if ids.is_empty() {
+            return HashSet::new();
+        }
+        let group_ids: HashSet<String> = {
+            let proj = self.project.borrow();
+            proj.tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| ids.contains(&c.id))
+                .filter_map(|c| c.group_id.clone())
+                .collect()
+        };
+        if group_ids.is_empty() {
+            return ids.clone();
+        }
+        let mut expanded = ids.clone();
+        {
+            let proj = self.project.borrow();
+            for clip in proj.tracks.iter().flat_map(|t| t.clips.iter()) {
+                if clip
+                    .group_id
+                    .as_deref()
+                    .is_some_and(|gid| group_ids.contains(gid))
+                {
+                    expanded.insert(clip.id.clone());
+                }
+            }
+        }
+        expanded
+    }
+
+    fn grouped_clip_ids_for_clip(&self, clip_id: &str) -> Vec<String> {
+        let mut ids = HashSet::new();
+        ids.insert(clip_id.to_string());
+        self.expand_with_group_members(&ids).into_iter().collect()
     }
 
     fn shift_select_range_to(&mut self, track_id: &str, to_clip_id: &str) -> bool {
@@ -1126,6 +1287,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     if let Some((tl_start, src_in, src_out)) = clip_data {
                         let offset_ns = st.x_to_ns(x).saturating_sub(tl_start);
                         let click_ns = st.x_to_ns(x);
+                        let move_clip_ids = st.grouped_clip_ids_for_clip(&h.clip_id);
+                        let move_clip_set: HashSet<String> = move_clip_ids.iter().cloned().collect();
+                        let (original_member_starts, original_tracks) = {
+                            let proj = st.project.borrow();
+                            let original_member_starts = proj
+                                .tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter(|c| move_clip_set.contains(&c.id))
+                                .map(|c| (c.id.clone(), c.timeline_start))
+                                .collect::<Vec<_>>();
+                            let original_tracks = proj
+                                .tracks
+                                .iter()
+                                .filter(|t| t.clips.iter().any(|c| move_clip_set.contains(&c.id)))
+                                .map(|t| (t.id.clone(), t.clips.clone()))
+                                .collect::<Vec<_>>();
+                            (original_member_starts, original_tracks)
+                        };
                         st.drag_op = match h.zone {
                             HitZone::Body if st.active_tool == ActiveTool::Slip => DragOp::Slip {
                                 clip_id: h.clip_id.clone(),
@@ -1166,6 +1346,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 original_start: tl_start,
                                 clip_offset_ns: offset_ns,
                                 original_track_clips: track_snapshot.clone(),
+                                move_clip_ids: move_clip_ids.clone(),
+                                original_member_starts,
+                                original_tracks,
                             },
                             HitZone::TrimIn => DragOp::TrimIn {
                                 clip_id: h.clip_id.clone(),
@@ -1209,7 +1392,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 }
                             }
                         };
-                        st.set_single_clip_selection(h.clip_id, h.track_id);
+                        if move_clip_ids.len() > 1 {
+                            st.set_selection_with_primary(h.clip_id, h.track_id, move_clip_set);
+                        } else {
+                            st.set_single_clip_selection(h.clip_id, h.track_id);
+                        }
                     }
                 } else if x < TRACK_LABEL_WIDTH && y > RULER_HEIGHT {
                     // Drag started in track label area → track reorder
@@ -1275,134 +1462,201 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     DragOp::MoveClip {
                         ref clip_id,
                         ref current_track_id,
+                        original_start,
                         clip_offset_ns,
+                        ref move_clip_ids,
+                        ref original_member_starts,
                         ..
                     } => {
+                        let grouped_move = move_clip_ids.len() > 1;
                         let raw_start = current_ns.saturating_sub(clip_offset_ns);
-                        // ── Determine target track from y position ──────────
-                        let target_track_idx = if current_y > RULER_HEIGHT {
-                            ((current_y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
-                        } else {
-                            0
-                        };
-                        let (target_track_id, same_kind) = {
-                            let proj = st.project.borrow();
-                            let cur_kind = proj
-                                .tracks
-                                .iter()
-                                .find(|t| &t.id == current_track_id)
-                                .map(|t| t.kind.clone());
-                            match proj.tracks.get(target_track_idx) {
-                                Some(target)
-                                    if Some(&target.kind) == cur_kind.as_ref()
-                                        && target.id != *current_track_id =>
-                                {
-                                    (Some(target.id.clone()), true)
-                                }
-                                _ => (None, false),
-                            }
-                        };
-                        // Move clip between tracks if target is valid and different
-                        if same_kind {
-                            if let Some(ref new_tid) = target_track_id {
-                                let mut proj = st.project.borrow_mut();
-                                let extracted = {
-                                    let from =
-                                        proj.tracks.iter_mut().find(|t| &t.id == current_track_id);
-                                    from.and_then(|t| {
-                                        let pos = t.clips.iter().position(|c| &c.id == clip_id);
-                                        pos.map(|i| t.clips.remove(i))
+                        if grouped_move {
+                            let move_set: HashSet<String> = move_clip_ids.iter().cloned().collect();
+                            let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                            let snap_start = {
+                                let proj = st.project.borrow();
+                                let edges: Vec<u64> = proj
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .filter(|c| !move_set.contains(&c.id))
+                                    .flat_map(|c| [c.timeline_start, c.timeline_end()])
+                                    .collect();
+                                let this_dur = proj
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .find(|c| &c.id == clip_id)
+                                    .map(|c| c.duration())
+                                    .unwrap_or(0);
+                                let by_start = edges
+                                    .iter()
+                                    .copied()
+                                    .filter(|&e| (e as i64 - raw_start as i64).unsigned_abs() < snap_ns)
+                                    .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
+                                let by_end = edges
+                                    .iter()
+                                    .copied()
+                                    .filter(|&e| {
+                                        let end = raw_start + this_dur;
+                                        (e as i64 - end as i64).unsigned_abs() < snap_ns
                                     })
-                                };
-                                if let Some(mut clip) = extracted {
-                                    clip.timeline_start = raw_start;
-                                    if let Some(to_track) =
-                                        proj.tracks.iter_mut().find(|t| &t.id == new_tid)
-                                    {
-                                        to_track.add_clip(clip);
+                                    .min_by_key(|&e| {
+                                        let end = raw_start + this_dur;
+                                        (e as i64 - end as i64).unsigned_abs()
+                                    })
+                                    .map(|e| e.saturating_sub(this_dur));
+                                match (by_start, by_end) {
+                                    (Some(a), Some(b)) => {
+                                        let da = (a as i64 - raw_start as i64).unsigned_abs();
+                                        let db = (b as i64 - raw_start as i64).unsigned_abs();
+                                        if da <= db { a } else { b }
                                     }
+                                    (Some(a), None) => a,
+                                    (None, Some(b)) => b,
+                                    (None, None) => raw_start,
                                 }
-                                drop(proj);
-                                // Update drag_op with new current_track_id
-                                if let DragOp::MoveClip {
-                                    ref mut current_track_id,
-                                    ..
-                                } = st.drag_op
-                                {
-                                    *current_track_id = new_tid.clone();
-                                }
-                                st.selected_track_id = Some(new_tid.clone());
-                            }
-                        }
-
-                        // ── Snap to clip edges ──────────────────────────────
-                        let active_track_id = if let DragOp::MoveClip {
-                            ref current_track_id,
-                            ..
-                        } = st.drag_op
-                        {
-                            current_track_id.clone()
-                        } else {
-                            String::new()
-                        };
-
-                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
-                        let (clip_dur, snap_start) = {
-                            let proj = st.project.borrow();
-                            let edges: Vec<u64> = proj
-                                .tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter(|c| &c.id != clip_id)
-                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                .collect();
-                            let this_dur = proj
-                                .tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .find(|c| &c.id == clip_id)
-                                .map(|c| c.duration())
-                                .unwrap_or(0);
-                            let by_start = edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| (e as i64 - raw_start as i64).unsigned_abs() < snap_ns)
-                                .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
-                            let by_end = edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| {
-                                    let end = raw_start + this_dur;
-                                    (e as i64 - end as i64).unsigned_abs() < snap_ns
-                                })
-                                .min_by_key(|&e| {
-                                    let end = raw_start + this_dur;
-                                    (e as i64 - end as i64).unsigned_abs()
-                                })
-                                .map(|e| e.saturating_sub(this_dur));
-                            let snapped = match (by_start, by_end) {
-                                (Some(a), Some(b)) => {
-                                    let da = (a as i64 - raw_start as i64).unsigned_abs();
-                                    let db = (b as i64 - raw_start as i64).unsigned_abs();
-                                    if da <= db {
-                                        a
-                                    } else {
-                                        b
-                                    }
-                                }
-                                (Some(a), None) => a,
-                                (None, Some(b)) => b,
-                                (None, None) => raw_start,
                             };
-                            (this_dur, snapped)
-                        };
-                        let _ = clip_dur;
-                        let mut proj = st.project.borrow_mut();
-                        if let Some(track) =
-                            proj.tracks.iter_mut().find(|t| t.id == active_track_id)
-                        {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.timeline_start = snap_start;
+                            let delta = snap_start as i64 - original_start as i64;
+                            let mut proj = st.project.borrow_mut();
+                            for (member_id, member_start) in original_member_starts {
+                                if let Some(clip) = proj
+                                    .tracks
+                                    .iter_mut()
+                                    .flat_map(|t| t.clips.iter_mut())
+                                    .find(|c| c.id == *member_id)
+                                {
+                                    clip.timeline_start = (i128::from(*member_start) + i128::from(delta))
+                                        .max(0) as u64;
+                                }
+                            }
+                            for track in &mut proj.tracks {
+                                if track.clips.iter().any(|c| move_set.contains(&c.id)) {
+                                    track.sort_clips();
+                                }
+                            }
+                        } else {
+                            // ── Determine target track from y position ──────────
+                            let target_track_idx = if current_y > RULER_HEIGHT {
+                                ((current_y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
+                            } else {
+                                0
+                            };
+                            let (target_track_id, same_kind) = {
+                                let proj = st.project.borrow();
+                                let cur_kind = proj
+                                    .tracks
+                                    .iter()
+                                    .find(|t| &t.id == current_track_id)
+                                    .map(|t| t.kind.clone());
+                                match proj.tracks.get(target_track_idx) {
+                                    Some(target)
+                                        if Some(&target.kind) == cur_kind.as_ref()
+                                            && target.id != *current_track_id =>
+                                    {
+                                        (Some(target.id.clone()), true)
+                                    }
+                                    _ => (None, false),
+                                }
+                            };
+                            // Move clip between tracks if target is valid and different
+                            if same_kind {
+                                if let Some(ref new_tid) = target_track_id {
+                                    let mut proj = st.project.borrow_mut();
+                                    let extracted = {
+                                        let from =
+                                            proj.tracks.iter_mut().find(|t| &t.id == current_track_id);
+                                        from.and_then(|t| {
+                                            let pos = t.clips.iter().position(|c| &c.id == clip_id);
+                                            pos.map(|i| t.clips.remove(i))
+                                        })
+                                    };
+                                    if let Some(mut clip) = extracted {
+                                        clip.timeline_start = raw_start;
+                                        if let Some(to_track) =
+                                            proj.tracks.iter_mut().find(|t| &t.id == new_tid)
+                                        {
+                                            to_track.add_clip(clip);
+                                        }
+                                    }
+                                    drop(proj);
+                                    // Update drag_op with new current_track_id
+                                    if let DragOp::MoveClip {
+                                        ref mut current_track_id,
+                                        ..
+                                    } = st.drag_op
+                                    {
+                                        *current_track_id = new_tid.clone();
+                                    }
+                                    st.selected_track_id = Some(new_tid.clone());
+                                }
+                            }
+
+                            // ── Snap to clip edges ──────────────────────────────
+                            let active_track_id = if let DragOp::MoveClip {
+                                ref current_track_id,
+                                ..
+                            } = st.drag_op
+                            {
+                                current_track_id.clone()
+                            } else {
+                                String::new()
+                            };
+
+                            let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                            let (_clip_dur, snap_start) = {
+                                let proj = st.project.borrow();
+                                let edges: Vec<u64> = proj
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .filter(|c| &c.id != clip_id)
+                                    .flat_map(|c| [c.timeline_start, c.timeline_end()])
+                                    .collect();
+                                let this_dur = proj
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .find(|c| &c.id == clip_id)
+                                    .map(|c| c.duration())
+                                    .unwrap_or(0);
+                                let by_start = edges
+                                    .iter()
+                                    .copied()
+                                    .filter(|&e| (e as i64 - raw_start as i64).unsigned_abs() < snap_ns)
+                                    .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
+                                let by_end = edges
+                                    .iter()
+                                    .copied()
+                                    .filter(|&e| {
+                                        let end = raw_start + this_dur;
+                                        (e as i64 - end as i64).unsigned_abs() < snap_ns
+                                    })
+                                    .min_by_key(|&e| {
+                                        let end = raw_start + this_dur;
+                                        (e as i64 - end as i64).unsigned_abs()
+                                    })
+                                    .map(|e| e.saturating_sub(this_dur));
+                                let snapped = match (by_start, by_end) {
+                                    (Some(a), Some(b)) => {
+                                        let da = (a as i64 - raw_start as i64).unsigned_abs();
+                                        let db = (b as i64 - raw_start as i64).unsigned_abs();
+                                        if da <= db { a } else { b }
+                                    }
+                                    (Some(a), None) => a,
+                                    (None, Some(b)) => b,
+                                    (None, None) => raw_start,
+                                };
+                                (this_dur, snapped)
+                            };
+                            let mut proj = st.project.borrow_mut();
+                            if let Some(track) =
+                                proj.tracks.iter_mut().find(|t| t.id == active_track_id)
+                            {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id)
+                                {
+                                    clip.timeline_start = snap_start;
+                                }
                             }
                         }
                     }
@@ -1771,10 +2025,47 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         ref current_track_id,
                         original_start,
                         original_track_clips,
+                        move_clip_ids,
+                        original_tracks,
                         ..
                     } => {
-                        let cross_track = original_track_id != current_track_id;
-                        if magnetic_mode {
+                        let grouped_move = move_clip_ids.len() > 1;
+                        if grouped_move {
+                            let track_updates = {
+                                let proj = st.project.borrow();
+                                original_tracks
+                                    .iter()
+                                    .filter_map(|(track_id, old_clips)| {
+                                        let new_clips = proj
+                                            .tracks
+                                            .iter()
+                                            .find(|t| t.id == *track_id)
+                                            .map(|t| t.clips.clone())
+                                            .unwrap_or_default();
+                                        if &new_clips != old_clips {
+                                            Some((track_id.clone(), old_clips.clone(), new_clips))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            };
+                            if !track_updates.is_empty() {
+                                let project = st.project.clone();
+                                let mut proj = project.borrow_mut();
+                                for (track_id, old_clips, new_clips) in track_updates {
+                                    let cmd = SetTrackClipsCommand {
+                                        track_id,
+                                        old_clips,
+                                        new_clips,
+                                        label: "Move grouped clips".to_string(),
+                                    };
+                                    st.history.execute(Box::new(cmd), &mut proj);
+                                }
+                            }
+                        } else {
+                            let cross_track = original_track_id != current_track_id;
+                            if magnetic_mode {
                             // Compact the current (destination) track
                             let mut new_clips = {
                                 let proj = st.project.borrow();
@@ -1826,28 +2117,29 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             if cross_track {
                                 st.history.redo_stack.clear();
                             }
-                        } else {
-                            let new_start = {
-                                let proj = st.project.borrow();
-                                proj.tracks
-                                    .iter()
-                                    .find(|t| &t.id == current_track_id)
-                                    .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
-                                    .map(|c| c.timeline_start)
-                            };
-                            if let Some(new_start) = new_start {
-                                if new_start != original_start || cross_track {
-                                    let cmd = MoveClipCommand {
-                                        clip_id: clip_id.clone(),
-                                        from_track_id: original_track_id.clone(),
-                                        to_track_id: current_track_id.clone(),
-                                        old_timeline_start: original_start,
-                                        new_timeline_start: new_start,
-                                    };
-                                    // Don't re-execute (already applied live), just push to history
-                                    st.history.undo_stack.push(Box::new(cmd));
-                                    st.history.redo_stack.clear();
-                                    st.project.borrow_mut().dirty = true;
+                            } else {
+                                let new_start = {
+                                    let proj = st.project.borrow();
+                                    proj.tracks
+                                        .iter()
+                                        .find(|t| &t.id == current_track_id)
+                                        .and_then(|t| t.clips.iter().find(|c| &c.id == clip_id))
+                                        .map(|c| c.timeline_start)
+                                };
+                                if let Some(new_start) = new_start {
+                                    if new_start != original_start || cross_track {
+                                        let cmd = MoveClipCommand {
+                                            clip_id: clip_id.clone(),
+                                            from_track_id: original_track_id.clone(),
+                                            to_track_id: current_track_id.clone(),
+                                            old_timeline_start: original_start,
+                                            new_timeline_start: new_start,
+                                        };
+                                        // Don't re-execute (already applied live), just push to history
+                                        st.history.undo_stack.push(Box::new(cmd));
+                                        st.history.redo_stack.clear();
+                                        st.project.borrow_mut().dirty = true;
+                                    }
                                 }
                             }
                         }
@@ -2233,6 +2525,20 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 }
                 Key::v | Key::V if ctrl => {
                     let changed = st.paste_insert_from_clipboard();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::g | Key::G if ctrl && shift => {
+                    let changed = st.ungroup_selected_clips();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::g | Key::G if ctrl => {
+                    let changed = st.group_selected_clips();
                     if changed {
                         notify_project = true;
                     }
@@ -3359,6 +3665,8 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Ctrl+C", "Copy selected timeline clip"),
         ("Ctrl+V", "Paste insert clip at playhead"),
         ("Ctrl+Shift+V", "Paste copied clip attributes"),
+        ("Ctrl+G", "Group selected clips"),
+        ("Ctrl+Shift+G", "Ungroup selected clips"),
         ("Scroll", "Zoom timeline (vertical scroll)"),
         ("Scroll (H)", "Pan timeline (horizontal scroll)"),
         ("? / /", "Show this help"),

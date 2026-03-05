@@ -102,6 +102,14 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Works with single selection and multi-selection.
 - Uses track-local compaction (does not shift unrelated tracks).
 
+### Clip Grouping (`Ctrl+G`, `Ctrl+Shift+G`)
+
+- **Group (`Ctrl+G`)** links the current multi-selection into one clip group.
+- **Ungroup (`Ctrl+Shift+G`)** removes grouping for any selected grouped clips.
+- Grouped clips move together when dragging any member.
+- Grouped clips delete together for both normal delete and ripple delete.
+- First pass scope: grouped trim behavior is not yet enabled.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -120,6 +128,8 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
+| `Ctrl+G` | Group selected clips |
+| `Ctrl+Shift+G` | Ungroup selected clips |
 | `Shift+Click` (timeline) | Add a same-track range to selection |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |

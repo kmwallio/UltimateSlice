@@ -172,7 +172,7 @@ Tracking docs:
   - [x] Phase 1: Shift+click range select, Ctrl/Cmd+click toggle selection, Ctrl+A select all
   - [x] Phase 2: rubber-band marquee selection
 - [x] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
-- [ ] Clip grouping / ungrouping (link multiple clips to move/delete/trim as a unit)
+- [x] Clip grouping / ungrouping (persist clip-group IDs; grouped move/delete as a unit)
 - [ ] Audio/video linking (auto-link video and audio from same source)
 - [ ] Solo track (play only selected tracks, complement to muted/locked)
 - [ ] Freeze frame (hold single frame for arbitrary duration)

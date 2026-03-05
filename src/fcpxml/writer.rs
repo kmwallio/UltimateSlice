@@ -148,6 +148,11 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
             asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
             asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
+            if let Some(ref gid) = clip.group_id {
+                if !gid.is_empty() {
+                    asset_clip.push_attribute(("us:group-id", gid.as_str()));
+                }
+            }
             asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
             asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
             asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
@@ -697,6 +702,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:reverse"
+            | "us:group-id"
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"

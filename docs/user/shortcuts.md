@@ -55,6 +55,8 @@
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
+| `Ctrl+G` | Group selected clips |
+| `Ctrl+Shift+G` | Ungroup selected clips |
 | `Shift+Click` (timeline) | Add a range of clips on the same track to selection |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle a clip in the current selection |
 | `Ctrl+A` | Select all timeline clips |
