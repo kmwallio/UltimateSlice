@@ -127,7 +127,9 @@ pub fn export_project(
     let secondary_clips_flat: Vec<_> = secondary_track_clips.iter().flatten().copied().collect();
 
     let total_duration_us = project.duration().max(1) / 1_000;
-    let estimated_size_bytes = estimated_size_bytes.filter(|v| *v > 0);
+    let estimated_size_bytes = estimated_size_bytes
+        .filter(|v| *v > 0)
+        .or_else(|| estimate_export_size_bytes(project, &options, out_w, out_h));
     let _ = tx.send(ExportProgress::Progress(0.0));
 
     let ffmpeg = find_ffmpeg()?;
@@ -727,6 +729,57 @@ fn parse_progress_line(
     None
 }
 
+fn estimate_export_size_bytes(
+    project: &Project,
+    options: &ExportOptions,
+    out_w: u32,
+    out_h: u32,
+) -> Option<u64> {
+    let duration_secs = project.duration() as f64 / 1_000_000_000.0;
+    if duration_secs <= 0.0 {
+        return None;
+    }
+    let total_bitrate_bps = estimate_export_total_bitrate_bps(project, options, out_w, out_h);
+    if total_bitrate_bps == 0 {
+        return None;
+    }
+    Some(((total_bitrate_bps as f64 * duration_secs) / 8.0).round() as u64)
+}
+
+fn estimate_export_total_bitrate_bps(
+    project: &Project,
+    options: &ExportOptions,
+    out_w: u32,
+    out_h: u32,
+) -> u64 {
+    let fps = project.frame_rate.as_f64().clamp(1.0, 120.0);
+    let pixel_scale = ((out_w.max(1) as f64 * out_h.max(1) as f64) / (1920.0 * 1080.0)).max(0.1);
+    let fps_scale = (fps / 30.0).max(0.5);
+    let crf_scale = (1.0 + ((23.0 - options.crf as f64) * 0.04)).clamp(0.4, 2.0);
+
+    let base_video_kbps = match options.video_codec {
+        VideoCodec::H264 => 6_000.0,
+        VideoCodec::H265 => 4_200.0,
+        VideoCodec::Vp9 => 3_600.0,
+        VideoCodec::Av1 => 3_200.0,
+        VideoCodec::ProRes => 95_000.0,
+    };
+    let mut video_kbps = base_video_kbps * pixel_scale * fps_scale * crf_scale;
+    if matches!(options.video_codec, VideoCodec::ProRes) {
+        video_kbps = video_kbps.max(40_000.0);
+    } else {
+        video_kbps = video_kbps.clamp(700.0, 40_000.0);
+    }
+
+    let audio_kbps = match options.audio_codec {
+        AudioCodec::Aac | AudioCodec::Opus => options.audio_bitrate_kbps.max(64) as f64,
+        AudioCodec::Flac => 1_000.0,
+        AudioCodec::Pcm => 4_608.0, // 48kHz * 24-bit * 2ch
+    };
+
+    ((video_kbps + audio_kbps) * 1_000.0) as u64
+}
+
 fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
     let output = Command::new(ffmpeg)
         .arg("-filters")
@@ -790,7 +843,9 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_progress_line;
+    use super::{estimate_export_size_bytes, parse_progress_line, AudioCodec, ExportOptions, VideoCodec};
+    use crate::model::clip::{Clip, ClipKind};
+    use crate::model::project::Project;
 
     #[test]
     fn total_size_progress_uses_estimate_and_caps() {
@@ -810,5 +865,23 @@ mod tests {
     fn time_mode_out_time_ms_treated_as_microseconds() {
         let p = parse_progress_line("out_time_ms=500000", 1_000_000, None).unwrap();
         assert!((p - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn export_size_estimate_returns_positive_value() {
+        let mut project = Project::new("Test");
+        project.tracks[0].add_clip(Clip::new(
+            "/tmp/test.mp4",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        let options = ExportOptions {
+            video_codec: VideoCodec::H264,
+            audio_codec: AudioCodec::Aac,
+            ..ExportOptions::default()
+        };
+        let est = estimate_export_size_bytes(&project, &options, project.width, project.height);
+        assert!(est.unwrap_or(0) > 0);
     }
 }

@@ -2690,27 +2690,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
             if proxy_active || prerender_active {
-                let active_total = (if proxy_active { proxy_progress.total } else { 0 })
-                    + if prerender_active {
-                        prerender_progress.total
-                    } else {
-                        0
-                    };
-                let active_completed = (if proxy_active {
-                    proxy_progress.completed
-                } else {
-                    0
-                }) + if prerender_active {
-                    prerender_progress.completed
-                } else {
-                    0
-                };
                 status_label.set_visible(true);
                 status_progress.set_visible(true);
                 let label = if proxy_active && prerender_active {
                     format!(
-                        "Generating proxies + prerender… {}/{}",
-                        active_completed, active_total
+                        "Generating proxies + prerender… proxy {}/{} | prerender {}/{}",
+                        proxy_progress.completed,
+                        proxy_progress.total,
+                        prerender_progress.completed,
+                        prerender_progress.total
                     )
                 } else if proxy_active {
                     format!(
@@ -2724,12 +2712,22 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     )
                 };
                 status_label.set_text(&label);
-                if active_total > 0 {
-                    status_progress.set_fraction(active_completed as f64 / active_total as f64);
-                    status_progress.set_text(Some(&format!(
-                        "{:.0}%",
-                        (active_completed as f64 / active_total as f64) * 100.0
-                    )));
+                if proxy_active {
+                    let fraction = proxy_progress.byte_fraction.unwrap_or_else(|| {
+                        if proxy_progress.total > 0 {
+                            (proxy_progress.completed as f64 / proxy_progress.total as f64).clamp(0.0, 0.99)
+                        } else {
+                            0.0
+                        }
+                    });
+                    status_progress.set_fraction(fraction);
+                    status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                } else if prerender_progress.total > 0 {
+                    let fraction = (prerender_progress.completed as f64
+                        / prerender_progress.total as f64)
+                        .clamp(0.0, 0.99);
+                    status_progress.set_fraction(fraction);
+                    status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
                 }
             } else {
                 status_label.set_visible(false);

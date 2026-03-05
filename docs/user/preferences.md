@@ -65,6 +65,7 @@ Preferences are grouped by category in a sidebar:
 - Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index), and project unload/app close performs managed-cache cleanup.
 - Project reload eagerly primes a capped set of near-playhead proxy sources so first playback can pick up local proxies sooner on slower/external storage.
 - A yellow progress bar appears at the bottom of the window during proxy generation (and now also when background timeline prerender jobs are in flight).
+- Proxy percentage now uses ffmpeg bytes-written (`total_size`) versus a bitrate×duration estimate, and remains below 100% while jobs are still running.
 - **Changing the proxy size** (e.g. from Half Res to Quarter Res) automatically invalidates existing proxies and re-generates them at the new resolution.
 - **LUT-baked proxies**: when a LUT is assigned to a clip via the Inspector, a new proxy is generated for that clip with the LUT baked in, so the preview reflects the color grade. Removing the LUT regenerates a plain (ungraded) proxy.
 - Source Monitor behavior in `Off` mode is adaptive: it may request **Quarter** proxies for small source-monitor sizes and **Half** proxies for larger ones to improve preview smoothness.

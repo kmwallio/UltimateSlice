@@ -1,7 +1,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,11 +17,22 @@ pub struct ProxyResult {
     pub owned_local: bool,
 }
 
+/// Background worker updates (progress + completion).
+pub enum ProxyWorkerUpdate {
+    Progress {
+        cache_key: String,
+        written_bytes: u64,
+        estimated_bytes: u64,
+    },
+    Done(ProxyResult),
+}
+
 /// Progress snapshot for the status bar.
 pub struct ProxyProgress {
     pub total: usize,
     pub completed: usize,
     pub in_flight: bool,
+    pub byte_fraction: Option<f64>,
 }
 
 /// Scale factor for proxy transcodes.
@@ -81,8 +94,11 @@ pub struct ProxyCache {
     failed: HashSet<String>,
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
-    result_rx: mpsc::Receiver<ProxyResult>,
+    result_rx: mpsc::Receiver<ProxyWorkerUpdate>,
     work_tx: Option<mpsc::Sender<(String, ProxyScale, Option<String>)>>,
+    /// Per-job estimated bytes and written bytes for byte-based status progress.
+    estimated_bytes: HashMap<String, u64>,
+    written_bytes: HashMap<String, u64>,
     /// Managed local cache root (`$XDG_CACHE_HOME/ultimateslice/proxies` or `/tmp/...` fallback).
     local_cache_root: PathBuf,
     /// Local managed-cache files created by this process.
@@ -101,7 +117,7 @@ impl ProxyCache {
                 local_cache_root.display()
             );
         }
-        let (result_tx, result_rx) = mpsc::sync_channel::<ProxyResult>(32);
+        let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
         let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Option<String>)>();
 
         // Pool of worker threads to transcode proxies in parallel.
@@ -120,14 +136,21 @@ impl ProxyCache {
                     Ok((source_path, scale, lut_path)) => {
                         let key = proxy_key(&source_path, lut_path.as_deref());
                         let (proxy_path, success, owned_local) =
-                            transcode_proxy(&source_path, scale, lut_path.as_deref(), &local_root);
+                            transcode_proxy(
+                                &source_path,
+                                scale,
+                                lut_path.as_deref(),
+                                &local_root,
+                                &key,
+                                &tx,
+                            );
                         if tx
-                            .send(ProxyResult {
+                            .send(ProxyWorkerUpdate::Done(ProxyResult {
                                 cache_key: key,
                                 proxy_path,
                                 success,
                                 owned_local,
-                            })
+                            }))
                             .is_err()
                         {
                             break;
@@ -145,6 +168,8 @@ impl ProxyCache {
             total_requested: 0,
             result_rx,
             work_tx: Some(work_tx),
+            estimated_bytes: HashMap::new(),
+            written_bytes: HashMap::new(),
             local_cache_root,
             runtime_owned_local_files: HashSet::new(),
         }
@@ -171,6 +196,7 @@ impl ProxyCache {
         }
         self.pending.insert(key);
         self.total_requested += 1;
+        self.written_bytes.insert(proxy_key(source_path, lut_path), 0);
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send((
                 source_path.to_string(),
@@ -183,20 +209,39 @@ impl ProxyCache {
     /// Drain completed background transcodes. Returns cache keys that were just resolved.
     pub fn poll(&mut self) -> Vec<String> {
         let mut resolved = Vec::new();
-        while let Ok(result) = self.result_rx.try_recv() {
-            self.pending.remove(&result.cache_key);
-            if result.success {
-                self.proxies
-                    .insert(result.cache_key.clone(), result.proxy_path.clone());
-                if result.owned_local {
-                    self.runtime_owned_local_files
-                        .insert(result.proxy_path.clone());
-                    append_owned_entry(&self.local_cache_root, &result.proxy_path);
+        while let Ok(update) = self.result_rx.try_recv() {
+            match update {
+                ProxyWorkerUpdate::Progress {
+                    cache_key,
+                    written_bytes,
+                    estimated_bytes,
+                } => {
+                    self.written_bytes.insert(cache_key.clone(), written_bytes);
+                    if estimated_bytes > 0 {
+                        self.estimated_bytes.insert(cache_key, estimated_bytes);
+                    }
                 }
-            } else {
-                self.failed.insert(result.cache_key.clone());
+                ProxyWorkerUpdate::Done(result) => {
+                    self.pending.remove(&result.cache_key);
+                    if result.success {
+                        self.proxies
+                            .insert(result.cache_key.clone(), result.proxy_path.clone());
+                        if let Some(estimate) = self.estimated_bytes.get(&result.cache_key).copied() {
+                            self.written_bytes.insert(result.cache_key.clone(), estimate);
+                        }
+                        if result.owned_local {
+                            self.runtime_owned_local_files
+                                .insert(result.proxy_path.clone());
+                            append_owned_entry(&self.local_cache_root, &result.proxy_path);
+                        }
+                    } else {
+                        self.failed.insert(result.cache_key.clone());
+                        self.estimated_bytes.remove(&result.cache_key);
+                        self.written_bytes.remove(&result.cache_key);
+                    }
+                    resolved.push(result.cache_key);
+                }
             }
-            resolved.push(result.cache_key);
         }
         resolved
     }
@@ -213,6 +258,8 @@ impl ProxyCache {
         self.pending.clear();
         self.failed.clear();
         self.total_requested = 0;
+        self.estimated_bytes.clear();
+        self.written_bytes.clear();
     }
 
     /// Remove managed local proxy cache files on project unload/close.
@@ -268,10 +315,31 @@ impl ProxyCache {
     /// Current progress snapshot.
     pub fn progress(&self) -> ProxyProgress {
         let completed = self.proxies.len();
+        let mut written = 0u64;
+        let mut estimated = 0u64;
+        for (key, est) in &self.estimated_bytes {
+            if *est == 0 {
+                continue;
+            }
+            estimated = estimated.saturating_add(*est);
+            let bytes = self.written_bytes.get(key).copied().unwrap_or(0);
+            written = written.saturating_add(bytes.min(*est));
+        }
+        let in_flight = !self.pending.is_empty();
+        let byte_fraction = if estimated > 0 {
+            let mut frac = (written as f64 / estimated as f64).clamp(0.0, 1.0);
+            if in_flight {
+                frac = frac.min(0.99);
+            }
+            Some(frac)
+        } else {
+            None
+        };
         ProxyProgress {
             total: self.total_requested,
             completed: completed.min(self.total_requested),
-            in_flight: !self.pending.is_empty(),
+            in_flight,
+            byte_fraction,
         }
     }
 }
@@ -444,12 +512,23 @@ fn existing_proxy_path_for(
     None
 }
 
-fn run_transcode_command(ffmpeg: &str, source_path: &str, proxy_path: &str, filter: &str) -> bool {
-    let status = std::process::Command::new(ffmpeg)
-        .arg("-y")
+fn run_transcode_command(
+    ffmpeg: &str,
+    source_path: &str,
+    proxy_path: &str,
+    filter: &str,
+    cache_key: &str,
+    estimated_size_bytes: Option<u64>,
+    progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
+) -> bool {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
+        .arg("-progress")
+        .arg("pipe:2")
+        .arg("-nostats")
         .arg("-i")
         .arg(source_path)
         .arg("-vf")
@@ -475,10 +554,86 @@ fn run_transcode_command(ffmpeg: &str, source_path: &str, proxy_path: &str, filt
         .arg("-movflags")
         .arg("+faststart")
         .arg(proxy_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    matches!(status, Ok(s) if s.success())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.wait();
+        return false;
+    };
+
+    let estimate = estimated_size_bytes.unwrap_or(0);
+    if estimate > 0 {
+        let _ = progress_tx.send(ProxyWorkerUpdate::Progress {
+            cache_key: cache_key.to_string(),
+            written_bytes: 0,
+            estimated_bytes: estimate,
+        });
+    }
+    for line in BufReader::new(stderr).lines().map_while(|r| r.ok()) {
+        if let Some(v) = line.strip_prefix("total_size=") {
+            if let Ok(bytes) = v.parse::<u64>() {
+                let _ = progress_tx.send(ProxyWorkerUpdate::Progress {
+                    cache_key: cache_key.to_string(),
+                    written_bytes: bytes,
+                    estimated_bytes: estimate,
+                });
+            }
+        }
+    }
+    matches!(child.wait(), Ok(s) if s.success())
+}
+
+fn estimate_proxy_output_bitrate_bps(scale: ProxyScale, has_lut: bool) -> u64 {
+    let base_video_bps = match scale {
+        ProxyScale::Half => 1_600_000f64,
+        ProxyScale::Quarter => 850_000f64,
+        ProxyScale::Project { width, height } => {
+            let pixel_scale = ((width.max(1) as f64 * height.max(1) as f64) / (1920.0 * 1080.0))
+                .clamp(0.25, 4.0);
+            (3_200_000f64 * pixel_scale).clamp(1_200_000.0, 12_000_000.0)
+        }
+    };
+    let lut_scale = if has_lut { 1.1 } else { 1.0 };
+    let video_bps = (base_video_bps * lut_scale) as u64;
+    video_bps.saturating_add(128_000)
+}
+
+fn probe_duration_seconds(ffprobe: &str, source_path: &str) -> Option<f64> {
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+            source_path,
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let duration = text.trim().parse::<f64>().ok()?;
+    if duration.is_finite() && duration > 0.0 {
+        Some(duration)
+    } else {
+        None
+    }
+}
+
+fn estimate_proxy_size_bytes(
+    source_path: &str,
+    scale: ProxyScale,
+    lut_path: Option<&str>,
+    ffmpeg: &str,
+) -> Option<u64> {
+    let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
+    let duration_secs = probe_duration_seconds(&ffprobe, source_path)?;
+    let bitrate_bps = estimate_proxy_output_bitrate_bps(scale, lut_path.is_some_and(|p| !p.is_empty()));
+    Some(((bitrate_bps as f64 * duration_secs) / 8.0).round() as u64)
 }
 
 /// Run ffmpeg to create a proxy file.
@@ -488,6 +643,8 @@ fn transcode_proxy(
     scale: ProxyScale,
     lut_path: Option<&str>,
     local_root: &Path,
+    cache_key: &str,
+    progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
 ) -> (String, bool, bool) {
     let local_proxy_path = match local_proxy_path_for(source_path, scale, lut_path, local_root) {
         Some(p) => p,
@@ -499,6 +656,7 @@ fn transcode_proxy(
         Ok(f) => f,
         Err(_) => return (local_proxy_path, false, false),
     };
+    let estimated_size_bytes = estimate_proxy_size_bytes(source_path, scale, lut_path, &ffmpeg);
 
     // Build the -vf filter string: scale, then optional lut3d.
     let mut filter = scale.ffmpeg_scale_filter().to_string();
@@ -525,7 +683,15 @@ fn transcode_proxy(
             }
             continue;
         }
-        if run_transcode_command(&ffmpeg, source_path, &proxy_path, &filter) {
+        if run_transcode_command(
+            &ffmpeg,
+            source_path,
+            &proxy_path,
+            &filter,
+            cache_key,
+            estimated_size_bytes,
+            progress_tx,
+        ) {
             if std::fs::metadata(&proxy_path).map_or(true, |m| m.len() == 0) {
                 let _ = std::fs::remove_file(&proxy_path);
                 continue;

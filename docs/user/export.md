@@ -76,7 +76,7 @@ Applies to AAC and Opus. Ignored for FLAC and PCM.
 ## Export Progress
 
 After choosing the output file, an export progress dialog shows:
-- A progress bar driven by ffmpeg progress output. It estimates progress from ffmpeg `total_size` against the largest imported media-library file.
+- A progress bar driven by ffmpeg progress output. It estimates final file size from bitrate × duration and then tracks ffmpeg `total_size` against that estimate.
 - Progress is capped at **99%** while encoding/muxing is still running, then switches to **100%** only after export completes successfully.
 - A status label showing the output path.
 - A **Close** button (available once export completes or errors).

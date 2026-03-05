@@ -33,14 +33,6 @@ fn save_project_to_path(
     Ok(())
 }
 
-fn largest_library_file_size_bytes(library: &[MediaItem]) -> Option<u64> {
-    library
-        .iter()
-        .filter_map(|item| std::fs::metadata(&item.source_path).ok().map(|m| m.len()))
-        .max()
-        .filter(|size| *size > 0)
-}
-
 pub fn confirm_unsaved_then(
     window: Option<gtk::Window>,
     project: Rc<RefCell<Project>>,
@@ -714,7 +706,6 @@ pub fn build_toolbar(
             opt_dialog.add_button("Choose Output File…", gtk::ResponseType::Accept);
 
             let project = project.clone();
-            let library = library.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept {
                     d.close();
@@ -773,7 +764,6 @@ pub fn build_toolbar(
 
                 let window: Option<gtk::Window> = None; // no parent at this point
                 let project = project.clone();
-                let library = library.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -781,9 +771,6 @@ pub fn build_toolbar(
                             let output_clone = output.clone();
                             let proj = project.borrow().clone();
                             let opts = options.clone();
-                            let estimated_size_bytes =
-                                largest_library_file_size_bytes(&library.borrow());
-
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
@@ -791,7 +778,7 @@ pub fn build_toolbar(
                                     &proj,
                                     &output_clone,
                                     opts,
-                                    estimated_size_bytes,
+                                    None,
                                     tx.clone(),
                                 ) {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
