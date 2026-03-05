@@ -2283,12 +2283,18 @@ impl ProgramPlayer {
     }
 
     fn resolve_source_path_for_clip(&self, clip: &ProgramClip) -> (String, bool, String) {
+        let resolve_ready_proxy = |key: &String| {
+            self.proxy_paths.get(key).and_then(|p| {
+                std::fs::metadata(p)
+                    .ok()
+                    .filter(|m| m.len() > 0)
+                    .map(|_| p.clone())
+            })
+        };
         if self.proxy_enabled {
             let key =
                 crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
-            self.proxy_paths
-                .get(&key)
-                .cloned()
+            resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
         } else if self.preview_luts
@@ -2300,9 +2306,7 @@ impl ProgramPlayer {
         {
             let key =
                 crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
-            self.proxy_paths
-                .get(&key)
-                .cloned()
+            resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
         } else {

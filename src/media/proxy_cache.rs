@@ -101,6 +101,8 @@ pub struct ProxyCache {
     written_bytes: HashMap<String, u64>,
     /// Managed local cache root (`$XDG_CACHE_HOME/ultimateslice/proxies` or `/tmp/...` fallback).
     local_cache_root: PathBuf,
+    /// Optional ffprobe path used to validate on-disk proxy readiness.
+    ffprobe_path: Option<String>,
     /// Local managed-cache files created by this process.
     runtime_owned_local_files: HashSet<String>,
 }
@@ -171,6 +173,7 @@ impl ProxyCache {
             estimated_bytes: HashMap::new(),
             written_bytes: HashMap::new(),
             local_cache_root,
+            ffprobe_path: find_ffprobe_path(),
             runtime_owned_local_files: HashSet::new(),
         }
     }
@@ -187,12 +190,16 @@ impl ProxyCache {
         }
         // Check for pre-existing proxy on disk before spawning work.
         if let Some(p) =
-            existing_proxy_path_for(source_path, scale, lut_path, &self.local_cache_root)
+            existing_proxy_path_for(
+                source_path,
+                scale,
+                lut_path,
+                &self.local_cache_root,
+                self.ffprobe_path.as_deref(),
+            )
         {
-            if std::fs::metadata(&p).map_or(false, |m| m.len() > 0) {
-                self.proxies.insert(key, p);
-                return;
-            }
+            self.proxies.insert(key, p);
+            return;
         }
         self.pending.insert(key);
         self.total_requested += 1;
@@ -498,18 +505,70 @@ fn existing_proxy_path_for(
     scale: ProxyScale,
     lut_path: Option<&str>,
     local_root: &Path,
+    ffprobe_path: Option<&str>,
 ) -> Option<String> {
     if let Some(local) = local_proxy_path_for(source_path, scale, lut_path, local_root) {
-        if std::fs::metadata(&local).map_or(false, |m| m.len() > 0) {
+        if proxy_file_is_ready(&local, ffprobe_path) {
             return Some(local);
         }
     }
     if let Some(side) = alongside_proxy_path_for(source_path, scale, lut_path) {
-        if std::fs::metadata(&side).map_or(false, |m| m.len() > 0) {
+        if proxy_file_is_ready(&side, ffprobe_path) {
             return Some(side);
         }
     }
     None
+}
+
+fn find_ffprobe_path() -> Option<String> {
+    let ffmpeg = crate::media::export::find_ffmpeg().ok()?;
+    let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
+    let usable = Command::new(&ffprobe)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if usable {
+        Some(ffprobe)
+    } else {
+        None
+    }
+}
+
+fn proxy_file_is_ready(path: &str, ffprobe_path: Option<&str>) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() == 0 {
+        return false;
+    }
+    let Some(ffprobe) = ffprobe_path else {
+        return true;
+    };
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+            path,
+        ])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let duration = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok();
+    duration.is_some_and(|d| d.is_finite() && d > 0.0)
 }
 
 fn run_transcode_command(
@@ -657,6 +716,7 @@ fn transcode_proxy(
         Err(_) => return (local_proxy_path, false, false),
     };
     let estimated_size_bytes = estimate_proxy_size_bytes(source_path, scale, lut_path, &ffmpeg);
+    let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
 
     // Build the -vf filter string: scale, then optional lut3d.
     let mut filter = scale.ffmpeg_scale_filter().to_string();
@@ -683,22 +743,32 @@ fn transcode_proxy(
             }
             continue;
         }
+        let temp_proxy_path = format!("{proxy_path}.partial");
+        let _ = std::fs::remove_file(&temp_proxy_path);
         if run_transcode_command(
             &ffmpeg,
             source_path,
-            &proxy_path,
+            &temp_proxy_path,
             &filter,
             cache_key,
             estimated_size_bytes,
             progress_tx,
         ) {
-            if std::fs::metadata(&proxy_path).map_or(true, |m| m.len() == 0) {
+            if !proxy_file_is_ready(&temp_proxy_path, Some(&ffprobe)) {
+                let _ = std::fs::remove_file(&temp_proxy_path);
+                continue;
+            }
+            if std::fs::rename(&temp_proxy_path, &proxy_path).is_err() {
+                let _ = std::fs::remove_file(&temp_proxy_path);
+                continue;
+            }
+            if !proxy_file_is_ready(&proxy_path, Some(&ffprobe)) {
                 let _ = std::fs::remove_file(&proxy_path);
                 continue;
             }
             return (proxy_path, true, owned_local);
         }
-        let _ = std::fs::remove_file(&proxy_path);
+        let _ = std::fs::remove_file(&temp_proxy_path);
         if owned_local {
             log::warn!(
                 "ProxyCache: local cache transcode failed, retrying alongside-media cache for {}",

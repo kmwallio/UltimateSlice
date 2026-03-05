@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Proxy-in-progress playback stall**: Proxy selection now ignores incomplete/unusable proxy files and keeps Program Monitor playback on original media until a valid proxy is ready; proxy transcodes are now published atomically (temp file → final path) to avoid exposing half-written proxies.
 - **Export/proxy percentage realism**: Export and proxy progress now estimate output size from bitrate×duration and track ffmpeg `total_size` against that estimate, while keeping in-progress values capped below 100% until ffmpeg completion.
 - **Prerender-exit boundary cold-starts**: While playing inside a prerender slot, the next boundary now prewarms post-prerender clip resources immediately (instead of relying on logical incoming-only diffing), reducing handoff stalls when exiting prerender playback.
 - **Background prerender proxy-resolution alignment**: When proxy mode is enabled, complex-section prerender segments now render at the active proxy scale (Half/Quarter) instead of full project resolution, reducing prerender cost and matching configured proxy behavior.
