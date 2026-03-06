@@ -597,6 +597,53 @@ impl TimelineState {
         true
     }
 
+    fn select_clips_from_playhead(&mut self, forward: bool) -> bool {
+        let prev_primary = self.selected_clip_id.clone();
+        let prev_ids = self.selected_ids_or_primary();
+        let playhead_ns = self.playhead_ns;
+        let mut matches: Vec<(String, String, u64)> = Vec::new();
+        {
+            let proj = self.project.borrow();
+            for track in &proj.tracks {
+                for clip in &track.clips {
+                    let include = if forward {
+                        clip.timeline_end() > playhead_ns
+                    } else {
+                        clip.timeline_start < playhead_ns
+                    };
+                    if include {
+                        matches.push((clip.id.clone(), track.id.clone(), clip.timeline_start));
+                    }
+                }
+            }
+        }
+        if matches.is_empty() {
+            let changed = !prev_ids.is_empty() || prev_primary.is_some();
+            self.clear_clip_selection();
+            self.selected_track_id = None;
+            return changed;
+        }
+        if forward {
+            matches.sort_by_key(|(_, _, start)| *start);
+        } else {
+            matches.sort_by(|a, b| b.2.cmp(&a.2));
+        }
+        let (primary_id, primary_track_id, _) = matches[0].clone();
+        let selected_ids: HashSet<String> = matches.iter().map(|(id, _, _)| id.clone()).collect();
+        let changed =
+            prev_primary.as_deref() != Some(primary_id.as_str()) || prev_ids != selected_ids;
+        self.set_selection_with_primary(primary_id, primary_track_id, selected_ids);
+        changed
+    }
+
+    pub fn select_clips_forward_from_playhead(&mut self) -> bool {
+        self.select_clips_from_playhead(true)
+    }
+
+    pub fn select_clips_backward_from_playhead(&mut self) -> bool {
+        self.select_clips_from_playhead(false)
+    }
+
     fn selected_ids_or_primary(&self) -> HashSet<String> {
         if !self.selected_clip_ids.is_empty() {
             return self.selected_clip_ids.clone();
@@ -2554,6 +2601,20 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     notify_project = true;
                     true
                 }
+                Key::Right if ctrl && shift => {
+                    let changed = st.select_clips_forward_from_playhead();
+                    if changed {
+                        notify_selection = true;
+                    }
+                    changed
+                }
+                Key::Left if ctrl && shift => {
+                    let changed = st.select_clips_backward_from_playhead();
+                    if changed {
+                        notify_selection = true;
+                    }
+                    changed
+                }
                 Key::space => {
                     let pp_cb = st.on_play_pause.clone();
                     drop(st);
@@ -3667,6 +3728,8 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Ctrl+Shift+V", "Paste copied clip attributes"),
         ("Ctrl+G", "Group selected clips"),
         ("Ctrl+Shift+G", "Ungroup selected clips"),
+        ("Ctrl+Shift+→", "Select clips forward from playhead"),
+        ("Ctrl+Shift+←", "Select clips backward from playhead"),
         ("Scroll", "Zoom timeline (vertical scroll)"),
         ("Scroll (H)", "Pan timeline (horizontal scroll)"),
         ("? / /", "Show this help"),

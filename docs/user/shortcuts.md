@@ -52,6 +52,8 @@
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip(s) |
 | `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
+| `Ctrl+Shift+→` | Select clips forward from playhead |
+| `Ctrl+Shift+←` | Select clips backward from playhead |
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |

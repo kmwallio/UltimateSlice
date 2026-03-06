@@ -177,7 +177,7 @@ Tracking docs:
 - [ ] Solo track (play only selected tracks, complement to muted/locked)
 - [ ] Freeze frame (hold single frame for arbitrary duration)
 - [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
-- [ ] Select clips forward/backward from playhead for bulk operations
+- [x] Select clips forward/backward from playhead for bulk operations
 - [ ] Clip display options / adjustable per-track height, clip color labels
 
 ### Speed Ramps (per clip)

@@ -44,6 +44,7 @@ All notable project changes and progress should be recorded here.
 - **Continuing decoders at boundary crossings**: When adjacent clips share the same source file (common after splits, rough cuts from single footage), the program player now reuses existing decoder slots instead of tearing down and rebuilding the full pipeline. This avoids codec init, element creation, and stream discovery overhead, reducing boundary crossing latency from ~800-2800ms to ~200-600ms (~60-75% improvement). Falls back to full rebuild when source files differ, slot count changes, audio presence differs, speed/reverse settings differ, or effects topology changes.
 
 ### Added
+- **Playhead-relative bulk selection shortcuts**: Added timeline `Ctrl+Shift+→` (select clips forward from playhead) and `Ctrl+Shift+←` (select clips backward from playhead) for faster multi-clip operations.
 - **Timeline clip grouping**: Added persistent clip grouping with `Ctrl+G` (group) and `Ctrl+Shift+G` (ungroup). Group members now move and delete as a unit (including ripple delete), with undo/redo support, and group IDs round-trip through FCPXML via `us:group-id`.
 - **Ripple Delete shortcut**: Added track-local ripple delete on `Shift+Delete` / `Shift+Backspace` for selected timeline clip(s), with undo/redo integration.
 - **Timeline multi-select completion**: Added Shift+click same-track range selection, Ctrl/Cmd+click toggle selection, Ctrl+A select-all, and rubber-band marquee selection in empty timeline body drags, while keeping Inspector focus on a primary selected clip.

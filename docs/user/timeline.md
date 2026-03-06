@@ -102,6 +102,12 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Works with single selection and multi-selection.
 - Uses track-local compaction (does not shift unrelated tracks).
 
+### Select Forward / Backward from Playhead (`Ctrl+Shift+→`, `Ctrl+Shift+←`)
+
+- **Select Forward** selects all clips with timeline content after the playhead.
+- **Select Backward** selects all clips with timeline content before the playhead.
+- Useful for bulk delete, ripple delete, grouping, and other multi-clip edits.
+
 ### Clip Grouping (`Ctrl+G`, `Ctrl+Shift+G`)
 
 - **Group (`Ctrl+G`)** links the current multi-selection into one clip group.
@@ -125,6 +131,8 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Escape` | Switch to Select tool |
 | `Delete` / `Backspace` | Delete selected clip(s) |
 | `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
+| `Ctrl+Shift+→` | Select clips forward from playhead |
+| `Ctrl+Shift+←` | Select clips backward from playhead |
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
