@@ -1,5 +1,7 @@
 # UltimateSlice
 
+![](data/io.github.kmwallio.ultimateslice.svg)
+
 The AI connectable video editor.
 
 ![UltimateSlice Screenshot](ultimateslice.png)
