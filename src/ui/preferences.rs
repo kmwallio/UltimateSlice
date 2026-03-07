@@ -1,8 +1,7 @@
 use crate::ui_state::{GskRenderer, PlaybackPriority, PreferencesState, PreviewQuality, ProxyMode};
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack,
-    StackSidebar,
+    self as gtk, Box as GBox, CheckButton, Label, Orientation, ResponseType, Stack, StackSidebar,
 };
 use std::rc::Rc;
 
@@ -20,18 +19,19 @@ Third-party crates and libraries:\n\
 See Cargo.toml/Cargo.lock and io.github.kmwallio.ultimateslice.yml for full dependency details.";
 
 const LICENSE_NOTICE: &str = "\
-UltimateSlice project license: TBD.\n\
+UltimateSlice project license: GPL-3.0-or-later.\n\
 \n\
 This application uses third-party open-source crates and libraries.\n\
 Please review each dependency license in Cargo.lock, the Flatpak manifest,\n\
 and upstream project repositories for complete terms and notices.";
 
+#[allow(deprecated)]
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
     current: PreferencesState,
     on_save: Rc<dyn Fn(PreferencesState)>,
 ) {
-    let dialog = Dialog::builder()
+    let dialog = gtk::Dialog::builder()
         .title("Preferences")
         .transient_for(parent)
         .modal(true)

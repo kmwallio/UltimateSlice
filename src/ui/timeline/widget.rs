@@ -3851,6 +3851,7 @@ fn format_timecode(secs: f64, label_interval: f64) -> String {
     }
 }
 
+#[allow(deprecated)]
 pub fn show_shortcuts_dialog(parent: &gtk::Window) {
     use gtk4::{Dialog, Label, Orientation, ResponseType, ScrolledWindow};
     let dialog = Dialog::builder()

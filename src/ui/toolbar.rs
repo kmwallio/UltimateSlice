@@ -33,6 +33,7 @@ fn save_project_to_path(
     Ok(())
 }
 
+#[allow(deprecated)]
 pub fn confirm_unsaved_then(
     window: Option<gtk::Window>,
     project: Rc<RefCell<Project>>,
@@ -117,6 +118,7 @@ pub fn confirm_unsaved_then(
 }
 
 /// Build the main `HeaderBar` toolbar.
+#[allow(deprecated)]
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
     _library: Rc<RefCell<Vec<MediaItem>>>,

@@ -19,6 +19,7 @@ Tracking docs:
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
 - [x] Non-deprecation warning cleanup pass for `cargo build --quiet` / `cargo test --quiet` (unused imports/vars/mut, `unused_must_use`, and targeted intentional dead-code allowances)
+- [x] Legacy GTK deprecation-warning suppression pass for existing Dialog/ComboBoxText UI paths with narrowly scoped `#[allow(deprecated)]` (no runtime behavior change)
 
 ### Data Model
 - [x] `Clip` — source path, source in/out (ns), timeline position, label, kind

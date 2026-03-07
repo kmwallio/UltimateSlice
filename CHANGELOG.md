@@ -5,6 +5,9 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **About/Credits license notice placeholder**: Replaced the remaining `TBD` project license label in Preferences → About/Credits with the actual `GPL-3.0-or-later` license text.
+- **Legacy GTK UI deprecation noise cleanup**: Added narrowly scoped `#[allow(deprecated)]` on existing Dialog/ComboBoxText-based UI entry points in Preferences, Toolbar dialogs, and Timeline shortcuts help to keep warning output clean without changing runtime behavior.
+- **GTK CSS provider deprecation in app startup**: Replaced deprecated `CssProvider::load_from_data` with `load_from_string` in `src/app.rs` to keep startup CSS loading on the current GTK API without behavior changes.
 - **Non-deprecation build/test warning cleanup pass**: Cleared current non-deprecation warning set from `cargo build --quiet` / `cargo test --quiet` by removing unused imports/variables, fixing ignored `Result` handling in thumbnail extraction, and adding narrowly scoped `#[allow(dead_code)]` only for intentionally reserved APIs.
 - **Ctrl+Shift+click selection precedence**: `Ctrl/Cmd+Shift+Click` now follows Ctrl/Cmd toggle semantics (single clicked clip toggle) instead of triggering Shift range selection, preventing unintended multi-clip cross-track selections.
 - **Slide edit neighbor over-extension**: Slide drag delta is now clamped by neighbor bounds, preventing over-extension of adjacent clips; edge clips now keep Slide active with available-side-only compensation.
