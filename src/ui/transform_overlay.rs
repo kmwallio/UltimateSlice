@@ -401,7 +401,7 @@ impl TransformOverlay {
             let da_ref = da.clone();
 
             gesture.connect_drag_update(move |g, off_x, off_y| {
-                let mut ds_borrow = drag_state.borrow_mut();
+                let ds_borrow = drag_state.borrow_mut();
                 let Some(ref ds) = *ds_borrow else {
                     return;
                 };

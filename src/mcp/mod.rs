@@ -224,6 +224,7 @@ pub enum McpCommand {
 /// Spawn the MCP stdio server on a background thread.
 /// Returns the `Sender` (for sharing with other transports) and the `Receiver`
 /// that the GTK main thread should poll for commands.
+#[allow(dead_code)]
 pub fn start_mcp_server() -> (
     std::sync::mpsc::Sender<McpCommand>,
     std::sync::mpsc::Receiver<McpCommand>,

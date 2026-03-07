@@ -27,11 +27,13 @@ pub struct Player {
     gl_video_sink: Option<gst::Element>,
     hardware_acceleration_enabled: Arc<Mutex<bool>>,
     /// videobalance element for color correction (brightness/contrast/saturation)
+    #[allow(dead_code)]
     videobalance: Option<gst::Element>,
     /// gaussianblur element for denoise (positive sigma) / sharpness (negative sigma)
     /// Kept for property storage but NOT linked in the pipeline — gaussianblur
     /// only accepts AYUV format, forcing two expensive I420↔AYUV conversions
     /// per frame even at sigma=0.  Denoise/sharpness is applied during export.
+    #[allow(dead_code)]
     gaussianblur: Option<gst::Element>,
     /// videocrop element for per-clip cropping
     videocrop: Option<gst::Element>,
@@ -324,6 +326,7 @@ impl Player {
         });
     }
 
+    #[allow(dead_code)]
     pub fn toggle_play_pause(&self) -> Result<()> {
         let state = self.state.lock().unwrap().clone();
         drop(state);
@@ -569,6 +572,7 @@ impl Player {
     /// - saturation: 0.0 to 2.0  (1.0 = neutral)
     /// - denoise:    0.0 to 1.0  (0.0 = off; maps to positive gaussianblur sigma)
     /// - sharpness:  -1.0 to 1.0 (0.0 = neutral; negative = soften, positive = sharpen)
+    #[allow(dead_code)]
     pub fn set_color(&self, brightness: f64, contrast: f64, saturation: f64) {
         if let Some(ref vb) = self.videobalance {
             vb.set_property("brightness", brightness.clamp(-1.0, 1.0));
@@ -579,6 +583,7 @@ impl Player {
 
     /// Apply denoise and sharpness via the gaussianblur video filter.
     /// Combined sigma = denoise * 4 − sharpness * 6 (clamped to −20..20).
+    #[allow(dead_code)]
     pub fn set_denoise_sharpness(&self, denoise: f64, sharpness: f64) {
         if let Some(ref gb) = self.gaussianblur {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);

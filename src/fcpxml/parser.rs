@@ -13,6 +13,7 @@ const MAX_IMPORTED_LINEAR_VOLUME: f64 = 3.981_071_705_5; // +12 dB
 
 /// Represents a parsed FCPXML asset
 struct Asset {
+    #[allow(dead_code)]
     id: String,
     src: String,
     name: String,
@@ -56,6 +57,7 @@ struct ActiveClipContext {
 }
 
 /// Parse an FCPXML string into a `Project`.
+#[allow(dead_code)]
 pub fn parse_fcpxml(xml: &str) -> Result<Project> {
     parse_fcpxml_with_path(xml, None)
 }
@@ -1387,7 +1389,7 @@ fn parse_flag(value: Option<&String>, default: bool) -> bool {
 }
 
 fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, String>> {
-    let mut attrs = e.attributes();
+    let attrs = e.attributes();
     let mut map = HashMap::with_capacity(attrs.size_hint().0);
     for attr in attrs {
         let attr = attr?;

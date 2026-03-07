@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
 /// Result of a background media probe.
@@ -6,6 +6,7 @@ pub struct ProbeResult {
     pub path: String,
     pub duration_ns: u64,
     pub is_audio_only: bool,
+    #[allow(dead_code)]
     pub has_audio: bool,
 }
 
@@ -21,7 +22,6 @@ pub struct ProbeResult {
 pub struct MediaProbeCache {
     pub results: HashMap<String, ProbeResult>,
     pending: HashSet<String>,
-    result_tx: mpsc::SyncSender<ProbeResult>,
     result_rx: mpsc::Receiver<ProbeResult>,
     work_tx: Option<mpsc::Sender<String>>,
 }
@@ -54,7 +54,6 @@ impl MediaProbeCache {
         Self {
             results: HashMap::new(),
             pending: HashSet::new(),
-            result_tx,
             result_rx,
             work_tx: Some(work_tx),
         }
@@ -91,7 +90,6 @@ impl MediaProbeCache {
 
 /// Single Discoverer call that returns duration, audio-only flag, and has-audio flag.
 fn probe_media_bg(uri: &str) -> (u64, bool, bool) {
-    use gstreamer_pbutils::prelude::*;
     use gstreamer_pbutils::Discoverer;
     let fallback = (10 * 1_000_000_000, false, true);
     let Ok(()) = gstreamer::init() else {

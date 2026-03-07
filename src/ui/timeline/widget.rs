@@ -1089,6 +1089,7 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
 struct HitResult {
     clip_id: String,
     track_id: String,
+    #[allow(dead_code)]
     track_idx: usize,
     zone: HitZone,
     other_clip_id: Option<String>,
@@ -2131,7 +2132,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
-                    DragOp::ReorderTrack { track_idx, .. } => {
+                    DragOp::ReorderTrack { track_idx: _, .. } => {
                         let new_target = if current_y > RULER_HEIGHT {
                             let idx = ((current_y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
                             let count = st.project.borrow().tracks.len();
@@ -3786,6 +3787,7 @@ fn draw_waveform_batched(
     }
 }
 
+#[allow(dead_code)]
 fn waveform_color(peak: f64) -> (f64, f64, f64) {
     if peak >= 0.5 {
         (0.95, 0.25, 0.15) // red  — loud (≥ −6 dBFS)

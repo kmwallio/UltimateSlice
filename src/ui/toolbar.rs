@@ -119,7 +119,7 @@ pub fn confirm_unsaved_then(
 /// Build the main `HeaderBar` toolbar.
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
-    library: Rc<RefCell<Vec<MediaItem>>>,
+    _library: Rc<RefCell<Vec<MediaItem>>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,

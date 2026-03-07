@@ -3,6 +3,7 @@ use uuid::Uuid;
 /// A media item in the project library — not yet placed on the timeline.
 #[derive(Debug, Clone)]
 pub struct MediaItem {
+    #[allow(dead_code)]
     pub id: String,
     pub source_path: String,
     pub duration_ns: u64,

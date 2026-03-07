@@ -10,6 +10,7 @@ use std::rc::Rc;
 /// Transform parameters for a clip (crop, rotation, flip).
 /// Kept here so other modules can reference it without a separate file.
 #[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
 pub struct ClipTransform {
     pub crop_left: i32,
     pub crop_right: i32,
@@ -31,7 +32,7 @@ pub struct ClipTransform {
 /// `canvas_frame` is an `AspectFrame` locked to the canvas ratio — update its ratio
 /// via `canvas_frame.set_ratio(w as f32 / h as f32)` when project settings change.
 pub fn build_program_monitor(
-    program_player: Rc<RefCell<ProgramPlayer>>,
+    _program_player: Rc<RefCell<ProgramPlayer>>,
     paintable_a: gdk4::Paintable,
     paintable_b: gdk4::Paintable,
     canvas_width: u32,

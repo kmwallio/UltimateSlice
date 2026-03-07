@@ -5,6 +5,7 @@ use crate::model::project::Project;
 pub trait EditCommand {
     fn execute(&self, project: &mut Project);
     fn undo(&self, project: &mut Project);
+    #[allow(dead_code)]
     fn description(&self) -> &str;
 }
 
@@ -395,6 +396,7 @@ impl EditCommand for RollEditCommand {
 }
 
 /// Delete a clip from a track
+#[allow(dead_code)]
 pub struct DeleteClipCommand {
     pub clip: Clip,
     pub track_id: String,
@@ -423,6 +425,7 @@ pub struct SetTrackClipsCommand {
     pub track_id: String,
     pub old_clips: Vec<Clip>,
     pub new_clips: Vec<Clip>,
+    #[allow(dead_code)]
     pub label: String,
 }
 
@@ -488,6 +491,7 @@ impl EditCommand for SplitClipCommand {
 }
 
 /// Set color correction on a clip (brightness/contrast/saturation)
+#[allow(dead_code)]
 pub struct SetClipColorCommand {
     pub clip_id: String,
     pub track_id: String,
@@ -672,13 +676,16 @@ impl EditHistory {
         }
     }
 
+    #[allow(dead_code)]
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
+    #[allow(dead_code)]
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn undo_description(&self) -> Option<&str> {
         self.undo_stack.last().map(|c| c.description())
     }
@@ -715,7 +722,7 @@ mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
-    use crate::model::track::{Track, TrackKind};
+    use crate::model::track::Track;
 
     #[test]
     fn test_ripple_trim_out() {
@@ -837,7 +844,7 @@ mod tests {
         let mut project = Project::new("Test");
         let mut track_a = Track::new_video("A");
         let track_a_id = track_a.id.clone();
-        let mut track_b = Track::new_video("B");
+        let track_b = Track::new_video("B");
         let track_b_id = track_b.id.clone();
 
         let mut clip = Clip::new("file.mp4", 10, 0, ClipKind::Video);
@@ -1050,8 +1057,6 @@ mod tests {
         project.add_video_track(); // tracks[2] = Video 2
 
         let id0 = project.tracks[0].id.clone();
-        let id2 = project.tracks[2].id.clone();
-
         let cmd = ReorderTrackCommand {
             from_index: 0,
             to_index: 2,

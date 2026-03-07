@@ -384,7 +384,6 @@ pub fn probe_duration(uri: &str) -> Option<u64> {
 
 /// Returns `true` if the media file has no video streams (audio-only).
 pub fn probe_is_audio_only(uri: &str) -> bool {
-    use gstreamer_pbutils::prelude::*;
     use gstreamer_pbutils::Discoverer;
     let Ok(()) = gstreamer::init() else {
         return false;

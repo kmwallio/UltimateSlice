@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Non-deprecation build/test warning cleanup pass**: Cleared current non-deprecation warning set from `cargo build --quiet` / `cargo test --quiet` by removing unused imports/variables, fixing ignored `Result` handling in thumbnail extraction, and adding narrowly scoped `#[allow(dead_code)]` only for intentionally reserved APIs.
 - **Ctrl+Shift+click selection precedence**: `Ctrl/Cmd+Shift+Click` now follows Ctrl/Cmd toggle semantics (single clicked clip toggle) instead of triggering Shift range selection, preventing unintended multi-clip cross-track selections.
 - **Slide edit neighbor over-extension**: Slide drag delta is now clamped by neighbor bounds, preventing over-extension of adjacent clips; edge clips now keep Slide active with available-side-only compensation.
 - **Timeline modifier multi-select reliability**: Ctrl/Cmd+click and Shift+click selection state is now preserved when a drag gesture begins, preventing unintended collapse back to single selection during timeline interactions.

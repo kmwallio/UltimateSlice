@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// Extract a single video frame from a file at `time_ns` nanoseconds.
 /// Returns the frame as a `gdk4::MemoryTexture`.
+#[allow(dead_code)]
 pub fn extract_frame(source_path: &str, time_ns: u64) -> Result<gdk4::MemoryTexture> {
     gst::init()?;
 
@@ -34,14 +35,16 @@ pub fn extract_frame(source_path: &str, time_ns: u64) -> Result<gdk4::MemoryText
     appsink.set_property("drop", false);
 
     pipeline.set_state(gst::State::Paused)?;
-    pipeline.state(Some(gst::ClockTime::from_seconds(5)));
+    let (state_res, _, _) = pipeline.state(Some(gst::ClockTime::from_seconds(5)));
+    state_res.map_err(|e| anyhow!("failed waiting for paused preroll: {e:?}"))?;
 
     // Seek to desired time
     pipeline.seek_simple(
         gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
         gst::ClockTime::from_nseconds(time_ns),
     )?;
-    pipeline.state(Some(gst::ClockTime::from_seconds(2)));
+    let (state_res, _, _) = pipeline.state(Some(gst::ClockTime::from_seconds(2)));
+    state_res.map_err(|e| anyhow!("failed waiting after seek: {e:?}"))?;
 
     pipeline.set_state(gst::State::Playing)?;
 

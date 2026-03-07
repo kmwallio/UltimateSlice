@@ -61,6 +61,7 @@ pub struct ProgramClip {
     /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     pub volume: f64,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
+    #[allow(dead_code)]
     pub pan: f64,
     /// Crop pixels (left, right, top, bottom)
     pub crop_left: i32,
@@ -87,8 +88,10 @@ pub struct ProgramClip {
     /// Track index — higher index clips (B-roll, overlays) take priority in preview.
     pub track_index: usize,
     /// Transition to next clip on same track (e.g. "cross_dissolve").
+    #[allow(dead_code)]
     pub transition_after: String,
     /// Transition duration in nanoseconds.
+    #[allow(dead_code)]
     pub transition_after_ns: u64,
     /// LUT file path for color grading (used for proxy lookup when proxy mode is enabled).
     pub lut_path: Option<String>,
@@ -204,6 +207,7 @@ struct VideoSlot {
     videoflip_rotate: Option<gst::Element>,
     videoflip_flip: Option<gst::Element>,
     textoverlay: Option<gst::Element>,
+    #[allow(dead_code)]
     alpha_filter: Option<gst::Element>,
     capsfilter_zoom: Option<gst::Element>,
     videobox_zoom: Option<gst::Element>,
@@ -302,6 +306,7 @@ pub struct ProgramPlayer {
     /// GStreamer `level` element on audiomixer output for metering.
     level_element: Option<gst::Element>,
     /// GStreamer `level` element on the audio-only pipeline for metering.
+    #[allow(dead_code)]
     level_element_audio: Option<gst::Element>,
     /// GStreamer `volume` element on the audio-only pipeline for volume control.
     /// Using a dedicated element avoids playbin's StreamVolume which can interact
@@ -345,6 +350,7 @@ pub struct ProgramPlayer {
     /// compositor re-preroll (the aggregator clears ALL pad buffers on flush).
     background_src: gst::Element,
     /// Requested compositor sink pad for the always-on black background branch.
+    #[allow(dead_code)]
     background_compositor_pad: gst::Pad,
     /// Current preview quality divisor (used for preview processing and output caps).
     preview_divisor: u32,
@@ -1111,6 +1117,7 @@ impl ProgramPlayer {
     /// transition), and poll `scope_frame_seq` for a change.
     /// When `left_playing` is true, the caller must call `set_paused_after_export()`
     /// after the export completes.
+    #[allow(dead_code)]
     pub fn prepare_export(&self) -> (u64, bool, bool) {
         let start_seq = self.scope_frame_seq.load(Ordering::Relaxed);
         let was_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
@@ -1134,17 +1141,20 @@ impl ProgramPlayer {
 
     /// Monotonic counter for scope frame captures.  Clone it for polling from
     /// an async glib timeout without holding the ProgramPlayer borrow.
+    #[allow(dead_code)]
     pub fn scope_frame_seq_arc(&self) -> Arc<AtomicU64> {
         self.scope_frame_seq.clone()
     }
 
     /// Monotonic counter for compositor-src frame captures.
+    #[allow(dead_code)]
     pub fn compositor_frame_seq_arc(&self) -> Arc<AtomicU64> {
         self.compositor_frame_seq.clone()
     }
 
     /// Phase 2 of async export: write the latest scope frame to disk as PPM
     /// and optionally restore scope_enabled.
+    #[allow(dead_code)]
     pub fn finish_export(
         &self,
         path: &str,
@@ -1191,6 +1201,7 @@ impl ProgramPlayer {
     }
 
     /// Write the latest scope frame to a PPM (P6) file.
+    #[allow(dead_code)]
     fn write_scope_frame_ppm(&self, path: &str) -> Result<()> {
         let frame = self
             .try_pull_scope_frame()
@@ -1228,6 +1239,7 @@ impl ProgramPlayer {
     }
 
     /// Quick diagnostic: check pipeline + compositor GStreamer state (10ms timeout).
+    #[allow(dead_code)]
     pub fn pipeline_state_debug(&self) -> String {
         let (_, pipe_cur, pipe_pend) = self.pipeline.state(gst::ClockTime::from_mseconds(10));
         let (_, comp_cur, comp_pend) = self.compositor.state(gst::ClockTime::from_mseconds(10));
@@ -1245,6 +1257,7 @@ impl ProgramPlayer {
         self.preview_divisor
     }
 
+    #[allow(dead_code)]
     pub fn current_clip_transform(&self) -> Option<crate::ui::program_monitor::ClipTransform> {
         let c = self.clips.get(self.current_idx?)?;
         Some(crate::ui::program_monitor::ClipTransform {
@@ -1802,6 +1815,7 @@ impl ProgramPlayer {
 
     // ── Effects / transform updates ────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
         self.update_current_effects(brightness, contrast, saturation, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
@@ -1842,6 +1856,7 @@ impl ProgramPlayer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn update_current_audio(&mut self, volume: f64, _pan: f64) {
         // Per-clip volume on the audiomixer pad.
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
@@ -2748,6 +2763,7 @@ impl ProgramPlayer {
             .find(|s| s.clip_idx == clip_idx && !s.is_prerender_slot)
     }
 
+    #[allow(dead_code)]
     fn should_block_preroll(&self) -> bool {
         !matches!(self.playback_priority, PlaybackPriority::Smooth)
     }
@@ -2985,7 +3001,7 @@ impl ProgramPlayer {
                 );
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(sleep_ms));
         }
     }
 
@@ -3181,6 +3197,7 @@ impl ProgramPlayer {
     }
 
     /// Public entry point to force a paused frame refresh on the current slot.
+    #[allow(dead_code)]
     pub fn reseek_paused(&self) {
         if self.state != PlayerState::Playing {
             self.reseek_slot_for_current();
@@ -3234,6 +3251,7 @@ impl ProgramPlayer {
     }
 
     /// Restore pipeline to Paused after an async export that left it Playing.
+    #[allow(dead_code)]
     pub fn set_paused_after_export(&self) {
         let _ = self.pipeline.set_state(gst::State::Paused);
         self.wait_for_paused_preroll();
@@ -3533,7 +3551,7 @@ impl ProgramPlayer {
         }
 
         // 3. Wait for NEW decoders to link (discover streams + pad-added).
-        let mut link_wait_ms = if was_playing {
+        let link_wait_ms = if was_playing {
             self.adaptive_arrival_wait_ms(400)
         } else {
             self.effective_wait_timeout_ms(400)
@@ -3969,6 +3987,7 @@ impl ProgramPlayer {
     }
 
     /// Wait briefly for dynamic decode pads to link into the effects chain.
+    #[allow(dead_code)]
     fn wait_for_video_links(&self) {
         if self.slots.is_empty() {
             return;
@@ -4271,7 +4290,6 @@ impl ProgramPlayer {
     /// Quick check whether a media file contains an audio stream.
     /// Uses GStreamer Discoverer with a short timeout. Defaults to `true` on error.
     fn probe_has_audio_stream(path: &str) -> bool {
-        use gstreamer_pbutils::prelude::*;
         use gstreamer_pbutils::Discoverer;
         let uri = if path.starts_with("file://") {
             path.to_string()
