@@ -120,6 +120,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Ungroup (`Ctrl+Shift+G`)** removes grouping for any selected grouped clips.
 - Grouped clips move together when dragging any member.
 - Grouped clips delete together for both normal delete and ripple delete.
+- Selecting one clip in a group shows a secondary border on the other clips in that group for quick visual context.
 - First pass scope: grouped trim behavior is not yet enabled.
 
 ## Keyboard Shortcuts
@@ -202,3 +203,4 @@ The undo history is per-session (not persisted in the FCPXML).
 - Audio clips show a normalised waveform.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
 - Selected clips have a yellow highlight border.
+- Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.

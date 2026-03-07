@@ -173,6 +173,7 @@ Tracking docs:
   - [x] Phase 2: rubber-band marquee selection
 - [x] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
 - [x] Clip grouping / ungrouping (persist clip-group IDs; grouped move/delete as a unit)
+  - [x] Visual group context: selecting a grouped clip highlights non-selected group peers with a secondary border
 - [ ] Audio/video linking (auto-link video and audio from same source)
 - [ ] Solo track (play only selected tracks, complement to muted/locked)
 - [ ] Freeze frame (hold single frame for arbitrary duration)

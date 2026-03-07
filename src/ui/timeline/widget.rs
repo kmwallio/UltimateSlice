@@ -705,6 +705,37 @@ impl TimelineState {
             .collect()
     }
 
+    fn grouped_peer_highlight_ids(&self) -> HashSet<String> {
+        let selected_ids = self.selected_ids_or_primary();
+        if selected_ids.is_empty() {
+            return HashSet::new();
+        }
+        let group_ids: HashSet<String> = {
+            let proj = self.project.borrow();
+            proj.tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| selected_ids.contains(&c.id))
+                .filter_map(|c| c.group_id.clone())
+                .collect()
+        };
+        if group_ids.is_empty() {
+            return HashSet::new();
+        }
+        let proj = self.project.borrow();
+        proj.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| {
+                c.group_id
+                    .as_deref()
+                    .is_some_and(|gid| group_ids.contains(gid))
+            })
+            .filter(|c| !selected_ids.contains(&c.id))
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
     fn shift_select_range_to(&mut self, track_id: &str, to_clip_id: &str) -> bool {
         let anchor = self
             .selection_anchor_clip_id
@@ -3006,10 +3037,21 @@ fn draw_timeline(
     draw_ruler(cr, w, st);
 
     // Tracks
+    let grouped_peer_highlight_ids = st.grouped_peer_highlight_ids();
     let proj = st.project.borrow();
     for (i, track) in proj.tracks.iter().enumerate() {
         let y = RULER_HEIGHT + i as f64 * TRACK_HEIGHT;
-        draw_track_row(cr, w, y, i, track, st, cache, wcache);
+        draw_track_row(
+            cr,
+            w,
+            y,
+            i,
+            track,
+            st,
+            &grouped_peer_highlight_ids,
+            cache,
+            wcache,
+        );
     }
 
     // Playhead (clipped to content area so it doesn't overdraw track labels)
@@ -3238,6 +3280,7 @@ fn draw_track_row(
     track_idx: usize,
     track: &crate::model::track::Track,
     st: &TimelineState,
+    grouped_peer_highlight_ids: &HashSet<String>,
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
     wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
@@ -3256,7 +3299,17 @@ fn draw_track_row(
 
     // Draw clips first (they may overlap into label column before clipping)
     for clip in &track.clips {
-        draw_clip(cr, width, y, clip, track, st, cache, wcache);
+        draw_clip(
+            cr,
+            width,
+            y,
+            clip,
+            track,
+            st,
+            grouped_peer_highlight_ids,
+            cache,
+            wcache,
+        );
     }
 
     // Draw transition markers (clip -> next clip) after clip bodies.
@@ -3378,6 +3431,7 @@ fn draw_clip(
     clip: &crate::model::clip::Clip,
     track: &crate::model::track::Track,
     st: &TimelineState,
+    grouped_peer_highlight_ids: &HashSet<String>,
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
     wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
@@ -3391,6 +3445,7 @@ fn draw_clip(
     }
 
     let is_selected = st.is_clip_selected(&clip.id);
+    let is_group_peer_highlighted = grouped_peer_highlight_ids.contains(&clip.id);
     let is_transition_hover = st
         .hover_transition_pair
         .as_ref()
@@ -3566,6 +3621,11 @@ fn draw_clip(
         cr.fill().ok();
         cr.rectangle(cx + cw - TRIM_HANDLE_PX, cy, TRIM_HANDLE_PX, ch);
         cr.fill().ok();
+    } else if is_group_peer_highlighted {
+        cr.set_source_rgba(0.95, 0.95, 0.55, 0.95);
+        cr.set_line_width(1.5);
+        rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
+        cr.stroke().ok();
     } else if is_transition_hover {
         cr.set_source_rgba(0.55, 0.85, 1.0, 0.95);
         cr.set_line_width(2.0);
@@ -4100,6 +4160,115 @@ mod tests {
         assert!(move_ids.contains(&ids_a[0]));
         assert!(move_ids.contains(&ids_b[0]));
         assert!(move_ids.contains(&ids_b[1]));
+    }
+
+    #[test]
+    fn grouped_peer_highlight_ids_marks_other_group_members() {
+        let (mut st, _track_a, track_b, _ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[
+                ("X", 1_000_000_000),
+                ("Y", 2_000_000_000),
+                ("Z", 3_000_000_000),
+            ],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let group_id = "g1".to_string();
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_b) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_b[0] || clip.id == ids_b[1] {
+                        clip.group_id = Some(group_id.clone());
+                    }
+                }
+            }
+        }
+        st.set_single_clip_selection(ids_b[0].clone(), track_b.clone());
+
+        let peers = st.grouped_peer_highlight_ids();
+        assert_eq!(peers.len(), 1);
+        assert!(peers.contains(&ids_b[1]));
+        assert!(!peers.contains(&ids_b[0]));
+        assert!(!peers.contains(&ids_b[2]));
+    }
+
+    #[test]
+    fn grouped_peer_highlight_ids_excludes_selected_group_members() {
+        let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[
+                ("X", 1_000_000_000),
+                ("Y", 2_000_000_000),
+                ("Z", 3_000_000_000),
+            ],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let group_id = "g1".to_string();
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_b) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_b[0] || clip.id == ids_b[1] || clip.id == ids_b[2] {
+                        clip.group_id = Some(group_id.clone());
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids_a[0].clone());
+        selected.insert(ids_b[0].clone());
+        selected.insert(ids_b[1].clone());
+        st.set_selection_with_primary(ids_a[0].clone(), track_a, selected);
+
+        let peers = st.grouped_peer_highlight_ids();
+        assert_eq!(peers.len(), 1);
+        assert!(peers.contains(&ids_b[2]));
+        assert!(!peers.contains(&ids_b[0]));
+        assert!(!peers.contains(&ids_b[1]));
+    }
+
+    #[test]
+    fn grouped_peer_highlight_ids_supports_multiple_selected_groups() {
+        let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0), ("B", 1_000_000_000)],
+            &[
+                ("X", 2_000_000_000),
+                ("Y", 3_000_000_000),
+                ("Z", 4_000_000_000),
+                ("W", 5_000_000_000),
+            ],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let g1 = "g1".to_string();
+            let g2 = "g2".to_string();
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_a) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_a[0] || clip.id == ids_a[1] {
+                        clip.group_id = Some(g1.clone());
+                    }
+                }
+            }
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_b) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_b[0] || clip.id == ids_b[1] {
+                        clip.group_id = Some(g2.clone());
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids_a[0].clone());
+        selected.insert(ids_b[0].clone());
+        st.set_selection_with_primary(ids_a[0].clone(), track_a, selected);
+
+        let peers = st.grouped_peer_highlight_ids();
+        assert_eq!(peers.len(), 2);
+        assert!(peers.contains(&ids_a[1]));
+        assert!(peers.contains(&ids_b[1]));
+        assert!(!peers.contains(&ids_a[0]));
+        assert!(!peers.contains(&ids_b[0]));
+        assert!(!peers.contains(&ids_b[2]));
+        assert!(!peers.contains(&ids_b[3]));
     }
 
     #[test]
