@@ -602,7 +602,12 @@ fn parse_asset_clip(
                 .get("start")
                 .and_then(|t| parse_fcpxml_time(t))
                 .unwrap_or(asset.start_ns);
-            let source_in = if raw_source_start >= asset.start_ns {
+            let vendor_source_timecode_base_ns = attrs
+                .get("us:source-timecode-base-ns")
+                .and_then(|t| t.parse::<u64>().ok());
+            let source_in = if let Some(base_ns) = vendor_source_timecode_base_ns {
+                raw_source_start.saturating_sub(base_ns)
+            } else if raw_source_start >= asset.start_ns {
                 raw_source_start - asset.start_ns
             } else {
                 raw_source_start
@@ -757,6 +762,13 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:link-group-id") {
                 clip.link_group_id = if v.is_empty() { None } else { Some(v.clone()) };
             }
+            clip.source_timecode_base_ns = vendor_source_timecode_base_ns.or_else(|| {
+                if asset.start_ns > 0 {
+                    Some(asset.start_ns)
+                } else {
+                    None
+                }
+            });
             if let Some(v) = attrs.get("us:shadows") {
                 clip.shadows = v.parse().unwrap_or(0.0);
             }
@@ -998,6 +1010,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:reverse"
             | "us:group-id"
             | "us:link-group-id"
+            | "us:source-timecode-base-ns"
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
@@ -1699,6 +1712,36 @@ mod tests {
         let project = parse_fcpxml(xml).expect("parse should succeed");
         let clip = &project.video_tracks().next().unwrap().clips[0];
         assert_eq!(clip.link_group_id.as_deref(), Some("link-1"));
+    }
+
+    #[test]
+    fn test_parse_fcpxml_source_timecode_base_attr() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimecodeTest">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="120/24s"
+                        name="footage" us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                        us:source-timecode-base-ns="4000000000"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.source_timecode_base_ns, Some(4_000_000_000));
+        assert_eq!(clip.source_in, 1_000_000_000);
+        assert_eq!(clip.source_timecode_start_ns(), Some(5_000_000_000));
     }
 
     #[test]

@@ -122,6 +122,9 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Grouped clips move together when dragging any member.
 - Grouped clips delete together for both normal delete and ripple delete.
 - Selecting one clip in a group shows a secondary border on the other clips in that group for quick visual context.
+- Right-clicking a grouped clip can now run **Align Grouped Clips by Timecode** when that clip group carries stored source-time metadata; the selected clip acts as the anchor when possible.
+- Today that metadata is preserved for FCPXML-imported clips and UltimateSlice-saved projects that already carry source-time references.
+- Timecode alignment is the current first pass for grouped sync workflows; audio-based auto-sync remains future work.
 - First pass scope: grouped trim behavior is not yet enabled.
 
 ### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
@@ -158,7 +161,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
-| `Right-click clip` | Open clip context menu with link/unlink actions |
+| `Right-click clip` | Open clip context menu with link/unlink and grouped timecode-align actions |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |

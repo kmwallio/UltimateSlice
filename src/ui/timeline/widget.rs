@@ -11,7 +11,7 @@ use gtk4::{
     self as gtk, DrawingArea, EventControllerKey, EventControllerScroll, GestureClick, GestureDrag,
 };
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 const TRACK_HEIGHT: f64 = 60.0;
@@ -495,6 +495,143 @@ impl TimelineState {
         true
     }
 
+    fn selected_group_ids(&self) -> HashSet<String> {
+        let target_ids = self.selected_ids_or_primary();
+        if target_ids.is_empty() {
+            return HashSet::new();
+        }
+        let proj = self.project.borrow();
+        proj.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| target_ids.contains(&c.id))
+            .filter_map(|c| c.group_id.clone())
+            .collect()
+    }
+
+    pub fn align_selected_groups_by_timecode(&mut self) -> bool {
+        let target_groups = self.selected_group_ids();
+        if target_groups.is_empty() {
+            return false;
+        }
+
+        let assignments = {
+            let proj = self.project.borrow();
+            let primary_selected = self.selected_clip_id.as_deref();
+            let mut assignments: HashMap<String, u64> = HashMap::new();
+
+            for group_id in &target_groups {
+                let members: Vec<_> = proj
+                    .tracks
+                    .iter()
+                    .flat_map(|track| track.clips.iter())
+                    .filter(|clip| clip.group_id.as_deref() == Some(group_id.as_str()))
+                    .filter_map(|clip| {
+                        clip.source_timecode_start_ns()
+                            .map(|source_timecode_start_ns| {
+                                (
+                                    clip.id.clone(),
+                                    clip.timeline_start,
+                                    source_timecode_start_ns,
+                                )
+                            })
+                    })
+                    .collect();
+
+                if members.len() < 2 {
+                    continue;
+                }
+
+                let anchor = members
+                    .iter()
+                    .find(|(clip_id, _, _)| Some(clip_id.as_str()) == primary_selected)
+                    .or_else(|| {
+                        members.iter().min_by_key(
+                            |(_, timeline_start, source_timecode_start_ns)| {
+                                (*source_timecode_start_ns, *timeline_start)
+                            },
+                        )
+                    });
+                let Some((_, anchor_timeline_start, anchor_source_timecode_start_ns)) = anchor
+                else {
+                    continue;
+                };
+
+                let mut proposed: Vec<(String, i128)> = members
+                    .iter()
+                    .map(|(clip_id, _, source_timecode_start_ns)| {
+                        (
+                            clip_id.clone(),
+                            i128::from(*anchor_timeline_start)
+                                + i128::from(*source_timecode_start_ns)
+                                - i128::from(*anchor_source_timecode_start_ns),
+                        )
+                    })
+                    .collect();
+
+                if let Some(min_start) = proposed.iter().map(|(_, start)| *start).min() {
+                    if min_start < 0 {
+                        let shift = -min_start;
+                        for (_, start) in &mut proposed {
+                            *start += shift;
+                        }
+                    }
+                }
+
+                for (clip_id, start) in proposed {
+                    assignments.insert(clip_id, start.max(0) as u64);
+                }
+            }
+
+            assignments
+        };
+
+        if assignments.is_empty() {
+            return false;
+        }
+
+        let track_updates = {
+            let proj = self.project.borrow();
+            proj.tracks
+                .iter()
+                .filter_map(|track| {
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut changed = false;
+                    for clip in &mut new_clips {
+                        if let Some(new_start) = assignments.get(&clip.id) {
+                            if clip.timeline_start != *new_start {
+                                clip.timeline_start = *new_start;
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if track_updates.is_empty() {
+            return false;
+        }
+
+        let mut proj = self.project.borrow_mut();
+        for (track_id, old_clips, new_clips) in track_updates {
+            let cmd = SetTrackClipsCommand {
+                track_id,
+                old_clips,
+                new_clips,
+                label: "Align grouped clips by timecode".to_string(),
+            };
+            self.history.execute(Box::new(cmd), &mut proj);
+        }
+        true
+    }
+
     fn can_link_selected_clips(&self) -> bool {
         self.selected_ids_or_primary().len() >= 2
     }
@@ -513,6 +650,35 @@ impl TimelineState {
                     .map(|gid| !gid.is_empty())
                     .unwrap_or(false)
         })
+    }
+
+    fn can_align_selected_groups_by_timecode(&self) -> bool {
+        let target_groups = self.selected_group_ids();
+        if target_groups.is_empty() {
+            return false;
+        }
+
+        let proj = self.project.borrow();
+        let mut found_group = false;
+        for group_id in &target_groups {
+            let members: Vec<_> = proj
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .filter(|clip| clip.group_id.as_deref() == Some(group_id.as_str()))
+                .collect();
+            if members.len() < 2 {
+                continue;
+            }
+            found_group = true;
+            if members
+                .iter()
+                .any(|clip| clip.source_timecode_start_ns().is_none())
+            {
+                return false;
+            }
+        }
+        found_group
     }
 
     pub fn copy_selected_to_clipboard(&mut self) -> bool {
@@ -1358,8 +1524,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     let btn_unlink_selected = gtk::Button::with_label("Unlink Selected Clips");
     btn_unlink_selected.add_css_class("flat");
     btn_unlink_selected.set_tooltip_text(Some("Unlink the current selection (Ctrl+Shift+L)"));
+    let btn_align_grouped = gtk::Button::with_label("Align Grouped Clips by Timecode");
+    btn_align_grouped.add_css_class("flat");
+    btn_align_grouped.set_tooltip_text(Some(
+        "Align grouped clips using stored source timecode metadata when available",
+    ));
     clip_context_box.append(&btn_link_selected);
     clip_context_box.append(&btn_unlink_selected);
+    clip_context_box.append(&btn_align_grouped);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     {
@@ -1392,6 +1564,29 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn_unlink_selected.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             let changed = st.unlink_selected_clips();
+            let proj_cb = st.on_project_changed.clone();
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_align_grouped.connect_clicked(move |_| {
+            let mut st = state.borrow_mut();
+            let changed = st.align_selected_groups_by_timecode();
             let proj_cb = st.on_project_changed.clone();
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
@@ -1459,6 +1654,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let clip_context_pop = clip_context_pop.clone();
         let btn_link_selected = btn_link_selected.clone();
         let btn_unlink_selected = btn_unlink_selected.clone();
+        let btn_align_grouped = btn_align_grouped.clone();
         click.connect_pressed(move |gesture, _n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() {
@@ -1636,9 +1832,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         st.prepare_clip_context_menu_selection(&h.clip_id, &h.track_id);
                         let can_link = st.can_link_selected_clips();
                         let can_unlink = st.can_unlink_selected_clips();
+                        let can_align_grouped = st.can_align_selected_groups_by_timecode();
                         btn_link_selected.set_sensitive(can_link);
                         btn_unlink_selected.set_sensitive(can_unlink);
-                        if can_link || can_unlink {
+                        btn_align_grouped.set_sensitive(can_align_grouped);
+                        if can_link || can_unlink || can_align_grouped {
                             clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                 x as i32, y as i32, 1, 1,
                             )));
@@ -4326,7 +4524,7 @@ mod tests {
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use std::cell::RefCell;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
 
     fn timeline_state_with_video_clips(
@@ -4664,6 +4862,66 @@ mod tests {
         let selected = st.selected_ids_or_primary();
         assert_eq!(selected.len(), 1);
         assert!(selected.contains(&ids_b[0]));
+    }
+
+    #[test]
+    fn can_align_selected_groups_by_timecode_requires_group_time_metadata() {
+        let (mut st, _track_a, track_b, _ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[("X", 1_000_000_000), ("Y", 2_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let group_id = "g1".to_string();
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_b) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_b[0] || clip.id == ids_b[1] {
+                        clip.group_id = Some(group_id.clone());
+                    }
+                }
+            }
+        }
+
+        st.set_single_clip_selection(ids_b[0].clone(), track_b);
+        assert!(!st.can_align_selected_groups_by_timecode());
+    }
+
+    #[test]
+    fn align_selected_groups_by_timecode_moves_entire_group() {
+        let (mut st, _track_a, track_b, _ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[("X", 4_000_000_000), ("Y", 9_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let group_id = "g1".to_string();
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_b) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_b[0] {
+                        clip.group_id = Some(group_id.clone());
+                        clip.source_timecode_base_ns = Some(10_000_000_000);
+                    } else if clip.id == ids_b[1] {
+                        clip.group_id = Some(group_id.clone());
+                        clip.source_timecode_base_ns = Some(12_000_000_000);
+                    }
+                }
+            }
+        }
+
+        st.set_single_clip_selection(ids_b[0].clone(), track_b);
+        assert!(st.can_align_selected_groups_by_timecode());
+        assert!(st.align_selected_groups_by_timecode());
+
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| clip.id == ids_b[0] || clip.id == ids_b[1])
+            .map(|clip| (clip.id.clone(), clip.timeline_start))
+            .collect();
+        assert_eq!(starts.get(&ids_b[0]), Some(&4_000_000_000));
+        assert_eq!(starts.get(&ids_b[1]), Some(&6_000_000_000));
     }
 
     #[test]

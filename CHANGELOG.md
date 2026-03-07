@@ -12,6 +12,7 @@ All notable project changes and progress should be recorded here.
 ### Added
 - **Timeline clip linking with MCP support**: Added manual clip link/unlink workflows (`Ctrl+L`, `Ctrl+Shift+L`) with synchronized selection/move/delete behavior, persistent `link_group_id` FCPXML round-tripping, LINK timeline badges, cyan linked-peer inset highlight, and new MCP `link_clips` / `unlink_clips` tools.
 - **Timeline link context menu**: Right-clicking a selected clip now opens clip actions for **Link Selected Clips** / **Unlink Selected Clips**, while preserving the current multi-selection when you right-click within it.
+- **Grouped clip timecode alignment**: Added **Align Grouped Clips by Timecode** to the timeline clip context menu plus MCP support, using persisted source-time metadata to realign grouped clips and preserving that metadata through UltimateSlice FCPXML round-trips.
 
 ### Fixed
 - **Media Library thumbnail refresh after import/open**: Thumbnails now trigger a debounced batch redraw when extraction completes, and media-grid sync now detects content changes (not just item count), so thumbnail tiles update without requiring manual resize/redraw.

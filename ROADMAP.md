@@ -179,6 +179,8 @@ Tracking docs:
 - [x] Clip grouping / ungrouping (persist clip-group IDs; grouped move/delete as a unit)
   - [x] Visual group context: selecting a grouped clip highlights non-selected group peers with a secondary border
   - [ ] Align grouped clips by audio or timecode
+    - [x] Phase 1: Align grouped clips by stored timecode metadata
+    - [ ] Phase 2: Align grouped clips by audio
 - [ ] Audio/video linking (auto-link video and audio from same source)
   - [x] Manual clip linking / unlinking with synchronized selection, move, and delete behavior
   - [ ] Auto-link same-source A/V clip creation heuristics

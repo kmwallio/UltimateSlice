@@ -106,7 +106,10 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             let asset_ref = format!("a_{}", sanitize_id(&clip.id));
             let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
             let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
-            let start = ns_to_fcpxml_time(clip.source_in, &project.frame_rate);
+            let start = ns_to_fcpxml_time(
+                clip.source_timecode_start_ns().unwrap_or(clip.source_in),
+                &project.frame_rate,
+            );
 
             let mut asset_clip = BytesStart::new("asset-clip");
             asset_clip.push_attribute(("ref", asset_ref.as_str()));
@@ -157,6 +160,12 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                 if !link_gid.is_empty() {
                     asset_clip.push_attribute(("us:link-group-id", link_gid.as_str()));
                 }
+            }
+            if let Some(source_timecode_base_ns) = clip.source_timecode_base_ns {
+                asset_clip.push_attribute((
+                    "us:source-timecode-base-ns",
+                    source_timecode_base_ns.to_string().as_str(),
+                ));
             }
             asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
             asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
@@ -382,6 +391,39 @@ fn patch_asset_clip_block_transform(
     let mut changed = false;
 
     for (attr, value) in [
+        (
+            "offset",
+            ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate),
+        ),
+        (
+            "start",
+            ns_to_fcpxml_time(
+                clip.source_timecode_start_ns().unwrap_or(clip.source_in),
+                &project.frame_rate,
+            ),
+        ),
+    ] {
+        let next = replace_or_insert_attr(&updated_start, attr, &value)?;
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    let next = match clip.source_timecode_base_ns {
+        Some(source_timecode_base_ns) => replace_or_insert_attr(
+            &updated_start,
+            "us:source-timecode-base-ns",
+            &source_timecode_base_ns.to_string(),
+        )?,
+        None => remove_attr(&updated_start, "us:source-timecode-base-ns"),
+    };
+    if next != updated_start {
+        changed = true;
+    }
+    updated_start = next;
+
+    for (attr, value) in [
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
@@ -501,6 +543,22 @@ fn replace_or_insert_attr(tag_text: &str, attr_name: &str, new_value: &str) -> O
     updated.push('"');
     updated.push_str(&tag_text[insert_pos..]);
     Some(updated)
+}
+
+fn remove_attr(tag_text: &str, attr_name: &str) -> String {
+    let attr_prefix = format!(r#" {attr_name}=""#);
+    if let Some(attr_start) = tag_text.find(&attr_prefix) {
+        let value_start = attr_start + attr_prefix.len();
+        if let Some(value_end_rel) = tag_text[value_start..].find('"') {
+            let value_end = value_start + value_end_rel + 1;
+            let mut updated =
+                String::with_capacity(tag_text.len().saturating_sub(value_end - attr_start));
+            updated.push_str(&tag_text[..attr_start]);
+            updated.push_str(&tag_text[value_end..]);
+            return updated;
+        }
+    }
+    tag_text.to_string()
 }
 
 fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> Result<()> {
@@ -709,6 +767,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:reverse"
             | "us:group-id"
             | "us:link-group-id"
+            | "us:source-timecode-base-ns"
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
@@ -811,6 +870,22 @@ mod tests {
 
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(xml.contains("us:link-group-id=\"link-1\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_source_timecode_base_attr() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.source_in = 1_000_000_000;
+        clip.source_timecode_base_ns = Some(4_000_000_000);
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:source-timecode-base-ns=\"4000000000\""));
+        assert!(xml.contains("start=\"120/24s\""));
     }
 
     #[test]

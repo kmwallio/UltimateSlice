@@ -320,6 +320,21 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "align_grouped_clips_by_timecode",
+            "description": "Align the grouped clips referenced by the provided clip ids using stored source timecode metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "One or more clip ids whose clip groups should be aligned by timecode."
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
             "name": "trim_clip",
             "description": "Adjust the source in- and out-point of a clip without changing its timeline position.",
             "inputSchema": {
@@ -746,6 +761,17 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             reply: tx,
         },
         "unlink_clips" => McpCommand::UnlinkClips {
+            clip_ids: args["clip_ids"]
+                .as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            reply: tx,
+        },
+        "align_grouped_clips_by_timecode" => McpCommand::AlignGroupedClipsByTimecode {
             clip_ids: args["clip_ids"]
                 .as_array()
                 .map(|ids| {

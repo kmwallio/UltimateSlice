@@ -35,6 +35,150 @@ fn flash_window_status_title(
     });
 }
 
+fn lookup_source_timecode_base_ns(
+    library: &[MediaItem],
+    project: &Project,
+    source_path: &str,
+) -> Option<u64> {
+    library
+        .iter()
+        .find(|item| item.source_path == source_path)
+        .and_then(|item| item.source_timecode_base_ns)
+        .or_else(|| {
+            project
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .find(|clip| clip.source_path == source_path)
+                .and_then(|clip| clip.source_timecode_base_ns)
+        })
+}
+
+fn align_grouped_clips_by_timecode_in_project(
+    project: &mut Project,
+    clip_ids: &[String],
+) -> Result<(usize, usize), String> {
+    if clip_ids.is_empty() {
+        return Err("clip_ids must contain at least one clip id".to_string());
+    }
+
+    let clip_id_set: HashSet<&str> = clip_ids.iter().map(|id| id.as_str()).collect();
+    let target_groups: HashSet<String> = project
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| clip_id_set.contains(clip.id.as_str()))
+        .filter_map(|clip| clip.group_id.clone())
+        .collect();
+
+    if target_groups.is_empty() {
+        return Err("No grouped clips found for the provided clip_ids".to_string());
+    }
+
+    let mut assignments: HashMap<String, u64> = HashMap::new();
+    let mut aligned_group_count = 0usize;
+
+    for group_id in &target_groups {
+        let members: Vec<_> = project
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| clip.group_id.as_deref() == Some(group_id.as_str()))
+            .map(|clip| {
+                (
+                    clip.id.clone(),
+                    clip.timeline_start,
+                    clip.source_timecode_start_ns(),
+                )
+            })
+            .collect();
+
+        if members.len() < 2 {
+            continue;
+        }
+        if members
+            .iter()
+            .any(|(_, _, source_timecode_start_ns)| source_timecode_start_ns.is_none())
+        {
+            return Err(format!(
+                "Grouped clips in group {group_id} are missing source timecode metadata"
+            ));
+        }
+
+        let anchor = clip_ids
+            .iter()
+            .find_map(|requested_id| {
+                members
+                    .iter()
+                    .find(|(clip_id, _, _)| clip_id == requested_id)
+                    .cloned()
+            })
+            .or_else(|| {
+                members
+                    .iter()
+                    .min_by_key(|(_, timeline_start, source_timecode_start_ns)| {
+                        (source_timecode_start_ns.unwrap_or(0), *timeline_start)
+                    })
+                    .cloned()
+            })
+            .ok_or_else(|| format!("No anchor clip found for group {group_id}"))?;
+
+        let (_, anchor_timeline_start, anchor_source_timecode_start_ns) = anchor;
+        let anchor_source_timecode_start_ns = anchor_source_timecode_start_ns.unwrap_or(0);
+
+        let mut proposed: Vec<(String, i128)> = members
+            .iter()
+            .map(|(clip_id, _, source_timecode_start_ns)| {
+                (
+                    clip_id.clone(),
+                    i128::from(anchor_timeline_start)
+                        + i128::from(source_timecode_start_ns.unwrap_or(0))
+                        - i128::from(anchor_source_timecode_start_ns),
+                )
+            })
+            .collect();
+
+        if let Some(min_start) = proposed.iter().map(|(_, start)| *start).min() {
+            if min_start < 0 {
+                let shift = -min_start;
+                for (_, start) in &mut proposed {
+                    *start += shift;
+                }
+            }
+        }
+
+        aligned_group_count += 1;
+        for (clip_id, new_start) in proposed {
+            assignments.insert(clip_id, new_start.max(0) as u64);
+        }
+    }
+
+    if assignments.is_empty() {
+        return Err(
+            "No grouped clips with source timecode metadata were eligible for alignment"
+                .to_string(),
+        );
+    }
+
+    let mut aligned_clip_count = 0usize;
+    for track in &mut project.tracks {
+        for clip in &mut track.clips {
+            if let Some(new_start) = assignments.get(&clip.id) {
+                if clip.timeline_start != *new_start {
+                    clip.timeline_start = *new_start;
+                    aligned_clip_count += 1;
+                }
+            }
+        }
+    }
+
+    if aligned_clip_count == 0 {
+        return Err("Grouped clips were already aligned by timecode".to_string());
+    }
+
+    Ok((aligned_group_count, aligned_clip_count))
+}
+
 fn export_displayed_frame_to_image(
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     out_path: &std::path::Path,
@@ -1006,12 +1150,23 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     // the in/out selection set in the source monitor.
     {
         let project = project.clone();
+        let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         let source_marks = source_marks.clone();
         let timeline_state_for_drop = timeline_state.clone();
         timeline_state.borrow_mut().on_drop_clip = Some(Rc::new(
             move |source_path, duration_ns, track_idx, timeline_start_ns| {
                 let magnetic_mode = timeline_state_for_drop.borrow().magnetic_mode;
+                let source_timecode_base_ns = {
+                    let marks = source_marks.borrow();
+                    if marks.path == source_path {
+                        marks.source_timecode_base_ns
+                    } else {
+                        let lib = library.borrow();
+                        let proj = project.borrow();
+                        lookup_source_timecode_base_ns(&lib, &proj, &source_path)
+                    }
+                };
                 let mut proj = project.borrow_mut();
                 if let Some(track) = proj.tracks.get_mut(track_idx) {
                     use crate::model::clip::ClipKind;
@@ -1033,6 +1188,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let mut clip = Clip::new(source_path, src_out, timeline_start_ns, kind);
                     clip.source_in = src_in;
                     clip.source_out = src_out;
+                    clip.source_timecode_base_ns = source_timecode_base_ns;
                     track.add_clip(clip);
                     if magnetic_mode {
                         track.compact_gap_free();
@@ -1732,6 +1888,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
             let is_audio = marks.is_audio_only;
+            let source_timecode_base_ns = marks.source_timecode_base_ns;
             drop(marks);
 
             let ts = timeline_state.borrow();
@@ -1771,6 +1928,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let mut clip = Clip::new(path, out_ns, timeline_start, clip_kind);
                     clip.source_in = in_ns;
                     clip.source_out = out_ns;
+                    clip.source_timecode_base_ns = source_timecode_base_ns;
                     track.add_clip(clip);
                     if magnetic_mode {
                         track.compact_gap_free();
@@ -1797,6 +1955,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
             let is_audio = marks.is_audio_only;
+            let source_timecode_base_ns = marks.source_timecode_base_ns;
             drop(marks);
 
             let ts = timeline_state.borrow();
@@ -1849,6 +2008,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let mut new_clip = Clip::new(path, out_ns, playhead, clip_kind);
                     new_clip.source_in = in_ns;
                     new_clip.source_out = out_ns;
+                    new_clip.source_timecode_base_ns = source_timecode_base_ns;
                     track.add_clip(new_clip);
 
                     if magnetic_mode {
@@ -1897,6 +2057,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
             let is_audio = marks.is_audio_only;
+            let source_timecode_base_ns = marks.source_timecode_base_ns;
             drop(marks);
 
             let ts = timeline_state.borrow();
@@ -1982,6 +2143,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     let mut new_clip = Clip::new(path, out_ns, playhead, clip_kind);
                     new_clip.source_in = in_ns;
                     new_clip.source_out = out_ns;
+                    new_clip.source_timecode_base_ns = source_timecode_base_ns;
                     track.add_clip(new_clip);
 
                     if magnetic_mode {
@@ -2040,12 +2202,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 m.path != path
             };
             // Look up is_audio_only from library item (set by background probe).
-            let audio_only = library
+            let (audio_only, source_timecode_base_ns) = library
                 .borrow()
                 .iter()
                 .find(|i| i.source_path == path)
-                .map(|i| i.is_audio_only)
-                .unwrap_or(false);
+                .map(|i| (i.is_audio_only, i.source_timecode_base_ns))
+                .unwrap_or((false, None));
             if should_reload {
                 // Use proxy for source preview when available to avoid
                 // freezing on high-resolution content (e.g. 5.3K HEVC).
@@ -2079,6 +2241,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             m.out_ns = duration_ns;
             m.display_pos_ns = 0;
             m.is_audio_only = audio_only;
+            m.source_timecode_base_ns = source_timecode_base_ns;
         })
     };
 
@@ -2178,7 +2341,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
             let (clips, media_from_project, project_dims, project_frame_rate): (
                 Vec<ProgramClip>,
-                Vec<(String, u64)>,
+                Vec<(String, u64, Option<u64>)>,
                 (u32, u32),
                 (u32, u32),
             ) = {
@@ -2271,12 +2434,18 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 // Keep media browser in sync with timeline clip sources after project open/load.
                 // Collect only unique source paths to avoid redundant work.
                 let mut media_seen: HashSet<&str> = HashSet::new();
-                let media: Vec<(String, u64)> = proj
+                let media: Vec<(String, u64, Option<u64>)> = proj
                     .tracks
                     .iter()
                     .flat_map(|t| t.clips.iter())
                     .filter(|c| media_seen.insert(c.source_path.as_str()))
-                    .map(|c| (c.source_path.clone(), c.source_out))
+                    .map(|c| {
+                        (
+                            c.source_path.clone(),
+                            c.source_out,
+                            c.source_timecode_base_ns,
+                        )
+                    })
                     .collect();
                 (
                     clips,
@@ -2292,13 +2461,27 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
             {
                 let mut lib = library.borrow_mut();
-                let seen: HashSet<&str> = lib.iter().map(|i| i.source_path.as_str()).collect();
+                let seen: HashSet<String> = lib.iter().map(|i| i.source_path.clone()).collect();
+                for (path, dur, source_timecode_base_ns) in &media_from_project {
+                    if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
+                        if item.duration_ns == 0 && *dur > 0 {
+                            item.duration_ns = *dur;
+                        }
+                        if item.source_timecode_base_ns.is_none()
+                            && source_timecode_base_ns.is_some()
+                        {
+                            item.source_timecode_base_ns = *source_timecode_base_ns;
+                        }
+                    }
+                }
                 let new_items: Vec<_> = media_from_project
                     .into_iter()
-                    .filter(|(path, _)| !seen.contains(path.as_str()))
+                    .filter(|(path, _, _)| !seen.contains(path))
                     .collect();
-                for (path, dur) in new_items {
-                    lib.push(MediaItem::new(path, dur));
+                for (path, dur, source_timecode_base_ns) in new_items {
+                    let mut item = MediaItem::new(path, dur);
+                    item.source_timecode_base_ns = source_timecode_base_ns;
+                    lib.push(item);
                 }
             }
 
@@ -3074,7 +3257,10 @@ fn handle_mcp_command(
                             "source_path":      c.source_path,
                             "track_index":      ti,
                             "track_id":         track.id,
+                            "group_id":         c.group_id,
                             "link_group_id":    c.link_group_id,
+                            "source_timecode_base_ns": c.source_timecode_base_ns,
+                            "source_timecode_start_ns": c.source_timecode_start_ns(),
                             "timeline_start_ns": c.timeline_start,
                             "source_in_ns":     c.source_in,
                             "source_out_ns":    c.source_out,
@@ -3436,6 +3622,11 @@ fn handle_mcp_command(
             reply,
         } => {
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
+            let source_timecode_base_ns = {
+                let lib = library.borrow();
+                let proj = project.borrow();
+                lookup_source_timecode_base_ns(&lib, &proj, &source_path)
+            };
             let clip_id = {
                 let mut proj = project.borrow_mut();
                 if let Some(track) = proj.tracks.get_mut(track_index) {
@@ -3447,6 +3638,7 @@ fn handle_mcp_command(
                     );
                     clip.source_in = source_in_ns;
                     clip.source_out = source_out_ns;
+                    clip.source_timecode_base_ns = source_timecode_base_ns;
                     let id = clip.id.clone();
                     track.add_clip(clip);
                     if magnetic_mode {
@@ -3658,6 +3850,32 @@ fn handle_mcp_command(
                 .ok();
             if success {
                 on_project_changed();
+            }
+        }
+
+        McpCommand::AlignGroupedClipsByTimecode { clip_ids, reply } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                let result = align_grouped_clips_by_timecode_in_project(&mut proj, &clip_ids);
+                if result.is_ok() {
+                    proj.dirty = true;
+                }
+                result
+            };
+            match result {
+                Ok((aligned_group_count, aligned_clip_count)) => {
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "aligned_group_count": aligned_group_count,
+                            "aligned_clip_count": aligned_clip_count
+                        }))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(error) => {
+                    reply.send(json!({"success": false, "error": error})).ok();
+                }
             }
         }
 
@@ -4038,12 +4256,23 @@ fn handle_mcp_command(
             let duration_ns =
                 crate::ui::media_browser::probe_duration(&uri).unwrap_or(10 * 1_000_000_000);
             let audio_only = crate::ui::media_browser::probe_is_audio_only(&uri);
+            let source_timecode_base_ns = {
+                let lib = library.borrow();
+                let proj = project.borrow();
+                lookup_source_timecode_base_ns(&lib, &proj, &path)
+            };
             let mut item = MediaItem::new(path.clone(), duration_ns);
             item.is_audio_only = audio_only;
+            item.source_timecode_base_ns = source_timecode_base_ns;
             let label = item.label.clone();
             library.borrow_mut().push(item);
             reply
-                .send(json!({"success": true, "label": label, "duration_ns": duration_ns}))
+                .send(json!({
+                    "success": true,
+                    "label": label,
+                    "duration_ns": duration_ns,
+                    "source_timecode_base_ns": source_timecode_base_ns
+                }))
                 .ok();
         }
 
@@ -4191,6 +4420,11 @@ fn handle_mcp_command(
             }
             let playhead = timeline_state.borrow().playhead_ns;
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
+            let source_timecode_base_ns = {
+                let lib = library.borrow();
+                let proj = project.borrow();
+                lookup_source_timecode_base_ns(&lib, &proj, &source_path)
+            };
             let result = {
                 let mut proj = project.borrow_mut();
                 let track = if let Some(idx) = track_index {
@@ -4212,6 +4446,7 @@ fn handle_mcp_command(
                         Clip::new(source_path, source_out_ns, playhead, ClipKind::Video);
                     new_clip.source_in = source_in_ns;
                     new_clip.source_out = source_out_ns;
+                    new_clip.source_timecode_base_ns = source_timecode_base_ns;
                     let clip_id = new_clip.id.clone();
                     track.add_clip(new_clip);
                     if magnetic_mode {
@@ -4273,6 +4508,11 @@ fn handle_mcp_command(
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let range_start = playhead;
             let range_end = playhead + clip_duration;
+            let source_timecode_base_ns = {
+                let lib = library.borrow();
+                let proj = project.borrow();
+                lookup_source_timecode_base_ns(&lib, &proj, &source_path)
+            };
             let result = {
                 let mut proj = project.borrow_mut();
                 let track = if let Some(idx) = track_index {
@@ -4320,6 +4560,7 @@ fn handle_mcp_command(
                         Clip::new(source_path, source_out_ns, playhead, ClipKind::Video);
                     new_clip.source_in = source_in_ns;
                     new_clip.source_out = source_out_ns;
+                    new_clip.source_timecode_base_ns = source_timecode_base_ns;
                     let clip_id = new_clip.id.clone();
                     track.add_clip(new_clip);
                     if magnetic_mode {

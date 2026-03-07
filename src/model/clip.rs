@@ -151,6 +151,10 @@ pub struct Clip {
     /// Optional strict link-group identifier used for synchronized A/V-linked edits.
     #[serde(default)]
     pub link_group_id: Option<String>,
+    /// Optional absolute source time reference for the start of the underlying media.
+    /// When present, source clip start timecode is `source_timecode_base_ns + source_in`.
+    #[serde(default)]
+    pub source_timecode_base_ns: Option<u64>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -225,6 +229,7 @@ impl Clip {
             reverse: false,
             group_id: None,
             link_group_id: None,
+            source_timecode_base_ns: None,
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
@@ -237,6 +242,11 @@ impl Clip {
     /// Raw source material duration (source_out − source_in), unaffected by speed.
     pub fn source_duration(&self) -> u64 {
         self.source_out.saturating_sub(self.source_in)
+    }
+
+    pub fn source_timecode_start_ns(&self) -> Option<u64> {
+        self.source_timecode_base_ns
+            .map(|base| base.saturating_add(self.source_in))
     }
 
     /// Duration of the clip on the **timeline**, in nanoseconds.
@@ -288,10 +298,19 @@ mod tests {
         assert!(clip.lut_path.is_none());
         assert!(clip.group_id.is_none());
         assert!(clip.link_group_id.is_none());
+        assert!(clip.source_timecode_base_ns.is_none());
         assert!(clip.transition_after.is_empty());
         assert!(clip.fcpxml_unknown_attrs.is_empty());
         assert!(clip.fcpxml_unknown_children.is_empty());
         assert!(clip.fcpxml_original_source_path.is_none());
+    }
+
+    #[test]
+    fn test_source_timecode_start_uses_base_and_source_in() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.source_in = 2_000_000_000;
+        clip.source_timecode_base_ns = Some(10_000_000_000);
+        assert_eq!(clip.source_timecode_start_ns(), Some(12_000_000_000));
     }
 
     #[test]

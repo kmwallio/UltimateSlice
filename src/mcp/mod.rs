@@ -74,6 +74,10 @@ pub enum McpCommand {
         clip_ids: Vec<String>,
         reply: SyncSender<Value>,
     },
+    AlignGroupedClipsByTimecode {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
     TrimClip {
         clip_id: String,
         source_in_ns: u64,
