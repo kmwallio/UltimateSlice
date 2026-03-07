@@ -20,6 +20,7 @@ Tracking docs:
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
 - [x] Non-deprecation warning cleanup pass for `cargo build --quiet` / `cargo test --quiet` (unused imports/vars/mut, `unused_must_use`, and targeted intentional dead-code allowances)
 - [x] Legacy GTK deprecation-warning suppression pass for existing Dialog/ComboBoxText UI paths with narrowly scoped `#[allow(deprecated)]` (no runtime behavior change)
+- [x] Runtime GTK slider warning cleanup: added a generic slider CSS reset (border/margin/padding/box-shadow none) plus explicit scale-thumb sizing to remove negative min-size warnings (`GtkGizmo ... slider ... -4`)
 
 ### Data Model
 - [x] `Clip` — source path, source in/out (ns), timeline position, label, kind
