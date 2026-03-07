@@ -18,6 +18,7 @@ Tracking docs:
 - [x] GApplication entry point with CSS loading
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
+- [x] Non-deprecation warning cleanup pass for `cargo build --quiet` / `cargo test --quiet` (unused imports/vars/mut, `unused_must_use`, and targeted intentional dead-code allowances)
 
 ### Data Model
 - [x] `Clip` — source path, source in/out (ns), timeline position, label, kind
@@ -303,8 +304,26 @@ Tracking docs:
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Shadows and Highlights
 - [ ] Advanced color grading
-- [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)
-- [ ] HDR workflow (PQ/HLG preview + export metadata)
+- [ ] Color management pipeline via OpenColorIO (OCIO)
+  - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
+  - [ ] OCIO config loading (ACES 2.0, Rec.709, sRGB built-in configs; user-supplied config file path in Preferences)
+  - [ ] Display transform in Program Monitor (source colorspace → display colorspace via OCIO processor; GStreamer element or per-frame CPU path)
+  - [ ] GPU-accelerated color transforms (OCIO GPU shader extraction applied via OpenGL/Vulkan in preview pipeline)
+  - [ ] Per-clip input colorspace override (Inspector dropdown: Auto-detect, sRGB, Rec.709, Rec.2020, S-Log3, LogC, Protune, etc.)
+  - [ ] Export colorspace selection (output color profile in export dialog; OCIO baked into ffmpeg filter or pre-transform frames)
+  - [ ] Working colorspace preference (scene-linear, ACEScg, Rec.709 — controls internal processing space)
+- [ ] HDR workflow via libplacebo
+  - [ ] libplacebo Vulkan integration for GPU-accelerated video rendering in Program Monitor
+  - [ ] HDR tone mapping (PQ/HLG → SDR) using libplacebo algorithms (hable, bt2446a, st2094-40) for accurate SDR preview of HDR sources
+  - [ ] Inverse tone mapping (SDR → HDR) for HDR display output and export
+  - [ ] High-quality upscaling/downscaling (libplacebo polar/orthogonal scalers as alternative to GStreamer `videoscale`)
+  - [ ] HDR export metadata (PQ/HLG transfer characteristics, mastering display color volume, MaxCLL/MaxFALL)
+  - [ ] HDR passthrough mode for native HDR display output
+- [ ] Frei0r video effects plugin support
+  - [ ] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
+  - [ ] Effects browser UI listing available Frei0r filters/generators/mixers with categories
+  - [ ] Per-clip Frei0r effect application with parameter controls in Inspector
+  - [ ] Effect stacking (multiple Frei0r filters per clip, reorderable)
 - [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Transition effects (fade to black, wipe right, wipe left)
@@ -417,7 +436,7 @@ Tracking docs:
 - [ ] Multicam editing (sync by audio or timecode)
 - [ ] Nested Timelines / Compound Clips
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
-- [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio is a future enhancement)
+- [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [ ] Match Frame (shortcut to find timeline clip in media library)
 - [ ] Proxy Workflow: One-click toggle between original and proxy media
 - [ ] Keyword ranges + favorite/reject ratings in browser
@@ -425,6 +444,11 @@ Tracking docs:
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 
 ### Advanced Audio
+- [ ] Pitch-corrected audio time-stretching via Rubberband
+  - [ ] Rubberband C library integration (FFI bindings or GStreamer `rubberband` element)
+  - [ ] Pitch-preserved playback at variable speeds (J/K/L shuttle, constant speed changes)
+  - [ ] Independent audio clip time-stretch without pitch shift (fit audio to duration)
+  - [ ] Pitch-shift effect per clip (transpose audio without changing duration)
 - [ ] Audio Roles (Dialogue, Effects, Music) with submixing
 - [ ] Support for LV2 / LADSPA audio plugins
 - [ ] Voiceover recording tool with countdown and punch-in
