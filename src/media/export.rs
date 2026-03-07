@@ -843,7 +843,9 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{estimate_export_size_bytes, parse_progress_line, AudioCodec, ExportOptions, VideoCodec};
+    use super::{
+        estimate_export_size_bytes, parse_progress_line, AudioCodec, ExportOptions, VideoCodec,
+    };
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
 

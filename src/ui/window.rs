@@ -540,7 +540,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             {
                                 proxy_cache.borrow_mut().invalidate_all();
                             }
-                            let (project_w, project_h, clips): (u32, u32, Vec<(String, Option<String>)>) = {
+                            let (project_w, project_h, clips): (
+                                u32,
+                                u32,
+                                Vec<(String, Option<String>)>,
+                            ) = {
                                 let proj = project.borrow();
                                 (
                                     proj.width,
@@ -730,7 +734,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 // Re-generate proxies so the newly assigned/cleared LUT is baked in.
                 let prefs = preferences_state.borrow();
                 if prefs.proxy_mode.is_enabled() || prefs.preview_luts {
-                    let (scale, clips): (crate::media::proxy_cache::ProxyScale, Vec<(String, Option<String>)>) = {
+                    let (scale, clips): (
+                        crate::media::proxy_cache::ProxyScale,
+                        Vec<(String, Option<String>)>,
+                    ) = {
                         let proj = project.borrow();
                         if prefs.proxy_mode.is_enabled() {
                             (
@@ -1212,10 +1219,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         inspector_view.crop_bottom_slider.set_value(cb as f64);
                         *inspector_view.updating.borrow_mut() = false;
                     }
-                    let rot = inspector_view
-                        .rotate_spin
-                        .value()
-                        .round() as i32;
+                    let rot = inspector_view.rotate_spin.value().round() as i32;
                     let fh = inspector_view.flip_h_btn.is_active();
                     let fv = inspector_view.flip_v_btn.is_active();
                     let sc = inspector_view.scale_slider.value();
@@ -1404,16 +1408,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let picture_a_poll = picture_a.clone();
         let picture_b_poll = picture_b.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-            let (
-                pos_ns,
-                playing,
-                opacity_a,
-                opacity_b,
-                peaks,
-                track_peaks,
-                scope_frame,
-                jkl_rate,
-            ) = {
+            let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
                 let now_us = glib::monotonic_time();
                 if now_us - last_auto_check_us_c.get() >= 250_000 {
@@ -1521,7 +1516,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         last_proxy_refresh_us_c.set(now_us);
                         let (project_w, project_h, lut_sources) = {
                             let proj = project.borrow();
-                            (proj.width, proj.height, collect_unique_lut_clip_sources(&proj))
+                            (
+                                proj.width,
+                                proj.height,
+                                collect_unique_lut_clip_sources(&proj),
+                            )
                         };
                         {
                             let mut cache = proxy_cache.borrow_mut();
@@ -2715,7 +2714,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 if proxy_active {
                     let fraction = proxy_progress.byte_fraction.unwrap_or_else(|| {
                         if proxy_progress.total > 0 {
-                            (proxy_progress.completed as f64 / proxy_progress.total as f64).clamp(0.0, 0.99)
+                            (proxy_progress.completed as f64 / proxy_progress.total as f64)
+                                .clamp(0.0, 0.99)
                         } else {
                             0.0
                         }
@@ -3224,10 +3224,12 @@ fn handle_mcp_command(
             prog_player
                 .borrow_mut()
                 .set_preview_luts(new_state.preview_luts);
-            prog_player.borrow_mut().set_proxy_scale_divisor(match new_state.proxy_mode {
-                crate::ui_state::ProxyMode::QuarterRes => 4,
-                _ => 2,
-            });
+            prog_player
+                .borrow_mut()
+                .set_proxy_scale_divisor(match new_state.proxy_mode {
+                    crate::ui_state::ProxyMode::QuarterRes => 4,
+                    _ => 2,
+                });
             if enabled {
                 let scale = match new_state.proxy_mode {
                     crate::ui_state::ProxyMode::QuarterRes => {
@@ -3263,7 +3265,11 @@ fn handle_mcp_command(
             } else if new_state.preview_luts {
                 let (project_w, project_h, lut_sources): (u32, u32, Vec<(String, Option<String>)>) = {
                     let proj = project.borrow();
-                    (proj.width, proj.height, collect_unique_lut_clip_sources(&proj))
+                    (
+                        proj.width,
+                        proj.height,
+                        collect_unique_lut_clip_sources(&proj),
+                    )
                 };
                 {
                     let mut cache = proxy_cache.borrow_mut();
@@ -3387,7 +3393,11 @@ fn handle_mcp_command(
             if !new_state.proxy_mode.is_enabled() && enabled {
                 let (project_w, project_h, lut_sources): (u32, u32, Vec<(String, Option<String>)>) = {
                     let proj = project.borrow();
-                    (proj.width, proj.height, collect_unique_lut_clip_sources(&proj))
+                    (
+                        proj.width,
+                        proj.height,
+                        collect_unique_lut_clip_sources(&proj),
+                    )
                 };
                 {
                     let mut cache = proxy_cache.borrow_mut();

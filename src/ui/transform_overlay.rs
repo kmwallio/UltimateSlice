@@ -291,26 +291,34 @@ impl TransformOverlay {
                     ),
                     (
                         {
-                            let (x, _) =
-                                to_world(crop_left_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            let (x, _) = to_world(
+                                crop_left_x - cx,
+                                ((crop_top_y + crop_bottom_y) / 2.0) - cy,
+                            );
                             x
                         },
                         {
-                            let (_, y) =
-                                to_world(crop_left_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            let (_, y) = to_world(
+                                crop_left_x - cx,
+                                ((crop_top_y + crop_bottom_y) / 2.0) - cy,
+                            );
                             y
                         },
                         Handle::CropLeft,
                     ),
                     (
                         {
-                            let (x, _) =
-                                to_world(crop_right_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            let (x, _) = to_world(
+                                crop_right_x - cx,
+                                ((crop_top_y + crop_bottom_y) / 2.0) - cy,
+                            );
                             x
                         },
                         {
-                            let (_, y) =
-                                to_world(crop_right_x - cx, ((crop_top_y + crop_bottom_y) / 2.0) - cy);
+                            let (_, y) = to_world(
+                                crop_right_x - cx,
+                                ((crop_top_y + crop_bottom_y) / 2.0) - cy,
+                            );
                             y
                         },
                         Handle::CropRight,
@@ -319,7 +327,8 @@ impl TransformOverlay {
 
                 let mut handle = Handle::None;
                 {
-                    let d = ((sx - rotate_handle.0).powi(2) + (sy - rotate_handle.1).powi(2)).sqrt();
+                    let d =
+                        ((sx - rotate_handle.0).powi(2) + (sy - rotate_handle.1).powi(2)).sqrt();
                     if d <= HANDLE_HIT {
                         handle = rotate_handle.2;
                     }
@@ -402,13 +411,16 @@ impl TransformOverlay {
 
                 match ds.handle {
                     Handle::Rotate => {
-                        let clip_cx =
-                            ds.vx + ds.vw / 2.0 + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
-                        let clip_cy =
-                            ds.vy + ds.vh / 2.0 + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
+                        let clip_cx = ds.vx
+                            + ds.vw / 2.0
+                            + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
+                        let clip_cy = ds.vy
+                            + ds.vh / 2.0
+                            + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
                         let cur_x = ds.start_wx + off_x;
                         let cur_y = ds.start_wy + off_y;
-                        let mut deg = ((cur_y - clip_cy).atan2(cur_x - clip_cx).to_degrees() + 90.0)
+                        let mut deg = ((cur_y - clip_cy).atan2(cur_x - clip_cx).to_degrees()
+                            + 90.0)
                             .rem_euclid(360.0);
                         if deg > 180.0 {
                             deg -= 360.0;

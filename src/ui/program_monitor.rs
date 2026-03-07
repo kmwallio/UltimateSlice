@@ -2,8 +2,7 @@ use crate::media::program_player::ProgramPlayer;
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, AspectFrame, Box as GBox, Button, DrawingArea, EventControllerScroll,
-    EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow,
-    ToggleButton,
+    EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow, ToggleButton,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

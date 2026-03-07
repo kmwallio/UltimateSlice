@@ -169,7 +169,7 @@ Tracking docs:
 - [x] Slip/slide edit modes
 - [x] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
 - [x] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
-  - [x] Phase 1: Shift+click range select, Ctrl/Cmd+click toggle selection, Ctrl+A select all
+  - [x] Phase 1: Shift+click range select (same-track + cross-track time-range), Ctrl/Cmd+click toggle selection, Ctrl+A select all
   - [x] Phase 2: rubber-band marquee selection
 - [x] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
 - [x] Clip grouping / ungrouping (persist clip-group IDs; grouped move/delete as a unit)

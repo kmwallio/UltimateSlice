@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Ctrl+Shift+click selection precedence**: `Ctrl/Cmd+Shift+Click` now follows Ctrl/Cmd toggle semantics (single clicked clip toggle) instead of triggering Shift range selection, preventing unintended multi-clip cross-track selections.
 - **Slide edit neighbor over-extension**: Slide drag delta is now clamped by neighbor bounds, preventing over-extension of adjacent clips; edge clips now keep Slide active with available-side-only compensation.
 - **Timeline modifier multi-select reliability**: Ctrl/Cmd+click and Shift+click selection state is now preserved when a drag gesture begins, preventing unintended collapse back to single selection during timeline interactions.
 - **Proxy-in-progress playback stall**: Proxy selection now ignores incomplete/unusable proxy files and keeps Program Monitor playback on original media until a valid proxy is ready; proxy transcodes are now published atomically (temp file → final path) to avoid exposing half-written proxies.
@@ -46,6 +47,7 @@ All notable project changes and progress should be recorded here.
 - **Continuing decoders at boundary crossings**: When adjacent clips share the same source file (common after splits, rough cuts from single footage), the program player now reuses existing decoder slots instead of tearing down and rebuilding the full pipeline. This avoids codec init, element creation, and stream discovery overhead, reducing boundary crossing latency from ~800-2800ms to ~200-600ms (~60-75% improvement). Falls back to full rebuild when source files differ, slot count changes, audio presence differs, speed/reverse settings differ, or effects topology changes.
 
 ### Added
+- **Cross-track Shift+click range selection + selected-set move-together**: Shift+click now supports cross-track time-range selection (anchor↔click across all tracks), and dragging a selected clip now moves the active multi-selection together while still expanding grouped clips as a unit.
 - **Playhead-relative bulk selection shortcuts**: Added timeline `Ctrl+Shift+→` (select clips forward from playhead) and `Ctrl+Shift+←` (select clips backward from playhead) for faster multi-clip operations.
 - **Timeline clip grouping**: Added persistent clip grouping with `Ctrl+G` (group) and `Ctrl+Shift+G` (ungroup). Group members now move and delete as a unit (including ripple delete), with undo/redo support, and group IDs round-trip through FCPXML via `us:group-id`.
 - **Ripple Delete shortcut**: Added track-local ripple delete on `Shift+Delete` / `Shift+Backspace` for selected timeline clip(s), with undo/redo integration.

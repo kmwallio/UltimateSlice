@@ -774,13 +774,9 @@ pub fn build_toolbar(
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
-                                if let Err(e) = export_project(
-                                    &proj,
-                                    &output_clone,
-                                    opts,
-                                    None,
-                                    tx.clone(),
-                                ) {
+                                if let Err(e) =
+                                    export_project(&proj, &output_clone, opts, None, tx.clone())
+                                {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
                                 }
                             });

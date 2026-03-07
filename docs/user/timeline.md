@@ -91,11 +91,15 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ### Multi-Select (staged rollout)
 
-- **Shift+Click** adds a same-track range between the anchor clip and the clicked clip.
+- **Shift+Click** adds a range from the anchor to the clicked clip:
+  - on the same track: selects the same-track span between the two clips;
+  - across different tracks: selects clips that intersect the anchor↔click time range across all tracks.
 - **Ctrl/Cmd+Click** toggles individual clips in the current selection.
+- When both **Ctrl/Cmd+Shift** are held, toggle selection takes precedence over Shift range selection.
 - **Ctrl+A** selects all clips in the timeline.
 - **Marquee drag** (drag in empty timeline body) selects clips intersecting the rectangle.
 - Modifier-based selection is preserved when a clip drag starts, so Ctrl/Cmd+click and Shift+click selections do not unexpectedly collapse.
+- Dragging a selected clip moves the current selected set together while preserving relative offsets across tracks; grouped clips are still expanded and move as a unit.
 - The Inspector still follows the primary selected clip.
 
 ### Ripple Delete (`Shift+Delete`)
@@ -140,7 +144,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
-| `Shift+Click` (timeline) | Add a same-track range to selection |
+| `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |
 | `Drag in empty timeline body` | Marquee-select clips intersecting the rectangle |

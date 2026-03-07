@@ -59,7 +59,7 @@
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
-| `Shift+Click` (timeline) | Add a range of clips on the same track to selection |
+| `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle a clip in the current selection |
 | `Ctrl+A` | Select all timeline clips |
 | Drag in empty timeline body | Marquee-select clips intersecting the rectangle |
@@ -90,3 +90,4 @@ All Inspector controls are mouse-driven sliders and text fields. Transform edits
 - **J/K/L** shuttle works globally: J/K/L control the **Program Monitor** from anywhere in the window (no focus needed). In the Source Monitor, J/K/L still work as before when the Source Monitor panel has focus.
 - **M** is captured globally so the timeline does not need to be focused.
 - **Space** toggles playback in whichever monitor is contextually active.
+- In timeline selection, **Ctrl/Cmd+Shift+Click** behaves like **Ctrl/Cmd+Click** (toggle clicked clip).

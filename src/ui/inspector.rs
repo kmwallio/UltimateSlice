@@ -1164,8 +1164,12 @@ pub fn build_inspector(
                     return;
                 }
                 *drag_start.borrow_mut() = (x, y);
-                let rot =
-                    dial_point_to_degrees(x, y, rotate_dial.width() as f64, rotate_dial.height() as f64);
+                let rot = dial_point_to_degrees(
+                    x,
+                    y,
+                    rotate_dial.width() as f64,
+                    rotate_dial.height() as f64,
+                );
                 rotate_spin.set_value(rot as f64);
             });
         }
@@ -1181,8 +1185,12 @@ pub fn build_inspector(
                 let (sx, sy) = *drag_start.borrow();
                 let x = sx + off_x;
                 let y = sy + off_y;
-                let rot =
-                    dial_point_to_degrees(x, y, rotate_dial.width() as f64, rotate_dial.height() as f64);
+                let rot = dial_point_to_degrees(
+                    x,
+                    y,
+                    rotate_dial.width() as f64,
+                    rotate_dial.height() as f64,
+                );
                 rotate_spin.set_value(rot as f64);
             });
         }

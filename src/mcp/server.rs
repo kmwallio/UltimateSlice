@@ -831,7 +831,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
                 enabled: args["enabled"].as_bool().unwrap_or(false),
                 reply: tx,
             }
-        },
+        }
 
         "set_background_prerender" => McpCommand::SetBackgroundPrerender {
             enabled: args["enabled"].as_bool().unwrap_or(false),
