@@ -33,6 +33,7 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 - `serde` / `serde_json` — MIT OR Apache-2.0
 - `uuid` — MIT OR Apache-2.0
 - `anyhow` / `thiserror` / `log` / `env_logger` — MIT OR Apache-2.0
+- `rustfft` — MIT OR Apache-2.0
 - FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
 - x264 (Flatpak build dependency) — GPL-2.0-or-later
 

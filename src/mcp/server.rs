@@ -692,6 +692,21 @@ fn tools_list() -> Value {
             "name": "source_pause",
             "description": "Pause playback in the Source Monitor (source preview player).",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "sync_clips_by_audio",
+            "description": "Synchronize two or more timeline clips by audio cross-correlation. The first clip is used as the anchor; other clips are repositioned based on matching audio content. Returns offset and confidence for each non-anchor clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Two or more clip ids to sync. First clip is the anchor."
+                    }
+                },
+                "required": ["clip_ids"]
+            }
         }
     ]})
 }
@@ -954,6 +969,17 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
         "source_play" => McpCommand::SourcePlay { reply: tx },
         "source_pause" => McpCommand::SourcePause { reply: tx },
+        "sync_clips_by_audio" => McpCommand::SyncClipsByAudio {
+            clip_ids: args["clip_ids"]
+                .as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            reply: tx,
+        },
 
         _ => return err(id.clone(), -32602, &format!("Unknown tool: '{name}'")),
     };

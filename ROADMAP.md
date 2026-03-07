@@ -32,7 +32,7 @@ Tracking docs:
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
-- [x] GStreamer Discoverer probes duration on import (background thread via `MediaProbeCache`)
+- [x] GStreamer Discoverer probes duration and source timecode on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
 - [x] Thumbnails auto-refresh when extraction completes (debounced batch redraw) without requiring manual panel/window redraw
 - [x] Selecting a library item loads it in the source preview
@@ -178,9 +178,9 @@ Tracking docs:
 - [x] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
 - [x] Clip grouping / ungrouping (persist clip-group IDs; grouped move/delete as a unit)
   - [x] Visual group context: selecting a grouped clip highlights non-selected group peers with a secondary border
-  - [ ] Align grouped clips by audio or timecode
+  - [x] Align grouped clips by audio or timecode
     - [x] Phase 1: Align grouped clips by stored timecode metadata
-    - [ ] Phase 2: Align grouped clips by audio
+    - [x] Phase 2: Align grouped clips by audio (FFT cross-correlation via `rustfft`)
 - [ ] Audio/video linking (auto-link video and audio from same source)
   - [x] Manual clip linking / unlinking with synchronized selection, move, and delete behavior
   - [ ] Auto-link same-source A/V clip creation heuristics
@@ -442,6 +442,8 @@ Tracking docs:
 
 ### Professional Workflow (The "Pro" Edge)
 - [ ] Multicam editing (sync by audio or timecode)
+  - [x] Audio cross-correlation sync for selected clips (FFT-based, background thread, MCP tool)
+  - [x] Automatic timecode extraction from media files on import (GST_TAG_DATE_TIME)
 - [ ] Nested Timelines / Compound Clips
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)

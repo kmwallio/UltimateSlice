@@ -13,6 +13,7 @@ Third-party crates and libraries:\n\
 • serde / serde_json — MIT OR Apache-2.0\n\
 • uuid — MIT OR Apache-2.0\n\
 • anyhow / thiserror / log / env_logger — MIT OR Apache-2.0\n\
+• rustfft — MIT OR Apache-2.0\n\
 • FFmpeg (export/runtime tooling) — LGPL-2.1-or-later (built with GPL options in Flatpak)\n\
 • x264 (Flatpak build) — GPL-2.0-or-later\n\
 \n\

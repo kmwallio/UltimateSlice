@@ -149,6 +149,9 @@ pub fn build_media_browser(
                         if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
                             item.duration_ns = result.duration_ns;
                             item.is_audio_only = result.is_audio_only;
+                            if item.source_timecode_base_ns.is_none() {
+                                item.source_timecode_base_ns = result.source_timecode_base_ns;
+                            }
                         }
                     }
                 }

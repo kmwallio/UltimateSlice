@@ -179,6 +179,110 @@ fn align_grouped_clips_by_timecode_in_project(
     Ok((aligned_group_count, aligned_clip_count))
 }
 
+/// Apply audio sync results to the project: reposition non-anchor clips
+/// relative to the anchor clip's timeline_start using the computed offsets.
+fn apply_audio_sync_results(
+    results: &[(String, i64, f32)],
+    project: &Rc<RefCell<Project>>,
+    timeline_state: &Rc<RefCell<crate::ui::timeline::TimelineState>>,
+    on_project_changed: &Rc<dyn Fn()>,
+    window: Option<&gtk::ApplicationWindow>,
+) {
+    use crate::undo::SetTrackClipsCommand;
+
+    const MIN_CONFIDENCE: f32 = 3.0;
+
+    // Check all results for minimum confidence
+    let low_confidence = results.iter().any(|(_, _, c)| *c < MIN_CONFIDENCE);
+    if low_confidence {
+        if let Some(win) = window {
+            let proj = project.borrow();
+            flash_window_status_title(
+                win,
+                project,
+                "Audio sync failed — no reliable audio match found",
+            );
+            drop(proj);
+        }
+        return;
+    }
+
+    // Find the anchor clip's timeline_start (first selected clip that wasn't synced)
+    let synced_ids: HashSet<&str> = results.iter().map(|(id, _, _)| id.as_str()).collect();
+    let anchor_timeline_start = {
+        let proj = project.borrow();
+        let st = timeline_state.borrow();
+        let all_ids = st.selected_ids_or_primary();
+        proj.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| all_ids.contains(&c.id) && !synced_ids.contains(c.id.as_str()))
+            .map(|c| c.timeline_start)
+            .unwrap_or(0)
+    };
+
+    // Build new clip positions
+    let mut assignments: HashMap<String, u64> = HashMap::new();
+    for (clip_id, offset_ns, _) in results {
+        let new_start = (anchor_timeline_start as i64 + offset_ns).max(0) as u64;
+        assignments.insert(clip_id.clone(), new_start);
+    }
+
+    if assignments.is_empty() {
+        return;
+    }
+
+    // Apply changes via undo-friendly SetTrackClipsCommand
+    {
+        let mut st = timeline_state.borrow_mut();
+        let proj_rc = st.project.clone();
+
+        // Collect track updates first (avoids borrowing proj as both immutable and mutable)
+        let track_updates: Vec<(String, Vec<Clip>, Vec<Clip>)> = {
+            let proj = proj_rc.borrow();
+            proj.tracks
+                .iter()
+                .filter_map(|track| {
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut changed = false;
+                    for clip in &mut new_clips {
+                        if let Some(&new_start) = assignments.get(&clip.id) {
+                            if clip.timeline_start != new_start {
+                                clip.timeline_start = new_start;
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        let mut proj = proj_rc.borrow_mut();
+        for (track_id, old_clips, new_clips) in track_updates {
+            let cmd = SetTrackClipsCommand {
+                track_id,
+                old_clips,
+                new_clips,
+                label: "Sync clips by audio".to_string(),
+            };
+            st.history.execute(Box::new(cmd), &mut proj);
+        }
+        proj.dirty = true;
+    }
+
+    on_project_changed();
+
+    if let Some(win) = window {
+        flash_window_status_title(win, project, "Audio sync complete");
+    }
+}
+
 fn export_displayed_frame_to_image(
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     out_path: &std::path::Path,
@@ -1197,6 +1301,74 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     drop(proj);
                     on_project_changed();
                 }
+            },
+        ));
+    }
+
+    // Wire on_sync_audio — spawns a background thread for FFT cross-correlation.
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
+        let sync_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<Vec<(String, i64, f32)>>>>> =
+            Rc::new(RefCell::new(None));
+        let sync_rx_for_timer = sync_rx.clone();
+        // Poll timer for sync results
+        {
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            let timeline_state = timeline_state.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let rx_opt = sync_rx_for_timer.borrow();
+                if let Some(ref rx) = *rx_opt {
+                    if let Ok(results) = rx.try_recv() {
+                        drop(rx_opt);
+                        sync_rx_for_timer.borrow_mut().take();
+                        apply_audio_sync_results(
+                            &results,
+                            &project,
+                            &timeline_state,
+                            &on_project_changed,
+                            window_weak.upgrade().as_ref(),
+                        );
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        timeline_state.borrow_mut().on_sync_audio = Some(Rc::new(
+            move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
+                if sync_rx.borrow().is_some() {
+                    // Sync already in progress
+                    return;
+                }
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = proj.title.clone();
+                    let dirty = proj.dirty;
+                    drop(proj);
+                    win.set_title(Some(&format!("UltimateSlice — {title} (Syncing audio...)")));
+                    let _ = dirty; // title restored by apply function
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *sync_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = gstreamer::init();
+                    let clips: Vec<(String, String, u64, u64)> = clip_infos
+                        .iter()
+                        .map(|(id, path, src_in, src_out, _tl_start, _track_id)| {
+                            (id.clone(), path.clone(), *src_in, *src_out)
+                        })
+                        .collect();
+                    let sync_results =
+                        crate::media::audio_sync::sync_clips_by_audio(&clips);
+                    let results: Vec<(String, i64, f32)> = sync_results
+                        .into_iter()
+                        .map(|r| (r.clip_id, r.offset_ns, r.confidence))
+                        .collect();
+                    let _ = tx.send(results);
+                });
             },
         ));
     }
@@ -3875,6 +4047,90 @@ fn handle_mcp_command(
                 }
                 Err(error) => {
                     reply.send(json!({"success": false, "error": error})).ok();
+                }
+            }
+        }
+
+        McpCommand::SyncClipsByAudio { clip_ids, reply } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"success": false, "error": "Need at least 2 clip ids"}))
+                    .ok();
+            } else {
+                // Collect clip info from project
+                let clips: Vec<(String, String, u64, u64)> = {
+                    let proj = project.borrow();
+                    clip_ids
+                        .iter()
+                        .filter_map(|id| {
+                            proj.tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| &c.id == id)
+                                .map(|c| {
+                                    (
+                                        c.id.clone(),
+                                        c.source_path.clone(),
+                                        c.source_in,
+                                        c.source_out,
+                                    )
+                                })
+                        })
+                        .collect()
+                };
+                if clips.len() < 2 {
+                    reply
+                        .send(json!({"success": false, "error": "Could not find 2+ clips with the provided ids"}))
+                        .ok();
+                } else {
+                    let anchor_timeline_start = {
+                        let proj = project.borrow();
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .find(|c| c.id == clips[0].0)
+                            .map(|c| c.timeline_start)
+                            .unwrap_or(0)
+                    };
+                    let sync_results =
+                        crate::media::audio_sync::sync_clips_by_audio(&clips);
+                    let mut result_json = Vec::new();
+                    let mut assignments: HashMap<String, u64> = HashMap::new();
+                    let mut all_confident = true;
+                    for r in &sync_results {
+                        let new_start =
+                            (anchor_timeline_start as i64 + r.offset_ns).max(0) as u64;
+                        result_json.push(json!({
+                            "clip_id": r.clip_id,
+                            "offset_ns": r.offset_ns,
+                            "confidence": r.confidence,
+                            "new_timeline_start_ns": new_start,
+                        }));
+                        if r.confidence < 3.0 {
+                            all_confident = false;
+                        } else {
+                            assignments.insert(r.clip_id.clone(), new_start);
+                        }
+                    }
+                    if all_confident && !assignments.is_empty() {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            for clip in &mut track.clips {
+                                if let Some(&new_start) = assignments.get(&clip.id) {
+                                    clip.timeline_start = new_start;
+                                }
+                            }
+                        }
+                        proj.dirty = true;
+                        drop(proj);
+                        on_project_changed();
+                    }
+                    reply
+                        .send(json!({
+                            "success": all_confident,
+                            "results": result_json,
+                        }))
+                        .ok();
                 }
             }
         }

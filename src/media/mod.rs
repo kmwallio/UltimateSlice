@@ -1,3 +1,4 @@
+pub mod audio_sync;
 pub mod export;
 pub mod player;
 pub mod probe_cache;

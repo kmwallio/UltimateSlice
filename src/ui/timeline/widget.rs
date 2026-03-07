@@ -145,6 +145,8 @@ pub struct TimelineState {
     /// Lightweight callback fired immediately when clip selection changes (no pipeline rebuild).
     /// Called with the new selected_clip_id (or None if deselected).
     pub on_clip_selected: Option<Rc<dyn Fn(Option<String>)>>,
+    /// Callback fired when user requests audio sync: Vec<(clip_id, source_path, source_in, source_out, timeline_start, track_id)>
+    pub on_sync_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
@@ -188,6 +190,7 @@ impl TimelineState {
             on_extraction_pause: None,
             on_drop_clip: None,
             on_clip_selected: None,
+            on_sync_audio: None,
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
@@ -681,6 +684,52 @@ impl TimelineState {
         found_group
     }
 
+    /// Returns true when 2+ selected clips could be synced by audio.
+    fn can_sync_selected_clips_by_audio(&self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() < 2 {
+            return false;
+        }
+        // All selected clips need a source_path (always true) — no further validation needed;
+        // actual audio availability is checked at extraction time.
+        true
+    }
+
+    /// Collect clip info for audio sync and fire the callback.
+    fn sync_selected_clips_by_audio(&self) {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() < 2 {
+            return;
+        }
+        let proj = self.project.borrow();
+        let clip_infos: Vec<(String, String, u64, u64, u64, String)> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| {
+                t.clips
+                    .iter()
+                    .filter(|c| ids.contains(&c.id))
+                    .map(|c| {
+                        (
+                            c.id.clone(),
+                            c.source_path.clone(),
+                            c.source_in,
+                            c.source_out,
+                            c.timeline_start,
+                            t.id.clone(),
+                        )
+                    })
+            })
+            .collect();
+        drop(proj);
+        if clip_infos.len() < 2 {
+            return;
+        }
+        if let Some(ref cb) = self.on_sync_audio {
+            cb(clip_infos);
+        }
+    }
+
     pub fn copy_selected_to_clipboard(&mut self) -> bool {
         let Some(clip_id) = self.selected_clip_id.clone() else {
             return false;
@@ -950,7 +999,7 @@ impl TimelineState {
         self.select_clips_from_playhead(false)
     }
 
-    fn selected_ids_or_primary(&self) -> HashSet<String> {
+    pub fn selected_ids_or_primary(&self) -> HashSet<String> {
         if !self.selected_clip_ids.is_empty() {
             return self.selected_clip_ids.clone();
         }
@@ -1529,9 +1578,15 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     btn_align_grouped.set_tooltip_text(Some(
         "Align grouped clips using stored source timecode metadata when available",
     ));
+    let btn_sync_audio = gtk::Button::with_label("Sync Selected Clips by Audio");
+    btn_sync_audio.add_css_class("flat");
+    btn_sync_audio.set_tooltip_text(Some(
+        "Align selected clips using audio cross-correlation (requires 2+ clips with audio)",
+    ));
     clip_context_box.append(&btn_link_selected);
     clip_context_box.append(&btn_unlink_selected);
     clip_context_box.append(&btn_align_grouped);
+    clip_context_box.append(&btn_sync_audio);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     {
@@ -1599,6 +1654,19 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_sync_audio.connect_clicked(move |_| {
+            let st = state.borrow();
+            st.sync_selected_clips_by_audio();
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
             }
         });
     }
@@ -1833,10 +1901,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let can_link = st.can_link_selected_clips();
                         let can_unlink = st.can_unlink_selected_clips();
                         let can_align_grouped = st.can_align_selected_groups_by_timecode();
+                        let can_sync_audio = st.can_sync_selected_clips_by_audio();
                         btn_link_selected.set_sensitive(can_link);
                         btn_unlink_selected.set_sensitive(can_unlink);
                         btn_align_grouped.set_sensitive(can_align_grouped);
-                        if can_link || can_unlink || can_align_grouped {
+                        btn_sync_audio.set_sensitive(can_sync_audio);
+                        if can_link || can_unlink || can_align_grouped || can_sync_audio {
                             clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                 x as i32, y as i32, 1, 1,
                             )));

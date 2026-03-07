@@ -231,6 +231,10 @@ pub enum McpCommand {
     SourcePause {
         reply: SyncSender<Value>,
     },
+    SyncClipsByAudio {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

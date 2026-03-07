@@ -123,9 +123,18 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Grouped clips delete together for both normal delete and ripple delete.
 - Selecting one clip in a group shows a secondary border on the other clips in that group for quick visual context.
 - Right-clicking a grouped clip can now run **Align Grouped Clips by Timecode** when that clip group carries stored source-time metadata; the selected clip acts as the anchor when possible.
-- Today that metadata is preserved for FCPXML-imported clips and UltimateSlice-saved projects that already carry source-time references.
-- Timecode alignment is the current first pass for grouped sync workflows; audio-based auto-sync remains future work.
+- Source timecode metadata is automatically extracted from media files on import (camera creation timestamps) and also preserved for FCPXML-imported clips and UltimateSlice-saved projects.
 - First pass scope: grouped trim behavior is not yet enabled.
+
+### Sync Selected Clips by Audio (right-click menu)
+
+- Select 2 or more clips on the timeline, then right-click → **Sync Selected Clips by Audio**.
+- The first selected clip is the **anchor** — it stays in place. All other clips are repositioned based on matching audio content using FFT cross-correlation.
+- Sync runs on a background thread; the title bar shows "Syncing audio…" while processing.
+- If no reliable audio match is found (low confidence), a status message is shown and no changes are applied.
+- The operation is undoable (`Ctrl+Z`).
+- Clips without audio streams are not eligible for audio sync (the button is insensitive when fewer than 2 clips are selected).
+- Typical use case: multi-cam footage from cameras that were not jam-synced — each camera's audio captures the same ambient sound, enabling automatic alignment.
 
 ### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
 
@@ -161,7 +170,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
-| `Right-click clip` | Open clip context menu with link/unlink and grouped timecode-align actions |
+| `Right-click clip` | Open clip context menu with link/unlink, grouped timecode-align, and audio sync actions |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |

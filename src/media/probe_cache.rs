@@ -8,6 +8,7 @@ pub struct ProbeResult {
     pub is_audio_only: bool,
     #[allow(dead_code)]
     pub has_audio: bool,
+    pub source_timecode_base_ns: Option<u64>,
 }
 
 /// Asynchronous media probe cache.
@@ -36,13 +37,15 @@ impl MediaProbeCache {
         std::thread::spawn(move || {
             while let Ok(path) = work_rx.recv() {
                 let uri = format!("file://{path}");
-                let (duration_ns, is_audio_only, has_audio) = probe_media_bg(&uri);
+                let (duration_ns, is_audio_only, has_audio, source_timecode_base_ns) =
+                    probe_media_bg(&uri);
                 if tx
                     .send(ProbeResult {
                         path,
                         duration_ns,
                         is_audio_only,
                         has_audio,
+                        source_timecode_base_ns,
                     })
                     .is_err()
                 {
@@ -88,10 +91,10 @@ impl MediaProbeCache {
     }
 }
 
-/// Single Discoverer call that returns duration, audio-only flag, and has-audio flag.
-fn probe_media_bg(uri: &str) -> (u64, bool, bool) {
+/// Single Discoverer call that returns duration, audio-only flag, has-audio flag, and timecode.
+fn probe_media_bg(uri: &str) -> (u64, bool, bool, Option<u64>) {
     use gstreamer_pbutils::Discoverer;
-    let fallback = (10 * 1_000_000_000, false, true);
+    let fallback = (10 * 1_000_000_000, false, true, None);
     let Ok(()) = gstreamer::init() else {
         return fallback;
     };
@@ -104,5 +107,26 @@ fn probe_media_bg(uri: &str) -> (u64, bool, bool) {
     let duration_ns = info.duration().map(|d| d.nseconds()).unwrap_or(fallback.0);
     let is_audio_only = info.video_streams().is_empty();
     let has_audio = !info.audio_streams().is_empty();
-    (duration_ns, is_audio_only, has_audio)
+    let source_timecode_base_ns = extract_timecode_ns(&info);
+    (duration_ns, is_audio_only, has_audio, source_timecode_base_ns)
+}
+
+/// Extract time-of-day nanoseconds from GStreamer Discoverer tags.
+/// Checks GST_TAG_DATE_TIME first, which contains creation date/time for
+/// most camera files. Returns time-of-day (not epoch) for multi-cam sync.
+fn extract_timecode_ns(info: &gstreamer_pbutils::DiscovererInfo) -> Option<u64> {
+    let tags = info.tags()?;
+    // Try GST_TAG_DATE_TIME (most camera files have this)
+    if let Some(dt) = tags.get::<gstreamer::tags::DateTime>().map(|v| v.get()) {
+        let hour = dt.hour()? as u64;
+        let minute = dt.minute()? as u64;
+        let second = dt.second()? as u64;
+        let microsecond = dt.microsecond().unwrap_or(0) as u64;
+        let ns = hour * 3_600_000_000_000
+            + minute * 60_000_000_000
+            + second * 1_000_000_000
+            + microsecond * 1_000;
+        return Some(ns);
+    }
+    None
 }

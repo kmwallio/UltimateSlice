@@ -40,6 +40,7 @@ src/
     media_library.rs        MediaItem (library entry) + SourceMarks (source in/out state)
 
   media/
+    audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
     thumbnail.rs            Frame extraction via GStreamer AppSink pipeline (unused in UI yet)
     export.rs               MP4 export via ffmpeg subprocess: filter_complex concat (video) + adelay/amix (audio) → libx264 + aac
@@ -235,6 +236,7 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 | `anyhow` | `1` | error handling |
 | `thiserror` | `1` | error types |
 | `log` + `env_logger` | latest | logging |
+| `rustfft` | `6` | FFT for audio cross-correlation sync |
 
 **Do not upgrade gstreamer without also upgrading gtk4/gdk4/glib to the matching glib version.**
 
@@ -347,6 +349,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `link_clips` | Assign a shared clip link group to two or more clips |
 | `unlink_clips` | Clear clip link groups for the provided clips and their linked peers |
 | `align_grouped_clips_by_timecode` | Align grouped clips referenced by clip ids using stored source-time metadata |
+| `sync_clips_by_audio` | Synchronize 2+ clips by FFT audio cross-correlation (first clip is anchor) |
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |
