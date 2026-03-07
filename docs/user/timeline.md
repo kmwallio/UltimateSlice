@@ -98,6 +98,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - When both **Ctrl/Cmd+Shift** are held, toggle selection takes precedence over Shift range selection.
 - **Ctrl+A** selects all clips in the timeline.
 - **Marquee drag** (drag in empty timeline body) selects clips intersecting the rectangle.
+- Selecting a linked clip also selects its linked peers so synchronized A/V-linked edits stay together.
 - Modifier-based selection is preserved when a clip drag starts, so Ctrl/Cmd+click and Shift+click selections do not unexpectedly collapse.
 - Dragging a selected clip moves the current selected set together while preserving relative offsets across tracks; grouped clips are still expanded and move as a unit.
 - The Inspector still follows the primary selected clip.
@@ -123,6 +124,16 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Selecting one clip in a group shows a secondary border on the other clips in that group for quick visual context.
 - First pass scope: grouped trim behavior is not yet enabled.
 
+### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
+
+- **Link (`Ctrl+L`)** assigns the current multi-selection to a shared clip link group.
+- **Unlink (`Ctrl+Shift+L`)** clears linking for the selected linked clip(s) and any linked peers in the same link group.
+- Linked clips are selected together, move together when dragging any linked member, and delete together for both normal delete and ripple delete.
+- Link behavior is intentionally narrower than clip grouping: trims remain independent in this first pass.
+- Right-clicking a selected clip now opens a clip context menu with **Link Selected Clips** and **Unlink Selected Clips** actions so link editing is available without remembering the shortcuts.
+- Linked clips show a **LINK** badge in the timeline so linked relationships stay visible even when nothing is selected.
+- When a linked selection spans multiple clips, non-primary linked peers also get a cyan inset border so they stay visually distinct from the primary selected clip.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -145,6 +156,9 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
+| `Ctrl+L` | Link selected clips |
+| `Ctrl+Shift+L` | Unlink selected clips |
+| `Right-click clip` | Open clip context menu with link/unlink actions |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |
@@ -204,3 +218,5 @@ The undo history is per-session (not persisted in the FCPXML).
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
 - Selected clips have a yellow highlight border.
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.
+- Linked clips show a `LINK` badge whenever they belong to a clip link group.
+- Non-primary linked peers in the current linked selection show a cyan inset border.

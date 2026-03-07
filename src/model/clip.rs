@@ -148,6 +148,9 @@ pub struct Clip {
     /// Optional clip-group identifier. Clips with the same group id are edited as a unit.
     #[serde(default)]
     pub group_id: Option<String>,
+    /// Optional strict link-group identifier used for synchronized A/V-linked edits.
+    #[serde(default)]
+    pub link_group_id: Option<String>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -221,6 +224,7 @@ impl Clip {
             highlights: 0.0,
             reverse: false,
             group_id: None,
+            link_group_id: None,
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
@@ -283,6 +287,7 @@ mod tests {
         assert!(!clip.flip_v);
         assert!(clip.lut_path.is_none());
         assert!(clip.group_id.is_none());
+        assert!(clip.link_group_id.is_none());
         assert!(clip.transition_after.is_empty());
         assert!(clip.fcpxml_unknown_attrs.is_empty());
         assert!(clip.fcpxml_unknown_children.is_empty());

@@ -153,6 +153,11 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                     asset_clip.push_attribute(("us:group-id", gid.as_str()));
                 }
             }
+            if let Some(ref link_gid) = clip.link_group_id {
+                if !link_gid.is_empty() {
+                    asset_clip.push_attribute(("us:link-group-id", link_gid.as_str()));
+                }
+            }
             asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
             asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
             asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
@@ -703,6 +708,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:speed"
             | "us:reverse"
             | "us:group-id"
+            | "us:link-group-id"
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
@@ -791,6 +797,20 @@ mod tests {
 
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(xml.contains("<media-rep kind=\"proxy-media\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_link_group_attr() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.link_group_id = Some("link-1".to_string());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:link-group-id=\"link-1\""));
     }
 
     #[test]

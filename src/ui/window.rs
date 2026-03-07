@@ -3074,6 +3074,7 @@ fn handle_mcp_command(
                             "source_path":      c.source_path,
                             "track_index":      ti,
                             "track_id":         track.id,
+                            "link_group_id":    c.link_group_id,
                             "timeline_start_ns": c.timeline_start,
                             "source_in_ns":     c.source_in,
                             "source_out_ns":    c.source_out,
@@ -3471,20 +3472,43 @@ fn handle_mcp_command(
         McpCommand::RemoveClip { clip_id, reply } => {
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let mut proj = project.borrow_mut();
-            let mut found = false;
+            let target_ids: HashSet<String> = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .map(|clip| {
+                    if let Some(link_group_id) = clip.link_group_id.clone() {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .filter(|c| c.link_group_id.as_deref() == Some(link_group_id.as_str()))
+                            .map(|c| c.id.clone())
+                            .collect()
+                    } else {
+                        std::iter::once(clip_id.clone()).collect()
+                    }
+                })
+                .unwrap_or_default();
+            let mut removed_count = 0usize;
             for track in proj.tracks.iter_mut() {
-                if let Some(pos) = track.clips.iter().position(|c| c.id == clip_id) {
-                    track.clips.remove(pos);
+                let before = track.clips.len();
+                track.clips.retain(|c| !target_ids.contains(&c.id));
+                if before != track.clips.len() {
+                    removed_count += before - track.clips.len();
                     if magnetic_mode {
                         track.compact_gap_free();
                     }
-                    proj.dirty = true;
-                    found = true;
-                    break;
                 }
             }
+            let found = removed_count > 0;
+            if found {
+                proj.dirty = true;
+            }
             drop(proj);
-            reply.send(json!({"success": found})).ok();
+            reply
+                .send(json!({"success": found, "removed_clip_count": removed_count}))
+                .ok();
             if found {
                 on_project_changed();
             }
@@ -3497,21 +3521,142 @@ fn handle_mcp_command(
         } => {
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            for track in proj.tracks.iter_mut() {
-                if let Some(idx) = track.clips.iter().position(|c| c.id == clip_id) {
-                    track.clips[idx].timeline_start = new_start_ns;
-                    if magnetic_mode {
-                        track.compact_gap_free();
+            let target = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .map(|clip| (clip.timeline_start, clip.link_group_id.clone()));
+            let mut moved_count = 0usize;
+            if let Some((original_start_ns, link_group_id)) = target {
+                if let Some(link_group_id) = link_group_id {
+                    let delta = i128::from(new_start_ns) - i128::from(original_start_ns);
+                    for track in proj.tracks.iter_mut() {
+                        let mut changed = false;
+                        for clip in &mut track.clips {
+                            if clip.link_group_id.as_deref() == Some(link_group_id.as_str()) {
+                                clip.timeline_start =
+                                    (i128::from(clip.timeline_start) + delta).max(0) as u64;
+                                moved_count += 1;
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            track.sort_clips();
+                            if magnetic_mode {
+                                track.compact_gap_free();
+                            }
+                        }
                     }
-                    proj.dirty = true;
-                    found = true;
-                    break;
+                } else {
+                    for track in proj.tracks.iter_mut() {
+                        if let Some(idx) = track.clips.iter().position(|c| c.id == clip_id) {
+                            track.clips[idx].timeline_start = new_start_ns;
+                            if magnetic_mode {
+                                track.compact_gap_free();
+                            } else {
+                                track.sort_clips();
+                            }
+                            moved_count = 1;
+                            break;
+                        }
+                    }
                 }
             }
-            drop(proj);
-            reply.send(json!({"success": found})).ok();
+            let found = moved_count > 0;
             if found {
+                proj.dirty = true;
+            }
+            drop(proj);
+            reply
+                .send(json!({"success": found, "moved_clip_count": moved_count}))
+                .ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::LinkClips { clip_ids, reply } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"success": false, "error": "clip_ids must contain at least two clip ids"}))
+                    .ok();
+                return;
+            }
+            let clip_id_set: HashSet<String> = clip_ids.into_iter().collect();
+            let link_group_id = uuid::Uuid::new_v4().to_string();
+            let mut proj = project.borrow_mut();
+            let mut linked_count = 0usize;
+            for track in proj.tracks.iter_mut() {
+                for clip in &mut track.clips {
+                    if clip_id_set.contains(&clip.id) {
+                        clip.link_group_id = Some(link_group_id.clone());
+                        linked_count += 1;
+                    }
+                }
+            }
+            let success = linked_count >= 2;
+            if success {
+                proj.dirty = true;
+            }
+            drop(proj);
+            reply
+                .send(json!({
+                    "success": success,
+                    "link_group_id": if success { Some(link_group_id) } else { None::<String> },
+                    "linked_clip_count": linked_count
+                }))
+                .ok();
+            if success {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::UnlinkClips { clip_ids, reply } => {
+            let clip_id_set: HashSet<String> = clip_ids.into_iter().collect();
+            if clip_id_set.is_empty() {
+                reply
+                    .send(json!({"success": false, "error": "clip_ids must contain at least one clip id"}))
+                    .ok();
+                return;
+            }
+            let mut proj = project.borrow_mut();
+            let target_link_groups: HashSet<String> = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| clip_id_set.contains(&c.id))
+                .filter_map(|c| c.link_group_id.clone())
+                .collect();
+            if target_link_groups.is_empty() {
+                drop(proj);
+                reply
+                    .send(json!({"success": false, "error": "No linked clips found for the provided clip_ids"}))
+                    .ok();
+                return;
+            }
+            let mut unlinked_count = 0usize;
+            for track in proj.tracks.iter_mut() {
+                for clip in &mut track.clips {
+                    if clip
+                        .link_group_id
+                        .as_deref()
+                        .is_some_and(|gid| target_link_groups.contains(gid))
+                    {
+                        clip.link_group_id = None;
+                        unlinked_count += 1;
+                    }
+                }
+            }
+            let success = unlinked_count > 0;
+            if success {
+                proj.dirty = true;
+            }
+            drop(proj);
+            reply
+                .send(json!({"success": success, "unlinked_clip_count": unlinked_count}))
+                .ok();
+            if success {
                 on_project_changed();
             }
         }

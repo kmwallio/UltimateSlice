@@ -178,7 +178,10 @@ Tracking docs:
 - [x] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
 - [x] Clip grouping / ungrouping (persist clip-group IDs; grouped move/delete as a unit)
   - [x] Visual group context: selecting a grouped clip highlights non-selected group peers with a secondary border
+  - [ ] Align grouped clips by audio or timecode
 - [ ] Audio/video linking (auto-link video and audio from same source)
+  - [x] Manual clip linking / unlinking with synchronized selection, move, and delete behavior
+  - [ ] Auto-link same-source A/V clip creation heuristics
 - [ ] Solo track (play only selected tracks, complement to muted/locked)
 - [ ] Freeze frame (hold single frame for arbitrary duration)
 - [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
@@ -335,7 +338,7 @@ Tracking docs:
 - [ ] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls
 - [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
 - [ ] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
-- [ ] Adjustment layers — clip on a track that applies its effects to everything below
+- [ ] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
 - [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
 
 ### Video Transform (per clip)
@@ -465,6 +468,10 @@ Tracking docs:
 - [ ] AI Scene Cut Detection for long source files
 - [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
 - [ ] Optical Flow slow-motion (AI frame interpolation)
+- [ ] AI Music Generation (MusicGen / MusicGPT)
+  - [ ] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
+  - [ ] Phase 2 — Local model backend: Preferences entry for local model path; candidate runtimes include the `musicgpt` Rust crate (native, no Python dependency), MusicGen-small ONNX via `ort`, or Python `audiocraft` subprocess; background generation with status-bar progress (same pattern as proxy transcoding)
+  - [ ] Phase 3 — Prompt UI: popover on drawn region with text prompt input, optional reference audio, duration auto-calculated from region length; generated audio written as a WAV clip and placed in the region
 
 ### Script-to-Timeline (Create Project from Script & Clips)
 - [ ] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order

@@ -4,6 +4,14 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Documentation
+- **Roadmap AI Music Generation planning**: Added a phased roadmap item under AI & Automation for MusicGen/MusicGPT integration — draw-region UX on audio tracks (phase 1), local model backend via `musicgpt` crate / ONNX / Python `audiocraft` subprocess (phase 2), and prompt popover with auto-duration (phase 3).
+- **Roadmap clip-group sync planning**: Added a roadmap item for aligning grouped clips by audio or timecode so the planned grouped-edit workflow is tracked alongside existing clip-group features.
+
+### Added
+- **Timeline clip linking with MCP support**: Added manual clip link/unlink workflows (`Ctrl+L`, `Ctrl+Shift+L`) with synchronized selection/move/delete behavior, persistent `link_group_id` FCPXML round-tripping, LINK timeline badges, cyan linked-peer inset highlight, and new MCP `link_clips` / `unlink_clips` tools.
+- **Timeline link context menu**: Right-clicking a selected clip now opens clip actions for **Link Selected Clips** / **Unlink Selected Clips**, while preserving the current multi-selection when you right-click within it.
+
 ### Fixed
 - **Media Library thumbnail refresh after import/open**: Thumbnails now trigger a debounced batch redraw when extraction completes, and media-grid sync now detects content changes (not just item count), so thumbnail tiles update without requiring manual resize/redraw.
 - **GTK slider min-size runtime warnings**: Added a generic `slider` CSS reset (`border/margin/padding/box-shadow: none`) and retained explicit scale-thumb sizing, eliminating startup `GtkGizmo ... (slider) reported min width/height -4` warnings.

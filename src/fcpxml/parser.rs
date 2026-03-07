@@ -754,6 +754,9 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:group-id") {
                 clip.group_id = if v.is_empty() { None } else { Some(v.clone()) };
             }
+            if let Some(v) = attrs.get("us:link-group-id") {
+                clip.link_group_id = if v.is_empty() { None } else { Some(v.clone()) };
+            }
             if let Some(v) = attrs.get("us:shadows") {
                 clip.shadows = v.parse().unwrap_or(0.0);
             }
@@ -994,6 +997,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:speed"
             | "us:reverse"
             | "us:group-id"
+            | "us:link-group-id"
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
@@ -1667,6 +1671,34 @@ mod tests {
         assert!((clip.saturation - 0.8).abs() < 1e-5);
         assert!((clip.opacity - 0.9).abs() < 1e-5);
         assert!((clip.speed - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_link_group_attr() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="LinkTest">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s"
+                        name="footage" us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                        us:link-group-id="link-1"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.link_group_id.as_deref(), Some("link-1"));
     }
 
     #[test]

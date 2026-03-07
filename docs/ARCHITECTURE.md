@@ -325,7 +325,7 @@ Before declaring a task finished, agents must verify via MCP:
 |---|---|
 | `get_project` | Full project JSON (title, tracks, clips) |
 | `list_tracks` | Track index, id, kind, clip count |
-| `list_clips` | All clips with id, path, track\_index, ns positions |
+| `list_clips` | All clips with id, path, track\_index, ns positions, and `link_group_id` when present |
 | `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
 | `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
@@ -344,6 +344,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |
+| `link_clips` | Assign a shared clip link group to two or more clips |
+| `unlink_clips` | Clear clip link groups for the provided clips and their linked peers |
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |

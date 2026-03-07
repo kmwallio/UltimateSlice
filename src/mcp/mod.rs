@@ -66,6 +66,14 @@ pub enum McpCommand {
         new_start_ns: u64,
         reply: SyncSender<Value>,
     },
+    LinkClips {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    UnlinkClips {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
     TrimClip {
         clip_id: String,
         source_in_ns: u64,

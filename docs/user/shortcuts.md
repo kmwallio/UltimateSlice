@@ -59,6 +59,8 @@
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
+| `Ctrl+L` | Link selected clips |
+| `Ctrl+Shift+L` | Unlink selected clips |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle a clip in the current selection |
 | `Ctrl+A` | Select all timeline clips |

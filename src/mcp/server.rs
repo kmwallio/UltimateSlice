@@ -290,6 +290,36 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "link_clips",
+            "description": "Assign a shared link group to two or more timeline clips so selection/move/delete operations stay synchronized.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Two or more clip ids to link together."
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "unlink_clips",
+            "description": "Clear the shared link group for the provided clips and any peers already linked with them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "One or more clip ids whose link groups should be cleared."
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
             "name": "trim_clip",
             "description": "Adjust the source in- and out-point of a clip without changing its timeline position.",
             "inputSchema": {
@@ -702,6 +732,28 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "move_clip" => McpCommand::MoveClip {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             new_start_ns: args["new_start_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+        "link_clips" => McpCommand::LinkClips {
+            clip_ids: args["clip_ids"]
+                .as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            reply: tx,
+        },
+        "unlink_clips" => McpCommand::UnlinkClips {
+            clip_ids: args["clip_ids"]
+                .as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             reply: tx,
         },
 
