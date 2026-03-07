@@ -59,6 +59,48 @@ See `docs/ARCHITECTURE.md` for the full layout and design notes. Highlights:
 
 On Linux, install GTK4 and GStreamer via your distribution packages.
 
+## Recommended System Specs
+
+Three tiers targeting up to 4K source media, each with suggested UltimateSlice preference settings.
+
+### Minimum (1080p editing, basic 4K with proxies)
+
+| Component | Spec |
+|-----------|------|
+| CPU | Dual-core, 2.0 GHz+ |
+| RAM | 4 GB |
+| GPU | Integrated graphics (Intel HD / AMD APU), 512 MB shared VRAM |
+| Storage | HDD (SSD recommended for proxy cache) |
+
+**Settings:** Proxy Mode → Half or Quarter, Preview Quality → Quarter, Hardware Acceleration → Off, GSK Renderer → Cairo, Playback Priority → Smooth
+
+### Recommended (4K editing)
+
+| Component | Spec |
+|-----------|------|
+| CPU | Quad-core, 3.0 GHz+ |
+| RAM | 8 GB |
+| GPU | Integrated or discrete with VA-API support, 2 GB VRAM |
+| Storage | SSD |
+
+**Settings:** Proxy Mode → Off, Preview Quality → Half or Auto, Hardware Acceleration → On, GSK Renderer → Auto (OpenGL), Playback Priority → Balanced
+
+### Ideal (4K real-time, multi-track compositing)
+
+| Component | Spec |
+|-----------|------|
+| CPU | 6+ cores, 3.5 GHz+ |
+| RAM | 16 GB+ |
+| GPU | Discrete GPU with VA-API, 4 GB+ VRAM |
+| Storage | NVMe SSD |
+
+**Settings:** Proxy Mode → Off, Preview Quality → Full, Hardware Acceleration → On, GSK Renderer → Vulkan, Playback Priority → Accurate, Real-time Preview → On
+
+> **Notes:**
+> - VA-API hardware decoding supports H.264, H.265/HEVC, VP9, and AV1.
+> - Export uses FFmpeg (CPU-based) — more cores = faster exports.
+> - Flatpak includes `--device=dri` for GPU access; native installs need VA-API drivers.
+
 ## Build & Run
 
 ```/dev/null/bash#L1-5

@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Documentation
+- **README recommended system specs**: Added a three-tier (Minimum / Recommended / Ideal) hardware spec table with matching UltimateSlice preference settings for 1080p through 4K real-time editing, plus notes on VA-API codecs, FFmpeg export, and Flatpak GPU access.
 - **Roadmap AI Music Generation planning**: Added a phased roadmap item under AI & Automation for MusicGen/MusicGPT integration — draw-region UX on audio tracks (phase 1), local model backend via `musicgpt` crate / ONNX / Python `audiocraft` subprocess (phase 2), and prompt popover with auto-duration (phase 3).
 - **Roadmap clip-group sync planning**: Added a roadmap item for aligning grouped clips by audio or timecode so the planned grouped-edit workflow is tracked alongside existing clip-group features.
 
