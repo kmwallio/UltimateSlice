@@ -34,6 +34,7 @@ Tracking docs:
 - [x] Import media via file chooser (video/audio/image MIME filter)
 - [x] GStreamer Discoverer probes duration on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
+- [x] Thumbnails auto-refresh when extraction completes (debounced batch redraw) without requiring manual panel/window redraw
 - [x] Selecting a library item loads it in the source preview
 - [x] Imported clips are **not** auto-added to the timeline
 - [x] Import no longer auto-loads Source Monitor; selecting a library item loads preview on demand (avoids import-time playbin reconfiguration races)

@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Media Library thumbnail refresh after import/open**: Thumbnails now trigger a debounced batch redraw when extraction completes, and media-grid sync now detects content changes (not just item count), so thumbnail tiles update without requiring manual resize/redraw.
 - **GTK slider min-size runtime warnings**: Added a generic `slider` CSS reset (`border/margin/padding/box-shadow: none`) and retained explicit scale-thumb sizing, eliminating startup `GtkGizmo ... (slider) reported min width/height -4` warnings.
 - **About/Credits license notice placeholder**: Replaced the remaining `TBD` project license label in Preferences → About/Credits with the actual `GPL-3.0-or-later` license text.
 - **Legacy GTK UI deprecation noise cleanup**: Added narrowly scoped `#[allow(deprecated)]` on existing Dialog/ComboBoxText-based UI entry points in Preferences, Toolbar dialogs, and Timeline shortcuts help to keep warning output clean without changing runtime behavior.

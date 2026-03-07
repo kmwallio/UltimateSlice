@@ -40,4 +40,5 @@ Supported formats depend on your installed GStreamer plugins (any format `playbi
 - Deleting a clip from the timeline does not remove it from the library.
 - The library list is saved as part of the FCPXML project file.
 - Creating a new project or opening a different project clears the current library view first, then loads that project's media list.
+- Thumbnails are generated asynchronously and refresh automatically as they become available (no manual panel/window resize needed).
 - When the library is empty, the panel shows a short hint reminding you that you can import or drag files to begin.

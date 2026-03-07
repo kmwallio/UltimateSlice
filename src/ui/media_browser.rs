@@ -9,7 +9,7 @@ use gtk4::{
     self as gtk, Box as GBox, Button, DrawingArea, FlowBox, FlowBoxChild, Label, Orientation,
     ScrolledWindow,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const THUMB_W: i32 = 160;
@@ -88,6 +88,7 @@ pub fn build_media_browser(
     flow_box.add_css_class("media-grid");
     scroll.set_child(Some(&flow_box));
     vbox.append(&scroll);
+    let flow_box_paths = Rc::new(RefCell::new(Vec::<String>::new()));
 
     // Populate from existing library items (e.g. after project load).
     {
@@ -100,6 +101,7 @@ pub fn build_media_browser(
                 &thumb_cache,
             );
             flow_box.insert(&child, -1);
+            flow_box_paths.borrow_mut().push(item.source_path.clone());
         }
     }
 
@@ -122,16 +124,21 @@ pub fn build_media_browser(
         });
     }
 
-    // 250ms timer: keep grid in sync with library + poll thumbnail & probe caches.
+    // Debounced thumbnail redraw trigger (coalesces bursts during bulk import).
+    let thumb_redraw_scheduled = Rc::new(Cell::new(false));
+
+    // 100ms timer: keep grid in sync with library + poll thumbnail & probe caches.
     {
         let library = library.clone();
         let flow_box = flow_box.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
+        let flow_box_paths = flow_box_paths.clone();
         let empty_hint = empty_hint.clone();
         let import_btn = import_btn.clone();
         let header_import_btn = header_import_btn.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+        let thumb_redraw_scheduled = thumb_redraw_scheduled.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             // Drain completed probe results → update library items (lightweight).
             let resolved = probe_cache.borrow_mut().poll();
             if !resolved.is_empty() {
@@ -144,6 +151,9 @@ pub fn build_media_browser(
                             item.is_audio_only = result.is_audio_only;
                         }
                     }
+                }
+                if !flowbox_matches_library(&flow_box_paths.borrow(), &lib) {
+                    rebuild_flowbox(&flow_box, &lib, &thumb_cache, &flow_box_paths);
                 }
                 drop(lib);
                 // Now that probes are done, start thumbnail extraction for newly-probed
@@ -182,19 +192,18 @@ pub fn build_media_browser(
             empty_hint.set_visible(lib.is_empty());
             import_btn.set_visible(lib.is_empty());
             header_import_btn.set_visible(!lib.is_empty());
-            let count = flowbox_child_count(&flow_box);
-            if count != lib.len() {
-                rebuild_flowbox(&flow_box, &lib, &thumb_cache);
+            if !flowbox_matches_library(&flow_box_paths.borrow(), &lib) {
+                rebuild_flowbox(&flow_box, &lib, &thumb_cache, &flow_box_paths);
             }
             drop(lib);
-            if thumb_cache.borrow_mut().poll() {
-                // In GTK4, queue_draw() on a FlowBox does not propagate into
-                // descendant DrawingArea widgets. Queue each child directly.
-                let mut child = flow_box.first_child();
-                while let Some(w) = child {
-                    w.queue_draw();
-                    child = w.next_sibling();
-                }
+            let thumbnails_ready = !thumb_cache.borrow_mut().poll_ready_keys().is_empty();
+            if thumbnails_ready && !thumb_redraw_scheduled.replace(true) {
+                let flow_box = flow_box.clone();
+                let thumb_redraw_scheduled = thumb_redraw_scheduled.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(40), move || {
+                    queue_flowbox_thumbnail_draws(&flow_box);
+                    thumb_redraw_scheduled.set(false);
+                });
             }
             glib::ControlFlow::Continue
         });
@@ -206,6 +215,7 @@ pub fn build_media_browser(
         let flow_box = flow_box.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
+        let flow_box_paths = flow_box_paths.clone();
 
         Rc::new(move |btn: &Button| {
             let dialog = gtk::FileDialog::new();
@@ -225,6 +235,7 @@ pub fn build_media_browser(
             let flow_box = flow_box.clone();
             let thumb_cache = thumb_cache.clone();
             let probe_cache = probe_cache.clone();
+            let flow_box_paths = flow_box_paths.clone();
 
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
@@ -242,6 +253,7 @@ pub fn build_media_browser(
                             &flow_box,
                             &thumb_cache,
                             &probe_cache,
+                            &flow_box_paths,
                         );
                     }
                 }
@@ -264,6 +276,7 @@ pub fn build_media_browser(
         let flow_box = flow_box.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
+        let flow_box_paths = flow_box_paths.clone();
         let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
         let flow_box_for_drop = flow_box.clone();
         drop_target.connect_drop(move |_target, value, _x, _y| {
@@ -279,6 +292,7 @@ pub fn build_media_browser(
                     &flow_box_for_drop,
                     &thumb_cache,
                     &probe_cache,
+                    &flow_box_paths,
                 )
                 .is_some()
                 {
@@ -360,7 +374,6 @@ fn make_grid_item(
 
     let child = FlowBoxChild::new();
     child.set_child(Some(&cell));
-
     // Drag source: payload = "{source_path}|{duration_ns}"
     let drag_src = gtk::DragSource::new();
     drag_src.set_actions(gdk4::DragAction::COPY);
@@ -397,14 +410,28 @@ pub fn probe_is_audio_only(uri: &str) -> bool {
     info.video_streams().is_empty()
 }
 
-fn flowbox_child_count(fb: &FlowBox) -> usize {
-    let mut count = 0usize;
+fn flowbox_matches_library(current_paths: &[String], lib: &[MediaItem]) -> bool {
+    current_paths.len() == lib.len()
+        && current_paths
+            .iter()
+            .zip(lib.iter())
+            .all(|(a, b)| a == &b.source_path)
+}
+
+fn queue_flowbox_thumbnail_draws(fb: &FlowBox) {
     let mut child = fb.first_child();
     while let Some(w) = child {
-        count += 1;
+        if let Some(cell) = w.first_child() {
+            if let Some(thumb) = cell.first_child() {
+                if let Ok(area) = thumb.clone().downcast::<DrawingArea>() {
+                    area.queue_draw();
+                } else {
+                    thumb.queue_draw();
+                }
+            }
+        }
         child = w.next_sibling();
     }
-    count
 }
 
 fn import_path_into_library(
@@ -413,6 +440,7 @@ fn import_path_into_library(
     flow_box: &FlowBox,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
     probe_cache: &Rc<RefCell<MediaProbeCache>>,
+    flow_box_paths: &Rc<RefCell<Vec<String>>>,
 ) -> Option<(String, u64, FlowBoxChild)> {
     if path_str.is_empty() {
         return None;
@@ -425,6 +453,7 @@ fn import_path_into_library(
     library.borrow_mut().push(item);
     let child = make_grid_item(&label, &path_str, duration_ns, thumb_cache);
     flow_box.insert(&child, -1);
+    flow_box_paths.borrow_mut().push(path_str.clone());
     Some((path_str, duration_ns, child))
 }
 
@@ -451,10 +480,17 @@ fn parse_external_drop_paths(payload: &str) -> Vec<String> {
     out
 }
 
-fn rebuild_flowbox(fb: &FlowBox, lib: &[MediaItem], thumb_cache: &Rc<RefCell<ThumbnailCache>>) {
+fn rebuild_flowbox(
+    fb: &FlowBox,
+    lib: &[MediaItem],
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    flow_box_paths: &Rc<RefCell<Vec<String>>>,
+) {
     while let Some(child) = fb.first_child() {
         fb.remove(&child);
     }
+    let mut paths = flow_box_paths.borrow_mut();
+    paths.clear();
     for item in lib.iter() {
         let child = make_grid_item(
             &item.label,
@@ -463,5 +499,6 @@ fn rebuild_flowbox(fb: &FlowBox, lib: &[MediaItem], thumb_cache: &Rc<RefCell<Thu
             thumb_cache,
         );
         fb.insert(&child, -1);
+        paths.push(item.source_path.clone());
     }
 }
