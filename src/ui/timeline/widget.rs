@@ -1314,6 +1314,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
                 let hit = st.hit_test(x, y);
                 if let Some(h) = hit {
+                    let mods = gesture.current_event_state();
+                    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                    let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                        || mods.contains(gtk::gdk::ModifierType::META_MASK);
                     // Extract clip data before mutating st (avoids borrow conflict)
                     let (clip_data, track_snapshot) = {
                         let proj = st.project.borrow();
@@ -1439,10 +1443,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 }
                             }
                         };
-                        if move_clip_ids.len() > 1 {
-                            st.set_selection_with_primary(h.clip_id, h.track_id, move_clip_set);
-                        } else {
-                            st.set_single_clip_selection(h.clip_id, h.track_id);
+                        // Preserve modifier-driven multi-select from click handling;
+                        // drag-begin should not collapse Ctrl/Shift selections.
+                        if !shift && !ctrl_or_meta {
+                            if move_clip_ids.len() > 1 {
+                                st.set_selection_with_primary(h.clip_id, h.track_id, move_clip_set);
+                            } else {
+                                st.set_single_clip_selection(h.clip_id, h.track_id);
+                            }
                         }
                     }
                 } else if x < TRACK_LABEL_WIDTH && y > RULER_HEIGHT {
@@ -1962,64 +1970,59 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         original_right_in,
                         original_right_start,
                     } => {
-                        let delta = current_ns as i64 - drag_start_ns as i64;
-                        let new_start = (original_start as i64 + delta).max(0) as u64;
+                        let requested_delta = i128::from(current_ns) - i128::from(drag_start_ns);
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
-                            // Validate neighbors can absorb the delta
-                            let left_ok = if let (Some(ref lid), Some(orig_out)) =
+                            let left_bounds = if let (Some(ref lid), Some(orig_out)) =
                                 (left_clip_id, original_left_out)
                             {
-                                let new_out = (orig_out as i64 + delta).max(0) as u64;
-                                let left_in = track
+                                track
                                     .clips
                                     .iter()
                                     .find(|c| &c.id == lid)
-                                    .map(|c| c.source_in)
-                                    .unwrap_or(0);
-                                new_out > left_in + 1_000_000
+                                    .map(|c| (orig_out, c.source_in))
                             } else {
-                                true
+                                None
                             };
-                            let right_ok = if let (Some(ref rid), Some(orig_in), Some(_orig_rs)) =
+                            let right_bounds = if let (Some(ref rid), Some(orig_in), Some(_orig_rs)) =
                                 (right_clip_id, original_right_in, original_right_start)
                             {
-                                let new_in = (orig_in as i64 + delta).max(0) as u64;
-                                let right_out = track
+                                track
                                     .clips
                                     .iter()
                                     .find(|c| &c.id == rid)
-                                    .map(|c| c.source_out)
-                                    .unwrap_or(u64::MAX);
-                                new_in + 1_000_000 < right_out
+                                    .map(|c| (orig_in, c.source_out))
                             } else {
-                                true
+                                None
                             };
-                            if left_ok && right_ok {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| &c.id == clip_id)
-                                {
-                                    clip.timeline_start = new_start;
+
+                            let clamped_delta =
+                                clamp_slide_delta(requested_delta, left_bounds, right_bounds);
+                            let new_start = (i128::from(original_start) + clamped_delta).max(0) as u64;
+
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                clip.timeline_start = new_start;
+                            }
+
+                            if let (Some(ref lid), Some((orig_out, left_in))) =
+                                (left_clip_id, left_bounds)
+                            {
+                                if let Some(left) = track.clips.iter_mut().find(|c| &c.id == lid) {
+                                    left.source_out = (i128::from(orig_out) + clamped_delta)
+                                        .max(i128::from(left_in) + 1_000_000)
+                                        as u64;
                                 }
-                                if let (Some(ref lid), Some(orig_out)) =
-                                    (left_clip_id, original_left_out)
-                                {
-                                    if let Some(left) =
-                                        track.clips.iter_mut().find(|c| &c.id == lid)
-                                    {
-                                        left.source_out = (orig_out as i64 + delta).max(0) as u64;
-                                    }
-                                }
-                                if let (Some(ref rid), Some(orig_in), Some(orig_rs)) =
-                                    (right_clip_id, original_right_in, original_right_start)
-                                {
-                                    if let Some(right) =
-                                        track.clips.iter_mut().find(|c| &c.id == rid)
-                                    {
-                                        right.source_in = (orig_in as i64 + delta).max(0) as u64;
-                                        right.timeline_start =
-                                            (orig_rs as i64 + delta).max(0) as u64;
-                                    }
+                            }
+
+                            if let (Some(ref rid), Some((orig_in, right_out)), Some(orig_rs)) =
+                                (right_clip_id, right_bounds, original_right_start)
+                            {
+                                if let Some(right) = track.clips.iter_mut().find(|c| &c.id == rid) {
+                                    let max_in = i128::from(right_out).saturating_sub(1_000_000);
+                                    right.source_in =
+                                        (i128::from(orig_in) + clamped_delta).clamp(0, max_in) as u64;
+                                    right.timeline_start =
+                                        (i128::from(orig_rs) + clamped_delta).max(0) as u64;
                                 }
                             }
                         }
@@ -3017,6 +3020,41 @@ fn draw_timeline(
     }
 }
 
+fn clamp_slide_delta(
+    requested_delta: i128,
+    left_bounds: Option<(u64, u64)>,
+    right_bounds: Option<(u64, u64)>,
+) -> i128 {
+    const MIN_CLIP_NS: i128 = 1_000_000;
+    if left_bounds.is_none() && right_bounds.is_none() {
+        return 0;
+    }
+
+    let mut min_delta = i128::MIN;
+    let mut max_delta = i128::MAX;
+
+    if let Some((orig_out, left_in)) = left_bounds {
+        min_delta = min_delta.max(i128::from(left_in) + MIN_CLIP_NS - i128::from(orig_out));
+    }
+    if let Some((orig_in, right_out)) = right_bounds {
+        max_delta = max_delta.min(i128::from(right_out) - MIN_CLIP_NS - i128::from(orig_in));
+    }
+
+    // Edge-clip slide fallback: keep slide active, but don't extend the only
+    // available neighbor beyond its drag-start trimmed window.
+    if left_bounds.is_some() && right_bounds.is_none() {
+        max_delta = max_delta.min(0);
+    } else if left_bounds.is_none() && right_bounds.is_some() {
+        min_delta = min_delta.max(0);
+    }
+
+    if min_delta > max_delta {
+        0
+    } else {
+        requested_delta.clamp(min_delta, max_delta)
+    }
+}
+
 fn compact_gap_free_clips(clips: &mut Vec<Clip>) {
     clips.sort_by_key(|c| c.timeline_start);
     let mut cursor = 0_u64;
@@ -3765,4 +3803,125 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
 
     dialog.connect_response(|d, _| d.destroy());
     dialog.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::clip::{Clip, ClipKind};
+    use crate::model::project::Project;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn timeline_state_with_video_clips(spec: &[(&str, u64)]) -> (TimelineState, String, Vec<String>) {
+        let mut project = Project::new("Selection tests");
+        let video_idx = project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .expect("default project should include a video track");
+        let track_id = project.tracks[video_idx].id.clone();
+        let mut ids = Vec::new();
+        for (id, start) in spec {
+            let mut clip = Clip::new(format!("{id}.mp4"), 1_000_000_000, *start, ClipKind::Video);
+            clip.id = (*id).to_string();
+            project.tracks[video_idx].add_clip(clip);
+            ids.push((*id).to_string());
+        }
+        (
+            TimelineState::new(Rc::new(RefCell::new(project))),
+            track_id,
+            ids,
+        )
+    }
+
+    #[test]
+    fn ctrl_toggle_adds_to_selection_set() {
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 1_000_000_000)]);
+        st.set_single_clip_selection(ids[0].clone(), track_id.clone());
+        st.toggle_clip_selection(&ids[1], &track_id);
+
+        assert!(st.is_clip_selected(&ids[0]));
+        assert!(st.is_clip_selected(&ids[1]));
+        assert_eq!(st.selected_ids_or_primary().len(), 2);
+    }
+
+    #[test]
+    fn shift_range_selects_same_track_span() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 1_000_000_000),
+            ("C", 2_000_000_000),
+        ]);
+        st.set_single_clip_selection(ids[0].clone(), track_id.clone());
+
+        let changed = st.shift_select_range_to(&track_id, &ids[2]);
+        let selected = st.selected_ids_or_primary();
+
+        assert!(changed);
+        assert_eq!(selected.len(), 3);
+        assert!(selected.contains(&ids[0]));
+        assert!(selected.contains(&ids[1]));
+        assert!(selected.contains(&ids[2]));
+        assert_eq!(st.selected_clip_id.as_deref(), Some(ids[2].as_str()));
+    }
+
+    #[test]
+    fn select_all_clips_populates_multi_selection() {
+        let (mut st, _track_id, _ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 1_000_000_000),
+            ("C", 2_000_000_000),
+        ]);
+
+        let changed = st.select_all_clips();
+
+        assert!(changed);
+        assert_eq!(st.selected_ids_or_primary().len(), 3);
+    }
+
+    #[test]
+    fn clamp_slide_delta_returns_zero_when_no_neighbors() {
+        assert_eq!(clamp_slide_delta(5_000_000, None, None), 0);
+        assert_eq!(clamp_slide_delta(-5_000_000, None, None), 0);
+    }
+
+    #[test]
+    fn clamp_slide_delta_left_only_blocks_positive_extension() {
+        // left bounds: source_in=0, original source_out=4s => min_delta=-3s.
+        let left_bounds = Some((4_000_000, 0));
+        assert_eq!(clamp_slide_delta(2_000_000, left_bounds, None), 0);
+        assert_eq!(
+            clamp_slide_delta(-9_000_000, left_bounds, None),
+            -3_000_000
+        );
+    }
+
+    #[test]
+    fn clamp_slide_delta_right_only_blocks_negative_extension() {
+        // right bounds: original source_in=1s, source_out=6s => max_delta=4s.
+        let right_bounds = Some((1_000_000, 6_000_000));
+        assert_eq!(clamp_slide_delta(-2_000_000, None, right_bounds), 0);
+        assert_eq!(
+            clamp_slide_delta(9_000_000, None, right_bounds),
+            4_000_000
+        );
+    }
+
+    #[test]
+    fn clamp_slide_delta_with_both_neighbors_honors_min_and_max() {
+        // left -> min_delta = (2s + 1s - 10s) = -7s
+        // right -> max_delta = (8s - 1s - 1s) = 6s
+        let left_bounds = Some((10_000_000, 2_000_000));
+        let right_bounds = Some((1_000_000, 8_000_000));
+        assert_eq!(
+            clamp_slide_delta(-12_000_000, left_bounds, right_bounds),
+            -7_000_000
+        );
+        assert_eq!(
+            clamp_slide_delta(12_000_000, left_bounds, right_bounds),
+            6_000_000
+        );
+    }
 }

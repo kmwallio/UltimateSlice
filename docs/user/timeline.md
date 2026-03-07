@@ -64,6 +64,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 - Drag a clip body to **move it on the timeline** while the neighboring clips adjust their edit points to compensate.
 - The left neighbor's out-point extends/shrinks and the right neighbor's in-point shrinks/extends — overall timeline duration stays the same.
+- On edge clips (only one neighbor), slide remains available but movement is clamped and only the available-side neighbor is adjusted.
 - Press **U** to toggle Slide mode on/off.
 
 ### Insert at Playhead (`,`)
@@ -94,6 +95,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Ctrl/Cmd+Click** toggles individual clips in the current selection.
 - **Ctrl+A** selects all clips in the timeline.
 - **Marquee drag** (drag in empty timeline body) selects clips intersecting the rectangle.
+- Modifier-based selection is preserved when a clip drag starts, so Ctrl/Cmd+click and Shift+click selections do not unexpectedly collapse.
 - The Inspector still follows the primary selected clip.
 
 ### Ripple Delete (`Shift+Delete`)

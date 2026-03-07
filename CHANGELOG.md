@@ -5,6 +5,8 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Fixed
+- **Slide edit neighbor over-extension**: Slide drag delta is now clamped by neighbor bounds, preventing over-extension of adjacent clips; edge clips now keep Slide active with available-side-only compensation.
+- **Timeline modifier multi-select reliability**: Ctrl/Cmd+click and Shift+click selection state is now preserved when a drag gesture begins, preventing unintended collapse back to single selection during timeline interactions.
 - **Proxy-in-progress playback stall**: Proxy selection now ignores incomplete/unusable proxy files and keeps Program Monitor playback on original media until a valid proxy is ready; proxy transcodes are now published atomically (temp file → final path) to avoid exposing half-written proxies.
 - **Export/proxy percentage realism**: Export and proxy progress now estimate output size from bitrate×duration and track ffmpeg `total_size` against that estimate, while keeping in-progress values capped below 100% until ffmpeg completion.
 - **Prerender-exit boundary cold-starts**: While playing inside a prerender slot, the next boundary now prewarms post-prerender clip resources immediately (instead of relying on logical incoming-only diffing), reducing handoff stalls when exiting prerender playback.
