@@ -183,7 +183,8 @@ Tracking docs:
     - [x] Phase 2: Align grouped clips by audio (FFT cross-correlation via `rustfft`)
 - [ ] Audio/video linking (auto-link video and audio from same source)
   - [x] Manual clip linking / unlinking with synchronized selection, move, and delete behavior
-  - [x] Auto-link same-source A/V clip creation heuristics
+  - [x] Auto-link same-source A/V clip creation on drag-and-drop
+  - [ ] Auto-link A/V for source monitor operations (Append/Insert/Overwrite) — reverted to single-clip placement; needs redesign to handle track targeting and edge cases before re-enabling
 - [ ] Solo track (play only selected tracks, complement to muted/locked)
 - [ ] Freeze frame (hold single frame for arbitrary duration)
 - [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
