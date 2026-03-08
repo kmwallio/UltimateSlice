@@ -3365,19 +3365,65 @@ impl ProgramPlayer {
         flip_h: bool,
         flip_v: bool,
     ) {
+        // Clamp crop values so videocrop never produces zero/negative output
+        // dimensions.  The processing resolution can be smaller than the
+        // slider maximum (e.g. 540px wide on a 9×16 vertical timeline at
+        // half-res), so crop_left + crop_right could otherwise exceed the
+        // frame width, causing caps negotiation failures in GStreamer.
+        let (mut cl, mut cr, mut ct, mut cb) = (
+            crop_left.max(0),
+            crop_right.max(0),
+            crop_top.max(0),
+            crop_bottom.max(0),
+        );
+        let (frame_w, frame_h) = slot
+            .videocrop
+            .as_ref()
+            .and_then(|vc| vc.static_pad("sink"))
+            .and_then(|p| p.current_caps())
+            .and_then(|c| {
+                c.structure(0).map(|s| {
+                    (
+                        s.get::<i32>("width").unwrap_or(9999),
+                        s.get::<i32>("height").unwrap_or(9999),
+                    )
+                })
+            })
+            .unwrap_or((9999, 9999));
+        const MIN_DIM: i32 = 2;
+        if cl + cr > frame_w - MIN_DIM {
+            let total = (frame_w - MIN_DIM).max(0);
+            let ratio = if cl + cr > 0 {
+                total as f64 / (cl + cr) as f64
+            } else {
+                1.0
+            };
+            cl = (cl as f64 * ratio) as i32;
+            cr = total - cl;
+        }
+        if ct + cb > frame_h - MIN_DIM {
+            let total = (frame_h - MIN_DIM).max(0);
+            let ratio = if ct + cb > 0 {
+                total as f64 / (ct + cb) as f64
+            } else {
+                1.0
+            };
+            ct = (ct as f64 * ratio) as i32;
+            cb = total - ct;
+        }
         if let Some(ref vc) = slot.videocrop {
-            vc.set_property("left", crop_left.max(0));
-            vc.set_property("right", crop_right.max(0));
-            vc.set_property("top", crop_top.max(0));
-            vc.set_property("bottom", crop_bottom.max(0));
+            vc.set_property("left", cl);
+            vc.set_property("right", cr);
+            vc.set_property("top", ct);
+            vc.set_property("bottom", cb);
         }
         // Re-pad cropped edges with transparent borders so the compositor
         // reveals lower tracks through the cropped area.
         if let Some(ref vb) = slot.videobox_crop_alpha {
-            vb.set_property("left", -(crop_left.max(0)));
-            vb.set_property("right", -(crop_right.max(0)));
-            vb.set_property("top", -(crop_top.max(0)));
-            vb.set_property("bottom", -(crop_bottom.max(0)));
+            vb.set_property("left", -cl);
+            vb.set_property("right", -cr);
+            vb.set_property("top", -ct);
+            vb.set_property("bottom", -cb);
             vb.set_property("border-alpha", 0.0_f64);
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
@@ -4333,8 +4379,20 @@ impl ProgramPlayer {
             bin.add(&vc).ok();
             let sink_pad = vc.static_pad("sink").unwrap();
             let src_pad = vc.static_pad("src").unwrap();
-            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
-                .ok();
+            let ghost_sink = gst::GhostPad::with_target(&sink_pad).unwrap();
+            // Drop RECONFIGURE events at the bin boundary so internal caps
+            // changes (e.g. videocrop dimension changes) never propagate
+            // upstream to the decoder/demuxer, preventing not-negotiated
+            // errors during flush-seeks.
+            ghost_sink.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_pad, info| {
+                if let Some(ev) = info.event() {
+                    if let gst::EventView::Reconfigure(_) = ev.view() {
+                        return gst::PadProbeReturn::Drop;
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+            bin.add_pad(&ghost_sink).ok();
             bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
                 .ok();
         } else {
@@ -4343,8 +4401,16 @@ impl ProgramPlayer {
             gst::Element::link_many(&refs).ok();
             let sink_pad = chain.first().unwrap().static_pad("sink").unwrap();
             let src_pad = chain.last().unwrap().static_pad("src").unwrap();
-            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
-                .ok();
+            let ghost_sink = gst::GhostPad::with_target(&sink_pad).unwrap();
+            ghost_sink.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_pad, info| {
+                if let Some(ev) = info.event() {
+                    if let gst::EventView::Reconfigure(_) = ev.view() {
+                        return gst::PadProbeReturn::Drop;
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+            bin.add_pad(&ghost_sink).ok();
             bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
                 .ok();
         }
