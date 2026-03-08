@@ -391,6 +391,21 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_chroma_key",
+            "description": "Set chroma key (green/blue screen) settings for a clip by id. Makes the keyed color transparent so lower tracks show through.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":    { "type": "string",  "description": "Clip id (from list_clips)." },
+                    "enabled":    { "type": "boolean", "description": "Enable/disable chroma key." },
+                    "color":      { "type": "integer", "description": "Target color as 0xRRGGBB integer. Default 0x00FF00 (green). Use 0x0000FF for blue screen." },
+                    "tolerance":  { "type": "number",  "description": "Key tolerance: 0.0 (tight) to 1.0 (wide). Default 0.3." },
+                    "softness":   { "type": "number",  "description": "Edge softness: 0.0 (hard) to 1.0 (soft). Default 0.1." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_project_title",
             "description": "Rename the project.",
             "inputSchema": {
@@ -827,6 +842,15 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             shadows: args["shadows"].as_f64().unwrap_or(0.0),
             midtones: args["midtones"].as_f64().unwrap_or(0.0),
             highlights: args["highlights"].as_f64().unwrap_or(0.0),
+            reply: tx,
+        },
+
+        "set_clip_chroma_key" => McpCommand::SetClipChromaKey {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()),
+            color: args.get("color").and_then(|v| v.as_u64()).map(|v| v as u32),
+            tolerance: args.get("tolerance").and_then(|v| v.as_f64()),
+            softness: args.get("softness").and_then(|v| v.as_f64()),
             reply: tx,
         },
 

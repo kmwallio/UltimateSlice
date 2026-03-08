@@ -111,6 +111,14 @@ pub struct ProgramClip {
     pub highlights: f64,
     /// Whether the source file contains an audio stream.
     pub has_audio: bool,
+    /// Chroma key enabled flag.
+    pub chroma_key_enabled: bool,
+    /// Chroma key target color as 0xRRGGBB.
+    pub chroma_key_color: u32,
+    /// Chroma key tolerance: 0.0 (tight) to 1.0 (wide).
+    pub chroma_key_tolerance: f32,
+    /// Chroma key edge softness: 0.0 (hard) to 1.0 (soft).
+    pub chroma_key_softness: f32,
 }
 
 impl ProgramClip {
@@ -209,6 +217,7 @@ struct VideoSlot {
     textoverlay: Option<gst::Element>,
     #[allow(dead_code)]
     alpha_filter: Option<gst::Element>,
+    alpha_chroma_key: Option<gst::Element>,
     capsfilter_zoom: Option<gst::Element>,
     videobox_zoom: Option<gst::Element>,
     /// Queue between effects_bin and compositor to decouple caps negotiation.
@@ -1856,6 +1865,37 @@ impl ProgramPlayer {
         }
     }
 
+    pub fn update_current_chroma_key(
+        &mut self,
+        enabled: bool,
+        color: u32,
+        tolerance: f32,
+        softness: f32,
+    ) {
+        if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
+            if let Some(ref ck) = slot.alpha_chroma_key {
+                let r = ((color >> 16) & 0xFF) as u32;
+                let g = ((color >> 8) & 0xFF) as u32;
+                let b = (color & 0xFF) as u32;
+                ck.set_property("target-r", r);
+                ck.set_property("target-g", g);
+                ck.set_property("target-b", b);
+                ck.set_property("angle", (tolerance * 90.0).clamp(0.0, 90.0));
+                ck.set_property("noise-level", (softness * 64.0).clamp(0.0, 64.0));
+                // If the alpha element is in the pipeline but now disabled, we
+                // cannot remove it without a rebuild — but the clip model
+                // controls whether build_effects_bin creates it, so a full
+                // rebuild (on_project_changed) handles enable/disable.  For
+                // live slider updates while already enabled, just update props.
+                let _ = enabled; // rebuild handles toggle; see on_project_changed
+            }
+        }
+        // Force frame redraw when paused.
+        if self.current_idx.is_some() && self.state != PlayerState::Playing {
+            self.reseek_slot_for_current();
+        }
+    }
+
     #[allow(dead_code)]
     pub fn update_current_audio(&mut self, volume: f64, _pan: f64) {
         // Per-clip volume on the audiomixer pad.
@@ -2490,6 +2530,10 @@ impl ProgramPlayer {
                 c.midtones.to_bits().hash(&mut hasher);
                 c.highlights.to_bits().hash(&mut hasher);
                 c.lut_path.hash(&mut hasher);
+                c.chroma_key_enabled.hash(&mut hasher);
+                c.chroma_key_color.hash(&mut hasher);
+                c.chroma_key_tolerance.to_bits().hash(&mut hasher);
+                c.chroma_key_softness.to_bits().hash(&mut hasher);
             }
         }
         hasher.finish()
@@ -4052,6 +4096,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // videoflip_flip
         Option<gst::Element>, // textoverlay
         Option<gst::Element>, // alpha_filter
+        Option<gst::Element>, // alpha_chroma_key
         Option<gst::Element>, // capsfilter_zoom
         Option<gst::Element>,
     ) // videobox_zoom
@@ -4109,6 +4154,19 @@ impl ProgramPlayer {
             .ok();
 
         // Alpha filter: skipped — opacity is applied via compositor pad property.
+        // Chroma key alpha: conditionally created when chroma key is enabled.
+        let need_chroma_key = clip.chroma_key_enabled;
+        let (conv_ck, alpha_chroma_key) = if need_chroma_key {
+            (
+                gst::ElementFactory::make("videoconvert").build().ok(),
+                gst::ElementFactory::make("alpha")
+                    .property_from_str("method", "custom")
+                    .build()
+                    .ok(),
+            )
+        } else {
+            (None, None)
+        };
         let alpha_filter: Option<gst::Element> = None;
 
         // Textoverlay: only if title text is set.
@@ -4151,6 +4209,18 @@ impl ProgramPlayer {
         }
         if let Some(ref a) = alpha_filter {
             a.set_property("alpha", 1.0_f64);
+        }
+        if let Some(ref ck) = alpha_chroma_key {
+            let r = ((clip.chroma_key_color >> 16) & 0xFF) as i32;
+            let g = ((clip.chroma_key_color >> 8) & 0xFF) as i32;
+            let b = (clip.chroma_key_color & 0xFF) as i32;
+            ck.set_property("target-r", r as u32);
+            ck.set_property("target-g", g as u32);
+            ck.set_property("target-b", b as u32);
+            // angle: tolerance 0.0–1.0 → GStreamer 0–90 degrees
+            ck.set_property("angle", (clip.chroma_key_tolerance * 90.0).clamp(0.0, 90.0) as f32);
+            // noise-level: softness 0.0–1.0 → GStreamer 0–64
+            ck.set_property("noise-level", (clip.chroma_key_softness * 64.0).clamp(0.0, 64.0) as f32);
         }
         if let Some(ref to) = textoverlay {
             if clip.title_text.is_empty() {
@@ -4219,6 +4289,13 @@ impl ProgramPlayer {
         if let Some(ref e) = gaussianblur {
             chain.push(e.clone());
         }
+        // 3b. Chroma key (after color/blur, before zoom).
+        if let Some(ref e) = conv_ck {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = alpha_chroma_key {
+            chain.push(e.clone());
+        }
         if let Some(ref e) = alpha_filter {
             chain.push(e.clone());
         }
@@ -4282,6 +4359,7 @@ impl ProgramPlayer {
             videoflip_flip,
             textoverlay,
             alpha_filter,
+            alpha_chroma_key,
             capsfilter_zoom,
             videobox_zoom,
         )
@@ -4509,6 +4587,7 @@ impl ProgramPlayer {
             videoflip_flip: None,
             textoverlay: None,
             alpha_filter: None,
+            alpha_chroma_key: None,
             capsfilter_zoom: None,
             videobox_zoom: None,
             slot_queue: None,
@@ -4741,6 +4820,7 @@ impl ProgramPlayer {
             videoflip_flip: None,
             textoverlay: None,
             alpha_filter: None,
+            alpha_chroma_key: None,
             capsfilter_zoom: None,
             videobox_zoom: None,
             slot_queue: Some(slot_queue),
@@ -4787,24 +4867,45 @@ impl ProgramPlayer {
         let mut nodes: Vec<String> = Vec::new();
         for (i, (clip, _, _, _)) in inputs.iter().enumerate() {
             if i == 0 {
-                nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}[pv{i}]",
-                    Self::prerender_build_crop_filter(clip, out_w, out_h, false),
-                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
-                    Self::prerender_build_rotation_filter(clip, false),
-                    fps.max(1),
-                    Self::prerender_build_color_filter(clip),
-                    Self::prerender_build_grading_filter(clip),
-                    Self::prerender_build_denoise_filter(clip),
-                    format!(
-                        "{}{}",
-                        Self::prerender_build_sharpen_filter(clip),
-                        Self::prerender_build_lut_filter(clip)
-                    ),
-                ));
+                if clip.chroma_key_enabled {
+                    // Chroma key needs alpha: convert early so pad fills transparent.
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}[pv{i}]",
+                        Self::prerender_build_crop_filter(clip, out_w, out_h, false),
+                        Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
+                        Self::prerender_build_rotation_filter(clip, false),
+                        fps.max(1),
+                        Self::prerender_build_color_filter(clip),
+                        Self::prerender_build_grading_filter(clip),
+                        Self::prerender_build_denoise_filter(clip),
+                        format!(
+                            "{}{}",
+                            Self::prerender_build_sharpen_filter(clip),
+                            Self::prerender_build_lut_filter(clip)
+                        ),
+                        Self::prerender_build_chroma_key_filter(clip),
+                    ));
+                } else {
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}[pv{i}]",
+                        Self::prerender_build_crop_filter(clip, out_w, out_h, false),
+                        Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
+                        Self::prerender_build_rotation_filter(clip, false),
+                        fps.max(1),
+                        Self::prerender_build_color_filter(clip),
+                        Self::prerender_build_grading_filter(clip),
+                        Self::prerender_build_denoise_filter(clip),
+                        format!(
+                            "{}{}",
+                            Self::prerender_build_sharpen_filter(clip),
+                            Self::prerender_build_lut_filter(clip)
+                        ),
+                    ));
+                }
             } else {
+                // Overlay tracks: convert to yuva420p early so pad fills transparent.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},format=yuva420p{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
                     Self::prerender_build_rotation_filter(clip, true),
@@ -4813,6 +4914,7 @@ impl ProgramPlayer {
                     Self::prerender_build_denoise_filter(clip),
                     Self::prerender_build_sharpen_filter(clip),
                     Self::prerender_build_lut_filter(clip),
+                    Self::prerender_build_chroma_key_filter(clip),
                     clip.opacity.clamp(0.0, 1.0),
                 ));
             }
@@ -4933,6 +5035,22 @@ impl ProgramPlayer {
             }
         }
         String::new()
+    }
+
+    fn prerender_build_chroma_key_filter(clip: &ProgramClip) -> String {
+        if clip.chroma_key_enabled {
+            let color = format!(
+                "0x{:02X}{:02X}{:02X}",
+                (clip.chroma_key_color >> 16) & 0xFF,
+                (clip.chroma_key_color >> 8) & 0xFF,
+                clip.chroma_key_color & 0xFF
+            );
+            let similarity = (clip.chroma_key_tolerance * 0.5).clamp(0.01, 0.5);
+            let blend = (clip.chroma_key_softness * 0.5).clamp(0.0, 0.5);
+            format!(",colorkey={color}:{similarity:.4}:{blend:.4}")
+        } else {
+            String::new()
+        }
     }
 
     fn prerender_build_grading_filter(clip: &ProgramClip) -> String {
@@ -5112,6 +5230,7 @@ impl ProgramPlayer {
             videoflip_flip,
             textoverlay,
             alpha_filter,
+            alpha_chroma_key,
             capsfilter_zoom,
             videobox_zoom,
         ) = Self::build_effects_bin(&clip, proc_w, proc_h);
@@ -5350,6 +5469,7 @@ impl ProgramPlayer {
             videoflip_flip: videoflip_flip.clone(),
             textoverlay: textoverlay.clone(),
             alpha_filter: alpha_filter.clone(),
+            alpha_chroma_key: alpha_chroma_key.clone(),
             capsfilter_zoom: capsfilter_zoom.clone(),
             videobox_zoom: videobox_zoom.clone(),
             slot_queue: Some(slot_queue.clone()),
@@ -5404,6 +5524,7 @@ impl ProgramPlayer {
             videoflip_flip,
             textoverlay,
             alpha_filter,
+            alpha_chroma_key,
             capsfilter_zoom,
             videobox_zoom,
             slot_queue: Some(slot_queue),
@@ -5430,12 +5551,14 @@ impl ProgramPlayer {
         let need_rotate = |c: &ProgramClip| c.rotate.rem_euclid(360) != 0;
         let need_flip = |c: &ProgramClip| c.flip_h || c.flip_v;
         let need_title = |c: &ProgramClip| !c.title_text.is_empty();
+        let need_chroma_key = |c: &ProgramClip| c.chroma_key_enabled;
 
         need_balance(a) == need_balance(b)
             && need_blur(a) == need_blur(b)
             && need_rotate(a) == need_rotate(b)
             && need_flip(a) == need_flip(b)
             && need_title(a) == need_title(b)
+            && need_chroma_key(a) == need_chroma_key(b)
     }
 
     /// Determine whether all current slots can be reused for the desired
@@ -5521,6 +5644,18 @@ impl ProgramPlayer {
         if let Some(ref gb) = slot.gaussianblur {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             gb.set_property("sigma", sigma);
+        }
+
+        // Chroma key alpha element
+        if let Some(ref ck) = slot.alpha_chroma_key {
+            let r = ((clip.chroma_key_color >> 16) & 0xFF) as u32;
+            let g = ((clip.chroma_key_color >> 8) & 0xFF) as u32;
+            let b = (clip.chroma_key_color & 0xFF) as u32;
+            ck.set_property("target-r", r);
+            ck.set_property("target-g", g);
+            ck.set_property("target-b", b);
+            ck.set_property("angle", (clip.chroma_key_tolerance * 90.0).clamp(0.0, 90.0) as f32);
+            ck.set_property("noise-level", (clip.chroma_key_softness * 64.0).clamp(0.0, 64.0) as f32);
         }
 
         // Crop, rotate, flip
@@ -6466,6 +6601,10 @@ mod tests {
             midtones: 0.0,
             highlights: 0.0,
             has_audio: true,
+            chroma_key_enabled: false,
+            chroma_key_color: 0x00FF00,
+            chroma_key_tolerance: 0.3,
+            chroma_key_softness: 0.1,
         }
     }
 

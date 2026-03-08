@@ -338,7 +338,7 @@ Tracking docs:
 - [x] Transition effects (fade to black, wipe right, wipe left)
 
 ### Visual Effects
-- [ ] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls
+- [x] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls; GStreamer `alpha` element in preview, ffmpeg `colorkey` filter in export; Inspector panel with enable toggle, green/blue/custom color presets, tolerance and edge-softness sliders
 - [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
 - [ ] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
 - [ ] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline

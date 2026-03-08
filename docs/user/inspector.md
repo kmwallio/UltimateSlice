@@ -121,6 +121,23 @@ Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacki
 
 ---
 
+## Chroma Key
+
+Removes a target color (green screen / blue screen) from the clip, making those pixels transparent so lower video tracks show through the compositor pipeline.
+
+| Control | Range | Default | Description |
+|---|---|---|---|
+| **Enable Chroma Key** | on/off | off | Activates/deactivates chroma keying for this clip |
+| **Key Color** | Green / Blue / Custom | Green | Target color to make transparent; Custom shows a hex entry |
+| **Tolerance** | 0.0 → 1.0 | 0.3 | How far from the target color to key out (higher = wider range) |
+| **Edge Softness** | 0.0 → 1.0 | 0.1 | Softens the key edge for smoother blending (higher = softer) |
+
+> **Pipeline placement** — Chroma key is applied after color correction (so you can white-balance a green screen clip before keying) but before crop/rotation. Preview uses GStreamer's `alpha` element; export uses FFmpeg's `colorkey` filter.
+
+Place the chroma-keyed clip on an upper video track with the background on a lower track. The compositor automatically composites transparent regions.
+
+---
+
 ## Notes
 
 - All Inspector values are **persisted in the FCPXML** project file.

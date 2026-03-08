@@ -170,6 +170,12 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
             asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
             asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
+            if clip.chroma_key_enabled {
+                asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
+                asset_clip.push_attribute(("us:chroma-key-color", format!("{:#08X}", clip.chroma_key_color).as_str()));
+                asset_clip.push_attribute(("us:chroma-key-tolerance", clip.chroma_key_tolerance.to_string().as_str()));
+                asset_clip.push_attribute(("us:chroma-key-softness", clip.chroma_key_softness.to_string().as_str()));
+            }
             if let Some(ref lut) = clip.lut_path {
                 asset_clip.push_attribute(("us:lut-path", lut.as_str()));
             }
@@ -771,6 +777,10 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
+            | "us:chroma-key-enabled"
+            | "us:chroma-key-color"
+            | "us:chroma-key-tolerance"
+            | "us:chroma-key-softness"
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"

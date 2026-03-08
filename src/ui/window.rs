@@ -1253,6 +1253,43 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 on_project_changed();
             }
         },
+        // on_chroma_key_changed: chroma key toggle/color → full project-changed cycle
+        {
+            let on_project_changed = on_project_changed.clone();
+            move || {
+                on_project_changed();
+            }
+        },
+        // on_chroma_key_slider_changed: tolerance/softness → live property update, no rebuild
+        {
+            let prog_player = prog_player.clone();
+            let project = project.clone();
+            let window_weak = window_weak.clone();
+            let timeline_state = timeline_state.clone();
+            move |tolerance: f32, softness: f32| {
+                let (enabled, color) = {
+                    let proj = project.borrow();
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    selected
+                        .and_then(|id| {
+                            proj.tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| c.id == id)
+                                .map(|c| (c.chroma_key_enabled, c.chroma_key_color))
+                        })
+                        .unwrap_or((false, 0x00FF00))
+                };
+                prog_player.borrow_mut().update_current_chroma_key(
+                    enabled, color, tolerance, softness,
+                );
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
     );
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -1264,10 +1301,44 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
+        let transform_overlay_cell = transform_overlay_cell.clone();
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
                 inspector_view.update(&proj, clip_id.as_deref());
+                // Sync transform overlay handles with selection state.
+                if let Some(ref to) = *transform_overlay_cell.borrow() {
+                    match clip_id {
+                        Some(ref cid) => {
+                            let clip_opt = proj
+                                .tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| &c.id == cid);
+                            if let Some(c) = clip_opt {
+                                let is_visual = c.kind != ClipKind::Audio;
+                                if is_visual {
+                                    to.set_transform(c.scale, c.position_x, c.position_y);
+                                    to.set_rotation(c.rotate);
+                                    to.set_crop(
+                                        c.crop_left,
+                                        c.crop_right,
+                                        c.crop_top,
+                                        c.crop_bottom,
+                                    );
+                                    to.set_clip_selected(true);
+                                } else {
+                                    to.set_clip_selected(false);
+                                }
+                            } else {
+                                to.set_clip_selected(false);
+                            }
+                        }
+                        None => {
+                            to.set_clip_selected(false);
+                        }
+                    }
+                }
             }));
     }
     {
@@ -2813,6 +2884,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             midtones: c.midtones as f64,
                             highlights: c.highlights as f64,
                             has_audio: !suppress_embedded_audio_ids.contains(&c.id),
+                            chroma_key_enabled: c.chroma_key_enabled,
+                            chroma_key_color: c.chroma_key_color,
+                            chroma_key_tolerance: c.chroma_key_tolerance,
+                            chroma_key_softness: c.chroma_key_softness,
                         })
                     })
                     .collect();
@@ -4605,6 +4680,44 @@ fn handle_mcp_command(
                         clip.shadows = shadows as f32;
                         clip.midtones = midtones as f32;
                         clip.highlights = highlights as f32;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipChromaKey {
+            clip_id,
+            enabled,
+            color,
+            tolerance,
+            softness,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        if let Some(v) = enabled {
+                            clip.chroma_key_enabled = v;
+                        }
+                        if let Some(v) = color {
+                            clip.chroma_key_color = v;
+                        }
+                        if let Some(v) = tolerance {
+                            clip.chroma_key_tolerance = v as f32;
+                        }
+                        if let Some(v) = softness {
+                            clip.chroma_key_softness = v as f32;
+                        }
                         proj.dirty = true;
                         found = true;
                         break 'outer;

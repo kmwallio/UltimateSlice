@@ -96,6 +96,14 @@ pub enum McpCommand {
         highlights: f64,
         reply: SyncSender<Value>,
     },
+    SetClipChromaKey {
+        clip_id: String,
+        enabled: Option<bool>,
+        color: Option<u32>,
+        tolerance: Option<f64>,
+        softness: Option<f64>,
+        reply: SyncSender<Value>,
+    },
     SetTitle {
         title: String,
         reply: SyncSender<Value>,

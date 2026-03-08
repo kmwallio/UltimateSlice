@@ -778,6 +778,18 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:highlights") {
                 clip.highlights = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:chroma-key-enabled") {
+                clip.chroma_key_enabled = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:chroma-key-color") {
+                clip.chroma_key_color = u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0x00FF00);
+            }
+            if let Some(v) = attrs.get("us:chroma-key-tolerance") {
+                clip.chroma_key_tolerance = v.parse().unwrap_or(0.3);
+            }
+            if let Some(v) = attrs.get("us:chroma-key-softness") {
+                clip.chroma_key_softness = v.parse().unwrap_or(0.1);
+            }
             if let Some(v) = attrs.get("us:lut-path") {
                 clip.lut_path = Some(v.clone());
             }
@@ -1014,6 +1026,10 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
+            | "us:chroma-key-enabled"
+            | "us:chroma-key-color"
+            | "us:chroma-key-tolerance"
+            | "us:chroma-key-softness"
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"

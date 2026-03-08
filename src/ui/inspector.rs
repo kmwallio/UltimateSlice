@@ -1,4 +1,5 @@
 use crate::model::project::Project;
+use gdk4;
 use gio;
 use gtk4::prelude::*;
 use gtk4::{
@@ -85,6 +86,16 @@ pub struct InspectorView {
     pub title_section_box: GBox,
     pub speed_section_box: GBox,
     pub lut_section_box: GBox,
+    // Chroma key
+    pub chroma_key_section: GBox,
+    pub chroma_key_enable: CheckButton,
+    pub chroma_green_btn: gtk4::ToggleButton,
+    pub chroma_blue_btn: gtk4::ToggleButton,
+    pub chroma_custom_btn: gtk4::ToggleButton,
+    pub chroma_color_btn: gtk4::ColorDialogButton,
+    pub chroma_custom_color_row: GBox,
+    pub chroma_tolerance_slider: Scale,
+    pub chroma_softness_slider: Scale,
 }
 
 impl InspectorView {
@@ -122,6 +133,7 @@ impl InspectorView {
                 self.title_section_box.set_visible(is_video || is_image);
                 self.speed_section_box.set_visible(true);
                 self.lut_section_box.set_visible(is_video || is_image);
+                self.chroma_key_section.set_visible(is_video || is_image);
 
                 self.name_entry.set_text(&c.label);
                 self.path_value.set_text(
@@ -176,6 +188,31 @@ impl InspectorView {
                         self.lut_clear_btn.set_sensitive(false);
                     }
                 }
+                // Chroma Key
+                self.chroma_key_enable.set_active(c.chroma_key_enabled);
+                self.chroma_tolerance_slider
+                    .set_value(c.chroma_key_tolerance as f64);
+                self.chroma_softness_slider
+                    .set_value(c.chroma_key_softness as f64);
+                match c.chroma_key_color {
+                    0x00FF00 => {
+                        self.chroma_green_btn.set_active(true);
+                        self.chroma_custom_color_row.set_visible(false);
+                    }
+                    0x0000FF => {
+                        self.chroma_blue_btn.set_active(true);
+                        self.chroma_custom_color_row.set_visible(false);
+                    }
+                    custom => {
+                        self.chroma_custom_btn.set_active(true);
+                        self.chroma_custom_color_row.set_visible(true);
+                        let r = ((custom >> 16) & 0xFF) as f32 / 255.0;
+                        let g = ((custom >> 8) & 0xFF) as f32 / 255.0;
+                        let b = (custom & 0xFF) as f32 / 255.0;
+                        self.chroma_color_btn
+                            .set_rgba(&gdk4::RGBA::new(r, g, b, 1.0));
+                    }
+                }
             }
             None => {
                 self.name_entry.set_text("");
@@ -216,6 +253,12 @@ impl InspectorView {
                 self.reverse_check.set_active(false);
                 self.lut_path_label.set_text("None");
                 self.lut_clear_btn.set_sensitive(false);
+                // Chroma Key defaults
+                self.chroma_key_enable.set_active(false);
+                self.chroma_green_btn.set_active(true);
+                self.chroma_custom_color_row.set_visible(false);
+                self.chroma_tolerance_slider.set_value(0.3);
+                self.chroma_softness_slider.set_value(0.1);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -241,6 +284,8 @@ pub fn build_inspector(
     on_lut_changed: impl Fn(Option<String>) + 'static,
     on_opacity_changed: impl Fn(f64) + 'static,
     on_reverse_changed: impl Fn(bool) + 'static,
+    on_chroma_key_changed: impl Fn() + 'static,
+    on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(260);
@@ -387,6 +432,58 @@ pub fn build_inspector(
     highlights_slider.set_digits(2);
     highlights_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&highlights_slider);
+
+    // ── Chroma Key section (Video + Image only) ──────────────────────────────
+    let chroma_key_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&chroma_key_section);
+
+    chroma_key_section.append(&Separator::new(Orientation::Horizontal));
+    let chroma_key_expander = Expander::new(Some("Chroma Key"));
+    chroma_key_expander.set_expanded(false);
+    chroma_key_section.append(&chroma_key_expander);
+    let chroma_key_inner = GBox::new(Orientation::Vertical, 8);
+    chroma_key_expander.set_child(Some(&chroma_key_inner));
+
+    let chroma_key_enable = CheckButton::with_label("Enable Chroma Key");
+    chroma_key_inner.append(&chroma_key_enable);
+
+    row_label(&chroma_key_inner, "Key Color");
+    let chroma_key_color_row = GBox::new(Orientation::Horizontal, 8);
+    let chroma_green_btn = gtk4::ToggleButton::with_label("Green");
+    let chroma_blue_btn = gtk4::ToggleButton::with_label("Blue");
+    let chroma_custom_btn = gtk4::ToggleButton::with_label("Custom");
+    chroma_green_btn.set_active(true);
+    chroma_blue_btn.set_group(Some(&chroma_green_btn));
+    chroma_custom_btn.set_group(Some(&chroma_green_btn));
+    chroma_key_color_row.append(&chroma_green_btn);
+    chroma_key_color_row.append(&chroma_blue_btn);
+    chroma_key_color_row.append(&chroma_custom_btn);
+    chroma_key_inner.append(&chroma_key_color_row);
+
+    let chroma_custom_color_row = GBox::new(Orientation::Horizontal, 8);
+    let chroma_color_dialog = gtk4::ColorDialog::new();
+    chroma_color_dialog.set_with_alpha(false);
+    let chroma_color_btn = gtk4::ColorDialogButton::new(Some(chroma_color_dialog));
+    chroma_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 1.0, 0.0, 1.0));
+    chroma_custom_color_row.append(&chroma_color_btn);
+    chroma_key_inner.append(&chroma_custom_color_row);
+    chroma_custom_color_row.set_visible(false);
+
+    row_label(&chroma_key_inner, "Tolerance");
+    let chroma_tolerance_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    chroma_tolerance_slider.set_value(0.3);
+    chroma_tolerance_slider.set_draw_value(true);
+    chroma_tolerance_slider.set_digits(2);
+    chroma_tolerance_slider.add_mark(0.3, gtk4::PositionType::Bottom, None);
+    chroma_key_inner.append(&chroma_tolerance_slider);
+
+    row_label(&chroma_key_inner, "Edge Softness");
+    let chroma_softness_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    chroma_softness_slider.set_value(0.1);
+    chroma_softness_slider.set_draw_value(true);
+    chroma_softness_slider.set_digits(2);
+    chroma_softness_slider.add_mark(0.1, gtk4::PositionType::Bottom, None);
+    chroma_key_inner.append(&chroma_softness_slider);
 
     // ── Audio section (Video + Audio only) ───────────────────────────────────
     let audio_section = GBox::new(Orientation::Vertical, 8);
@@ -671,6 +768,9 @@ pub fn build_inspector(
     let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
     let on_opacity_changed: Rc<dyn Fn(f64)> = Rc::new(on_opacity_changed);
     let on_reverse_changed: Rc<dyn Fn(bool)> = Rc::new(on_reverse_changed);
+    let on_chroma_key_changed: Rc<dyn Fn()> = Rc::new(on_chroma_key_changed);
+    let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> =
+        Rc::new(on_chroma_key_slider_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -1721,6 +1821,190 @@ pub fn build_inspector(
         });
     }
 
+    // Chroma Key enable toggle — toggling on/off changes pipeline topology → full rebuild
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        chroma_key_enable.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_enabled = enabled;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+
+    // Chroma Key color preset buttons
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        let custom_row = chroma_custom_color_row.clone();
+        chroma_green_btn.connect_toggled(move |btn| {
+            if *updating.borrow() || !btn.is_active() {
+                return;
+            }
+            custom_row.set_visible(false);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_color = 0x00FF00;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        let custom_row = chroma_custom_color_row.clone();
+        chroma_blue_btn.connect_toggled(move |btn| {
+            if *updating.borrow() || !btn.is_active() {
+                return;
+            }
+            custom_row.set_visible(false);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_color = 0x0000FF;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+    {
+        let custom_row = chroma_custom_color_row.clone();
+        let updating = updating.clone();
+        chroma_custom_btn.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            custom_row.set_visible(btn.is_active());
+        });
+    }
+
+    // Chroma Key color picker — ColorDialogButton rgba notify
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        chroma_color_btn.connect_rgba_notify(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0).round() as u32;
+            let g = (rgba.green() * 255.0).round() as u32;
+            let b = (rgba.blue() * 255.0).round() as u32;
+            let color = (r << 16) | (g << 8) | b;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+
+    // Chroma Key tolerance slider — live property update (no pipeline rebuild)
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_slider_changed = on_chroma_key_slider_changed.clone();
+        let softness_slider = chroma_softness_slider.clone();
+        chroma_tolerance_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = s.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_tolerance = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_slider_changed(val, softness_slider.value() as f32);
+            }
+        });
+    }
+
+    // Chroma Key softness slider — live property update (no pipeline rebuild)
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_slider_changed = on_chroma_key_slider_changed.clone();
+        let tolerance_slider = chroma_tolerance_slider.clone();
+        chroma_softness_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = s.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_softness = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_slider_changed(tolerance_slider.value() as f32, val);
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -1766,6 +2050,15 @@ pub fn build_inspector(
         title_section_box,
         speed_section_box,
         lut_section_box,
+        chroma_key_section,
+        chroma_key_enable,
+        chroma_green_btn,
+        chroma_blue_btn,
+        chroma_custom_btn,
+        chroma_color_btn,
+        chroma_custom_color_row,
+        chroma_tolerance_slider,
+        chroma_softness_slider,
     });
 
     (vbox, view)

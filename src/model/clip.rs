@@ -39,6 +39,15 @@ fn default_title_x() -> f64 {
 fn default_title_y() -> f64 {
     0.9
 }
+fn default_chroma_key_color() -> u32 {
+    0x00FF00
+}
+fn default_chroma_key_tolerance() -> f32 {
+    0.3
+}
+fn default_chroma_key_softness() -> f32 {
+    0.1
+}
 
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -145,6 +154,18 @@ pub struct Clip {
     /// indicator on the timeline clip.
     #[serde(default)]
     pub reverse: bool,
+    /// Chroma key enabled flag. Default false.
+    #[serde(default)]
+    pub chroma_key_enabled: bool,
+    /// Chroma key target color as 0xRRGGBB. Default 0x00FF00 (green).
+    #[serde(default = "default_chroma_key_color")]
+    pub chroma_key_color: u32,
+    /// Chroma key tolerance (angle): 0.0 (tight key) to 1.0 (wide key). Default 0.3.
+    #[serde(default = "default_chroma_key_tolerance")]
+    pub chroma_key_tolerance: f32,
+    /// Chroma key edge softness (noise level): 0.0 (hard edge) to 1.0 (soft edge). Default 0.1.
+    #[serde(default = "default_chroma_key_softness")]
+    pub chroma_key_softness: f32,
     /// Optional clip-group identifier. Clips with the same group id are edited as a unit.
     #[serde(default)]
     pub group_id: Option<String>,
@@ -227,6 +248,10 @@ impl Clip {
             midtones: 0.0,
             highlights: 0.0,
             reverse: false,
+            chroma_key_enabled: false,
+            chroma_key_color: default_chroma_key_color(),
+            chroma_key_tolerance: default_chroma_key_tolerance(),
+            chroma_key_softness: default_chroma_key_softness(),
             group_id: None,
             link_group_id: None,
             source_timecode_base_ns: None,
@@ -299,6 +324,10 @@ mod tests {
         assert_eq!(clip.volume, 1.0);
         assert_eq!(clip.speed, 1.0);
         assert!(!clip.reverse);
+        assert!(!clip.chroma_key_enabled);
+        assert_eq!(clip.chroma_key_color, 0x00FF00);
+        assert!((clip.chroma_key_tolerance - 0.3).abs() < f32::EPSILON);
+        assert!((clip.chroma_key_softness - 0.1).abs() < f32::EPSILON);
         assert_eq!(clip.scale, 1.0);
         assert_eq!(clip.opacity, 1.0);
         assert!(!clip.flip_h);
