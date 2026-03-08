@@ -723,7 +723,7 @@ pub fn build_inspector(
             if *updating.borrow() {
                 return;
             }
-            let val = db_to_linear_volume(s.value()) as f32;
+            let val = s.value() as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -884,20 +884,19 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_audio_changed = on_audio_changed.clone();
-        let volume_slider_cb = volume_slider.clone();
         let pan_slider_cb = pan_slider.clone();
         volume_slider.connect_value_changed(move |s| {
             if *updating.borrow() {
                 return;
             }
-            let val = s.value() as f32;
+            let linear_vol = db_to_linear_volume(s.value()) as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.volume = val;
+                            clip.volume = linear_vol;
                             proj.dirty = true;
                             break;
                         }
@@ -905,7 +904,7 @@ pub fn build_inspector(
                 }
                 on_audio_changed(
                     clip_id,
-                    db_to_linear_volume(volume_slider_cb.value()) as f32,
+                    linear_vol,
                     pan_slider_cb.value() as f32,
                 );
             }
