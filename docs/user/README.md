@@ -12,6 +12,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [media-library.md](media-library.md) | Importing media, browsing clips, appending to timeline |
 | [source-monitor.md](source-monitor.md) | Previewing clips, setting In/Out points, shuttle controls |
 | [timeline.md](timeline.md) | Arranging clips, trimming, splitting, markers, zoom/pan |
+| [VIDEOAUDIOALIGNMENT.md](VIDEOAUDIOALIGNMENT.md) | Multi-cam sync: timecode alignment and audio cross-correlation |
 | [inspector.md](inspector.md) | Color correction, effects, audio, transform, titles, speed |
 | [color-scopes.md](color-scopes.md) | Waveform, histogram, RGB parade, vectorscope |
 | [preferences.md](preferences.md) | Application-level settings and performance preferences |

@@ -1305,6 +1305,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         ));
     }
 
+    // Shared flag: true while audio sync is running (read by status bar timer).
+    let audio_sync_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
     // Wire on_sync_audio — spawns a background thread for FFT cross-correlation.
     {
         let project = project.clone();
@@ -1313,6 +1316,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let sync_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<Vec<(String, i64, f32)>>>>> =
             Rc::new(RefCell::new(None));
         let sync_rx_for_timer = sync_rx.clone();
+        let audio_sync_in_progress_timer = audio_sync_in_progress.clone();
         // Poll timer for sync results
         {
             let project = project.clone();
@@ -1325,6 +1329,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     if let Ok(results) = rx.try_recv() {
                         drop(rx_opt);
                         sync_rx_for_timer.borrow_mut().take();
+                        audio_sync_in_progress_timer.set(false);
                         apply_audio_sync_results(
                             &results,
                             &project,
@@ -1337,12 +1342,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 glib::ControlFlow::Continue
             });
         }
+        let audio_sync_in_progress_cb = audio_sync_in_progress.clone();
         timeline_state.borrow_mut().on_sync_audio = Some(Rc::new(
             move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
                 if sync_rx.borrow().is_some() {
                     // Sync already in progress
                     return;
                 }
+                audio_sync_in_progress_cb.set(true);
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = proj.title.clone();
@@ -3013,6 +3020,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let status_progress = status_progress.clone();
         let player = player.clone();
         let source_marks = source_marks.clone();
+        let audio_sync_in_progress = audio_sync_in_progress.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
@@ -3043,10 +3051,32 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prerender_progress = prog_player.borrow().background_prerender_progress();
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
-            if proxy_active || prerender_active {
+            let syncing_audio = audio_sync_in_progress.get();
+            if proxy_active || prerender_active || syncing_audio {
                 status_label.set_visible(true);
-                status_progress.set_visible(true);
-                let label = if proxy_active && prerender_active {
+                let label = if syncing_audio && (proxy_active || prerender_active) {
+                    if proxy_active && prerender_active {
+                        format!(
+                            "Syncing audio… | Generating proxies + prerender… proxy {}/{} | prerender {}/{}",
+                            proxy_progress.completed,
+                            proxy_progress.total,
+                            prerender_progress.completed,
+                            prerender_progress.total
+                        )
+                    } else if proxy_active {
+                        format!(
+                            "Syncing audio… | Generating proxies… {}/{}",
+                            proxy_progress.completed, proxy_progress.total
+                        )
+                    } else {
+                        format!(
+                            "Syncing audio… | Prerendering timeline… {}/{}",
+                            prerender_progress.completed, prerender_progress.total
+                        )
+                    }
+                } else if syncing_audio {
+                    "Syncing clips by audio…".to_string()
+                } else if proxy_active && prerender_active {
                     format!(
                         "Generating proxies + prerender… proxy {}/{} | prerender {}/{}",
                         proxy_progress.completed,
@@ -3067,6 +3097,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 };
                 status_label.set_text(&label);
                 if proxy_active {
+                    status_progress.set_visible(true);
                     let fraction = proxy_progress.byte_fraction.unwrap_or_else(|| {
                         if proxy_progress.total > 0 {
                             (proxy_progress.completed as f64 / proxy_progress.total as f64)
@@ -3077,12 +3108,16 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     });
                     status_progress.set_fraction(fraction);
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
-                } else if prerender_progress.total > 0 {
+                } else if prerender_active && prerender_progress.total > 0 {
+                    status_progress.set_visible(true);
                     let fraction = (prerender_progress.completed as f64
                         / prerender_progress.total as f64)
                         .clamp(0.0, 0.99);
                     status_progress.set_fraction(fraction);
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                } else {
+                    // Audio sync only — no meaningful progress bar, just show the label
+                    status_progress.set_visible(false);
                 }
             } else {
                 status_label.set_visible(false);
