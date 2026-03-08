@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- Lens glass gradient (matches app icon) -->
+    <radialGradient id="lens" cx="30%" cy="30%" r="70%">
+      <stop offset="0%"  stop-color="#99c1f1"/>
+      <stop offset="38%" stop-color="#3584e4"/>
+      <stop offset="100%" stop-color="#1a5fb4"/>
+    </radialGradient>
+
+    <!-- Knife blade gradient -->
+    <linearGradient id="blade" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#f6f5f4"/>
+      <stop offset="50%" stop-color="#c8c7c6"/>
+      <stop offset="100%" stop-color="#9a9996"/>
+    </linearGradient>
+
+    <!-- Paper gradient (subtle top-lit) -->
+    <linearGradient id="paper" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f0eeec"/>
+    </linearGradient>
+
+    <!-- Fold triangle gradient (shadow on dog-ear) -->
+    <linearGradient id="fold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"  stop-color="#deddda"/>
+      <stop offset="100%" stop-color="#c0bfbc"/>
+    </linearGradient>
+
+    <!-- Drop shadow for entire document -->
+    <filter id="docShadow" x="-10%" y="-5%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3"
+                    flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+
+    <!-- Cut line clip paths (scaled for emblem area) -->
+    <clipPath id="camSide">
+      <polygon points="0,0 60,0 60,30 0,18"/>
+    </clipPath>
+    <clipPath id="cakeSide">
+      <polygon points="0,18 60,30 60,42 0,42"/>
+    </clipPath>
+    <clipPath id="camBody">
+      <rect x="3" y="9" width="54" height="30" rx="2.5"/>
+    </clipPath>
+  </defs>
+
+  <!-- ══ DOCUMENT PAGE ══ -->
+  <g filter="url(#docShadow)">
+    <!-- Page body with dog-ear cutout -->
+    <path d="M24,8 L84,8 L104,28 L104,120 Q104,124 100,124 L28,124 Q24,124 24,120 Z"
+          fill="url(#paper)" stroke="#c0bfbc" stroke-width="1"/>
+    <!-- Dog-ear fold triangle -->
+    <path d="M84,8 L84,24 Q84,28 88,28 L104,28 Z"
+          fill="url(#fold)" stroke="#c0bfbc" stroke-width="1"
+          stroke-linejoin="round"/>
+    <!-- Inner fold crease line -->
+    <path d="M84,8 L104,28" stroke="#deddda" stroke-width="0.6" fill="none"/>
+  </g>
+
+  <!-- ══ ULTIMATESLICE EMBLEM (centred on page) ══-->
+  <!-- Emblem area: 60×42 centred at (64, 68), translated to (34, 47) -->
+  <g transform="translate(34, 47)">
+
+    <!-- ── CINEMA CAMERA EXTERIOR (above the cut) ── -->
+    <g clip-path="url(#camSide)">
+
+      <!-- Film magazine (mini) -->
+      <rect x="3" y="10" width="22" height="2" rx="1" fill="#2a2835"/>
+      <rect x="3" y="2" width="22" height="9" rx="2" fill="#4a4851" stroke="#5e5c64" stroke-width="0.6"/>
+
+      <!-- Top handle (mini) -->
+      <rect x="12" y="3" width="34" height="2" rx="1.5" fill="#2a2835"/>
+      <rect x="12" y="0" width="34" height="5" rx="2.5" fill="#3d3846" stroke="#5e5c64" stroke-width="0.6"/>
+
+      <!-- Camera body -->
+      <rect x="3" y="12" width="54" height="28" rx="2.5" fill="#3d3846"/>
+      <rect x="3" y="10" width="54" height="27" rx="2.5" fill="#5e5c64"/>
+      <!-- Panel seam -->
+      <line x1="3" y1="19" x2="57" y2="19" stroke="#2a2835" stroke-width="0.5" opacity="0.5"/>
+
+      <!-- Lens port darkened area -->
+      <rect x="3" y="10" width="30" height="30" rx="2.5" fill="#1a1826" opacity="0.35"/>
+
+      <!-- Cinema lens assembly -->
+      <circle cx="18" cy="25" r="12" fill="#141420" stroke="#4a4851" stroke-width="1"/>
+      <circle cx="18" cy="25" r="10" fill="#1c1c2a" stroke="#3d3846" stroke-width="0.8"
+              stroke-dasharray="1.5,1"/>
+      <circle cx="18" cy="25" r="8" fill="#111118" stroke="#5e5c64" stroke-width="0.6"/>
+      <circle cx="18" cy="25" r="6" fill="url(#lens)"/>
+      <circle cx="18" cy="25" r="2.5" fill="#040820" stroke="#1a5fb4" stroke-width="0.4"/>
+      <!-- Lens highlight -->
+      <ellipse cx="15" cy="22" rx="2.2" ry="1.5" fill="#fff" opacity="0.28"/>
+
+      <!-- REC button -->
+      <circle cx="46" cy="14" r="3.5" fill="#c01010" stroke="#8a0e0e" stroke-width="0.8"/>
+      <circle cx="46" cy="14" r="2.2" fill="#e01b24"/>
+
+      <!-- Timecode display -->
+      <rect x="33" y="21" width="13" height="6" rx="1" fill="#0d1117" stroke="#3d3846" stroke-width="0.4"/>
+      <g fill="#00e878" opacity="0.7">
+        <rect x="34.5" y="22.5" width="1.5" height="2.5" rx="0.3"/>
+        <rect x="36.8" y="22.5" width="1.5" height="2.5" rx="0.3"/>
+        <rect x="39.5" y="22.5" width="1.5" height="2.5" rx="0.3"/>
+        <rect x="41.8" y="22.5" width="1.5" height="2.5" rx="0.3"/>
+      </g>
+
+      <!-- EVF viewfinder (mini) -->
+      <rect x="54" y="12" width="6" height="12" rx="1.5" fill="#2a2835" stroke="#4a4851" stroke-width="0.5"/>
+
+      <!-- Bottom rail -->
+      <rect x="3" y="36" width="54" height="3" rx="1" fill="#252432" stroke="#4a4851" stroke-width="0.4"/>
+    </g>
+
+    <!-- ── CAKE CROSS-SECTION (below the cut) ── -->
+    <g clip-path="url(#cakeSide)">
+      <g clip-path="url(#camBody)">
+        <rect x="3" y="34" width="54" height="6"  fill="#3e2723"/>  <!-- dark chocolate -->
+        <rect x="3" y="28" width="54" height="6"  fill="#f5f0e8"/>  <!-- vanilla cream   -->
+        <rect x="3" y="22" width="54" height="6"  fill="#c27a2e"/>  <!-- golden sponge   -->
+        <rect x="3" y="16" width="54" height="6"  fill="#f5f0e8"/>  <!-- vanilla cream   -->
+        <rect x="3" y="10" width="54" height="6"  fill="#d4952a"/>  <!-- top sponge      -->
+      </g>
+    </g>
+
+    <!-- Cut edge shadow -->
+    <line x1="0" y1="18" x2="60" y2="30"
+          stroke="#000" stroke-width="0.8" opacity="0.18"/>
+
+    <!-- ── KITCHEN KNIFE (along the cut line) ── -->
+    <g transform="translate(30, 24) rotate(11.3)">
+      <!-- Blade -->
+      <polygon points="-30,-1.2 15,-1.6 15,1.4 -30,1.2" fill="url(#blade)"/>
+      <!-- Sharp-edge highlight -->
+      <line x1="-30" y1="-1.2" x2="15" y2="-1.6"
+            stroke="#fff" stroke-width="0.3" opacity="0.55"/>
+      <!-- Bolster -->
+      <rect x="15" y="-2.8" width="3.5" height="5.6" rx="0.8" fill="#8f7a5e"/>
+      <!-- Handle -->
+      <rect x="18.5" y="-3.8" width="11" height="7.6" rx="2" fill="#5c3d1e"/>
+      <!-- Wood grain -->
+      <g stroke="#7a5634" stroke-width="0.4" opacity="0.5">
+        <line x1="21.5" y1="-3.8" x2="21.5" y2="3.8"/>
+        <line x1="24.5" y1="-3.8" x2="24.5" y2="3.8"/>
+        <line x1="27.5" y1="-3.8" x2="27.5" y2="3.8"/>
+      </g>
+      <!-- Brass rivets -->
+      <circle cx="22" cy="0" r="1.2" fill="#c0a878"/>
+      <circle cx="27" cy="0" r="1.2" fill="#c0a878"/>
+    </g>
+
+  </g>
+
+  <!-- ══ FILE EXTENSION LABEL ══ -->
+  <rect x="56" y="98" width="42" height="16" rx="3" fill="#3584e4"/>
+  <text x="77" y="111" font-family="sans-serif" font-weight="bold"
+        font-size="10" fill="#fff" text-anchor="middle">.uspxml</text>
+</svg>
