@@ -186,6 +186,7 @@ pub fn export_project(
     // === Primary video track: scale/correct each clip then concatenate ===
     for (i, clip) in primary_clips.iter().enumerate() {
         let color_filter = build_color_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter(clip);
         let grading_filter = build_grading_filter(clip);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
@@ -197,12 +198,12 @@ pub fn export_project(
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
         if clip.chroma_key_enabled {
             filter.push_str(&format!(
-                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             filter.push_str(&format!(
-                "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -284,6 +285,7 @@ pub fn export_project(
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         let color_filter = build_color_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter(clip);
         let grading_filter = build_grading_filter(clip);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
@@ -297,7 +299,7 @@ pub fn export_project(
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
@@ -519,6 +521,31 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     } else {
         String::new()
     }
+}
+
+fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
+    let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
+    let has_tint = clip.tint.abs() > 0.001;
+    let mut f = String::new();
+    if has_temp {
+        f.push_str(&format!(
+            ",colortemperature=temperature={:.0}",
+            clip.temperature.clamp(2000.0, 10000.0)
+        ));
+    }
+    if has_tint {
+        // Map tint to green channel offset via colorbalance midtones.
+        // Negative tint = boost green (positive gm), positive tint = cut green (negative gm)
+        // and complementary red+blue boost.
+        let t = clip.tint.clamp(-1.0, 1.0);
+        let gm = -t * 0.5;
+        let rm = t * 0.25;
+        let bm = t * 0.25;
+        f.push_str(&format!(
+            ",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"
+        ));
+    }
+    f
 }
 
 fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {

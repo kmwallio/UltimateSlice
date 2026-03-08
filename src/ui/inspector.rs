@@ -43,6 +43,8 @@ pub struct InspectorView {
     pub brightness_slider: Scale,
     pub contrast_slider: Scale,
     pub saturation_slider: Scale,
+    pub temperature_slider: Scale,
+    pub tint_slider: Scale,
     // Denoise / sharpness sliders
     pub denoise_slider: Scale,
     pub sharpness_slider: Scale,
@@ -149,6 +151,8 @@ impl InspectorView {
                 self.brightness_slider.set_value(c.brightness as f64);
                 self.contrast_slider.set_value(c.contrast as f64);
                 self.saturation_slider.set_value(c.saturation as f64);
+                self.temperature_slider.set_value(c.temperature as f64);
+                self.tint_slider.set_value(c.tint as f64);
                 self.denoise_slider.set_value(c.denoise as f64);
                 self.sharpness_slider.set_value(c.sharpness as f64);
                 self.shadows_slider.set_value(c.shadows as f64);
@@ -228,6 +232,8 @@ impl InspectorView {
                 self.brightness_slider.set_value(0.0);
                 self.contrast_slider.set_value(1.0);
                 self.saturation_slider.set_value(1.0);
+                self.temperature_slider.set_value(6500.0);
+                self.tint_slider.set_value(0.0);
                 self.denoise_slider.set_value(0.0);
                 self.sharpness_slider.set_value(0.0);
                 self.shadows_slider.set_value(0.0);
@@ -270,13 +276,13 @@ impl InspectorView {
 ///
 /// - `on_clip_changed`: fired when the clip name is applied (triggers full project-changed cycle).
 /// - `on_color_changed`: fired on every color/effects slider movement with
-///   `(brightness, contrast, saturation, denoise, sharpness, shadows, midtones, highlights)`;
+///   `(brightness, contrast, saturation, temperature, tint, denoise, sharpness, shadows, midtones, highlights)`;
 ///   should update the program player's video filter elements directly without a full pipeline reload.
 /// - `on_audio_changed`: fired on every audio slider movement with `(clip_id, volume, pan)`.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
+    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
@@ -382,6 +388,22 @@ pub fn build_inspector(
     saturation_slider.set_digits(2);
     saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&saturation_slider);
+
+    row_label(&color_inner, "Temperature (K)");
+    let temperature_slider = Scale::with_range(Orientation::Horizontal, 2000.0, 10000.0, 100.0);
+    temperature_slider.set_value(6500.0);
+    temperature_slider.set_draw_value(true);
+    temperature_slider.set_digits(0);
+    temperature_slider.add_mark(6500.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&temperature_slider);
+
+    row_label(&color_inner, "Tint");
+    let tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    tint_slider.set_value(0.0);
+    tint_slider.set_draw_value(true);
+    tint_slider.set_digits(2);
+    tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&tint_slider);
 
     let ds_title = Label::new(Some("Denoise / Sharpness"));
     ds_title.set_halign(gtk::Align::Start);
@@ -758,7 +780,7 @@ pub fn build_inspector(
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed = Rc::new(on_clip_changed);
-    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32)> =
+    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)> =
         Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
@@ -802,16 +824,18 @@ pub fn build_inspector(
     }
 
     // Helper: connect an effects slider — updates the model field then fires on_color_changed
-    // with all eight current values so the program player can update its filters directly.
+    // with all ten current values so the program player can update its filters directly.
     fn connect_color_slider(
         slider: &Scale,
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32)>,
+        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>,
         brightness_slider: Scale,
         contrast_slider: Scale,
         saturation_slider: Scale,
+        temperature_slider: Scale,
+        tint_slider: Scale,
         denoise_slider: Scale,
         sharpness_slider: Scale,
         shadows_slider: Scale,
@@ -839,144 +863,51 @@ pub fn build_inspector(
                 let b = brightness_slider.value() as f32;
                 let c = contrast_slider.value() as f32;
                 let sat = saturation_slider.value() as f32;
+                let temp = temperature_slider.value() as f32;
+                let tnt = tint_slider.value() as f32;
                 let d = denoise_slider.value() as f32;
                 let sh = sharpness_slider.value() as f32;
                 let shd = shadows_slider.value() as f32;
                 let mid = midtones_slider.value() as f32;
                 let hil = highlights_slider.value() as f32;
-                on_color_changed(b, c, sat, d, sh, shd, mid, hil);
+                on_color_changed(b, c, sat, temp, tnt, d, sh, shd, mid, hil);
             }
         });
     }
 
-    connect_color_slider(
-        &brightness_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.brightness = v,
-    );
-    connect_color_slider(
-        &contrast_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.contrast = v,
-    );
-    connect_color_slider(
-        &saturation_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.saturation = v,
-    );
-    connect_color_slider(
-        &denoise_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.denoise = v,
-    );
-    connect_color_slider(
-        &sharpness_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.sharpness = v,
-    );
-    connect_color_slider(
-        &shadows_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.shadows = v,
-    );
-    connect_color_slider(
-        &midtones_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.midtones = v,
-    );
-    connect_color_slider(
-        &highlights_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.highlights = v,
-    );
+    macro_rules! wire_color_slider {
+        ($slider:expr, $apply:expr) => {
+            connect_color_slider(
+                &$slider,
+                project.clone(),
+                selected_clip_id.clone(),
+                updating.clone(),
+                on_color_changed.clone(),
+                brightness_slider.clone(),
+                contrast_slider.clone(),
+                saturation_slider.clone(),
+                temperature_slider.clone(),
+                tint_slider.clone(),
+                denoise_slider.clone(),
+                sharpness_slider.clone(),
+                shadows_slider.clone(),
+                midtones_slider.clone(),
+                highlights_slider.clone(),
+                $apply,
+            );
+        };
+    }
+
+    wire_color_slider!(brightness_slider, |clip, v| clip.brightness = v);
+    wire_color_slider!(contrast_slider, |clip, v| clip.contrast = v);
+    wire_color_slider!(saturation_slider, |clip, v| clip.saturation = v);
+    wire_color_slider!(temperature_slider, |clip, v| clip.temperature = v);
+    wire_color_slider!(tint_slider, |clip, v| clip.tint = v);
+    wire_color_slider!(denoise_slider, |clip, v| clip.denoise = v);
+    wire_color_slider!(sharpness_slider, |clip, v| clip.sharpness = v);
+    wire_color_slider!(shadows_slider, |clip, v| clip.shadows = v);
+    wire_color_slider!(midtones_slider, |clip, v| clip.midtones = v);
+    wire_color_slider!(highlights_slider, |clip, v| clip.highlights = v);
 
     // Wire audio sliders
     {
@@ -2016,6 +1947,8 @@ pub fn build_inspector(
         brightness_slider,
         contrast_slider,
         saturation_slider,
+        temperature_slider,
+        tint_slider,
         denoise_slider,
         sharpness_slider,
         shadows_slider,

@@ -690,6 +690,12 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:saturation") {
                 clip.saturation = v.parse().unwrap_or(1.0);
             }
+            if let Some(v) = attrs.get("us:temperature") {
+                clip.temperature = v.parse().unwrap_or(6500.0);
+            }
+            if let Some(v) = attrs.get("us:tint") {
+                clip.tint = v.parse().unwrap_or(0.0);
+            }
             if let Some(v) = attrs.get("us:denoise") {
                 clip.denoise = v.parse().unwrap_or(0.0);
             }

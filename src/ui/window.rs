@@ -1060,9 +1060,10 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |b, c, s, d, sh, shd, mid, hil| {
+            move |b, c, s, temp, tnt, d, sh, shd, mid, hil| {
                 prog_player.borrow_mut().update_current_effects(
-                    b as f64, c as f64, s as f64, d as f64, sh as f64, shd as f64, mid as f64,
+                    b as f64, c as f64, s as f64, temp as f64, tnt as f64,
+                    d as f64, sh as f64, shd as f64, mid as f64,
                     hil as f64,
                 );
                 // Update window title dirty marker without a full reload
@@ -2853,6 +2854,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             brightness: c.brightness as f64,
                             contrast: c.contrast as f64,
                             saturation: c.saturation as f64,
+                            temperature: c.temperature as f64,
+                            tint: c.tint as f64,
                             denoise: c.denoise as f64,
                             sharpness: c.sharpness as f64,
                             volume: c.volume as f64,
@@ -4660,6 +4663,8 @@ fn handle_mcp_command(
             brightness,
             contrast,
             saturation,
+            temperature,
+            tint,
             denoise,
             sharpness,
             shadows,
@@ -4675,6 +4680,8 @@ fn handle_mcp_command(
                         clip.brightness = brightness as f32;
                         clip.contrast = contrast as f32;
                         clip.saturation = saturation as f32;
+                        clip.temperature = temperature as f32;
+                        clip.tint = tint as f32;
                         clip.denoise = denoise as f32;
                         clip.sharpness = sharpness as f32;
                         clip.shadows = shadows as f32;

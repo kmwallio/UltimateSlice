@@ -48,6 +48,9 @@ fn default_chroma_key_tolerance() -> f32 {
 fn default_chroma_key_softness() -> f32 {
     0.1
 }
+fn default_temperature() -> f32 {
+    6500.0
+}
 
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +77,12 @@ pub struct Clip {
     /// Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid), default 1.0
     #[serde(default = "default_saturation")]
     pub saturation: f32,
+    /// Color temperature in Kelvin: 2000 (warm/amber) to 10000 (cool/blue), default 6500 (daylight neutral).
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// Tint shift on the green–magenta axis: −1.0 (green) to 1.0 (magenta), default 0.0.
+    #[serde(default)]
+    pub tint: f32,
     /// Denoise strength: 0.0 (off) to 1.0 (heavy), default 0.0
     #[serde(default)]
     pub denoise: f32,
@@ -220,6 +229,8 @@ impl Clip {
             brightness: 0.0,
             contrast: 1.0,
             saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
             denoise: 0.0,
             sharpness: 0.0,
             volume: 1.0,

@@ -54,6 +54,10 @@ pub struct ProgramClip {
     pub brightness: f64,
     pub contrast: f64,
     pub saturation: f64,
+    /// Color temperature in Kelvin: 2000 (warm) to 10000 (cool). Default 6500.
+    pub temperature: f64,
+    /// Tint on green–magenta axis: −1.0 (green) to 1.0 (magenta). Default 0.0.
+    pub tint: f64,
     /// Denoise strength: 0.0 (off) to 1.0 (heavy)
     pub denoise: f64,
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen)
@@ -1826,7 +1830,7 @@ impl ProgramPlayer {
 
     #[allow(dead_code)]
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
-        self.update_current_effects(brightness, contrast, saturation, 0.0, 0.0, 0.0, 0.0, 0.0);
+        self.update_current_effects(brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
 
     pub fn update_current_effects(
@@ -1834,12 +1838,58 @@ impl ProgramPlayer {
         brightness: f64,
         contrast: f64,
         saturation: f64,
+        temperature: f64,
+        tint: f64,
         denoise: f64,
         sharpness: f64,
         shadows: f64,
         midtones: f64,
         highlights: f64,
     ) {
+        // Check whether the required effect elements exist.  If the slider
+        // values moved away from defaults but the slot was built without the
+        // element (because values were at defaults when the slot was created),
+        // we must do a one-time pipeline rebuild so the element gets created.
+        let need_balance = brightness != 0.0 || contrast != 1.0 || saturation != 1.0
+            || (temperature - 6500.0).abs() > 1.0 || tint.abs() > 0.001
+            || shadows.abs() > f64::EPSILON || midtones.abs() > f64::EPSILON
+            || highlights.abs() > f64::EPSILON;
+        let need_blur = {
+            let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
+            sigma.abs() > f64::EPSILON
+        };
+        let topology_changed = if let Some(slot) =
+            self.current_idx.and_then(|idx| self.slot_for_clip(idx))
+        {
+            (need_balance && slot.videobalance.is_none())
+                || (need_blur && slot.gaussianblur.is_none())
+        } else {
+            false
+        };
+        if topology_changed {
+            // Update self.clips so rebuild_pipeline_at sees the new values
+            // (self.clips is set at load_clips time and not updated by
+            // slider callbacks, so without this the rebuild would see stale
+            // defaults and take the fast reuse path instead of actually
+            // creating the needed effect elements).
+            if let Some(clip_idx) = self.current_idx {
+                let clip = &mut self.clips[clip_idx];
+                clip.brightness = brightness;
+                clip.contrast = contrast;
+                clip.saturation = saturation;
+                clip.temperature = temperature;
+                clip.tint = tint;
+                clip.denoise = denoise;
+                clip.sharpness = sharpness;
+                clip.shadows = shadows;
+                clip.midtones = midtones;
+                clip.highlights = highlights;
+            }
+            let pos = self.timeline_pos_ns;
+            self.rebuild_pipeline_at(pos);
+            return;
+        }
+
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             if let Some(ref vb) = slot.videobalance {
                 // Approximate shadows/midtones/highlights via videobalance
@@ -1853,11 +1903,34 @@ impl ProgramPlayer {
                 vb.set_property("brightness", eff_brightness);
                 vb.set_property("contrast", eff_contrast);
                 vb.set_property("saturation", saturation.clamp(0.0, 2.0));
+                // Approximate temperature/tint via hue shift.
+                // Temperature: below 6500K → warm (negative hue shift toward amber),
+                // above 6500K → cool (positive hue shift toward blue).
+                // Tint: negative → green, positive → magenta (smaller hue offset).
+                let temp_hue = ((temperature - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
+                let tint_hue = (tint * 0.08).clamp(-0.15, 0.15);
+                vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
             }
             if let Some(ref gb) = slot.gaussianblur {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
                 gb.set_property("sigma", sigma);
             }
+        }
+        // Keep self.clips in sync so future slot reuse and topology checks
+        // see the current slider values (self.clips is only fully refreshed
+        // by load_clips, not by slider edits).
+        if let Some(clip_idx) = self.current_idx {
+            let clip = &mut self.clips[clip_idx];
+            clip.brightness = brightness;
+            clip.contrast = contrast;
+            clip.saturation = saturation;
+            clip.temperature = temperature;
+            clip.tint = tint;
+            clip.denoise = denoise;
+            clip.sharpness = sharpness;
+            clip.shadows = shadows;
+            clip.midtones = midtones;
+            clip.highlights = highlights;
         }
         // Force frame redraw when paused.
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
@@ -4153,7 +4226,10 @@ impl ProgramPlayer {
         // no-op elements and their associated videoconvert instances.  This
         // dramatically reduces per-frame CPU cost for clips without effects
         // (3 concurrent clips drops from ~51 to ~22 pipeline elements).
-        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
+        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0
+            || (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001
+            || clip.shadows.abs() > f64::EPSILON || clip.midtones.abs() > f64::EPSILON
+            || clip.highlights.abs() > f64::EPSILON;
         let blur_sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
         let need_title = !clip.title_text.is_empty();
@@ -4249,6 +4325,10 @@ impl ProgramPlayer {
             vb.set_property("brightness", eff_brightness);
             vb.set_property("contrast", eff_contrast);
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
+            // Approximate temperature/tint via hue shift.
+            let temp_hue = ((clip.temperature as f64 - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
+            let tint_hue = (clip.tint as f64 * 0.08).clamp(-0.15, 0.15);
+            vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
         }
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
@@ -5609,7 +5689,10 @@ impl ProgramPlayer {
     /// without adding/removing GStreamer elements.
     fn effects_topology_matches(a: &ProgramClip, b: &ProgramClip) -> bool {
         let need_balance =
-            |c: &ProgramClip| c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0;
+            |c: &ProgramClip| c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0
+                || (c.temperature - 6500.0).abs() > 1.0 || c.tint.abs() > 0.001
+                || c.shadows.abs() > f64::EPSILON || c.midtones.abs() > f64::EPSILON
+                || c.highlights.abs() > f64::EPSILON;
         let need_blur = |c: &ProgramClip| {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -5625,6 +5708,37 @@ impl ProgramPlayer {
             && need_flip(a) == need_flip(b)
             && need_title(a) == need_title(b)
             && need_chroma_key(a) == need_chroma_key(b)
+    }
+
+    /// Verify a slot actually has the GStreamer elements required by the desired
+    /// clip.  This guards against stale `self.clips` data: when slider callbacks
+    /// update `self.clips` in-place before a rebuild, `effects_topology_matches`
+    /// can return true (comparing a clip against its own updated entry) even
+    /// though the slot was built for a different topology.
+    fn slot_satisfies_clip(slot: &VideoSlot, clip: &ProgramClip) -> bool {
+        let need_balance = clip.brightness != 0.0
+            || clip.contrast != 1.0
+            || clip.saturation != 1.0
+            || (clip.temperature - 6500.0).abs() > 1.0
+            || clip.tint.abs() > 0.001
+            || clip.shadows.abs() > f64::EPSILON
+            || clip.midtones.abs() > f64::EPSILON
+            || clip.highlights.abs() > f64::EPSILON;
+        let need_blur = {
+            let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
+            sigma.abs() > f64::EPSILON
+        };
+        let need_rotate = clip.rotate.rem_euclid(360) != 0;
+        let need_flip = clip.flip_h || clip.flip_v;
+        let need_title = !clip.title_text.is_empty();
+        let need_chroma_key = clip.chroma_key_enabled;
+
+        (!need_balance || slot.videobalance.is_some())
+            && (!need_blur || slot.gaussianblur.is_some())
+            && (!need_rotate || slot.videoflip_rotate.is_some())
+            && (!need_flip || slot.videoflip_flip.is_some())
+            && (!need_title || slot.textoverlay.is_some())
+            && (!need_chroma_key || slot.alpha_chroma_key.is_some())
     }
 
     /// Determine whether all current slots can be reused for the desired
@@ -5670,6 +5784,11 @@ impl ProgramPlayer {
                 if !Self::effects_topology_matches(current_clip, desired_clip) {
                     continue;
                 }
+                // Verify slot actually has the GStreamer elements the desired
+                // clip needs (guards against in-place self.clips updates).
+                if !Self::slot_satisfies_clip(&self.slots[slot_idx], desired_clip) {
+                    continue;
+                }
                 matched = Some((unmatched_idx, slot_idx));
                 break;
             }
@@ -5692,7 +5811,7 @@ impl ProgramPlayer {
     fn update_slot_effects(&self, slot_idx: usize, clip: &ProgramClip) {
         let slot = &self.slots[slot_idx];
 
-        // Videobalance (brightness/contrast/saturation + shadows/midtones/highlights)
+        // Videobalance (brightness/contrast/saturation + shadows/midtones/highlights + temperature/tint)
         if let Some(ref vb) = slot.videobalance {
             let eff_brightness = (clip.brightness
                 + clip.shadows * 0.3
@@ -5704,6 +5823,9 @@ impl ProgramPlayer {
             vb.set_property("brightness", eff_brightness);
             vb.set_property("contrast", eff_contrast);
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
+            let temp_hue = ((clip.temperature - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
+            let tint_hue = (clip.tint * 0.08).clamp(-0.15, 0.15);
+            vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
         }
 
         // Gaussianblur
@@ -6624,7 +6746,10 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip_can_fully_occlude, ProgramClip};
+    use super::{clip_can_fully_occlude, ProgramClip, ProgramPlayer, VideoSlot};
+    use gstreamer as gst;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::Arc;
 
     fn make_clip() -> ProgramClip {
         ProgramClip {
@@ -6636,6 +6761,8 @@ mod tests {
             brightness: 0.0,
             contrast: 1.0,
             saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
             denoise: 0.0,
             sharpness: 0.0,
             volume: 1.0,
@@ -6709,6 +6836,244 @@ mod tests {
         // Feature defaults to off for behavior-safe rollout.
         let prefs = crate::ui_state::PreferencesState::default();
         assert!(!prefs.background_prerender);
+    }
+
+    // ── effects_topology_matches tests ────────────────────────────────
+
+    #[test]
+    fn topology_matches_identical_default_clips() {
+        let a = make_clip();
+        let b = make_clip();
+        assert!(ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_matches_both_need_balance() {
+        let mut a = make_clip();
+        let mut b = make_clip();
+        a.brightness = -0.5;
+        b.brightness = 0.3;
+        assert!(ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_one_needs_balance() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.brightness = -0.5;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_temperature_triggers_balance() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.temperature = 3000.0;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_tint_triggers_balance() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.tint = 0.5;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_shadows_triggers_balance() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.shadows = 0.3;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_midtones_triggers_balance() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.midtones = -0.2;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_highlights_triggers_balance() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.highlights = 0.4;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_blur() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.denoise = 0.5;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    #[test]
+    fn topology_mismatch_chroma_key() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.chroma_key_enabled = true;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
+    // ── slot_satisfies_clip tests ─────────────────────────────────────
+
+    /// Create a minimal VideoSlot for testing.  Requires `gst::init()`.
+    fn make_test_slot(
+        has_videobalance: bool,
+        has_gaussianblur: bool,
+        has_rotate: bool,
+        has_flip: bool,
+        has_textoverlay: bool,
+        has_chroma_key: bool,
+    ) -> VideoSlot {
+        let _ = gst::init();
+        let identity = || gst::ElementFactory::make("identity").build().ok();
+        VideoSlot {
+            clip_idx: 0,
+            decoder: gst::ElementFactory::make("fakesrc").build()
+                .unwrap_or_else(|_| gst::ElementFactory::make("identity").build().unwrap()),
+            video_linked: Arc::new(AtomicBool::new(false)),
+            audio_linked: Arc::new(AtomicBool::new(false)),
+            effects_bin: gst::Bin::new(),
+            compositor_pad: None,
+            audio_mixer_pad: None,
+            audio_conv: None,
+            audio_level: None,
+            videobalance: if has_videobalance { identity() } else { None },
+            gaussianblur: if has_gaussianblur { identity() } else { None },
+            videocrop: None,
+            videobox_crop_alpha: None,
+            videoflip_rotate: if has_rotate { identity() } else { None },
+            videoflip_flip: if has_flip { identity() } else { None },
+            textoverlay: if has_textoverlay { identity() } else { None },
+            alpha_filter: None,
+            alpha_chroma_key: if has_chroma_key { identity() } else { None },
+            capsfilter_zoom: None,
+            videobox_zoom: None,
+            slot_queue: None,
+            comp_arrival_seq: Arc::new(AtomicU64::new(0)),
+            hidden: false,
+            is_prerender_slot: false,
+            prerender_segment_start_ns: None,
+        }
+    }
+
+    #[test]
+    fn slot_satisfies_default_clip_without_elements() {
+        // Default clip needs nothing — empty slot is fine.
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let clip = make_clip();
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_videobalance_rejects_brightness() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.brightness = -0.5;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_videobalance_accepts_brightness() {
+        let slot = make_test_slot(true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.brightness = -0.5;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_videobalance_rejects_temperature() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.temperature = 3000.0;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_videobalance_rejects_tint() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.tint = 0.5;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_videobalance_rejects_shadows() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.shadows = 0.3;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_videobalance_rejects_midtones() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.midtones = -0.2;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_videobalance_rejects_highlights() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.highlights = 0.4;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_gaussianblur_rejects_denoise() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.denoise = 0.5;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_gaussianblur_accepts_denoise() {
+        let slot = make_test_slot(false, true, false, false, false, false);
+        let mut clip = make_clip();
+        clip.denoise = 0.5;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_chroma_key_rejects_chroma_enabled() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.chroma_key_enabled = true;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_chroma_key_accepts_chroma_enabled() {
+        let slot = make_test_slot(false, false, false, false, false, true);
+        let mut clip = make_clip();
+        clip.chroma_key_enabled = true;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    /// Regression test for the in-place self.clips update bug:
+    /// When a clip is compared against itself after an in-place update,
+    /// effects_topology_matches returns true even though the slot was
+    /// built without the needed elements.  slot_satisfies_clip catches this.
+    #[test]
+    fn inplace_update_regression_topology_matches_but_slot_lacks_elements() {
+        // Simulate: clip starts at defaults, user moves brightness slider.
+        // After in-place update, both "old" and "new" clip have brightness=-0.5.
+        let mut clip = make_clip();
+        clip.brightness = -0.5;
+        // effects_topology_matches compares clip against itself → true
+        assert!(ProgramPlayer::effects_topology_matches(&clip, &clip));
+        // But the slot was built without videobalance → slot_satisfies_clip → false
+        let slot = make_test_slot(false, false, false, false, false, false);
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
     }
 }
 
