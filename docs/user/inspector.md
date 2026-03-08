@@ -28,6 +28,8 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 | **Brightness** | −1.0 → 1.0 | 0.0 | Additive luminance shift |
 | **Contrast** | 0.0 → 2.0 | 1.0 | Contrast multiplier |
 | **Saturation** | 0.0 → 2.0 | 1.0 | 0 = greyscale, 2 = vivid |
+| **Temperature** | 2000 → 10000 K | 6500 | Color temperature: low = warm/amber, high = cool/blue |
+| **Tint** | −1.0 → 1.0 | 0.0 | Green–magenta axis: negative = green, positive = magenta |
 
 ---
 

@@ -89,6 +89,8 @@ pub enum McpCommand {
         brightness: f64,
         contrast: f64,
         saturation: f64,
+        temperature: f64,
+        tint: f64,
         denoise: f64,
         sharpness: f64,
         shadows: f64,

@@ -54,6 +54,10 @@ pub struct ProgramClip {
     pub brightness: f64,
     pub contrast: f64,
     pub saturation: f64,
+    /// Color temperature in Kelvin: 2000 (warm) to 10000 (cool). Default 6500.
+    pub temperature: f64,
+    /// Tint on green–magenta axis: −1.0 (green) to 1.0 (magenta). Default 0.0.
+    pub tint: f64,
     /// Denoise strength: 0.0 (off) to 1.0 (heavy)
     pub denoise: f64,
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen)
@@ -1826,7 +1830,7 @@ impl ProgramPlayer {
 
     #[allow(dead_code)]
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
-        self.update_current_effects(brightness, contrast, saturation, 0.0, 0.0, 0.0, 0.0, 0.0);
+        self.update_current_effects(brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
 
     pub fn update_current_effects(
@@ -1834,6 +1838,8 @@ impl ProgramPlayer {
         brightness: f64,
         contrast: f64,
         saturation: f64,
+        temperature: f64,
+        tint: f64,
         denoise: f64,
         sharpness: f64,
         shadows: f64,
@@ -1853,6 +1859,13 @@ impl ProgramPlayer {
                 vb.set_property("brightness", eff_brightness);
                 vb.set_property("contrast", eff_contrast);
                 vb.set_property("saturation", saturation.clamp(0.0, 2.0));
+                // Approximate temperature/tint via hue shift.
+                // Temperature: below 6500K → warm (negative hue shift toward amber),
+                // above 6500K → cool (positive hue shift toward blue).
+                // Tint: negative → green, positive → magenta (smaller hue offset).
+                let temp_hue = ((temperature - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
+                let tint_hue = (tint * 0.08).clamp(-0.15, 0.15);
+                vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
             }
             if let Some(ref gb) = slot.gaussianblur {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
@@ -4153,7 +4166,8 @@ impl ProgramPlayer {
         // no-op elements and their associated videoconvert instances.  This
         // dramatically reduces per-frame CPU cost for clips without effects
         // (3 concurrent clips drops from ~51 to ~22 pipeline elements).
-        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
+        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0
+            || (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
         let blur_sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
         let need_title = !clip.title_text.is_empty();
@@ -4249,6 +4263,10 @@ impl ProgramPlayer {
             vb.set_property("brightness", eff_brightness);
             vb.set_property("contrast", eff_contrast);
             vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
+            // Approximate temperature/tint via hue shift.
+            let temp_hue = ((clip.temperature as f64 - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
+            let tint_hue = (clip.tint as f64 * 0.08).clamp(-0.15, 0.15);
+            vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
         }
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
@@ -6636,6 +6654,8 @@ mod tests {
             brightness: 0.0,
             contrast: 1.0,
             saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
             denoise: 0.0,
             sharpness: 0.0,
             volume: 1.0,

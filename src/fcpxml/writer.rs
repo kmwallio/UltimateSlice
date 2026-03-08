@@ -126,6 +126,8 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
             asset_clip.push_attribute(("us:contrast", clip.contrast.to_string().as_str()));
             asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
+            asset_clip.push_attribute(("us:temperature", clip.temperature.to_string().as_str()));
+            asset_clip.push_attribute(("us:tint", clip.tint.to_string().as_str()));
             asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
             asset_clip.push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
             asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
