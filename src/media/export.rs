@@ -195,10 +195,17 @@ pub fn export_project(
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
-        filter.push_str(&format!(
-            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter}{speed_filter}[pv{i}];",
-            project.frame_rate.numerator, project.frame_rate.denominator
-        ));
+        if clip.chroma_key_enabled {
+            filter.push_str(&format!(
+                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter}{speed_filter}[pv{i}];",
+                project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        } else {
+            filter.push_str(&format!(
+                "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
+                project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        }
     }
     // Check for xfade and tpad support
     let has_xfade = check_filter_support(&ffmpeg, "xfade");
@@ -290,7 +297,7 @@ pub fn export_project(
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter},format=yuva420p{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{lut_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
