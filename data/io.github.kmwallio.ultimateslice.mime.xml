@@ -4,6 +4,6 @@
     <comment>UltimateSlice Project</comment>
     <sub-class-of type="application/xml"/>
     <glob pattern="*.uspxml"/>
-    <icon name="io.github.kmwallio.ultimateslice"/>
+    <icon name="io.github.kmwallio.ultimateslice-file"/>
   </mime-type>
 </mime-info>
