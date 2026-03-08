@@ -249,6 +249,14 @@ impl Clip {
             .map(|base| base.saturating_add(self.source_in))
     }
 
+    pub fn suppresses_embedded_audio_for_linked_peer(&self, peer: &Clip) -> bool {
+        self.kind == ClipKind::Video
+            && peer.kind == ClipKind::Audio
+            && self.link_group_id.is_some()
+            && self.link_group_id == peer.link_group_id
+            && self.source_path == peer.source_path
+    }
+
     /// Duration of the clip on the **timeline**, in nanoseconds.
     /// A 2× speed clip occupies half the wall-clock time; 0.5× occupies double.
     pub fn duration(&self) -> u64 {
@@ -311,6 +319,28 @@ mod tests {
         clip.source_in = 2_000_000_000;
         clip.source_timecode_base_ns = Some(10_000_000_000);
         assert_eq!(clip.source_timecode_start_ns(), Some(12_000_000_000));
+    }
+
+    #[test]
+    fn test_linked_audio_peer_suppresses_embedded_audio() {
+        let mut video = make_test_clip(5_000_000_000, 0);
+        video.link_group_id = Some("link-1".to_string());
+
+        let mut audio = Clip::new("/path/to/video.mp4", 5_000_000_000, 0, ClipKind::Audio);
+        audio.link_group_id = Some("link-1".to_string());
+
+        assert!(video.suppresses_embedded_audio_for_linked_peer(&audio));
+    }
+
+    #[test]
+    fn test_unlinked_or_different_source_peer_does_not_suppress_embedded_audio() {
+        let mut video = make_test_clip(5_000_000_000, 0);
+        video.link_group_id = Some("link-1".to_string());
+
+        let mut audio = Clip::new("/path/to/other.wav", 5_000_000_000, 0, ClipKind::Audio);
+        audio.link_group_id = Some("link-1".to_string());
+
+        assert!(!video.suppresses_embedded_audio_for_linked_peer(&audio));
     }
 
     #[test]

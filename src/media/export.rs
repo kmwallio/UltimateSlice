@@ -1,4 +1,4 @@
-use crate::model::clip::ClipKind;
+use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
 use std::io::{BufRead, BufReader};
@@ -310,7 +310,10 @@ pub fn export_project(
 
     // Embedded audio from primary video clips, with per-clip volume scaling
     for (i, clip) in primary_clips.iter().enumerate() {
-        if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
+        if clip.kind == ClipKind::Video
+            && !has_linked_audio_peer(clip, &audio_clips)
+            && probe_has_audio(&ffmpeg, &clip.source_path)
+        {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
@@ -326,7 +329,10 @@ pub fn export_project(
     // Embedded audio from secondary video clips (with their volume)
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
-        if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
+        if clip.kind == ClipKind::Video
+            && !has_linked_audio_peer(clip, &audio_clips)
+            && probe_has_audio(&ffmpeg, &clip.source_path)
+        {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
@@ -796,6 +802,12 @@ fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
     })
 }
 
+fn has_linked_audio_peer(clip: &Clip, audio_clips: &[&Clip]) -> bool {
+    audio_clips
+        .iter()
+        .any(|audio_clip| clip.suppresses_embedded_audio_for_linked_peer(audio_clip))
+}
+
 fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
     // Derive ffprobe path from ffmpeg path (they live side-by-side)
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
@@ -844,7 +856,8 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_export_size_bytes, parse_progress_line, AudioCodec, ExportOptions, VideoCodec,
+        estimate_export_size_bytes, has_linked_audio_peer, parse_progress_line, AudioCodec,
+        ExportOptions, VideoCodec,
     };
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
@@ -885,5 +898,16 @@ mod tests {
         };
         let est = estimate_export_size_bytes(&project, &options, project.width, project.height);
         assert!(est.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn linked_audio_peer_suppresses_embedded_video_audio() {
+        let mut video = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        video.link_group_id = Some("link-1".to_string());
+
+        let mut audio = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Audio);
+        audio.link_group_id = Some("link-1".to_string());
+
+        assert!(has_linked_audio_peer(&video, std::slice::from_ref(&&audio)));
     }
 }

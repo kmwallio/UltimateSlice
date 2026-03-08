@@ -447,6 +447,44 @@ impl EditCommand for SetTrackClipsCommand {
     }
 }
 
+#[derive(Clone)]
+pub struct TrackClipsChange {
+    pub track_id: String,
+    pub old_clips: Vec<Clip>,
+    pub new_clips: Vec<Clip>,
+}
+
+/// Replace multiple tracks' full clip lists as a single undo step.
+pub struct SetMultipleTracksClipsCommand {
+    pub changes: Vec<TrackClipsChange>,
+    #[allow(dead_code)]
+    pub label: String,
+}
+
+impl EditCommand for SetMultipleTracksClipsCommand {
+    fn execute(&self, project: &mut Project) {
+        for change in &self.changes {
+            if let Some(track) = project.track_mut(&change.track_id) {
+                track.clips = change.new_clips.clone();
+            }
+        }
+        project.dirty = true;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        for change in &self.changes {
+            if let Some(track) = project.track_mut(&change.track_id) {
+                track.clips = change.old_clips.clone();
+            }
+        }
+        project.dirty = true;
+    }
+
+    fn description(&self) -> &str {
+        &self.label
+    }
+}
+
 /// Split a clip at a given position (razor cut)
 pub struct SplitClipCommand {
     pub original_clip: Clip,
@@ -1066,6 +1104,65 @@ mod tests {
 
         cmd.undo(&mut project);
         assert_eq!(project.tracks[0].id, id0);
+    }
+
+    #[test]
+    fn test_set_multiple_tracks_clips_command_updates_and_undoes_together() {
+        let mut project = Project::new("Test");
+        let mut video_track = Track::new_video("V1");
+        let video_track_id = video_track.id.clone();
+        let mut audio_track = Track::new_audio("A1");
+        let audio_track_id = audio_track.id.clone();
+
+        let mut video_clip = Clip::new("file.mp4", 10, 0, ClipKind::Video);
+        video_clip.id = "video-a".to_string();
+        let mut audio_clip = Clip::new("file.mp4", 10, 0, ClipKind::Audio);
+        audio_clip.id = "audio-a".to_string();
+        video_track.add_clip(video_clip.clone());
+        audio_track.add_clip(audio_clip.clone());
+        project.tracks.push(video_track);
+        project.tracks.push(audio_track);
+
+        let mut new_video_clip = video_clip.clone();
+        new_video_clip.timeline_start = 20;
+        let mut new_audio_clip = audio_clip.clone();
+        new_audio_clip.timeline_start = 20;
+
+        let cmd = SetMultipleTracksClipsCommand {
+            changes: vec![
+                TrackClipsChange {
+                    track_id: video_track_id.clone(),
+                    old_clips: vec![video_clip.clone()],
+                    new_clips: vec![new_video_clip],
+                },
+                TrackClipsChange {
+                    track_id: audio_track_id.clone(),
+                    old_clips: vec![audio_clip.clone()],
+                    new_clips: vec![new_audio_clip],
+                },
+            ],
+            label: "Move linked pair".to_string(),
+        };
+
+        cmd.execute(&mut project);
+        assert_eq!(
+            project.track_mut(&video_track_id).unwrap().clips[0].timeline_start,
+            20
+        );
+        assert_eq!(
+            project.track_mut(&audio_track_id).unwrap().clips[0].timeline_start,
+            20
+        );
+
+        cmd.undo(&mut project);
+        assert_eq!(
+            project.track_mut(&video_track_id).unwrap().clips[0].timeline_start,
+            0
+        );
+        assert_eq!(
+            project.track_mut(&audio_track_id).unwrap().clips[0].timeline_start,
+            0
+        );
     }
 
     #[test]

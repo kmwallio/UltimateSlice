@@ -41,14 +41,20 @@ pub fn sync_clips_by_audio(
 
     let anchor = &clips[0];
     let anchor_audio = match extract_and_prepare(&anchor.1, anchor.2, anchor.3) {
-        Some(a) => a,
+        Some(a) => {
+            eprintln!("audio_sync: anchor '{}' extracted {} samples", anchor.0, a.len());
+            a
+        }
         None => return Vec::new(),
     };
 
     let mut results = Vec::with_capacity(clips.len() - 1);
     for clip in &clips[1..] {
         let clip_audio = match extract_and_prepare(&clip.1, clip.2, clip.3) {
-            Some(a) => a,
+            Some(a) => {
+                eprintln!("audio_sync: clip '{}' extracted {} samples", clip.0, a.len());
+                a
+            }
             None => {
                 results.push(AudioSyncResult {
                     clip_id: clip.0.clone(),
@@ -61,6 +67,10 @@ pub fn sync_clips_by_audio(
 
         let (sample_offset, confidence) = gcc_phat(&anchor_audio, &clip_audio);
         let offset_ns = (sample_offset as f64 * NS_PER_SAMPLE) as i64;
+        eprintln!(
+            "audio_sync: clip '{}' gcc_phat => sample_offset={}, offset_ns={}, confidence={:.2}",
+            clip.0, sample_offset, offset_ns, confidence
+        );
 
         results.push(AudioSyncResult {
             clip_id: clip.0.clone(),
@@ -219,15 +229,26 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
         });
     }
 
-    pipeline.set_state(gst::State::Playing).ok()?;
+    // Paused first: wait for uridecodebin to create decoders and link pads
+    pipeline.set_state(gst::State::Paused).ok()?;
+    let _ = pipeline.state(Some(gst::ClockTime::from_seconds(5)));
 
-    // Seek to source_in if > 0
+    // Seek while paused (reliable, pads are linked)
     if source_in_ns > 0 {
-        let _ = pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+        let seek_ok = pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_nseconds(source_in_ns),
         );
+        if seek_ok.is_err() {
+            eprintln!("audio_sync: seek to {}ns failed for {}", source_in_ns, path);
+            pipeline.set_state(gst::State::Null).ok();
+            return None;
+        }
+        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(3)));
     }
+
+    // Now start data flow
+    pipeline.set_state(gst::State::Playing).ok()?;
 
     // Cap extraction length: use the shorter of clip duration and MAX_EXTRACT_SECONDS
     let clip_duration_s = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;

@@ -138,6 +138,9 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
 
+- Appending, inserting, overwriting, dragging, or MCP-placing a source that contains both video and audio now auto-creates a linked A/V pair when matching video and audio tracks exist.
+- Auto-linked pairs share the same clip link group immediately, so the picture and sound stay selected/moved/deleted together without requiring a manual `Ctrl+L`.
+- While a linked same-source audio-track peer exists, UltimateSlice suppresses the duplicate embedded audio from the linked video-track clip to avoid doubled playback/export audio. Unlinking restores the video clip's own embedded audio automatically.
 - **Link (`Ctrl+L`)** assigns the current multi-selection to a shared clip link group.
 - **Unlink (`Ctrl+Shift+L`)** clears linking for the selected linked clip(s) and any linked peers in the same link group.
 - Linked clips are selected together, move together when dragging any linked member, and delete together for both normal delete and ripple delete.
