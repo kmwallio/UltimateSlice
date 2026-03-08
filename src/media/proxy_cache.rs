@@ -612,6 +612,8 @@ fn run_transcode_command(
         .arg("128k")
         .arg("-movflags")
         .arg("+faststart")
+        .arg("-f")
+        .arg("mp4")
         .arg(proxy_path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
