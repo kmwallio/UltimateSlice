@@ -169,6 +169,8 @@ pub struct TimelineState {
     selection_anchor_clip_id: Option<String>,
     /// Active marquee-selection drag state.
     marquee_selection: Option<MarqueeSelection>,
+    /// Callback fired when the active tool changes (via keyboard shortcut).
+    pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
 }
 
 impl TimelineState {
@@ -202,6 +204,7 @@ impl TimelineState {
             selected_clip_ids: HashSet::new(),
             selection_anchor_clip_id: None,
             marquee_selection: None,
+            on_tool_changed: None,
         }
     }
 
@@ -1385,17 +1388,29 @@ impl TimelineState {
     }
 
     /// Razor cut the selected clip (or any clip at playhead) at the playhead position
-    pub fn razor_cut_at_playhead(&mut self) {
+    /// Razor cut the clip at the playhead position.  When `track_idx` is
+    /// `Some`, only the specified track is considered; otherwise all tracks
+    /// are searched (first match wins).
+    pub fn razor_cut_at_playhead_on_track(&mut self, track_idx: Option<usize>) {
         let playhead = self.playhead_ns;
         let (clip_to_cut, track_id) = {
             let proj = self.project.borrow();
             let mut found = None;
-            'outer: for track in &proj.tracks {
+            let tracks: Box<dyn Iterator<Item = (usize, &crate::model::track::Track)>> =
+                if let Some(idx) = track_idx {
+                    Box::new(proj.tracks.get(idx).into_iter().map(move |t| (idx, t)))
+                } else {
+                    Box::new(proj.tracks.iter().enumerate())
+                };
+            for (_i, track) in tracks {
                 for clip in &track.clips {
                     if clip.timeline_start < playhead && clip.timeline_end() > playhead {
                         found = Some((clip.clone(), track.id.clone()));
-                        break 'outer;
+                        break;
                     }
+                }
+                if found.is_some() {
+                    break;
                 }
             }
             match found {
@@ -1770,11 +1785,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             } else if button == 1 {
                 match st.active_tool.clone() {
                     ActiveTool::Razor => {
-                        // Razor cut at click position
+                        // Razor cut at click position on the clicked track
                         let ns = st.x_to_ns(x);
                         st.playhead_ns = ns;
+                        let track_idx = if y > RULER_HEIGHT {
+                            Some(((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize)
+                        } else {
+                            None
+                        };
                         let seek_cb = st.on_seek.clone();
-                        st.razor_cut_at_playhead();
+                        st.razor_cut_at_playhead_on_track(track_idx);
                         let proj_cb = st.on_project_changed.clone();
                         drop(st);
                         if let Some(cb) = seek_cb {
@@ -3225,6 +3245,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             // Track whether we need to fire on_project_changed after releasing the borrow
             let mut notify_project = false;
             let mut notify_selection = false;
+            let mut notify_tool: Option<ActiveTool> = None;
 
             let handled = match key {
                 Key::z if ctrl && !shift => {
@@ -3334,6 +3355,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     } else {
                         ActiveTool::Razor
                     };
+                    notify_tool = Some(st.active_tool.clone());
                     true
                 }
                 Key::r | Key::R => {
@@ -3343,6 +3365,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     } else {
                         ActiveTool::Ripple
                     };
+                    notify_tool = Some(st.active_tool.clone());
                     true
                 }
                 Key::e | Key::E => {
@@ -3352,6 +3375,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     } else {
                         ActiveTool::Roll
                     };
+                    notify_tool = Some(st.active_tool.clone());
                     true
                 }
                 Key::y | Key::Y if !ctrl => {
@@ -3361,6 +3385,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     } else {
                         ActiveTool::Slip
                     };
+                    notify_tool = Some(st.active_tool.clone());
                     true
                 }
                 Key::u | Key::U if !ctrl => {
@@ -3370,10 +3395,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     } else {
                         ActiveTool::Slide
                     };
+                    notify_tool = Some(st.active_tool.clone());
                     true
                 }
                 Key::Escape => {
                     st.active_tool = ActiveTool::Select;
+                    notify_tool = Some(ActiveTool::Select);
                     true
                 }
                 Key::question | Key::slash => {
@@ -3399,6 +3426,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             } else {
                 None
             };
+            let tool_cb = if notify_tool.is_some() {
+                st.on_tool_changed.clone()
+            } else {
+                None
+            };
             let new_sel = st.selected_clip_id.clone();
             if handled {
                 if let Some(a) = area_weak.upgrade() {
@@ -3411,6 +3443,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             }
             if let Some(cb) = sel_cb {
                 cb(new_sel);
+            }
+            if let (Some(cb), Some(tool)) = (tool_cb, notify_tool) {
+                cb(tool);
             }
 
             if handled {

@@ -1024,5 +1024,25 @@ pub fn build_toolbar(
     header.pack_start(&btn_slide);
     header.pack_start(&btn_magnetic);
 
+    // Wire on_tool_changed so keyboard shortcuts sync toolbar buttons
+    {
+        let btn_select = btn_select.clone();
+        let btn_razor = btn_razor.clone();
+        let btn_ripple = btn_ripple.clone();
+        let btn_roll = btn_roll.clone();
+        let btn_slip = btn_slip.clone();
+        let btn_slide = btn_slide.clone();
+        timeline_state.borrow_mut().on_tool_changed = Some(Rc::new(move |tool: ActiveTool| {
+            match tool {
+                ActiveTool::Select => btn_select.set_active(true),
+                ActiveTool::Razor => btn_razor.set_active(true),
+                ActiveTool::Ripple => btn_ripple.set_active(true),
+                ActiveTool::Roll => btn_roll.set_active(true),
+                ActiveTool::Slip => btn_slip.set_active(true),
+                ActiveTool::Slide => btn_slide.set_active(true),
+            }
+        }));
+    }
+
     header
 }
