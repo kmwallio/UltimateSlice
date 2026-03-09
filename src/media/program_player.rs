@@ -61,6 +61,21 @@ struct ColorAdjRGBParams {
     b: f64,
 }
 
+/// Parameters for frei0r `3-point-color-balance` element.
+/// Maps shadows/midtones/highlights to the black/gray/white reference
+/// points of a piecewise-linear transfer curve.
+struct ThreePointParams {
+    black_r: f64,
+    black_g: f64,
+    black_b: f64,
+    gray_r: f64,
+    gray_g: f64,
+    gray_b: f64,
+    white_r: f64,
+    white_g: f64,
+    white_b: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
     pub id: String,
@@ -233,6 +248,8 @@ struct VideoSlot {
     videobalance: Option<gst::Element>,
     /// frei0r coloradj_RGB for per-channel RGB gains (temperature/tint).
     coloradj_rgb: Option<gst::Element>,
+    /// frei0r 3-point-color-balance for shadows/midtones/highlights.
+    colorbalance_3pt: Option<gst::Element>,
     gaussianblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
@@ -1870,10 +1887,10 @@ impl ProgramPlayer {
         // values moved away from defaults but the slot was built without the
         // element (because values were at defaults when the slot was created),
         // we must do a one-time pipeline rebuild so the element gets created.
-        let need_balance = brightness != 0.0 || contrast != 1.0 || saturation != 1.0
-            || shadows.abs() > f64::EPSILON || midtones.abs() > f64::EPSILON
-            || highlights.abs() > f64::EPSILON;
+        let need_balance = brightness != 0.0 || contrast != 1.0 || saturation != 1.0;
         let need_coloradj = (temperature - 6500.0).abs() > 1.0 || tint.abs() > 0.001;
+        let need_3point = shadows.abs() > f64::EPSILON || midtones.abs() > f64::EPSILON
+            || highlights.abs() > f64::EPSILON;
         let need_blur = {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -1883,6 +1900,7 @@ impl ProgramPlayer {
         {
             (need_balance && slot.videobalance.is_none())
                 || (need_coloradj && slot.coloradj_rgb.is_none() && slot.videobalance.is_none())
+                || (need_3point && slot.colorbalance_3pt.is_none() && slot.videobalance.is_none())
                 || (need_blur && slot.gaussianblur.is_none())
         } else {
             false
@@ -1913,10 +1931,11 @@ impl ProgramPlayer {
 
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             let has_coloradj = slot.coloradj_rgb.is_some();
+            let has_3point = slot.colorbalance_3pt.is_some();
             if let Some(ref vb) = slot.videobalance {
                 let p = Self::compute_videobalance_params(
                     brightness, contrast, saturation, temperature, tint,
-                    shadows, midtones, highlights, has_coloradj,
+                    shadows, midtones, highlights, has_coloradj, has_3point,
                 );
                 vb.set_property("brightness", p.brightness);
                 vb.set_property("contrast", p.contrast);
@@ -1928,6 +1947,18 @@ impl ProgramPlayer {
                 ca.set_property("r", cp.r);
                 ca.set_property("g", cp.g);
                 ca.set_property("b", cp.b);
+            }
+            if let Some(ref tp) = slot.colorbalance_3pt {
+                let p = Self::compute_3point_params(shadows, midtones, highlights);
+                tp.set_property("black-color-r", p.black_r);
+                tp.set_property("black-color-g", p.black_g);
+                tp.set_property("black-color-b", p.black_b);
+                tp.set_property("gray-color-r", p.gray_r);
+                tp.set_property("gray-color-g", p.gray_g);
+                tp.set_property("gray-color-b", p.gray_b);
+                tp.set_property("white-color-r", p.white_r);
+                tp.set_property("white-color-g", p.white_g);
+                tp.set_property("white-color-b", p.white_b);
             }
             if let Some(ref gb) = slot.gaussianblur {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
@@ -4227,6 +4258,7 @@ impl ProgramPlayer {
         gst::Bin,
         Option<gst::Element>, // videobalance
         Option<gst::Element>, // coloradj_rgb (frei0r temperature/tint)
+        Option<gst::Element>, // colorbalance_3pt (frei0r shadows/midtones/highlights)
         Option<gst::Element>, // gaussianblur
         Option<gst::Element>, // videocrop
         Option<gst::Element>, // videobox_crop_alpha
@@ -4245,10 +4277,10 @@ impl ProgramPlayer {
         // no-op elements and their associated videoconvert instances.  This
         // dramatically reduces per-frame CPU cost for clips without effects
         // (3 concurrent clips drops from ~51 to ~22 pipeline elements).
-        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0
-            || clip.shadows.abs() > f64::EPSILON || clip.midtones.abs() > f64::EPSILON
-            || clip.highlights.abs() > f64::EPSILON;
+        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
         let need_coloradj = (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
+        let need_3point = clip.shadows.abs() > f64::EPSILON || clip.midtones.abs() > f64::EPSILON
+            || clip.highlights.abs() > f64::EPSILON;
         let blur_sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
         let need_title = !clip.title_text.is_empty();
@@ -4281,6 +4313,31 @@ impl ProgramPlayer {
         // exists so we can fall back to the hue-rotation approximation.
         let need_balance_for_temp_fallback = need_coloradj && coloradj_rgb.is_none();
         let (conv1, videobalance) = if need_balance_for_temp_fallback && videobalance.is_none() {
+            (
+                conv1.or_else(|| gst::ElementFactory::make("videoconvert").build().ok()),
+                Some(gst::ElementFactory::make("videobalance").build().unwrap()),
+            )
+        } else {
+            (conv1, videobalance)
+        };
+
+        // frei0r 3-point-color-balance for shadows/midtones/highlights.
+        // Provides per-luminance-range control matching FFmpeg's colorbalance.
+        // Falls back to videobalance polynomial approximation if unavailable.
+        let colorbalance_3pt = if need_3point {
+            let elem = gst::ElementFactory::make("frei0r-filter-3-point-color-balance").build().ok();
+            if let Some(ref e) = elem {
+                // Disable split-preview (default: true shows A/B comparison).
+                e.set_property("split-preview", false);
+            }
+            elem
+        } else {
+            None
+        };
+        // If frei0r 3-point is unavailable, ensure videobalance exists so the
+        // polynomial approximation for shadows/midtones/highlights is used.
+        let need_balance_for_3pt_fallback = need_3point && colorbalance_3pt.is_none();
+        let (conv1, videobalance) = if need_balance_for_3pt_fallback && videobalance.is_none() {
             (
                 conv1.or_else(|| gst::ElementFactory::make("videoconvert").build().ok()),
                 Some(gst::ElementFactory::make("videobalance").build().unwrap()),
@@ -4352,12 +4409,13 @@ impl ProgramPlayer {
 
         // Set initial values from clip data.
         let has_coloradj = coloradj_rgb.is_some();
+        let has_3point = colorbalance_3pt.is_some();
         if let Some(ref vb) = videobalance {
             let p = Self::compute_videobalance_params(
                 clip.brightness, clip.contrast, clip.saturation,
                 clip.temperature, clip.tint,
                 clip.shadows, clip.midtones, clip.highlights,
-                has_coloradj,
+                has_coloradj, has_3point,
             );
             vb.set_property("brightness", p.brightness);
             vb.set_property("contrast", p.contrast);
@@ -4372,6 +4430,18 @@ impl ProgramPlayer {
             ca.set_property("r", cp.r);
             ca.set_property("g", cp.g);
             ca.set_property("b", cp.b);
+        }
+        if let Some(ref tp) = colorbalance_3pt {
+            let p = Self::compute_3point_params(clip.shadows, clip.midtones, clip.highlights);
+            tp.set_property("black-color-r", p.black_r);
+            tp.set_property("black-color-g", p.black_g);
+            tp.set_property("black-color-b", p.black_b);
+            tp.set_property("gray-color-r", p.gray_r);
+            tp.set_property("gray-color-g", p.gray_g);
+            tp.set_property("gray-color-b", p.gray_b);
+            tp.set_property("white-color-r", p.white_r);
+            tp.set_property("white-color-g", p.white_g);
+            tp.set_property("white-color-b", p.white_b);
         }
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
@@ -4455,6 +4525,10 @@ impl ProgramPlayer {
         // frei0r coloradj_RGB (temperature/tint via per-channel RGB gains).
         // Operates on RGBA which is already the pipeline format after capsfilter_proj.
         if let Some(ref e) = coloradj_rgb {
+            chain.push(e.clone());
+        }
+        // frei0r 3-point-color-balance (shadows/midtones/highlights).
+        if let Some(ref e) = colorbalance_3pt {
             chain.push(e.clone());
         }
         if let Some(ref e) = conv2 {
@@ -4547,6 +4621,7 @@ impl ProgramPlayer {
             bin,
             videobalance,
             coloradj_rgb,
+            colorbalance_3pt,
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
@@ -4776,6 +4851,7 @@ impl ProgramPlayer {
             audio_level,
             videobalance: None,
             coloradj_rgb: None,
+            colorbalance_3pt: None,
             gaussianblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
@@ -5010,6 +5086,7 @@ impl ProgramPlayer {
             audio_level,
             videobalance: None,
             coloradj_rgb: None,
+            colorbalance_3pt: None,
             gaussianblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
@@ -5421,6 +5498,7 @@ impl ProgramPlayer {
             effects_bin,
             videobalance,
             coloradj_rgb,
+            colorbalance_3pt,
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
@@ -5661,6 +5739,7 @@ impl ProgramPlayer {
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
             coloradj_rgb: coloradj_rgb.clone(),
+            colorbalance_3pt: colorbalance_3pt.clone(),
             gaussianblur: gaussianblur.clone(),
             videocrop: videocrop.clone(),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
@@ -5717,6 +5796,7 @@ impl ProgramPlayer {
             audio_level,
             videobalance,
             coloradj_rgb,
+            colorbalance_3pt,
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
@@ -5762,6 +5842,8 @@ impl ProgramPlayer {
     ///
     /// When `has_coloradj` is true, temperature/tint are handled by the
     /// frei0r `coloradj_RGB` element and excluded from videobalance.
+    /// When `has_3point` is true, shadows/midtones/highlights are handled
+    /// by the frei0r `3-point-color-balance` element.
     fn compute_videobalance_params(
         brightness: f64,
         contrast: f64,
@@ -5772,6 +5854,7 @@ impl ProgramPlayer {
         midtones: f64,
         highlights: f64,
         has_coloradj: bool,
+        has_3point: bool,
     ) -> VBParams {
         let mut b = 0.0_f64;
         let mut c = 1.0_f64;
@@ -5832,11 +5915,14 @@ impl ProgramPlayer {
         }
 
         // ── Shadows (default 0.0) ───────────────────────────────────────
-        // Calibration: 74-94% RMSE improvement over current coefficients.
-        // FFmpeg colorbalance shadows apply per-luminance-range shifts that
-        // are poorly approximated by global brightness alone; adding
-        // contrast and saturation compensation dramatically improves match.
-        {
+        // When frei0r 3-point-color-balance is available, shadows/midtones/
+        // highlights are handled there with proper per-luminance-range control.
+        // Otherwise, fall back to polynomial approximation via videobalance.
+        if !has_3point {
+            // Calibration: 74-94% RMSE improvement over current coefficients.
+            // FFmpeg colorbalance shadows apply per-luminance-range shifts that
+            // are poorly approximated by global brightness alone; adding
+            // contrast and saturation compensation dramatically improves match.
             const SH_B: [f64; 5] = [-0.004654,  0.217915,  0.503318,  0.095557, -0.208157];
             const SH_C: [f64; 5] = [ 0.967806, -0.569223, -0.773125,  0.208067,  0.503863];
             let t = shadows;
@@ -5845,9 +5931,9 @@ impl ProgramPlayer {
         }
 
         // ── Midtones (default 0.0) ──────────────────────────────────────
-        // Calibration: moderate improvement; brightness weight close to
-        // original (0.13 vs 0.20) but contrast compensation is significant.
-        {
+        if !has_3point {
+            // Calibration: moderate improvement; brightness weight close to
+            // original (0.13 vs 0.20) but contrast compensation is significant.
             const M_B: [f64; 5] = [-0.009292,  0.130927, -0.050035, -0.039406,  0.044492];
             const M_C: [f64; 5] = [ 1.049000, -0.302024,  0.407251,  0.214717, -0.319686];
             let t = midtones;
@@ -5856,10 +5942,10 @@ impl ProgramPlayer {
         }
 
         // ── Highlights (default 0.0) ────────────────────────────────────
-        // Calibration: 78-88% RMSE improvement.  Current coefficients
-        // (b×0.15, c×0.15) dramatically undershoot; optimal mapping uses
-        // ~3× stronger brightness and aggressive contrast boost.
-        {
+        if !has_3point {
+            // Calibration: 78-88% RMSE improvement.  Current coefficients
+            // (b×0.15, c×0.15) dramatically undershoot; optimal mapping uses
+            // ~3× stronger brightness and aggressive contrast boost.
             const H_B: [f64; 5] = [-0.002545,  0.500927, -0.437295, -0.060255,  0.152945];
             const H_C: [f64; 5] = [ 0.918940,  1.420073,  1.848961, -0.254895, -0.846390];
             const H_S: [f64; 5] = [ 1.031708, -1.145010,  0.783173,  0.699344, -0.956279];
@@ -5935,17 +6021,61 @@ impl ProgramPlayer {
         }
     }
 
+    /// Compute frei0r `3-point-color-balance` parameters from
+    /// shadows/midtones/highlights sliders.
+    ///
+    /// The 3-point element defines a piecewise-linear transfer curve through
+    /// three reference points: black (input 0), gray (input 0.5), and white
+    /// (input 1.0).  This naturally separates luminance ranges, matching the
+    /// spirit of FFmpeg's `colorbalance` filter.
+    ///
+    /// Mapping:
+    /// - **Shadows** [−1,1] → lift the black point (positive) or compress the
+    ///   shadow-to-midtone slope via gray pull-down (negative).
+    /// - **Midtones** [−1,1] → shift the gray point up/down.
+    /// - **Highlights** [−1,1] → pull down the white point (negative) or
+    ///   expand the midtone-to-highlight slope via gray push-up (positive).
+    fn compute_3point_params(shadows: f64, midtones: f64, highlights: f64) -> ThreePointParams {
+        let sh = shadows.clamp(-1.0, 1.0);
+        let mid = midtones.clamp(-1.0, 1.0);
+        let hi = highlights.clamp(-1.0, 1.0);
+
+        // Black point: positive shadows lift it from 0.
+        // Negative shadows can't push below 0 — handled via gray.
+        let black = (sh.max(0.0) * 0.5).clamp(0.0, 0.8);
+
+        // White point: negative highlights pull it down from 1.0.
+        // Positive highlights can't push above 1.0 — handled via gray.
+        let white = (1.0 + hi.min(0.0) * 0.5).clamp(0.2, 1.0);
+
+        // Gray point: direct midtones control, plus spillover for the
+        // directions that can't be represented by black/white alone.
+        let gray = (0.5
+            + mid * 0.25                   // midtones: direct gray shift
+            + sh.min(0.0) * 0.15           // negative shadows → compress shadow slope
+            + hi.max(0.0) * 0.15           // positive highlights → expand highlight slope
+        ).clamp(0.05, 0.95);
+
+        // All channels equal (luminance-only, matching FFmpeg's rs=gs=bs pattern).
+        ThreePointParams {
+            black_r: black, black_g: black, black_b: black,
+            gray_r: gray,   gray_g: gray,   gray_b: gray,
+            white_r: white, white_g: white, white_b: white,
+        }
+    }
+
     /// Returns true if two clips would produce effects bins with the same
     /// element topology (same set of active effect elements).  When true,
     /// a reused slot's effects bin can be updated via property sets alone,
     /// without adding/removing GStreamer elements.
     fn effects_topology_matches(a: &ProgramClip, b: &ProgramClip) -> bool {
         let need_balance =
-            |c: &ProgramClip| c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0
-                || c.shadows.abs() > f64::EPSILON || c.midtones.abs() > f64::EPSILON
-                || c.highlights.abs() > f64::EPSILON;
+            |c: &ProgramClip| c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0;
         let need_coloradj =
             |c: &ProgramClip| (c.temperature - 6500.0).abs() > 1.0 || c.tint.abs() > 0.001;
+        let need_3point =
+            |c: &ProgramClip| c.shadows.abs() > f64::EPSILON || c.midtones.abs() > f64::EPSILON
+                || c.highlights.abs() > f64::EPSILON;
         let need_blur = |c: &ProgramClip| {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -5957,6 +6087,7 @@ impl ProgramPlayer {
 
         need_balance(a) == need_balance(b)
             && need_coloradj(a) == need_coloradj(b)
+            && need_3point(a) == need_3point(b)
             && need_blur(a) == need_blur(b)
             && need_rotate(a) == need_rotate(b)
             && need_flip(a) == need_flip(b)
@@ -5972,11 +6103,11 @@ impl ProgramPlayer {
     fn slot_satisfies_clip(slot: &VideoSlot, clip: &ProgramClip) -> bool {
         let need_balance = clip.brightness != 0.0
             || clip.contrast != 1.0
-            || clip.saturation != 1.0
-            || clip.shadows.abs() > f64::EPSILON
+            || clip.saturation != 1.0;
+        let need_coloradj = (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
+        let need_3point = clip.shadows.abs() > f64::EPSILON
             || clip.midtones.abs() > f64::EPSILON
             || clip.highlights.abs() > f64::EPSILON;
-        let need_coloradj = (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
         let need_blur = {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -5992,8 +6123,15 @@ impl ProgramPlayer {
             || slot.coloradj_rgb.is_some()
             || slot.videobalance.is_some();
 
+        // Shadows/midtones/highlights need either colorbalance_3pt (preferred)
+        // or videobalance (polynomial fallback).
+        let threepoint_ok = !need_3point
+            || slot.colorbalance_3pt.is_some()
+            || slot.videobalance.is_some();
+
         (!need_balance || slot.videobalance.is_some())
             && coloradj_ok
+            && threepoint_ok
             && (!need_blur || slot.gaussianblur.is_some())
             && (!need_rotate || slot.videoflip_rotate.is_some())
             && (!need_flip || slot.videoflip_flip.is_some())
@@ -6073,12 +6211,13 @@ impl ProgramPlayer {
 
         // Videobalance (calibrated preview mapping)
         let has_coloradj = slot.coloradj_rgb.is_some();
+        let has_3point = slot.colorbalance_3pt.is_some();
         if let Some(ref vb) = slot.videobalance {
             let p = Self::compute_videobalance_params(
                 clip.brightness, clip.contrast, clip.saturation,
                 clip.temperature, clip.tint,
                 clip.shadows, clip.midtones, clip.highlights,
-                has_coloradj,
+                has_coloradj, has_3point,
             );
             vb.set_property("brightness", p.brightness);
             vb.set_property("contrast", p.contrast);
@@ -6092,6 +6231,20 @@ impl ProgramPlayer {
             ca.set_property("r", cp.r);
             ca.set_property("g", cp.g);
             ca.set_property("b", cp.b);
+        }
+
+        // frei0r 3-point-color-balance (shadows/midtones/highlights)
+        if let Some(ref tp) = slot.colorbalance_3pt {
+            let p = Self::compute_3point_params(clip.shadows, clip.midtones, clip.highlights);
+            tp.set_property("black-color-r", p.black_r);
+            tp.set_property("black-color-g", p.black_g);
+            tp.set_property("black-color-b", p.black_b);
+            tp.set_property("gray-color-r", p.gray_r);
+            tp.set_property("gray-color-g", p.gray_g);
+            tp.set_property("gray-color-b", p.gray_b);
+            tp.set_property("white-color-r", p.white_r);
+            tp.set_property("white-color-g", p.white_g);
+            tp.set_property("white-color-b", p.white_b);
         }
 
         // Gaussianblur
@@ -7147,7 +7300,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_mismatch_shadows_triggers_balance() {
+    fn topology_mismatch_shadows_triggers_3point() {
         let a = make_clip();
         let mut b = make_clip();
         b.shadows = 0.3;
@@ -7155,7 +7308,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_mismatch_midtones_triggers_balance() {
+    fn topology_mismatch_midtones_triggers_3point() {
         let a = make_clip();
         let mut b = make_clip();
         b.midtones = -0.2;
@@ -7163,7 +7316,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_mismatch_highlights_triggers_balance() {
+    fn topology_mismatch_highlights_triggers_3point() {
         let a = make_clip();
         let mut b = make_clip();
         b.highlights = 0.4;
@@ -7197,12 +7350,13 @@ mod tests {
         has_textoverlay: bool,
         has_chroma_key: bool,
     ) -> VideoSlot {
-        make_test_slot_ext(has_videobalance, false, has_gaussianblur, has_rotate, has_flip, has_textoverlay, has_chroma_key)
+        make_test_slot_ext(has_videobalance, false, false, has_gaussianblur, has_rotate, has_flip, has_textoverlay, has_chroma_key)
     }
 
     fn make_test_slot_ext(
         has_videobalance: bool,
         has_coloradj_rgb: bool,
+        has_colorbalance_3pt: bool,
         has_gaussianblur: bool,
         has_rotate: bool,
         has_flip: bool,
@@ -7224,6 +7378,7 @@ mod tests {
             audio_level: None,
             videobalance: if has_videobalance { identity() } else { None },
             coloradj_rgb: if has_coloradj_rgb { identity() } else { None },
+            colorbalance_3pt: if has_colorbalance_3pt { identity() } else { None },
             gaussianblur: if has_gaussianblur { identity() } else { None },
             videocrop: None,
             videobox_crop_alpha: None,
@@ -7362,10 +7517,10 @@ mod tests {
         temperature: f64, tint: f64,
         shadows: f64, midtones: f64, highlights: f64,
     ) -> super::VBParams {
-        // Default: assume coloradj_rgb is available (no hue fallback).
+        // Default: assume both frei0r elements available (no fallbacks).
         ProgramPlayer::compute_videobalance_params(
             brightness, contrast, saturation, temperature, tint,
-            shadows, midtones, highlights, true,
+            shadows, midtones, highlights, true, true,
         )
     }
 
@@ -7376,7 +7531,18 @@ mod tests {
     ) -> super::VBParams {
         ProgramPlayer::compute_videobalance_params(
             brightness, contrast, saturation, temperature, tint,
-            shadows, midtones, highlights, false,
+            shadows, midtones, highlights, false, true,
+        )
+    }
+
+    fn vb_no_3point(
+        brightness: f64, contrast: f64, saturation: f64,
+        temperature: f64, tint: f64,
+        shadows: f64, midtones: f64, highlights: f64,
+    ) -> super::VBParams {
+        ProgramPlayer::compute_videobalance_params(
+            brightness, contrast, saturation, temperature, tint,
+            shadows, midtones, highlights, true, false,
         )
     }
 
@@ -7468,32 +7634,45 @@ mod tests {
 
     #[test]
     fn vb_shadows_positive_lifts_brightness() {
-        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
+        let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
         assert!(p.brightness > 0.05, "lifting shadows should raise brightness: b={}", p.brightness);
     }
 
     #[test]
     fn vb_shadows_positive_reduces_contrast() {
-        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
+        let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
         assert!(p.contrast < 0.95, "lifting shadows should reduce contrast: c={}", p.contrast);
     }
 
     #[test]
     fn vb_highlights_positive_boosts_contrast() {
-        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
+        let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
         assert!(p.contrast > 1.3, "boosting highlights should raise contrast: c={}", p.contrast);
     }
 
     #[test]
     fn vb_highlights_positive_increases_brightness() {
-        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
+        let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
         assert!(p.brightness > 0.05, "boosting highlights should increase brightness: b={}", p.brightness);
     }
 
     #[test]
     fn vb_midtones_positive_lifts_brightness() {
-        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.5, 0.0);
+        let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.5, 0.0);
         assert!(p.brightness > 0.03, "midtones lift should increase brightness: b={}", p.brightness);
+    }
+
+    #[test]
+    fn vb_shadows_no_effect_with_3point() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.8, 0.0, 0.0);
+        assert!((p.brightness).abs() < 0.05, "with 3-point, shadows should not affect vb brightness: b={}", p.brightness);
+    }
+
+    #[test]
+    fn vb_highlights_no_effect_with_3point() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.8);
+        assert!((p.brightness).abs() < 0.05, "with 3-point, highlights should not affect vb brightness: b={}", p.brightness);
+        assert!((p.contrast - 1.0).abs() < 0.05, "with 3-point, highlights should not affect vb contrast: c={}", p.contrast);
     }
 
     #[test]
@@ -7568,7 +7747,7 @@ mod tests {
 
     #[test]
     fn slot_with_coloradj_accepts_temperature() {
-        let slot = make_test_slot_ext(false, true, false, false, false, false, false);
+        let slot = make_test_slot_ext(false, true, false, false, false, false, false, false);
         let mut clip = make_clip();
         clip.temperature = 3000.0;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
@@ -7584,10 +7763,111 @@ mod tests {
 
     #[test]
     fn slot_with_coloradj_accepts_tint() {
-        let slot = make_test_slot_ext(false, true, false, false, false, false, false);
+        let slot = make_test_slot_ext(false, true, false, false, false, false, false, false);
         let mut clip = make_clip();
         clip.tint = 0.5;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    // ── slot_satisfies_clip with colorbalance_3pt ─────────────────────
+
+    #[test]
+    fn slot_with_3point_accepts_shadows() {
+        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.shadows = 0.5;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_3point_accepts_midtones() {
+        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.midtones = -0.3;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_3point_accepts_highlights() {
+        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.highlights = 0.7;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_videobalance_accepts_shadows_fallback() {
+        let slot = make_test_slot(true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.shadows = 0.5;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    // ── compute_3point_params tests ──────────────────────────────────
+
+    #[test]
+    fn threepoint_neutral_at_defaults() {
+        let p = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
+        assert!((p.black_r).abs() < 0.01, "neutral black_r={}", p.black_r);
+        assert!((p.gray_r - 0.5).abs() < 0.01, "neutral gray_r={}", p.gray_r);
+        assert!((p.white_r - 1.0).abs() < 0.01, "neutral white_r={}", p.white_r);
+    }
+
+    #[test]
+    fn threepoint_positive_shadows_lifts_black() {
+        let p = ProgramPlayer::compute_3point_params(0.8, 0.0, 0.0);
+        assert!(p.black_r > 0.1, "positive shadows should lift black: black_r={}", p.black_r);
+        assert!((p.gray_r - 0.5).abs() < 0.05, "positive shadows should not affect gray much: gray_r={}", p.gray_r);
+        assert!((p.white_r - 1.0).abs() < 0.01, "positive shadows should not affect white: white_r={}", p.white_r);
+    }
+
+    #[test]
+    fn threepoint_negative_shadows_lowers_gray() {
+        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
+        let neg = ProgramPlayer::compute_3point_params(-0.8, 0.0, 0.0);
+        assert!(neg.gray_r < neutral.gray_r, "negative shadows should lower gray: gray_r={}", neg.gray_r);
+        assert!((neg.black_r).abs() < 0.01, "negative shadows should keep black at 0: black_r={}", neg.black_r);
+    }
+
+    #[test]
+    fn threepoint_positive_midtones_raises_gray() {
+        let p = ProgramPlayer::compute_3point_params(0.0, 0.7, 0.0);
+        assert!(p.gray_r > 0.5, "positive midtones should raise gray: gray_r={}", p.gray_r);
+    }
+
+    #[test]
+    fn threepoint_negative_highlights_pulls_white() {
+        let p = ProgramPlayer::compute_3point_params(0.0, 0.0, -0.8);
+        assert!(p.white_r < 1.0, "negative highlights should pull down white: white_r={}", p.white_r);
+    }
+
+    #[test]
+    fn threepoint_positive_highlights_raises_gray() {
+        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
+        let pos = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.8);
+        assert!(pos.gray_r > neutral.gray_r, "positive highlights should raise gray: gray_r={}", pos.gray_r);
+        assert!((pos.white_r - 1.0).abs() < 0.01, "positive highlights should not push white above 1: white_r={}", pos.white_r);
+    }
+
+    #[test]
+    fn threepoint_all_channels_equal() {
+        let p = ProgramPlayer::compute_3point_params(0.5, -0.3, 0.7);
+        assert!((p.black_r - p.black_g).abs() < 1e-10, "R==G for black");
+        assert!((p.black_r - p.black_b).abs() < 1e-10, "R==B for black");
+        assert!((p.gray_r - p.gray_g).abs() < 1e-10, "R==G for gray");
+        assert!((p.white_r - p.white_g).abs() < 1e-10, "R==G for white");
+    }
+
+    #[test]
+    fn threepoint_params_clamped() {
+        let p = ProgramPlayer::compute_3point_params(1.0, 1.0, 1.0);
+        assert!(p.black_r >= 0.0 && p.black_r <= 0.8, "black clamped: {}", p.black_r);
+        assert!(p.gray_r >= 0.05 && p.gray_r <= 0.95, "gray clamped: {}", p.gray_r);
+        assert!(p.white_r >= 0.2 && p.white_r <= 1.0, "white clamped: {}", p.white_r);
+        let p2 = ProgramPlayer::compute_3point_params(-1.0, -1.0, -1.0);
+        assert!(p2.black_r >= 0.0 && p2.black_r <= 0.8, "black clamped min: {}", p2.black_r);
+        assert!(p2.gray_r >= 0.05 && p2.gray_r <= 0.95, "gray clamped min: {}", p2.gray_r);
+        assert!(p2.white_r >= 0.2 && p2.white_r <= 1.0, "white clamped min: {}", p2.white_r);
     }
 }
 
