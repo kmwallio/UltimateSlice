@@ -160,6 +160,17 @@ Preferences are grouped by category in a sidebar:
 - Use Disabled mode to reduce thumbnail-generation workload on heavy media/projects.
 - The setting is persisted across launches.
 
+## Audio Crossfades (Timeline)
+
+- **Enable automatic audio crossfades at edit points** toggles automatic crossfades for adjacent same-track timeline edits during Program Monitor playback and export.
+- **Crossfade curve** chooses `Equal power` (default) or `Linear`.
+- **Crossfade duration (ms)** sets the target fade duration (stored internally as nanoseconds for playback/export compatibility).
+- Fade windows are automatically clamped for short adjacent clips, so crossfades cannot exceed half of either clip.
+- Settings are persisted across launches with backward-compatible defaults for older config files.
+- MCP automation:
+  - `get_preferences` returns `crossfade_enabled`, `crossfade_curve`, and `crossfade_duration_ns`.
+  - `set_crossfade_settings` updates these values with strict validation (`curve`: `equal_power`/`linear`, `duration_ns`: 10_000_000–10_000_000_000).
+
 ## GTK Renderer (Playback)
 
 - **GTK renderer** controls which graphics backend GTK uses to draw the application window:

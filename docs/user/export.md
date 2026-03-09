@@ -73,6 +73,21 @@ Applies to AAC and Opus. Ignored for FLAC and PCM.
 - Acceptable web quality: 128 kbps
 - High fidelity: 256–320 kbps
 
+### Automatic Audio Crossfades
+
+Export honors Timeline crossfade preferences (set in Preferences → Timeline, or via MCP `set_crossfade_settings`):
+
+- `crossfade_enabled`
+- `crossfade_curve` (Equal power or Linear)
+- `crossfade_duration_ns`
+
+When enabled, export applies automatic fades at adjacent same-track audio edit points for:
+
+- clips on non-muted audio tracks
+- embedded audio in eligible video clips (when embedded audio is not suppressed by linked audio peers and audio is present)
+
+Fade lengths are clamped safely for very short clips and overlap boundaries so exports remain stable.
+
 ## Export Presets
 
 Use the **Preset** row in the Export dialog to save and reuse named export configurations:

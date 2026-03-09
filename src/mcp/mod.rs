@@ -45,6 +45,12 @@ pub enum McpCommand {
         priority: String,
         reply: SyncSender<Value>,
     },
+    SetCrossfadeSettings {
+        enabled: bool,
+        curve: String,
+        duration_ns: u64,
+        reply: SyncSender<Value>,
+    },
     SetProxyMode {
         mode: String,
         reply: SyncSender<Value>,

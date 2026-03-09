@@ -302,7 +302,10 @@ Tracking docs:
   - [x] Program Monitor master stereo VU meter (L/R)
   - [x] Per-track stereo meters in timeline track labels (timeline track order)
   - [x] Status-bar eye toggle to show/hide track audio levels
-- [ ] Audio crossfades (automatic crossfade at audio edit points, equal-power or linear, adjustable duration)
+- [x] Audio crossfades (automatic crossfade at audio edit points, equal-power or linear, adjustable duration)
+  - [x] Persisted crossfade preferences (enabled, curve, duration) in UI state and Preferences UI, with MCP read/write support via `get_preferences` and `set_crossfade_settings`
+  - [x] Program Monitor preview crossfades at adjacent same-track audio edit points, honoring preference curve/duration with short-clip-safe clamping
+  - [x] Export-time automatic crossfades at adjacent same-track audio edit points (audio tracks + eligible embedded clip audio), honoring preference curve/duration with short-clip-safe clamping
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`

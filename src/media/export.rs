@@ -1,6 +1,7 @@
 use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -99,17 +100,22 @@ pub fn export_project(
     // Primary video track (first video track) — forms the base concat sequence.
     // Secondary video tracks are composited on top with overlay.
     let mut video_tracks_iter = project.video_tracks();
-    let primary_clips: Vec<&crate::model::clip::Clip> = video_tracks_iter
+    let mut primary_clips: Vec<&crate::model::clip::Clip> = video_tracks_iter
         .next()
         .map(|t| t.clips.iter().collect())
         .unwrap_or_default();
+    primary_clips.sort_by_key(|c| c.timeline_start);
 
     // Remaining video tracks: each is a list of (overlay) clips
     let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
         .video_tracks()
         .skip(1)
         .filter(|t| !t.muted)
-        .map(|t| t.clips.iter().collect())
+        .map(|t| {
+            let mut clips: Vec<&Clip> = t.clips.iter().collect();
+            clips.sort_by_key(|c| c.timeline_start);
+            clips
+        })
         .collect();
 
     if primary_clips.is_empty() {
@@ -117,12 +123,16 @@ pub fn export_project(
     }
 
     // Collect audio-only clips from non-muted audio tracks
-    let mut audio_clips: Vec<_> = project
+    let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
         .audio_tracks()
         .filter(|t| !t.muted)
-        .flat_map(|t| t.clips.iter())
+        .map(|t| {
+            let mut clips: Vec<&Clip> = t.clips.iter().collect();
+            clips.sort_by_key(|c| c.timeline_start);
+            clips
+        })
         .collect();
-    audio_clips.sort_by_key(|c| c.timeline_start);
+    let audio_clips: Vec<&Clip> = audio_track_clips.iter().flatten().copied().collect();
 
     // Flatten secondary clips for indexing
     let secondary_clips_flat: Vec<_> = secondary_track_clips.iter().flatten().copied().collect();
@@ -134,6 +144,11 @@ pub fn export_project(
     let _ = tx.send(ExportProgress::Progress(0.0));
 
     let ffmpeg = find_ffmpeg()?;
+    let preferences = crate::ui_state::load_preferences_state();
+    let crossfade_enabled = preferences.crossfade_enabled;
+    let crossfade_duration_ns = preferences.crossfade_duration_ns;
+    let crossfade_curve = audio_crossfade_curve_name(&preferences.crossfade_curve);
+    let mut audio_presence_cache: HashMap<String, bool> = HashMap::new();
     let mut cmd = Command::new(&ffmpeg);
     cmd.arg("-y")
         .arg("-hide_banner")
@@ -340,21 +355,67 @@ pub fn export_project(
 
     // === Audio pipeline ===
     let mut audio_labels: Vec<String> = Vec::new();
+    let clip_audio_fades: HashMap<String, ClipAudioFade> =
+        if crossfade_enabled && crossfade_duration_ns > 0 {
+            let mut crossfade_tracks: Vec<Vec<&Clip>> = Vec::new();
+
+            let mut primary_embedded_audio_clips = Vec::new();
+            for clip in &primary_clips {
+                if clip.kind == ClipKind::Video
+                    && !has_linked_audio_peer(clip, &audio_clips)
+                    && !uses_bg_removal_path(clip)
+                    && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
+                {
+                    primary_embedded_audio_clips.push(*clip);
+                }
+            }
+            if !primary_embedded_audio_clips.is_empty() {
+                crossfade_tracks.push(primary_embedded_audio_clips);
+            }
+
+            for track_clips in &secondary_track_clips {
+                let mut secondary_embedded_audio_clips = Vec::new();
+                for clip in track_clips {
+                    if clip.kind == ClipKind::Video
+                        && !has_linked_audio_peer(clip, &audio_clips)
+                        && !uses_bg_removal_path(clip)
+                        && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
+                    {
+                        secondary_embedded_audio_clips.push(*clip);
+                    }
+                }
+                if !secondary_embedded_audio_clips.is_empty() {
+                    crossfade_tracks.push(secondary_embedded_audio_clips);
+                }
+            }
+
+            for track_clips in &audio_track_clips {
+                if !track_clips.is_empty() {
+                    crossfade_tracks.push(track_clips.clone());
+                }
+            }
+
+            compute_clip_audio_fades(&crossfade_tracks, crossfade_duration_ns)
+        } else {
+            HashMap::new()
+        };
 
     // Embedded audio from primary video clips, with per-clip volume scaling
     for (i, clip) in primary_clips.iter().enumerate() {
         if clip.kind == ClipKind::Video
             && !has_linked_audio_peer(clip, &audio_clips)
             && !uses_bg_removal_path(clip)
-            && probe_has_audio(&ffmpeg, &clip.source_path)
+            && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
         {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
             let vol = clip.volume;
+            let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
+            let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
+                ";[{i}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]"
             ));
             audio_labels.push(label);
         }
@@ -366,15 +427,17 @@ pub fn export_project(
         if clip.kind == ClipKind::Video
             && !has_linked_audio_peer(clip, &audio_clips)
             && !uses_bg_removal_path(clip)
-            && probe_has_audio(&ffmpeg, &clip.source_path)
+            && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
         {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
             let vol = clip.volume;
+            let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
+            let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]"
+                ";[{in_idx}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]"
             ));
             audio_labels.push(label);
         }
@@ -387,8 +450,10 @@ pub fn export_project(
         let areverse = if clip.reverse { "areverse," } else { "" };
         let atempo = build_atempo(clip.speed);
         let vol = clip.volume;
+        let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
+        let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}volume={vol:.4},adelay={delay_ms}:all=1[{label}]",
+            ";[{}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]",
             audio_base + j
         ));
         audio_labels.push(label);
@@ -778,6 +843,110 @@ fn build_atempo(speed: f64) -> String {
     filters
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ClipAudioFade {
+    fade_in_ns: u64,
+    fade_out_ns: u64,
+}
+
+fn compute_clip_audio_fades(
+    track_audio_clips: &[Vec<&Clip>],
+    target_crossfade_ns: u64,
+) -> HashMap<String, ClipAudioFade> {
+    let mut fades: HashMap<String, ClipAudioFade> = HashMap::new();
+    if target_crossfade_ns == 0 {
+        return fades;
+    }
+
+    for track in track_audio_clips {
+        if track.len() < 2 {
+            continue;
+        }
+        let mut sorted = track.clone();
+        sorted.sort_by_key(|c| c.timeline_start);
+
+        for pair in sorted.windows(2) {
+            let left = pair[0];
+            let right = pair[1];
+            let left_end = left.timeline_end();
+            if right.timeline_start > left_end {
+                continue;
+            }
+
+            let overlap_ns = left_end.saturating_sub(right.timeline_start);
+            let mut fade_ns = target_crossfade_ns;
+            if overlap_ns > 0 {
+                fade_ns = fade_ns.min(overlap_ns);
+            }
+            fade_ns = fade_ns.min(left.duration()).min(right.duration());
+            if fade_ns == 0 {
+                continue;
+            }
+
+            let left_fade = fades.entry(left.id.clone()).or_default();
+            left_fade.fade_out_ns = left_fade.fade_out_ns.max(fade_ns);
+
+            let right_fade = fades.entry(right.id.clone()).or_default();
+            right_fade.fade_in_ns = right_fade.fade_in_ns.max(fade_ns);
+        }
+
+        for clip in sorted {
+            if let Some(clip_fades) = fades.get_mut(&clip.id) {
+                let clip_duration = clip.duration();
+                if clip_duration == 0 {
+                    clip_fades.fade_in_ns = 0;
+                    clip_fades.fade_out_ns = 0;
+                    continue;
+                }
+
+                clip_fades.fade_in_ns = clip_fades.fade_in_ns.min(clip_duration);
+                clip_fades.fade_out_ns = clip_fades.fade_out_ns.min(clip_duration);
+                let total = clip_fades.fade_in_ns.saturating_add(clip_fades.fade_out_ns);
+                if total > clip_duration {
+                    let scaled_in = ((clip_fades.fade_in_ns as u128 * clip_duration as u128)
+                        / total as u128) as u64;
+                    clip_fades.fade_in_ns = scaled_in.min(clip_duration);
+                    clip_fades.fade_out_ns = clip_duration.saturating_sub(clip_fades.fade_in_ns);
+                }
+            }
+        }
+    }
+
+    fades
+}
+
+fn audio_crossfade_curve_name(curve: &crate::ui_state::CrossfadeCurve) -> &'static str {
+    match curve {
+        crate::ui_state::CrossfadeCurve::EqualPower => "qsin",
+        crate::ui_state::CrossfadeCurve::Linear => "tri",
+    }
+}
+
+fn build_audio_crossfade_filters(clip: &Clip, fades: ClipAudioFade, curve: &str) -> String {
+    let clip_duration_ns = clip.duration();
+    if clip_duration_ns == 0 {
+        return String::new();
+    }
+
+    let mut filters = String::new();
+    let fade_in_ns = fades.fade_in_ns.min(clip_duration_ns);
+    if fade_in_ns > 0 {
+        let d_s = fade_in_ns as f64 / 1_000_000_000.0;
+        filters.push_str(&format!("afade=t=in:st=0:d={d_s:.6}:curve={curve},"));
+    }
+
+    let max_fade_out_ns = clip_duration_ns.saturating_sub(fade_in_ns);
+    let fade_out_ns = fades.fade_out_ns.min(max_fade_out_ns);
+    if fade_out_ns > 0 {
+        let d_s = fade_out_ns as f64 / 1_000_000_000.0;
+        let st_s = clip_duration_ns.saturating_sub(fade_out_ns) as f64 / 1_000_000_000.0;
+        filters.push_str(&format!(
+            "afade=t=out:st={st_s:.6}:d={d_s:.6}:curve={curve},"
+        ));
+    }
+    filters
+}
+
 fn parse_progress_line(
     line: &str,
     total_duration_us: u64,
@@ -877,6 +1046,15 @@ fn has_linked_audio_peer(clip: &Clip, audio_clips: &[&Clip]) -> bool {
         .any(|audio_clip| clip.suppresses_embedded_audio_for_linked_peer(audio_clip))
 }
 
+fn clip_has_audio(ffmpeg: &str, clip: &Clip, cache: &mut HashMap<String, bool>) -> bool {
+    if let Some(has_audio) = cache.get(&clip.source_path) {
+        return *has_audio;
+    }
+    let has_audio = probe_has_audio(ffmpeg, &clip.source_path);
+    cache.insert(clip.source_path.clone(), has_audio);
+    has_audio
+}
+
 fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
     // Derive ffprobe path from ffmpeg path (they live side-by-side)
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
@@ -925,11 +1103,13 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
+        audio_crossfade_curve_name, build_audio_crossfade_filters, compute_clip_audio_fades,
         estimate_export_size_bytes, has_linked_audio_peer, parse_progress_line, AudioCodec,
-        ExportOptions, VideoCodec,
+        ClipAudioFade, ExportOptions, VideoCodec,
     };
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
+    use crate::ui_state::CrossfadeCurve;
 
     #[test]
     fn total_size_progress_uses_estimate_and_caps() {
@@ -978,5 +1158,131 @@ mod tests {
         audio.link_group_id = Some("link-1".to_string());
 
         assert!(has_linked_audio_peer(&video, std::slice::from_ref(&&audio)));
+    }
+
+    fn make_audio_clip(id: &str, timeline_start: u64, duration_ns: u64) -> Clip {
+        let mut clip = Clip::new(
+            "/tmp/audio.wav",
+            duration_ns,
+            timeline_start,
+            ClipKind::Audio,
+        );
+        clip.id = id.to_string();
+        clip
+    }
+
+    #[test]
+    fn compute_clip_audio_fades_for_adjacent_clips() {
+        let a = make_audio_clip("a", 0, 2_000_000_000);
+        let b = make_audio_clip("b", 2_000_000_000, 2_000_000_000);
+        let tracks = vec![vec![&a, &b]];
+
+        let fades = compute_clip_audio_fades(&tracks, 300_000_000);
+
+        assert_eq!(
+            fades.get("a"),
+            Some(&ClipAudioFade {
+                fade_in_ns: 0,
+                fade_out_ns: 300_000_000
+            })
+        );
+        assert_eq!(
+            fades.get("b"),
+            Some(&ClipAudioFade {
+                fade_in_ns: 300_000_000,
+                fade_out_ns: 0
+            })
+        );
+    }
+
+    #[test]
+    fn compute_clip_audio_fades_clamps_short_middle_clip() {
+        let a = make_audio_clip("a", 0, 100_000_000);
+        let b = make_audio_clip("b", 100_000_000, 100_000_000);
+        let c = make_audio_clip("c", 200_000_000, 100_000_000);
+        let tracks = vec![vec![&a, &b, &c]];
+
+        let fades = compute_clip_audio_fades(&tracks, 80_000_000);
+        let middle = fades.get("b").expect("middle clip should have fades");
+
+        assert_eq!(middle.fade_in_ns + middle.fade_out_ns, 100_000_000);
+        assert!(middle.fade_in_ns > 0);
+        assert!(middle.fade_out_ns > 0);
+    }
+
+    #[test]
+    fn compute_clip_audio_fades_clamps_to_overlap_when_tracks_overlap() {
+        let a = make_audio_clip("a", 0, 2_000_000_000);
+        let b = make_audio_clip("b", 1_800_000_000, 2_000_000_000);
+        let tracks = vec![vec![&a, &b]];
+
+        let fades = compute_clip_audio_fades(&tracks, 500_000_000);
+
+        assert_eq!(
+            fades.get("a"),
+            Some(&ClipAudioFade {
+                fade_in_ns: 0,
+                fade_out_ns: 200_000_000
+            })
+        );
+        assert_eq!(
+            fades.get("b"),
+            Some(&ClipAudioFade {
+                fade_in_ns: 200_000_000,
+                fade_out_ns: 0
+            })
+        );
+    }
+
+    #[test]
+    fn build_audio_crossfade_filters_builds_expected_afade_chain() {
+        let clip = make_audio_clip("a", 0, 1_000_000_000);
+        let filters = build_audio_crossfade_filters(
+            &clip,
+            ClipAudioFade {
+                fade_in_ns: 200_000_000,
+                fade_out_ns: 300_000_000,
+            },
+            "tri",
+        );
+        assert!(filters.contains("afade=t=in:st=0:d=0.200000:curve=tri"));
+        assert!(filters.contains("afade=t=out:st=0.700000:d=0.300000:curve=tri"));
+    }
+
+    #[test]
+    fn build_audio_crossfade_filters_clamps_fade_out_after_large_fade_in() {
+        let clip = make_audio_clip("a", 0, 1_000_000_000);
+        let filters = build_audio_crossfade_filters(
+            &clip,
+            ClipAudioFade {
+                fade_in_ns: 800_000_000,
+                fade_out_ns: 900_000_000,
+            },
+            "qsin",
+        );
+        assert!(filters.contains("afade=t=in:st=0:d=0.800000:curve=qsin"));
+        assert!(filters.contains("afade=t=out:st=0.800000:d=0.200000:curve=qsin"));
+    }
+
+    #[test]
+    fn audio_crossfade_curve_name_maps_expected_ffmpeg_curves() {
+        assert_eq!(
+            audio_crossfade_curve_name(&CrossfadeCurve::EqualPower),
+            "qsin"
+        );
+        assert_eq!(audio_crossfade_curve_name(&CrossfadeCurve::Linear), "tri");
+    }
+
+    #[test]
+    fn build_audio_crossfade_filters_supports_both_curve_types() {
+        let clip = make_audio_clip("a", 0, 1_000_000_000);
+        let fades = ClipAudioFade {
+            fade_in_ns: 150_000_000,
+            fade_out_ns: 150_000_000,
+        };
+        let equal_power = build_audio_crossfade_filters(&clip, fades, "qsin");
+        let linear = build_audio_crossfade_filters(&clip, fades, "tri");
+        assert!(equal_power.contains("curve=qsin"));
+        assert!(linear.contains("curve=tri"));
     }
 }

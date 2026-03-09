@@ -1,5 +1,5 @@
 use crate::media::player::PlayerState;
-use crate::ui_state::PlaybackPriority;
+use crate::ui_state::{CrossfadeCurve, PlaybackPriority};
 /// A "program monitor" player that composites the assembled timeline.
 ///
 /// Uses a GStreamer pipeline built around `compositor` (video) and `audiomixer`
@@ -377,6 +377,9 @@ pub struct ProgramPlayer {
     realtime_preview: bool,
     /// Prewarm upcoming boundaries earlier during active playback.
     background_prerender: bool,
+    crossfade_enabled: bool,
+    crossfade_curve: CrossfadeCurve,
+    crossfade_duration_ns: u64,
     proxy_paths: HashMap<String, String>,
     /// Bg-removed file paths: source_path → bg_removed file path.
     bg_removal_paths: HashMap<String, String>,
@@ -920,6 +923,9 @@ impl ProgramPlayer {
                 experimental_preview_optimizations: false,
                 realtime_preview: false,
                 background_prerender: false,
+                crossfade_enabled: false,
+                crossfade_curve: CrossfadeCurve::default(),
+                crossfade_duration_ns: 200_000_000,
                 proxy_paths: HashMap::new(),
                 bg_removal_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
@@ -1015,6 +1021,18 @@ impl ProgramPlayer {
             }
             self.cleanup_background_prerender_cache();
         }
+    }
+
+    pub fn set_audio_crossfade_preview(
+        &mut self,
+        enabled: bool,
+        curve: CrossfadeCurve,
+        duration_ns: u64,
+    ) {
+        self.crossfade_enabled = enabled;
+        self.crossfade_curve = curve;
+        self.crossfade_duration_ns = duration_ns;
+        self.sync_preview_audio_levels(self.timeline_pos_ns);
     }
 
     fn cleanup_background_prerender_cache(&mut self) {
@@ -1712,6 +1730,199 @@ impl ProgramPlayer {
         }
     }
 
+    fn crossfade_curve_gain(curve: &CrossfadeCurve, progress: f64, incoming: bool) -> f64 {
+        let t = progress.clamp(0.0, 1.0);
+        match (curve, incoming) {
+            (CrossfadeCurve::EqualPower, true) => (t * std::f64::consts::FRAC_PI_2).sin(),
+            (CrossfadeCurve::EqualPower, false) => (t * std::f64::consts::FRAC_PI_2).cos(),
+            (CrossfadeCurve::Linear, true) => t,
+            (CrossfadeCurve::Linear, false) => 1.0 - t,
+        }
+    }
+
+    fn adjacent_prev_same_track_with_audio(
+        clips: &[ProgramClip],
+        clip_idx: usize,
+    ) -> Option<usize> {
+        let clip = clips.get(clip_idx)?;
+        clips
+            .iter()
+            .enumerate()
+            .filter(|(idx, c)| {
+                *idx != clip_idx
+                    && c.has_audio
+                    && c.track_index == clip.track_index
+                    && c.timeline_end_ns() == clip.timeline_start_ns
+            })
+            .max_by_key(|(_, c)| c.timeline_start_ns)
+            .map(|(idx, _)| idx)
+    }
+
+    fn adjacent_next_same_track_with_audio(
+        clips: &[ProgramClip],
+        clip_idx: usize,
+    ) -> Option<usize> {
+        let clip = clips.get(clip_idx)?;
+        clips
+            .iter()
+            .enumerate()
+            .filter(|(idx, c)| {
+                *idx != clip_idx
+                    && c.has_audio
+                    && c.track_index == clip.track_index
+                    && c.timeline_start_ns == clip.timeline_end_ns()
+            })
+            .min_by_key(|(_, c)| c.timeline_start_ns)
+            .map(|(idx, _)| idx)
+    }
+
+    fn clamped_crossfade_duration_ns(
+        requested_duration_ns: u64,
+        a: &ProgramClip,
+        b: &ProgramClip,
+    ) -> u64 {
+        requested_duration_ns
+            .min(a.duration_ns() / 2)
+            .min(b.duration_ns() / 2)
+    }
+
+    fn clip_crossfade_gain(
+        &self,
+        clips: &[ProgramClip],
+        clip_idx: usize,
+        timeline_pos_ns: u64,
+    ) -> f64 {
+        Self::compute_clip_crossfade_gain(
+            self.crossfade_enabled,
+            &self.crossfade_curve,
+            self.crossfade_duration_ns,
+            clips,
+            clip_idx,
+            timeline_pos_ns,
+        )
+    }
+
+    fn compute_clip_crossfade_gain(
+        crossfade_enabled: bool,
+        crossfade_curve: &CrossfadeCurve,
+        crossfade_duration_ns: u64,
+        clips: &[ProgramClip],
+        clip_idx: usize,
+        timeline_pos_ns: u64,
+    ) -> f64 {
+        if !crossfade_enabled || crossfade_duration_ns == 0 {
+            return 1.0;
+        }
+        let Some(clip) = clips.get(clip_idx) else {
+            return 1.0;
+        };
+        if !clip.has_audio {
+            return 1.0;
+        }
+        let mut gain = 1.0_f64;
+
+        if let Some(prev_idx) = Self::adjacent_prev_same_track_with_audio(clips, clip_idx) {
+            if let Some(prev) = clips.get(prev_idx) {
+                let fade_ns =
+                    Self::clamped_crossfade_duration_ns(crossfade_duration_ns, prev, clip);
+                if fade_ns > 0 {
+                    let fade_end = clip.timeline_start_ns.saturating_add(fade_ns);
+                    if timeline_pos_ns >= clip.timeline_start_ns && timeline_pos_ns < fade_end {
+                        let elapsed = timeline_pos_ns.saturating_sub(clip.timeline_start_ns) as f64;
+                        let progress = elapsed / fade_ns as f64;
+                        gain *= Self::crossfade_curve_gain(crossfade_curve, progress, true);
+                    }
+                }
+            }
+        }
+
+        if let Some(next_idx) = Self::adjacent_next_same_track_with_audio(clips, clip_idx) {
+            if let Some(next) = clips.get(next_idx) {
+                let fade_ns =
+                    Self::clamped_crossfade_duration_ns(crossfade_duration_ns, clip, next);
+                if fade_ns > 0 {
+                    let fade_start = clip.timeline_end_ns().saturating_sub(fade_ns);
+                    if timeline_pos_ns >= fade_start && timeline_pos_ns < clip.timeline_end_ns() {
+                        let elapsed = timeline_pos_ns.saturating_sub(fade_start) as f64;
+                        let progress = elapsed / fade_ns as f64;
+                        gain *= Self::crossfade_curve_gain(crossfade_curve, progress, false);
+                    }
+                }
+            }
+        }
+
+        gain.clamp(0.0, 1.0)
+    }
+
+    fn effective_main_clip_volume(&self, clip_idx: usize, timeline_pos_ns: u64) -> f64 {
+        let Some(clip) = self.clips.get(clip_idx) else {
+            return 0.0;
+        };
+        if self.reverse_video_ducked_clip_idx == Some(clip_idx) {
+            return 0.0;
+        }
+        let base = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+        (base * self.clip_crossfade_gain(&self.clips, clip_idx, timeline_pos_ns))
+            .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN)
+    }
+
+    fn effective_audio_source_volume(
+        &self,
+        source: AudioCurrentSource,
+        timeline_pos_ns: u64,
+    ) -> f64 {
+        match source {
+            AudioCurrentSource::AudioClip(idx) => {
+                let Some(clip) = self.audio_clips.get(idx) else {
+                    return 0.0;
+                };
+                let base = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+                (base * self.clip_crossfade_gain(&self.audio_clips, idx, timeline_pos_ns))
+                    .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN)
+            }
+            AudioCurrentSource::ReverseVideoClip(idx) => {
+                let Some(clip) = self.clips.get(idx) else {
+                    return 0.0;
+                };
+                let base = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+                (base * self.clip_crossfade_gain(&self.clips, idx, timeline_pos_ns))
+                    .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN)
+            }
+        }
+    }
+
+    fn set_audio_pipeline_volume(&self, volume: f64) {
+        if let Some(ref vol_elem) = self.audio_volume_element {
+            vol_elem.set_property("volume", volume);
+        } else {
+            self.audio_pipeline.set_property("volume", volume);
+        }
+    }
+
+    fn apply_main_audio_slot_volumes(&self, timeline_pos_ns: u64) {
+        for slot in &self.slots {
+            if slot.is_prerender_slot {
+                continue;
+            }
+            if let Some(ref pad) = slot.audio_mixer_pad {
+                let volume = if slot.hidden {
+                    0.0
+                } else {
+                    self.effective_main_clip_volume(slot.clip_idx, timeline_pos_ns)
+                };
+                pad.set_property("volume", volume);
+            }
+        }
+    }
+
+    fn sync_preview_audio_levels(&self, timeline_pos_ns: u64) {
+        self.apply_main_audio_slot_volumes(timeline_pos_ns);
+        if let Some(source) = self.audio_current_source {
+            let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
+            self.set_audio_pipeline_volume(volume);
+        }
+    }
+
     pub fn poll(&mut self) -> bool {
         let _eos = self.poll_bus();
         self.poll_background_prerender_results();
@@ -1909,7 +2120,9 @@ impl ProgramPlayer {
 
     #[allow(dead_code)]
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
-        self.update_current_effects(brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        self.update_current_effects(
+            brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
     }
 
     pub fn update_current_effects(
@@ -1931,7 +2144,8 @@ impl ProgramPlayer {
         // we must do a one-time pipeline rebuild so the element gets created.
         let need_balance = brightness != 0.0 || contrast != 1.0 || saturation != 1.0;
         let need_coloradj = (temperature - 6500.0).abs() > 1.0 || tint.abs() > 0.001;
-        let need_3point = shadows.abs() > f64::EPSILON || midtones.abs() > f64::EPSILON
+        let need_3point = shadows.abs() > f64::EPSILON
+            || midtones.abs() > f64::EPSILON
             || highlights.abs() > f64::EPSILON;
         let need_blur = {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
@@ -1976,8 +2190,16 @@ impl ProgramPlayer {
             let has_3point = slot.colorbalance_3pt.is_some();
             if let Some(ref vb) = slot.videobalance {
                 let p = Self::compute_videobalance_params(
-                    brightness, contrast, saturation, temperature, tint,
-                    shadows, midtones, highlights, has_coloradj, has_3point,
+                    brightness,
+                    contrast,
+                    saturation,
+                    temperature,
+                    tint,
+                    shadows,
+                    midtones,
+                    highlights,
+                    has_coloradj,
+                    has_3point,
                 );
                 vb.set_property("brightness", p.brightness);
                 vb.set_property("contrast", p.contrast);
@@ -2062,18 +2284,12 @@ impl ProgramPlayer {
 
     #[allow(dead_code)]
     pub fn update_current_audio(&mut self, volume: f64, _pan: f64) {
-        // Per-clip volume on the audiomixer pad.
-        if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
-            if let Some(ref pad) = slot.audio_mixer_pad {
-                let clipped = volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
-                let pad_volume = if self.reverse_video_ducked_clip_idx == self.current_idx {
-                    0.0
-                } else {
-                    clipped
-                };
-                pad.set_property("volume", pad_volume);
+        if let Some(idx) = self.current_idx {
+            if let Some(clip) = self.clips.get_mut(idx) {
+                clip.volume = volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
             }
         }
+        self.sync_preview_audio_levels(self.timeline_pos_ns);
     }
 
     pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, _pan: f64) {
@@ -2081,16 +2297,7 @@ impl ProgramPlayer {
         // Check video clips first (use audiomixer pad on compositor pipeline).
         if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
             self.clips[i].volume = volume;
-            if let Some(slot) = self.slot_for_clip(i) {
-                if let Some(ref pad) = slot.audio_mixer_pad {
-                    let pad_volume = if self.reverse_video_ducked_clip_idx == Some(i) {
-                        0.0
-                    } else {
-                        volume
-                    };
-                    pad.set_property("volume", pad_volume);
-                }
-            }
+            self.apply_main_audio_slot_volumes(self.timeline_pos_ns);
             return;
         }
         // For audio-only clips, update the stored volume and, if actively playing,
@@ -2098,11 +2305,11 @@ impl ProgramPlayer {
         if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
             self.audio_clips[i].volume = volume;
             if self.audio_current_source == Some(AudioCurrentSource::AudioClip(i)) {
-                if let Some(ref vol_elem) = self.audio_volume_element {
-                    vol_elem.set_property("volume", volume);
-                } else {
-                    self.audio_pipeline.set_property("volume", volume);
-                }
+                let effective = self.effective_audio_source_volume(
+                    AudioCurrentSource::AudioClip(i),
+                    self.timeline_pos_ns,
+                );
+                self.set_audio_pipeline_volume(effective);
             }
         }
     }
@@ -2462,19 +2669,16 @@ impl ProgramPlayer {
             }
             let clip = &self.clips[i];
             // Find preceding clip on same track with an active transition.
-            let prev = self
-                .clips
-                .iter()
-                .enumerate()
-                .find(|(_, c)| {
-                    c.track_index == clip.track_index
-                        && c.timeline_end_ns() == clip.timeline_start_ns
-                        && !c.transition_after.is_empty()
-                        && c.transition_after_ns > 0
-                });
+            let prev = self.clips.iter().enumerate().find(|(_, c)| {
+                c.track_index == clip.track_index
+                    && c.timeline_end_ns() == clip.timeline_start_ns
+                    && !c.transition_after.is_empty()
+                    && c.transition_after_ns > 0
+            });
             if let Some((_, prev_clip)) = prev {
-                let trans_start =
-                    prev_clip.timeline_end_ns().saturating_sub(prev_clip.transition_after_ns);
+                let trans_start = prev_clip
+                    .timeline_end_ns()
+                    .saturating_sub(prev_clip.transition_after_ns);
                 if timeline_pos_ns >= trans_start && timeline_pos_ns < prev_clip.timeline_end_ns() {
                     active.push(i);
                 }
@@ -2515,7 +2719,9 @@ impl ProgramPlayer {
         let clip = &self.clips[clip_idx];
         // Check if this clip is the OUTGOING clip (has transition_after set).
         if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
-            let trans_start = clip.timeline_end_ns().saturating_sub(clip.transition_after_ns);
+            let trans_start = clip
+                .timeline_end_ns()
+                .saturating_sub(clip.transition_after_ns);
             if timeline_pos_ns >= trans_start && timeline_pos_ns < clip.timeline_end_ns() {
                 let elapsed = timeline_pos_ns.saturating_sub(trans_start) as f64;
                 let duration = clip.transition_after_ns as f64;
@@ -2535,8 +2741,9 @@ impl ProgramPlayer {
                 && c.transition_after_ns > 0
         });
         if let Some(prev_clip) = prev {
-            let trans_start =
-                prev_clip.timeline_end_ns().saturating_sub(prev_clip.transition_after_ns);
+            let trans_start = prev_clip
+                .timeline_end_ns()
+                .saturating_sub(prev_clip.transition_after_ns);
             if timeline_pos_ns >= trans_start && timeline_pos_ns < prev_clip.timeline_end_ns() {
                 let elapsed = timeline_pos_ns.saturating_sub(trans_start) as f64;
                 let duration = prev_clip.transition_after_ns as f64;
@@ -2591,16 +2798,10 @@ impl ProgramPlayer {
                                 pad.set_property("alpha", base_alpha * t);
                             }
                             ("fade_to_black", TransitionRole::Outgoing) => {
-                                pad.set_property(
-                                    "alpha",
-                                    base_alpha * (1.0 - 2.0 * t).max(0.0),
-                                );
+                                pad.set_property("alpha", base_alpha * (1.0 - 2.0 * t).max(0.0));
                             }
                             ("fade_to_black", TransitionRole::Incoming) => {
-                                pad.set_property(
-                                    "alpha",
-                                    base_alpha * (2.0 * t - 1.0).max(0.0),
-                                );
+                                pad.set_property("alpha", base_alpha * (2.0 * t - 1.0).max(0.0));
                             }
                             ("wipe_right", _) | ("wipe_left", _) => {
                                 // Wipes: both clips at full alpha; crop handles reveal.
@@ -2667,9 +2868,7 @@ impl ProgramPlayer {
                         }
                         vb.set_property("border-alpha", 0.0_f64);
                     }
-                } else if tstate.is_none()
-                    || !(ts.kind == "wipe_right" || ts.kind == "wipe_left")
-                {
+                } else if tstate.is_none() || !(ts.kind == "wipe_right" || ts.kind == "wipe_left") {
                     // Not in a wipe transition — ensure crop reflects user values only.
                     // (Skip reset if this slot is the outgoing clip of a wipe, since
                     // the outgoing clip's crop stays at user values naturally.)
@@ -4011,8 +4210,7 @@ impl ProgramPlayer {
                 continue;
             }
             if let Some(mut slot) = self.build_slot_for_clip(*clip_idx, zorder_offset, true) {
-                slot.transition_enter_offset_ns =
-                    self.transition_enter_offset_for_clip(*clip_idx);
+                slot.transition_enter_offset_ns = self.transition_enter_offset_for_clip(*clip_idx);
                 self.slots.push(slot);
                 added_clip_idxs.push(*clip_idx);
             } else {
@@ -4553,7 +4751,8 @@ impl ProgramPlayer {
         // (3 concurrent clips drops from ~51 to ~22 pipeline elements).
         let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
         let need_coloradj = (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
-        let need_3point = clip.shadows.abs() > f64::EPSILON || clip.midtones.abs() > f64::EPSILON
+        let need_3point = clip.shadows.abs() > f64::EPSILON
+            || clip.midtones.abs() > f64::EPSILON
             || clip.highlights.abs() > f64::EPSILON;
         let blur_sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
@@ -4579,7 +4778,9 @@ impl ProgramPlayer {
         // frei0r coloradj_RGB for per-channel temperature/tint (RGBA pipeline).
         // Falls back to videobalance hue approximation if frei0r unavailable.
         let coloradj_rgb = if need_coloradj {
-            gst::ElementFactory::make("frei0r-filter-coloradj-rgb").build().ok()
+            gst::ElementFactory::make("frei0r-filter-coloradj-rgb")
+                .build()
+                .ok()
         } else {
             None
         };
@@ -4599,7 +4800,9 @@ impl ProgramPlayer {
         // Provides per-luminance-range control matching FFmpeg's colorbalance.
         // Falls back to videobalance polynomial approximation if unavailable.
         let colorbalance_3pt = if need_3point {
-            let elem = gst::ElementFactory::make("frei0r-filter-3-point-color-balance").build().ok();
+            let elem = gst::ElementFactory::make("frei0r-filter-3-point-color-balance")
+                .build()
+                .ok();
             if let Some(ref e) = elem {
                 // Disable split-preview (default: true shows A/B comparison).
                 e.set_property("split-preview", false);
@@ -4686,10 +4889,16 @@ impl ProgramPlayer {
         let has_3point = colorbalance_3pt.is_some();
         if let Some(ref vb) = videobalance {
             let p = Self::compute_videobalance_params(
-                clip.brightness, clip.contrast, clip.saturation,
-                clip.temperature, clip.tint,
-                clip.shadows, clip.midtones, clip.highlights,
-                has_coloradj, has_3point,
+                clip.brightness,
+                clip.contrast,
+                clip.saturation,
+                clip.temperature,
+                clip.tint,
+                clip.shadows,
+                clip.midtones,
+                clip.highlights,
+                has_coloradj,
+                has_3point,
             );
             vb.set_property("brightness", p.brightness);
             vb.set_property("contrast", p.contrast);
@@ -4731,9 +4940,15 @@ impl ProgramPlayer {
             ck.set_property("target-g", g as u32);
             ck.set_property("target-b", b as u32);
             // angle: tolerance 0.0–1.0 → GStreamer 0–90 degrees
-            ck.set_property("angle", (clip.chroma_key_tolerance * 90.0).clamp(0.0, 90.0) as f32);
+            ck.set_property(
+                "angle",
+                (clip.chroma_key_tolerance * 90.0).clamp(0.0, 90.0) as f32,
+            );
             // noise-level: softness 0.0–1.0 → GStreamer 0–64
-            ck.set_property("noise-level", (clip.chroma_key_softness * 64.0).clamp(0.0, 64.0) as f32);
+            ck.set_property(
+                "noise-level",
+                (clip.chroma_key_softness * 64.0).clamp(0.0, 64.0) as f32,
+            );
         }
         if let Some(ref to) = textoverlay {
             if clip.title_text.is_empty() {
@@ -5053,7 +5268,10 @@ impl ProgramPlayer {
                         }
                     }
                     if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
-                        mp.set_property("volume", clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN));
+                        mp.set_property(
+                            "volume",
+                            self.effective_main_clip_volume(clip_idx, self.timeline_pos_ns),
+                        );
                         if let Some(src) = link_src {
                             let _ = src.link(&mp);
                         }
@@ -5565,9 +5783,7 @@ impl ProgramPlayer {
             let gm = -t * 0.5;
             let rm = t * 0.25;
             let bm = t * 0.25;
-            f.push_str(&format!(
-                ",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"
-            ));
+            f.push_str(&format!(",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"));
         }
         f
     }
@@ -5913,7 +6129,10 @@ impl ProgramPlayer {
                         }
                     }
                     if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
-                        mp.set_property("volume", clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN));
+                        mp.set_property(
+                            "volume",
+                            self.effective_main_clip_volume(clip_idx, self.timeline_pos_ns),
+                        );
                         if let Some(src) = link_src {
                             let _ = src.link(&mp);
                         }
@@ -6163,8 +6382,8 @@ impl ProgramPlayer {
         // GStreamer videobalance brightness (RGB additive) with a slight
         // contrast compensation.
         {
-            const B_B: [f64; 5] = [ 0.005156,  1.260891,  0.002010, -0.217226, -0.009772];
-            const B_C: [f64; 5] = [ 1.025037,  0.023633, -0.205914, -0.132415,  0.120400];
+            const B_B: [f64; 5] = [0.005156, 1.260891, 0.002010, -0.217226, -0.009772];
+            const B_C: [f64; 5] = [1.025037, 0.023633, -0.205914, -0.132415, 0.120400];
             // B_S omitted: high residual (0.48), noisy at extremes
             let t = brightness;
             b += Self::poly4(t, &B_B) - B_B[0]; // delta from neutral (poly(0) = c[0])
@@ -6176,8 +6395,8 @@ impl ProgramPlayer {
         // Brightness cross-effect removed: RMSE-optimal but perceptually
         // jarring (Δb ≈ +0.5 at contrast=0).
         {
-            const C_C: [f64; 5] = [ 0.294574,  0.666291,  0.242201, -0.290659,  0.071964];
-            const C_S: [f64; 5] = [ 2.423564, -3.689165,  3.643393, -1.624246,  0.272677];
+            const C_C: [f64; 5] = [0.294574, 0.666291, 0.242201, -0.290659, 0.071964];
+            const C_S: [f64; 5] = [2.423564, -3.689165, 3.643393, -1.624246, 0.272677];
             let t = contrast;
             let t0 = 1.0;
             c += Self::poly4(t, &C_C) - Self::poly4(t0, &C_C);
@@ -6189,7 +6408,7 @@ impl ProgramPlayer {
         // cross-effects removed: optimizer found them RMSE-helpful but
         // users expect the saturation slider to change color, not luminance.
         {
-            const S_S: [f64; 5] = [ 0.364002,  1.024258, -0.843067,  0.625649, -0.135496];
+            const S_S: [f64; 5] = [0.364002, 1.024258, -0.843067, 0.625649, -0.135496];
             let t = saturation;
             let t0 = 1.0;
             s += Self::poly4(t, &S_S) - Self::poly4(t0, &S_S);
@@ -6220,8 +6439,8 @@ impl ProgramPlayer {
             // FFmpeg colorbalance shadows apply per-luminance-range shifts that
             // are poorly approximated by global brightness alone; adding
             // contrast and saturation compensation dramatically improves match.
-            const SH_B: [f64; 5] = [-0.004654,  0.217915,  0.503318,  0.095557, -0.208157];
-            const SH_C: [f64; 5] = [ 0.967806, -0.569223, -0.773125,  0.208067,  0.503863];
+            const SH_B: [f64; 5] = [-0.004654, 0.217915, 0.503318, 0.095557, -0.208157];
+            const SH_C: [f64; 5] = [0.967806, -0.569223, -0.773125, 0.208067, 0.503863];
             let t = shadows;
             b += Self::poly4(t, &SH_B) - SH_B[0];
             c += Self::poly4(t, &SH_C) - SH_C[0];
@@ -6231,8 +6450,8 @@ impl ProgramPlayer {
         if !has_3point {
             // Calibration: moderate improvement; brightness weight close to
             // original (0.13 vs 0.20) but contrast compensation is significant.
-            const M_B: [f64; 5] = [-0.009292,  0.130927, -0.050035, -0.039406,  0.044492];
-            const M_C: [f64; 5] = [ 1.049000, -0.302024,  0.407251,  0.214717, -0.319686];
+            const M_B: [f64; 5] = [-0.009292, 0.130927, -0.050035, -0.039406, 0.044492];
+            const M_C: [f64; 5] = [1.049000, -0.302024, 0.407251, 0.214717, -0.319686];
             let t = midtones;
             b += Self::poly4(t, &M_B) - M_B[0];
             c += Self::poly4(t, &M_C) - M_C[0];
@@ -6243,9 +6462,9 @@ impl ProgramPlayer {
             // Calibration: 78-88% RMSE improvement.  Current coefficients
             // (b×0.15, c×0.15) dramatically undershoot; optimal mapping uses
             // ~3× stronger brightness and aggressive contrast boost.
-            const H_B: [f64; 5] = [-0.002545,  0.500927, -0.437295, -0.060255,  0.152945];
-            const H_C: [f64; 5] = [ 0.918940,  1.420073,  1.848961, -0.254895, -0.846390];
-            const H_S: [f64; 5] = [ 1.031708, -1.145010,  0.783173,  0.699344, -0.956279];
+            const H_B: [f64; 5] = [-0.002545, 0.500927, -0.437295, -0.060255, 0.152945];
+            const H_C: [f64; 5] = [0.918940, 1.420073, 1.848961, -0.254895, -0.846390];
+            const H_S: [f64; 5] = [1.031708, -1.145010, 0.783173, 0.699344, -0.956279];
             let t = highlights;
             b += Self::poly4(t, &H_B) - H_B[0];
             c += Self::poly4(t, &H_C) - H_C[0];
@@ -6280,14 +6499,14 @@ impl ProgramPlayer {
         // delta from its neutral (poly(0) = coeffs[0]).
 
         // ── Temperature (normalised Kelvin) ─────────────────────────────
-        const TEMP_R: [f64; 5] = [ 0.484425, -0.096376, -0.113860,  0.040888,  0.074672];
-        const TEMP_G: [f64; 5] = [ 0.477346,  0.003212, -0.205499,  0.074971,  0.075272];
-        const TEMP_B: [f64; 5] = [ 0.481896,  0.123688, -0.212512,  0.107891, -0.001538];
+        const TEMP_R: [f64; 5] = [0.484425, -0.096376, -0.113860, 0.040888, 0.074672];
+        const TEMP_G: [f64; 5] = [0.477346, 0.003212, -0.205499, 0.074971, 0.075272];
+        const TEMP_B: [f64; 5] = [0.481896, 0.123688, -0.212512, 0.107891, -0.001538];
 
         // ── Tint ────────────────────────────────────────────────────────
-        const TINT_R: [f64; 5] = [ 0.501907,  0.059414,  0.031477,  0.020843, -0.014643];
-        const TINT_G: [f64; 5] = [ 0.493519, -0.073231,  0.227645, -0.178444, -0.126107];
-        const TINT_B: [f64; 5] = [ 0.505304,  0.055597, -0.003110,  0.025954, -0.016120];
+        const TINT_R: [f64; 5] = [0.501907, 0.059414, 0.031477, 0.020843, -0.014643];
+        const TINT_G: [f64; 5] = [0.493519, -0.073231, 0.227645, -0.178444, -0.126107];
+        const TINT_B: [f64; 5] = [0.505304, 0.055597, -0.003110, 0.025954, -0.016120];
 
         let t_temp = ((temperature.clamp(1000.0, 15000.0) - 6500.0) / 4500.0).clamp(-1.0, 1.0);
         let t_tint = tint.clamp(-1.0, 1.0);
@@ -6320,19 +6539,19 @@ impl ProgramPlayer {
     /// Each slider contributes a delta from neutral via fitted polynomials.
     fn compute_3point_params(shadows: f64, midtones: f64, highlights: f64) -> ThreePointParams {
         // ── Shadows ─────────────────────────────────────────────────────
-        const SH_BLACK: [f64; 5] = [ 0.065817,  0.157626,  0.002710, -0.194674, -0.055835];
-        const SH_GRAY:  [f64; 5] = [ 0.513596,  0.081446, -0.041960,  0.017848,  0.117598];
-        const SH_WHITE: [f64; 5] = [ 0.999118, -0.037826, -0.087347, -0.046390, -0.004455];
+        const SH_BLACK: [f64; 5] = [0.065817, 0.157626, 0.002710, -0.194674, -0.055835];
+        const SH_GRAY: [f64; 5] = [0.513596, 0.081446, -0.041960, 0.017848, 0.117598];
+        const SH_WHITE: [f64; 5] = [0.999118, -0.037826, -0.087347, -0.046390, -0.004455];
 
         // ── Midtones ────────────────────────────────────────────────────
-        const M_BLACK: [f64; 5] = [ 0.006185, -0.024554, -0.070816,  0.093034,  0.159694];
-        const M_GRAY:  [f64; 5] = [ 0.499145, -0.111600, -0.219452,  0.010107,  0.285960];
-        const M_WHITE: [f64; 5] = [ 0.988180, -0.000025,  0.125044,  0.017842, -0.230026];
+        const M_BLACK: [f64; 5] = [0.006185, -0.024554, -0.070816, 0.093034, 0.159694];
+        const M_GRAY: [f64; 5] = [0.499145, -0.111600, -0.219452, 0.010107, 0.285960];
+        const M_WHITE: [f64; 5] = [0.988180, -0.000025, 0.125044, 0.017842, -0.230026];
 
         // ── Highlights ──────────────────────────────────────────────────
-        const H_BLACK: [f64; 5] = [ 0.039231,  0.056431, -0.027366,  0.018788,  0.094133];
-        const H_GRAY:  [f64; 5] = [ 0.519445, -0.494215,  0.275317,  0.483889, -0.277072];
-        const H_WHITE: [f64; 5] = [ 0.957496, -0.356602, -0.543984,  0.462982,  0.266763];
+        const H_BLACK: [f64; 5] = [0.039231, 0.056431, -0.027366, 0.018788, 0.094133];
+        const H_GRAY: [f64; 5] = [0.519445, -0.494215, 0.275317, 0.483889, -0.277072];
+        const H_WHITE: [f64; 5] = [0.957496, -0.356602, -0.543984, 0.462982, 0.266763];
 
         let sh = shadows.clamp(-1.0, 1.0);
         let mid = midtones.clamp(-1.0, 1.0);
@@ -6340,20 +6559,20 @@ impl ProgramPlayer {
 
         // Start from neutral, accumulate deltas from each slider.
         let mut black = 0.0_f64;
-        let mut gray  = 0.5_f64;
+        let mut gray = 0.5_f64;
         let mut white = 1.0_f64;
 
-        black += Self::poly4(sh,  &SH_BLACK) - SH_BLACK[0];
-        gray  += Self::poly4(sh,  &SH_GRAY)  - SH_GRAY[0];
-        white += Self::poly4(sh,  &SH_WHITE) - SH_WHITE[0];
+        black += Self::poly4(sh, &SH_BLACK) - SH_BLACK[0];
+        gray += Self::poly4(sh, &SH_GRAY) - SH_GRAY[0];
+        white += Self::poly4(sh, &SH_WHITE) - SH_WHITE[0];
 
-        black += Self::poly4(mid, &M_BLACK)  - M_BLACK[0];
-        gray  += Self::poly4(mid, &M_GRAY)   - M_GRAY[0];
-        white += Self::poly4(mid, &M_WHITE)  - M_WHITE[0];
+        black += Self::poly4(mid, &M_BLACK) - M_BLACK[0];
+        gray += Self::poly4(mid, &M_GRAY) - M_GRAY[0];
+        white += Self::poly4(mid, &M_WHITE) - M_WHITE[0];
 
-        black += Self::poly4(hi,  &H_BLACK)  - H_BLACK[0];
-        gray  += Self::poly4(hi,  &H_GRAY)   - H_GRAY[0];
-        white += Self::poly4(hi,  &H_WHITE)  - H_WHITE[0];
+        black += Self::poly4(hi, &H_BLACK) - H_BLACK[0];
+        gray += Self::poly4(hi, &H_GRAY) - H_GRAY[0];
+        white += Self::poly4(hi, &H_WHITE) - H_WHITE[0];
 
         // Clamp to valid frei0r ranges and ensure ordering.
         let black = black.clamp(0.0, 0.95);
@@ -6362,9 +6581,15 @@ impl ProgramPlayer {
 
         // All channels equal (luminance-only, matching FFmpeg's rs=gs=bs pattern).
         ThreePointParams {
-            black_r: black, black_g: black, black_b: black,
-            gray_r: gray,   gray_g: gray,   gray_b: gray,
-            white_r: white, white_g: white, white_b: white,
+            black_r: black,
+            black_g: black,
+            black_b: black,
+            gray_r: gray,
+            gray_g: gray,
+            gray_b: gray,
+            white_r: white,
+            white_g: white,
+            white_b: white,
         }
     }
 
@@ -6377,9 +6602,11 @@ impl ProgramPlayer {
             |c: &ProgramClip| c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0;
         let need_coloradj =
             |c: &ProgramClip| (c.temperature - 6500.0).abs() > 1.0 || c.tint.abs() > 0.001;
-        let need_3point =
-            |c: &ProgramClip| c.shadows.abs() > f64::EPSILON || c.midtones.abs() > f64::EPSILON
-                || c.highlights.abs() > f64::EPSILON;
+        let need_3point = |c: &ProgramClip| {
+            c.shadows.abs() > f64::EPSILON
+                || c.midtones.abs() > f64::EPSILON
+                || c.highlights.abs() > f64::EPSILON
+        };
         let need_blur = |c: &ProgramClip| {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -6405,9 +6632,7 @@ impl ProgramPlayer {
     /// can return true (comparing a clip against its own updated entry) even
     /// though the slot was built for a different topology.
     fn slot_satisfies_clip(slot: &VideoSlot, clip: &ProgramClip) -> bool {
-        let need_balance = clip.brightness != 0.0
-            || clip.contrast != 1.0
-            || clip.saturation != 1.0;
+        let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
         let need_coloradj = (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
         let need_3point = clip.shadows.abs() > f64::EPSILON
             || clip.midtones.abs() > f64::EPSILON
@@ -6423,15 +6648,13 @@ impl ProgramPlayer {
 
         // Temperature/tint needs either coloradj_rgb (preferred) or
         // videobalance (hue-rotation fallback).
-        let coloradj_ok = !need_coloradj
-            || slot.coloradj_rgb.is_some()
-            || slot.videobalance.is_some();
+        let coloradj_ok =
+            !need_coloradj || slot.coloradj_rgb.is_some() || slot.videobalance.is_some();
 
         // Shadows/midtones/highlights need either colorbalance_3pt (preferred)
         // or videobalance (polynomial fallback).
-        let threepoint_ok = !need_3point
-            || slot.colorbalance_3pt.is_some()
-            || slot.videobalance.is_some();
+        let threepoint_ok =
+            !need_3point || slot.colorbalance_3pt.is_some() || slot.videobalance.is_some();
 
         (!need_balance || slot.videobalance.is_some())
             && coloradj_ok
@@ -6518,10 +6741,16 @@ impl ProgramPlayer {
         let has_3point = slot.colorbalance_3pt.is_some();
         if let Some(ref vb) = slot.videobalance {
             let p = Self::compute_videobalance_params(
-                clip.brightness, clip.contrast, clip.saturation,
-                clip.temperature, clip.tint,
-                clip.shadows, clip.midtones, clip.highlights,
-                has_coloradj, has_3point,
+                clip.brightness,
+                clip.contrast,
+                clip.saturation,
+                clip.temperature,
+                clip.tint,
+                clip.shadows,
+                clip.midtones,
+                clip.highlights,
+                has_coloradj,
+                has_3point,
             );
             vb.set_property("brightness", p.brightness);
             vb.set_property("contrast", p.contrast);
@@ -6565,8 +6794,14 @@ impl ProgramPlayer {
             ck.set_property("target-r", r);
             ck.set_property("target-g", g);
             ck.set_property("target-b", b);
-            ck.set_property("angle", (clip.chroma_key_tolerance * 90.0).clamp(0.0, 90.0) as f32);
-            ck.set_property("noise-level", (clip.chroma_key_softness * 64.0).clamp(0.0, 64.0) as f32);
+            ck.set_property(
+                "angle",
+                (clip.chroma_key_tolerance * 90.0).clamp(0.0, 90.0) as f32,
+            );
+            ck.set_property(
+                "noise-level",
+                (clip.chroma_key_softness * 64.0).clamp(0.0, 64.0) as f32,
+            );
         }
 
         // Crop, rotate, flip
@@ -6608,7 +6843,10 @@ impl ProgramPlayer {
 
         // Audiomixer pad: volume
         if let Some(ref pad) = slot.audio_mixer_pad {
-            pad.set_property("volume", clip.volume.clamp(0.0, 10.0));
+            pad.set_property(
+                "volume",
+                self.effective_main_clip_volume(slot.clip_idx, self.timeline_pos_ns),
+            );
         }
     }
 
@@ -7304,12 +7542,9 @@ impl ProgramPlayer {
     fn load_audio_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
         let clip = &self.audio_clips[idx];
         let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
-        let vol = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
-        if let Some(ref vol_elem) = self.audio_volume_element {
-            vol_elem.set_property("volume", vol);
-        } else {
-            self.audio_pipeline.set_property("volume", vol);
-        }
+        let vol =
+            self.effective_audio_source_volume(AudioCurrentSource::AudioClip(idx), timeline_pos_ns);
+        self.set_audio_pipeline_volume(vol);
         if self.audio_current_source == Some(AudioCurrentSource::AudioClip(idx)) {
             let _ = self.audio_pipeline.seek(
                 clip.seek_rate(),
@@ -7355,12 +7590,11 @@ impl ProgramPlayer {
         let effective_path = self.effective_source_path_for_clip(&clip);
         let uri = format!("file://{}", effective_path);
         let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
-        let vol = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
-        if let Some(ref vol_elem) = self.audio_volume_element {
-            vol_elem.set_property("volume", vol);
-        } else {
-            self.audio_pipeline.set_property("volume", vol);
-        }
+        let vol = self.effective_audio_source_volume(
+            AudioCurrentSource::ReverseVideoClip(idx),
+            timeline_pos_ns,
+        );
+        self.set_audio_pipeline_volume(vol);
         if self.audio_current_source == Some(AudioCurrentSource::ReverseVideoClip(idx)) {
             let _ = self.audio_pipeline.seek(
                 clip.seek_rate(),
@@ -7387,35 +7621,8 @@ impl ProgramPlayer {
     }
 
     fn apply_reverse_video_main_audio_ducking(&mut self, reverse_video_audio_idx: Option<usize>) {
-        if self.reverse_video_ducked_clip_idx == reverse_video_audio_idx {
-            if let Some(idx) = reverse_video_audio_idx {
-                if let Some(slot) = self.slot_for_clip(idx) {
-                    if let Some(ref pad) = slot.audio_mixer_pad {
-                        pad.set_property("volume", 0.0_f64);
-                    }
-                }
-            }
-            return;
-        }
-
-        if let Some(prev_idx) = self.reverse_video_ducked_clip_idx.take() {
-            if let Some(clip) = self.clips.get(prev_idx) {
-                if let Some(slot) = self.slot_for_clip(prev_idx) {
-                    if let Some(ref pad) = slot.audio_mixer_pad {
-                        pad.set_property("volume", clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN));
-                    }
-                }
-            }
-        }
-
-        if let Some(idx) = reverse_video_audio_idx {
-            if let Some(slot) = self.slot_for_clip(idx) {
-                if let Some(ref pad) = slot.audio_mixer_pad {
-                    pad.set_property("volume", 0.0_f64);
-                }
-            }
-            self.reverse_video_ducked_clip_idx = Some(idx);
-        }
+        self.reverse_video_ducked_clip_idx = reverse_video_audio_idx;
+        self.apply_main_audio_slot_volumes(self.timeline_pos_ns);
     }
 
     fn sync_audio_to(&mut self, timeline_pos_ns: u64) {
@@ -7429,6 +7636,7 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
             self.audio_current_source = None;
         }
+        self.sync_preview_audio_levels(timeline_pos_ns);
     }
 
     fn poll_audio(&mut self, timeline_pos_ns: u64) {
@@ -7457,7 +7665,11 @@ impl ProgramPlayer {
                     self.audio_current_source = None;
                 }
             }
+        } else if let Some(source) = self.audio_current_source {
+            let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
+            self.set_audio_pipeline_volume(volume);
         }
+        self.sync_preview_audio_levels(timeline_pos_ns);
     }
 }
 
@@ -7664,7 +7876,16 @@ mod tests {
         has_textoverlay: bool,
         has_chroma_key: bool,
     ) -> VideoSlot {
-        make_test_slot_ext(has_videobalance, false, false, has_gaussianblur, has_rotate, has_flip, has_textoverlay, has_chroma_key)
+        make_test_slot_ext(
+            has_videobalance,
+            false,
+            false,
+            has_gaussianblur,
+            has_rotate,
+            has_flip,
+            has_textoverlay,
+            has_chroma_key,
+        )
     }
 
     fn make_test_slot_ext(
@@ -7681,7 +7902,8 @@ mod tests {
         let identity = || gst::ElementFactory::make("identity").build().ok();
         VideoSlot {
             clip_idx: 0,
-            decoder: gst::ElementFactory::make("fakesrc").build()
+            decoder: gst::ElementFactory::make("fakesrc")
+                .build()
                 .unwrap_or_else(|_| gst::ElementFactory::make("identity").build().unwrap()),
             video_linked: Arc::new(AtomicBool::new(false)),
             audio_linked: Arc::new(AtomicBool::new(false)),
@@ -7692,7 +7914,11 @@ mod tests {
             audio_level: None,
             videobalance: if has_videobalance { identity() } else { None },
             coloradj_rgb: if has_coloradj_rgb { identity() } else { None },
-            colorbalance_3pt: if has_colorbalance_3pt { identity() } else { None },
+            colorbalance_3pt: if has_colorbalance_3pt {
+                identity()
+            } else {
+                None
+            },
             gaussianblur: if has_gaussianblur { identity() } else { None },
             videocrop: None,
             videobox_crop_alpha: None,
@@ -7828,36 +8054,75 @@ mod tests {
     // ── compute_videobalance_params tests ────────────────────────────────
 
     fn vb(
-        brightness: f64, contrast: f64, saturation: f64,
-        temperature: f64, tint: f64,
-        shadows: f64, midtones: f64, highlights: f64,
+        brightness: f64,
+        contrast: f64,
+        saturation: f64,
+        temperature: f64,
+        tint: f64,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
     ) -> super::VBParams {
         // Default: assume both frei0r elements available (no fallbacks).
         ProgramPlayer::compute_videobalance_params(
-            brightness, contrast, saturation, temperature, tint,
-            shadows, midtones, highlights, true, true,
+            brightness,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            shadows,
+            midtones,
+            highlights,
+            true,
+            true,
         )
     }
 
     fn vb_no_coloradj(
-        brightness: f64, contrast: f64, saturation: f64,
-        temperature: f64, tint: f64,
-        shadows: f64, midtones: f64, highlights: f64,
+        brightness: f64,
+        contrast: f64,
+        saturation: f64,
+        temperature: f64,
+        tint: f64,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
     ) -> super::VBParams {
         ProgramPlayer::compute_videobalance_params(
-            brightness, contrast, saturation, temperature, tint,
-            shadows, midtones, highlights, false, true,
+            brightness,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            shadows,
+            midtones,
+            highlights,
+            false,
+            true,
         )
     }
 
     fn vb_no_3point(
-        brightness: f64, contrast: f64, saturation: f64,
-        temperature: f64, tint: f64,
-        shadows: f64, midtones: f64, highlights: f64,
+        brightness: f64,
+        contrast: f64,
+        saturation: f64,
+        temperature: f64,
+        tint: f64,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
     ) -> super::VBParams {
         ProgramPlayer::compute_videobalance_params(
-            brightness, contrast, saturation, temperature, tint,
-            shadows, midtones, highlights, true, false,
+            brightness,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            shadows,
+            midtones,
+            highlights,
+            true,
+            false,
         )
     }
 
@@ -7873,136 +8138,246 @@ mod tests {
     #[test]
     fn vb_brightness_positive_increases() {
         let p = vb(0.5, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.brightness > 0.3, "positive brightness should increase: b={}", p.brightness);
+        assert!(
+            p.brightness > 0.3,
+            "positive brightness should increase: b={}",
+            p.brightness
+        );
     }
 
     #[test]
     fn vb_brightness_negative_decreases() {
         let p = vb(-0.5, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.brightness < -0.3, "negative brightness should decrease: b={}", p.brightness);
+        assert!(
+            p.brightness < -0.3,
+            "negative brightness should decrease: b={}",
+            p.brightness
+        );
     }
 
     #[test]
     fn vb_contrast_high_increases_contrast() {
         let p = vb(0.0, 1.8, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.contrast > 1.1, "high contrast slider should raise contrast: c={}", p.contrast);
+        assert!(
+            p.contrast > 1.1,
+            "high contrast slider should raise contrast: c={}",
+            p.contrast
+        );
     }
 
     #[test]
     fn vb_contrast_low_decreases_contrast() {
         let p = vb(0.0, 0.3, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.contrast < 0.9, "low contrast slider should lower contrast: c={}", p.contrast);
+        assert!(
+            p.contrast < 0.9,
+            "low contrast slider should lower contrast: c={}",
+            p.contrast
+        );
     }
 
     #[test]
     fn vb_saturation_zero_reduces_saturation() {
         let p = vb(0.0, 1.0, 0.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.saturation < 0.5, "zero saturation should reduce: s={}", p.saturation);
+        assert!(
+            p.saturation < 0.5,
+            "zero saturation should reduce: s={}",
+            p.saturation
+        );
     }
 
     #[test]
     fn vb_temperature_warm_shifts_hue_without_coloradj() {
         let p = vb_no_coloradj(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.hue > 0.01, "warm temperature should shift hue positively (fallback): h={}", p.hue);
+        assert!(
+            p.hue > 0.01,
+            "warm temperature should shift hue positively (fallback): h={}",
+            p.hue
+        );
     }
 
     #[test]
     fn vb_temperature_cool_shifts_hue_without_coloradj() {
         let p = vb_no_coloradj(0.0, 1.0, 1.0, 9000.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.hue < -0.01, "cool temperature should shift hue negatively (fallback): h={}", p.hue);
+        assert!(
+            p.hue < -0.01,
+            "cool temperature should shift hue negatively (fallback): h={}",
+            p.hue
+        );
     }
 
     #[test]
     fn vb_temperature_no_hue_with_coloradj() {
         let p = vb(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
-        assert!((p.hue).abs() < 0.01, "with coloradj, temp should not shift hue: h={}", p.hue);
+        assert!(
+            (p.hue).abs() < 0.01,
+            "with coloradj, temp should not shift hue: h={}",
+            p.hue
+        );
     }
 
     #[test]
     fn vb_temperature_warm_preserves_brightness_and_contrast() {
         let p = vb(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
-        assert!((p.brightness).abs() < 0.05, "warm temp should not change brightness: b={}", p.brightness);
-        assert!((p.contrast - 1.0).abs() < 0.05, "warm temp should not change contrast: c={}", p.contrast);
+        assert!(
+            (p.brightness).abs() < 0.05,
+            "warm temp should not change brightness: b={}",
+            p.brightness
+        );
+        assert!(
+            (p.contrast - 1.0).abs() < 0.05,
+            "warm temp should not change contrast: c={}",
+            p.contrast
+        );
     }
 
     #[test]
     fn vb_saturation_preserves_brightness() {
         let low = vb(0.0, 1.0, 0.2, 6500.0, 0.0, 0.0, 0.0, 0.0);
         let high = vb(0.0, 1.0, 1.8, 6500.0, 0.0, 0.0, 0.0, 0.0);
-        assert!((low.brightness).abs() < 0.05, "low saturation should not change brightness: b={}", low.brightness);
-        assert!((high.brightness).abs() < 0.05, "high saturation should not change brightness: b={}", high.brightness);
+        assert!(
+            (low.brightness).abs() < 0.05,
+            "low saturation should not change brightness: b={}",
+            low.brightness
+        );
+        assert!(
+            (high.brightness).abs() < 0.05,
+            "high saturation should not change brightness: b={}",
+            high.brightness
+        );
     }
 
     #[test]
     fn vb_tint_shifts_hue_without_coloradj() {
         let pos = vb_no_coloradj(0.0, 1.0, 1.0, 6500.0, 0.5, 0.0, 0.0, 0.0);
         let neg = vb_no_coloradj(0.0, 1.0, 1.0, 6500.0, -0.5, 0.0, 0.0, 0.0);
-        assert!(pos.hue > neg.hue, "positive tint should shift hue more positive (fallback)");
+        assert!(
+            pos.hue > neg.hue,
+            "positive tint should shift hue more positive (fallback)"
+        );
     }
 
     #[test]
     fn vb_tint_no_hue_with_coloradj() {
         let pos = vb(0.0, 1.0, 1.0, 6500.0, 0.5, 0.0, 0.0, 0.0);
         let neg = vb(0.0, 1.0, 1.0, 6500.0, -0.5, 0.0, 0.0, 0.0);
-        assert!((pos.hue - neg.hue).abs() < 0.01, "with coloradj, tint should not shift hue");
+        assert!(
+            (pos.hue - neg.hue).abs() < 0.01,
+            "with coloradj, tint should not shift hue"
+        );
     }
 
     #[test]
     fn vb_shadows_positive_lifts_brightness() {
         let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
-        assert!(p.brightness > 0.05, "lifting shadows should raise brightness: b={}", p.brightness);
+        assert!(
+            p.brightness > 0.05,
+            "lifting shadows should raise brightness: b={}",
+            p.brightness
+        );
     }
 
     #[test]
     fn vb_shadows_positive_reduces_contrast() {
         let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
-        assert!(p.contrast < 0.95, "lifting shadows should reduce contrast: c={}", p.contrast);
+        assert!(
+            p.contrast < 0.95,
+            "lifting shadows should reduce contrast: c={}",
+            p.contrast
+        );
     }
 
     #[test]
     fn vb_highlights_positive_boosts_contrast() {
         let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
-        assert!(p.contrast > 1.3, "boosting highlights should raise contrast: c={}", p.contrast);
+        assert!(
+            p.contrast > 1.3,
+            "boosting highlights should raise contrast: c={}",
+            p.contrast
+        );
     }
 
     #[test]
     fn vb_highlights_positive_increases_brightness() {
         let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
-        assert!(p.brightness > 0.05, "boosting highlights should increase brightness: b={}", p.brightness);
+        assert!(
+            p.brightness > 0.05,
+            "boosting highlights should increase brightness: b={}",
+            p.brightness
+        );
     }
 
     #[test]
     fn vb_midtones_positive_lifts_brightness() {
         let p = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.5, 0.0);
-        assert!(p.brightness > 0.03, "midtones lift should increase brightness: b={}", p.brightness);
+        assert!(
+            p.brightness > 0.03,
+            "midtones lift should increase brightness: b={}",
+            p.brightness
+        );
     }
 
     #[test]
     fn vb_shadows_no_effect_with_3point() {
         let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.8, 0.0, 0.0);
-        assert!((p.brightness).abs() < 0.05, "with 3-point, shadows should not affect vb brightness: b={}", p.brightness);
+        assert!(
+            (p.brightness).abs() < 0.05,
+            "with 3-point, shadows should not affect vb brightness: b={}",
+            p.brightness
+        );
     }
 
     #[test]
     fn vb_highlights_no_effect_with_3point() {
         let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.8);
-        assert!((p.brightness).abs() < 0.05, "with 3-point, highlights should not affect vb brightness: b={}", p.brightness);
-        assert!((p.contrast - 1.0).abs() < 0.05, "with 3-point, highlights should not affect vb contrast: c={}", p.contrast);
+        assert!(
+            (p.brightness).abs() < 0.05,
+            "with 3-point, highlights should not affect vb brightness: b={}",
+            p.brightness
+        );
+        assert!(
+            (p.contrast - 1.0).abs() < 0.05,
+            "with 3-point, highlights should not affect vb contrast: c={}",
+            p.contrast
+        );
     }
 
     #[test]
     fn vb_all_params_clamped() {
         // Extreme values: everything at max
         let p = vb(1.0, 2.0, 2.0, 10000.0, 1.0, 1.0, 1.0, 1.0);
-        assert!(p.brightness >= -1.0 && p.brightness <= 1.0, "b clamped: {}", p.brightness);
-        assert!(p.contrast >= 0.0 && p.contrast <= 2.0, "c clamped: {}", p.contrast);
-        assert!(p.saturation >= 0.0 && p.saturation <= 2.0, "s clamped: {}", p.saturation);
+        assert!(
+            p.brightness >= -1.0 && p.brightness <= 1.0,
+            "b clamped: {}",
+            p.brightness
+        );
+        assert!(
+            p.contrast >= 0.0 && p.contrast <= 2.0,
+            "c clamped: {}",
+            p.contrast
+        );
+        assert!(
+            p.saturation >= 0.0 && p.saturation <= 2.0,
+            "s clamped: {}",
+            p.saturation
+        );
         assert!(p.hue >= -1.0 && p.hue <= 1.0, "h clamped: {}", p.hue);
         // Everything at min
         let p2 = vb(-1.0, 0.0, 0.0, 2000.0, -1.0, -1.0, -1.0, -1.0);
-        assert!(p2.brightness >= -1.0 && p2.brightness <= 1.0, "b clamped min: {}", p2.brightness);
-        assert!(p2.contrast >= 0.0 && p2.contrast <= 2.0, "c clamped min: {}", p2.contrast);
-        assert!(p2.saturation >= 0.0 && p2.saturation <= 2.0, "s clamped min: {}", p2.saturation);
+        assert!(
+            p2.brightness >= -1.0 && p2.brightness <= 1.0,
+            "b clamped min: {}",
+            p2.brightness
+        );
+        assert!(
+            p2.contrast >= 0.0 && p2.contrast <= 2.0,
+            "c clamped min: {}",
+            p2.contrast
+        );
+        assert!(
+            p2.saturation >= 0.0 && p2.saturation <= 2.0,
+            "s clamped min: {}",
+            p2.saturation
+        );
         assert!(p2.hue >= -1.0 && p2.hue <= 1.0, "h clamped min: {}", p2.hue);
     }
 
@@ -8030,14 +8405,24 @@ mod tests {
     #[test]
     fn coloradj_warm_boosts_red_cuts_blue() {
         let cp = ProgramPlayer::compute_coloradj_params(3000.0, 0.0);
-        assert!(cp.r > cp.b, "warm should boost R over B: r={} b={}", cp.r, cp.b);
+        assert!(
+            cp.r > cp.b,
+            "warm should boost R over B: r={} b={}",
+            cp.r,
+            cp.b
+        );
         assert!(cp.b < 0.4, "warm should cut blue: b={}", cp.b);
     }
 
     #[test]
     fn coloradj_cool_boosts_blue_cuts_red() {
         let cp = ProgramPlayer::compute_coloradj_params(10000.0, 0.0);
-        assert!(cp.b > cp.r, "cool should boost B over R: r={} b={}", cp.r, cp.b);
+        assert!(
+            cp.b > cp.r,
+            "cool should boost B over R: r={} b={}",
+            cp.r,
+            cp.b
+        );
         assert!(cp.r < 0.45, "cool should cut red: r={}", cp.r);
     }
 
@@ -8046,8 +8431,18 @@ mod tests {
         let pos = ProgramPlayer::compute_coloradj_params(6500.0, 0.5);
         let neg = ProgramPlayer::compute_coloradj_params(6500.0, -0.5);
         // Positive tint = cut green (lower param), boost R/B
-        assert!(pos.g < neg.g, "positive tint cuts green: pos_g={} neg_g={}", pos.g, neg.g);
-        assert!(pos.r > neg.r, "positive tint boosts red: pos_r={} neg_r={}", pos.r, neg.r);
+        assert!(
+            pos.g < neg.g,
+            "positive tint cuts green: pos_g={} neg_g={}",
+            pos.g,
+            neg.g
+        );
+        assert!(
+            pos.r > neg.r,
+            "positive tint boosts red: pos_r={} neg_r={}",
+            pos.r,
+            neg.r
+        );
     }
 
     #[test]
@@ -8125,7 +8520,11 @@ mod tests {
         let p = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
         assert!((p.black_r).abs() < 0.01, "neutral black_r={}", p.black_r);
         assert!((p.gray_r - 0.5).abs() < 0.01, "neutral gray_r={}", p.gray_r);
-        assert!((p.white_r - 1.0).abs() < 0.01, "neutral white_r={}", p.white_r);
+        assert!(
+            (p.white_r - 1.0).abs() < 0.01,
+            "neutral white_r={}",
+            p.white_r
+        );
     }
 
     #[test]
@@ -8144,8 +8543,16 @@ mod tests {
     fn threepoint_negative_shadows_lowers_gray() {
         let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
         let neg = ProgramPlayer::compute_3point_params(-0.8, 0.0, 0.0);
-        assert!(neg.gray_r < neutral.gray_r, "negative shadows should lower gray: gray_r={}", neg.gray_r);
-        assert!((neg.black_r).abs() < 0.01, "negative shadows should keep black at 0: black_r={}", neg.black_r);
+        assert!(
+            neg.gray_r < neutral.gray_r,
+            "negative shadows should lower gray: gray_r={}",
+            neg.gray_r
+        );
+        assert!(
+            (neg.black_r).abs() < 0.01,
+            "negative shadows should keep black at 0: black_r={}",
+            neg.black_r
+        );
     }
 
     #[test]
@@ -8155,13 +8562,21 @@ mod tests {
         // midtones → lower gray to match FFmpeg's brighten behavior.
         let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
         let p = ProgramPlayer::compute_3point_params(0.0, 0.7, 0.0);
-        assert!(p.gray_r < neutral.gray_r, "positive midtones should lower gray (brighten): gray_r={}", p.gray_r);
+        assert!(
+            p.gray_r < neutral.gray_r,
+            "positive midtones should lower gray (brighten): gray_r={}",
+            p.gray_r
+        );
     }
 
     #[test]
     fn threepoint_negative_highlights_pulls_white() {
         let p = ProgramPlayer::compute_3point_params(0.0, 0.0, -0.8);
-        assert!(p.white_r < 1.0, "negative highlights should pull down white: white_r={}", p.white_r);
+        assert!(
+            p.white_r < 1.0,
+            "negative highlights should pull down white: white_r={}",
+            p.white_r
+        );
     }
 
     #[test]
@@ -8187,13 +8602,130 @@ mod tests {
     #[test]
     fn threepoint_params_clamped() {
         let p = ProgramPlayer::compute_3point_params(1.0, 1.0, 1.0);
-        assert!(p.black_r >= 0.0 && p.black_r <= 0.8, "black clamped: {}", p.black_r);
-        assert!(p.gray_r >= 0.05 && p.gray_r <= 0.95, "gray clamped: {}", p.gray_r);
-        assert!(p.white_r >= 0.2 && p.white_r <= 1.0, "white clamped: {}", p.white_r);
+        assert!(
+            p.black_r >= 0.0 && p.black_r <= 0.8,
+            "black clamped: {}",
+            p.black_r
+        );
+        assert!(
+            p.gray_r >= 0.05 && p.gray_r <= 0.95,
+            "gray clamped: {}",
+            p.gray_r
+        );
+        assert!(
+            p.white_r >= 0.2 && p.white_r <= 1.0,
+            "white clamped: {}",
+            p.white_r
+        );
         let p2 = ProgramPlayer::compute_3point_params(-1.0, -1.0, -1.0);
-        assert!(p2.black_r >= 0.0 && p2.black_r <= 0.8, "black clamped min: {}", p2.black_r);
-        assert!(p2.gray_r >= 0.05 && p2.gray_r <= 0.95, "gray clamped min: {}", p2.gray_r);
-        assert!(p2.white_r >= 0.2 && p2.white_r <= 1.0, "white clamped min: {}", p2.white_r);
+        assert!(
+            p2.black_r >= 0.0 && p2.black_r <= 0.8,
+            "black clamped min: {}",
+            p2.black_r
+        );
+        assert!(
+            p2.gray_r >= 0.05 && p2.gray_r <= 0.95,
+            "gray clamped min: {}",
+            p2.gray_r
+        );
+        assert!(
+            p2.white_r >= 0.2 && p2.white_r <= 1.0,
+            "white clamped min: {}",
+            p2.white_r
+        );
+    }
+
+    #[test]
+    fn crossfade_curve_gain_clamps_progress_bounds() {
+        assert_eq!(
+            ProgramPlayer::crossfade_curve_gain(
+                &crate::ui_state::CrossfadeCurve::Linear,
+                -0.2,
+                true
+            ),
+            0.0
+        );
+        assert_eq!(
+            ProgramPlayer::crossfade_curve_gain(
+                &crate::ui_state::CrossfadeCurve::Linear,
+                -0.2,
+                false
+            ),
+            1.0
+        );
+        assert_eq!(
+            ProgramPlayer::crossfade_curve_gain(
+                &crate::ui_state::CrossfadeCurve::Linear,
+                1.2,
+                true
+            ),
+            1.0
+        );
+        assert_eq!(
+            ProgramPlayer::crossfade_curve_gain(
+                &crate::ui_state::CrossfadeCurve::Linear,
+                1.2,
+                false
+            ),
+            0.0
+        );
+        let eq_in = ProgramPlayer::crossfade_curve_gain(
+            &crate::ui_state::CrossfadeCurve::EqualPower,
+            0.5,
+            true,
+        );
+        let eq_out = ProgramPlayer::crossfade_curve_gain(
+            &crate::ui_state::CrossfadeCurve::EqualPower,
+            0.5,
+            false,
+        );
+        assert!((eq_in - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        assert!((eq_out - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn crossfade_duration_clamps_to_half_clip_duration() {
+        let mut a = make_clip();
+        a.source_out_ns = 2_000_000_000;
+        let mut b = make_clip();
+        b.source_out_ns = 1_000_000_000;
+        assert_eq!(
+            ProgramPlayer::clamped_crossfade_duration_ns(900_000_000, &a, &b),
+            500_000_000
+        );
+    }
+
+    #[test]
+    fn compute_clip_crossfade_gain_applies_linear_fades_for_adjacent_clips() {
+        let mut a = make_clip();
+        a.id = "a".into();
+        a.timeline_start_ns = 0;
+        a.source_out_ns = 1_000_000_000;
+
+        let mut b = make_clip();
+        b.id = "b".into();
+        b.timeline_start_ns = 1_000_000_000;
+        b.source_out_ns = 1_000_000_000;
+
+        let clips = vec![a, b];
+        let out_gain = ProgramPlayer::compute_clip_crossfade_gain(
+            true,
+            &crate::ui_state::CrossfadeCurve::Linear,
+            400_000_000,
+            &clips,
+            0,
+            900_000_000,
+        );
+        let in_gain = ProgramPlayer::compute_clip_crossfade_gain(
+            true,
+            &crate::ui_state::CrossfadeCurve::Linear,
+            400_000_000,
+            &clips,
+            1,
+            1_100_000_000,
+        );
+        assert!((out_gain - 0.25).abs() < 1e-6, "outgoing gain={out_gain}");
+        assert!((in_gain - 0.25).abs() < 1e-6, "incoming gain={in_gain}");
     }
 }
 

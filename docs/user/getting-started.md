@@ -65,6 +65,7 @@ UltimateSlice uses a dark, GTK4/libadwaita-inspired control style so popovers, s
 
 - Click **Open…** (`Ctrl+O`) and select a `.uspxml` or `.fcpxml` file (the chooser also allows generic `.xml` fallback).
 - Or click **Recent ▾** to pick from up to 10 opened/saved projects that still exist on disk.
+- You can also launch UltimateSlice with a project file path argument (for example, `ultimate-slice /path/to/project.uspxml`) to open it immediately at startup.
 - On Linux desktop environments, `.uspxml` files are registered as UltimateSlice project files and can be associated with the app.
 - UltimateSlice reads FCPXML versions 1.10 through 1.14, including all clip properties, markers, and effects.
 - For FCPXML files containing multiple projects, UltimateSlice imports the first project timeline in the file.

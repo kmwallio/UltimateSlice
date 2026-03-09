@@ -2,18 +2,19 @@ use crate::ui::window::build_window;
 use gio;
 use gtk4::prelude::*;
 use gtk4::Application;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const APP_ID: &str = "io.github.kmwallio.ultimateslice";
 
-pub fn run(mcp_enabled: bool) {
+pub fn run(mcp_enabled: bool, startup_project_path: Option<String>) {
     // When running as an MCP server we've already terminated any prior instance
     // via the PID file. Use NON_UNIQUE so GTK doesn't block on D-Bus registration
     // while the old instance's session is still being cleaned up.
-    let flags = if mcp_enabled {
-        gio::ApplicationFlags::NON_UNIQUE
-    } else {
-        gio::ApplicationFlags::empty()
-    };
+    let mut flags = gio::ApplicationFlags::HANDLES_OPEN;
+    if mcp_enabled {
+        flags |= gio::ApplicationFlags::NON_UNIQUE;
+    }
 
     let app = Application::builder()
         .application_id(APP_ID)
@@ -24,8 +25,19 @@ pub fn run(mcp_enabled: bool) {
         load_css();
     });
 
+    let startup_project_path = Rc::new(RefCell::new(startup_project_path));
+    let startup_project_path_open = startup_project_path.clone();
     app.connect_activate(move |app| {
-        build_window(app, mcp_enabled);
+        let path = startup_project_path.borrow_mut().take();
+        build_window(app, mcp_enabled, path);
+    });
+    app.connect_open(move |app, files, _hint| {
+        let path = files
+            .first()
+            .and_then(|f| f.path())
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| startup_project_path_open.borrow_mut().take());
+        build_window(app, mcp_enabled, path);
     });
 
     // Strip --mcp and --mcp-attach from argv before GLib sees it (unknown flags cause errors).
