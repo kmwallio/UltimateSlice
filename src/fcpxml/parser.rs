@@ -653,16 +653,41 @@ fn parse_asset_clip(
                     format!("Video {}", track_idx + 1)
                 }
             });
+            let track_muted = attrs
+                .get("us:track-muted")
+                .and_then(|s| s.parse::<bool>().ok())
+                .unwrap_or(false);
+            let track_locked = attrs
+                .get("us:track-locked")
+                .and_then(|s| s.parse::<bool>().ok())
+                .unwrap_or(false);
+            let track_soloed = attrs
+                .get("us:track-soloed")
+                .and_then(|s| s.parse::<bool>().ok())
+                .unwrap_or(false);
             let track_key = (if clip_kind == ClipKind::Audio { 1 } else { 0 }, track_idx);
 
             // Get or create the target track
             let track = track_map.entry(track_key).or_insert_with(|| {
-                if clip_kind == ClipKind::Audio {
+                let mut track = if clip_kind == ClipKind::Audio {
                     Track::new_audio(&track_name)
                 } else {
                     Track::new_video(&track_name)
-                }
+                };
+                track.muted = track_muted;
+                track.locked = track_locked;
+                track.soloed = track_soloed;
+                track
             });
+            if attrs.contains_key("us:track-muted") {
+                track.muted = track_muted;
+            }
+            if attrs.contains_key("us:track-locked") {
+                track.locked = track_locked;
+            }
+            if attrs.contains_key("us:track-soloed") {
+                track.soloed = track_soloed;
+            }
 
             let resolved_source_path =
                 resolve_import_source_path(&asset.src, mount_root, mount_users);
@@ -788,7 +813,9 @@ fn parse_asset_clip(
                 clip.chroma_key_enabled = v == "true" || v == "1";
             }
             if let Some(v) = attrs.get("us:chroma-key-color") {
-                clip.chroma_key_color = u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0x00FF00);
+                clip.chroma_key_color =
+                    u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                        .unwrap_or(0x00FF00);
             }
             if let Some(v) = attrs.get("us:chroma-key-tolerance") {
                 clip.chroma_key_tolerance = v.parse().unwrap_or(0.3);
@@ -1007,6 +1034,9 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-idx"
             | "us:track-kind"
             | "us:track-name"
+            | "us:track-muted"
+            | "us:track-locked"
+            | "us:track-soloed"
             | "us:brightness"
             | "us:contrast"
             | "us:saturation"
@@ -2454,5 +2484,34 @@ mod tests {
         let decoded =
             decode_percent_encoded_path("/Volumes/LEXAR/Final%20Cut%20Original%20Media/C0378.mp4");
         assert_eq!(decoded, "/Volumes/LEXAR/Final Cut Original Media/C0378.mp4");
+    }
+
+    #[test]
+    fn test_parse_track_state_vendor_attrs() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="2s"/>
+  </resources>
+  <project name="TrackState">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="1s"
+          us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+          us:track-muted="true" us:track-locked="true" us:track-soloed="true"/>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let track = project
+            .video_tracks()
+            .next()
+            .expect("video track should exist");
+        assert!(track.muted);
+        assert!(track.locked);
+        assert!(track.soloed);
     }
 }

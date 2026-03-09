@@ -145,16 +145,16 @@ pub fn build_media_browser(
                 let cache = probe_cache.borrow();
                 let mut lib = library.borrow_mut();
                 for path in &resolved {
-                        if let Some(result) = cache.get(path) {
-                            if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
-                                item.duration_ns = result.duration_ns;
-                                item.is_audio_only = result.is_audio_only;
-                                item.has_audio = result.has_audio;
-                                if item.source_timecode_base_ns.is_none() {
-                                    item.source_timecode_base_ns = result.source_timecode_base_ns;
-                                }
+                    if let Some(result) = cache.get(path) {
+                        if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
+                            item.duration_ns = result.duration_ns;
+                            item.is_audio_only = result.is_audio_only;
+                            item.has_audio = result.has_audio;
+                            if item.source_timecode_base_ns.is_none() {
+                                item.source_timecode_base_ns = result.source_timecode_base_ns;
                             }
                         }
+                    }
                 }
                 if !flowbox_matches_library(&flow_box_paths.borrow(), &lib) {
                     rebuild_flowbox(&flow_box, &lib, &thumb_cache, &flow_box_paths);
@@ -420,7 +420,10 @@ fn probe_stream_flags(uri: &str) -> (bool, bool) {
     let Ok(info) = discoverer.discover_uri(uri) else {
         return (false, false);
     };
-    (info.video_streams().is_empty(), !info.audio_streams().is_empty())
+    (
+        info.video_streams().is_empty(),
+        !info.audio_streams().is_empty(),
+    )
 }
 
 fn flowbox_matches_library(current_paths: &[String], lib: &[MediaItem]) -> bool {

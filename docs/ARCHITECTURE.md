@@ -333,6 +333,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
 | `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
+| `set_track_solo` | Set solo state for a track id; soloed non-muted tracks become the active preview/export set |
 | `close_source_preview` | Deselect current source media and hide the source preview |
 | `get_preferences` | Get persisted application preferences |
 | `set_hardware_acceleration` | Set hardware-acceleration preference and apply to source preview playback |
@@ -346,7 +347,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_experimental_preview_optimizations` | Toggle occlusion optimization (audio-only decode for fully-occluded clips) |
 | `set_background_prerender` | Toggle background prerender of complex overlap windows (`true` / `false`) |
 | `set_preview_luts` | Toggle LUT-baked project-resolution preview media generation when proxy mode is off (`true` / `false`) |
-| `add_clip` | Add clip at track\_index + timeline position |
+| `add_clip` | Add source clip(s) at `track_index` + timeline position using source-placement rules (Source Monitor A/V auto-link enabled: linked A/V pair when both matching kinds exist + embedded-video-audio suppression; disabled: single-clip placement; single-kind fallback otherwise) |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |
 | `link_clips` | Assign a shared clip link group to two or more clips |
@@ -356,8 +357,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |
-| `insert_clip` | Insert a source clip at playhead, shifting subsequent clips right (3-point insert edit) |
-| `overwrite_clip` | Overwrite timeline content at playhead with a source clip (3-point overwrite edit) |
+| `insert_clip` | Insert source clip(s) at playhead (3-point insert) using source-placement rules (including optional Source Monitor A/V auto-link behavior); shifts subsequent clips right on affected track(s) |
+| `overwrite_clip` | Overwrite timeline content at playhead with source clip(s) (3-point overwrite) using source-placement rules (including optional Source Monitor A/V auto-link behavior) on affected track(s) |
 | `seek_playhead` | Seek the timeline/program monitor to an absolute `timeline_pos_ns` |
 | `export_displayed_frame` | Export current program-monitor displayed frame to an image file (PPM/P6) |
 | `play` | Start program monitor playback |

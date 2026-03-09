@@ -179,7 +179,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_tracks",
-            "description": "List all tracks in the project with their index, id, kind (Video/Audio), and clip count.",
+            "description": "List all tracks in the project with index/id/kind, clip count, and muted/locked/soloed state flags.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -206,6 +206,18 @@ fn tools_list() -> Value {
                     "enabled": { "type": "boolean", "description": "Whether magnetic mode should be enabled." }
                 },
                 "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_track_solo",
+            "description": "Set solo state for a track by id. When any track is soloed, only soloed non-muted tracks are active in preview/export.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "solo": { "type": "boolean", "description": "Whether the target track should be soloed." }
+                },
+                "required": ["track_id", "solo"]
             }
         },
         {
@@ -819,6 +831,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },
+        "set_track_solo" => McpCommand::SetTrackSolo {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            solo: args["solo"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
         "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
         "get_preferences" => McpCommand::GetPreferences { reply: tx },
         "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
@@ -1161,7 +1178,8 @@ fn parse_crossfade_settings_args(args: &Value) -> Result<(bool, &'static str, u6
 
 #[cfg(test)]
 mod tests {
-    use super::parse_crossfade_settings_args;
+    use super::{call_tool, parse_crossfade_settings_args};
+    use crate::mcp::McpCommand;
     use serde_json::json;
 
     #[test]
@@ -1210,5 +1228,35 @@ mod tests {
             parse_crossfade_settings_args(&args),
             Err("duration_ns must be an integer")
         );
+    }
+
+    #[test]
+    fn call_tool_dispatches_set_track_solo() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SetTrackSolo {
+                    track_id,
+                    solo,
+                    reply,
+                } => {
+                    assert_eq!(track_id, "track-1");
+                    assert!(solo);
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "soloed": solo}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(7);
+        let params = json!({
+            "name": "set_track_solo",
+            "arguments": { "track_id": "track-1", "solo": true }
+        });
+        let response = call_tool(&id, &params, &sender);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
     }
 }

@@ -97,20 +97,22 @@ pub fn export_project(
         options.output_height
     };
 
-    // Primary video track (first video track) — forms the base concat sequence.
-    // Secondary video tracks are composited on top with overlay.
-    let mut video_tracks_iter = project.video_tracks();
-    let mut primary_clips: Vec<&crate::model::clip::Clip> = video_tracks_iter
-        .next()
+    // Primary video track (first active video track) — forms the base concat sequence.
+    // Secondary active video tracks are composited on top with overlay.
+    let active_video_tracks: Vec<_> = project
+        .video_tracks()
+        .filter(|t| project.track_is_active_for_output(t))
+        .collect();
+    let mut primary_clips: Vec<&crate::model::clip::Clip> = active_video_tracks
+        .first()
         .map(|t| t.clips.iter().collect())
         .unwrap_or_default();
     primary_clips.sort_by_key(|c| c.timeline_start);
 
     // Remaining video tracks: each is a list of (overlay) clips
-    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
-        .video_tracks()
+    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = active_video_tracks
+        .into_iter()
         .skip(1)
-        .filter(|t| !t.muted)
         .map(|t| {
             let mut clips: Vec<&Clip> = t.clips.iter().collect();
             clips.sort_by_key(|c| c.timeline_start);
@@ -122,10 +124,10 @@ pub fn export_project(
         return Err(anyhow!("No video clips to export"));
     }
 
-    // Collect audio-only clips from non-muted audio tracks
+    // Collect audio-only clips from active audio tracks.
     let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
         .audio_tracks()
-        .filter(|t| !t.muted)
+        .filter(|t| project.track_is_active_for_output(t))
         .map(|t| {
             let mut clips: Vec<&Clip> = t.clips.iter().collect();
             clips.sort_by_key(|c| c.timeline_start);

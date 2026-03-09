@@ -121,6 +121,9 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:track-idx", track_idx.to_string().as_str()));
             asset_clip.push_attribute(("us:track-kind", track_kind));
             asset_clip.push_attribute(("us:track-name", track.label.as_str()));
+            asset_clip.push_attribute(("us:track-muted", track.muted.to_string().as_str()));
+            asset_clip.push_attribute(("us:track-locked", track.locked.to_string().as_str()));
+            asset_clip.push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
             // Store color/effects as custom vendor attributes (us: prefix).
             // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
             asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
@@ -174,13 +177,25 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
             if clip.chroma_key_enabled {
                 asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
-                asset_clip.push_attribute(("us:chroma-key-color", format!("{:#08X}", clip.chroma_key_color).as_str()));
-                asset_clip.push_attribute(("us:chroma-key-tolerance", clip.chroma_key_tolerance.to_string().as_str()));
-                asset_clip.push_attribute(("us:chroma-key-softness", clip.chroma_key_softness.to_string().as_str()));
+                asset_clip.push_attribute((
+                    "us:chroma-key-color",
+                    format!("{:#08X}", clip.chroma_key_color).as_str(),
+                ));
+                asset_clip.push_attribute((
+                    "us:chroma-key-tolerance",
+                    clip.chroma_key_tolerance.to_string().as_str(),
+                ));
+                asset_clip.push_attribute((
+                    "us:chroma-key-softness",
+                    clip.chroma_key_softness.to_string().as_str(),
+                ));
             }
             if clip.bg_removal_enabled {
                 asset_clip.push_attribute(("us:bg-removal-enabled", "true"));
-                asset_clip.push_attribute(("us:bg-removal-threshold", clip.bg_removal_threshold.to_string().as_str()));
+                asset_clip.push_attribute((
+                    "us:bg-removal-threshold",
+                    clip.bg_removal_threshold.to_string().as_str(),
+                ));
             }
             if let Some(ref lut) = clip.lut_path {
                 asset_clip.push_attribute(("us:lut-path", lut.as_str()));
@@ -752,6 +767,9 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:track-idx"
             | "us:track-kind"
             | "us:track-name"
+            | "us:track-muted"
+            | "us:track-locked"
+            | "us:track-soloed"
             | "us:brightness"
             | "us:contrast"
             | "us:saturation"
@@ -1295,6 +1313,25 @@ mod tests {
             ),
             "expected known format name for standard 1080p24 export:\n{xml}"
         );
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_track_state_vendor_attrs() {
+        let mut project = Project::new("TrackStateWrite");
+        project.tracks[0].muted = true;
+        project.tracks[0].locked = true;
+        project.tracks[0].soloed = true;
+        project.tracks[0].add_clip(Clip::new(
+            "file:///tmp/clip.mp4",
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:track-muted=\"true\""));
+        assert!(xml.contains("us:track-locked=\"true\""));
+        assert!(xml.contains("us:track-soloed=\"true\""));
     }
 
     #[test]

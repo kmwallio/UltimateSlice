@@ -270,6 +270,19 @@ pub fn show_preferences_dialog(
     timeline_preview_hint.set_max_width_chars(60);
     timeline_box.append(&timeline_preview_check);
     timeline_box.append(&timeline_preview_hint);
+    let source_monitor_auto_link_av_check =
+        CheckButton::with_label("Auto-link source monitor A/V placements");
+    source_monitor_auto_link_av_check.set_active(current.source_monitor_auto_link_av);
+    source_monitor_auto_link_av_check.set_halign(gtk::Align::Start);
+    let source_monitor_auto_link_av_hint = Label::new(Some(
+        "When enabled, Append/Insert/Overwrite places linked video+audio clips when matching tracks exist. The video clip is muted and audio comes from the dedicated audio clip.",
+    ));
+    source_monitor_auto_link_av_hint.set_halign(gtk::Align::Start);
+    source_monitor_auto_link_av_hint.add_css_class("dim-label");
+    source_monitor_auto_link_av_hint.set_wrap(true);
+    source_monitor_auto_link_av_hint.set_max_width_chars(60);
+    timeline_box.append(&source_monitor_auto_link_av_check);
+    timeline_box.append(&source_monitor_auto_link_av_hint);
     let crossfade_enabled_check =
         CheckButton::with_label("Enable automatic audio crossfades at edit points");
     crossfade_enabled_check.set_active(current.crossfade_enabled);
@@ -465,6 +478,7 @@ pub fn show_preferences_dialog(
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
+                source_monitor_auto_link_av: source_monitor_auto_link_av_check.is_active(),
                 show_track_audio_levels: current.show_track_audio_levels,
                 mcp_socket_enabled: mcp_socket_check.is_active(),
                 gsk_renderer: GskRenderer::from_str(

@@ -17,6 +17,8 @@ use std::rc::Rc;
 const TRACK_HEIGHT: f64 = 60.0;
 const TRACK_LABEL_WIDTH: f64 = 110.0;
 const TRACK_LABEL_METER_WIDTH: f64 = 18.0;
+const TRACK_LABEL_SOLO_BADGE_WIDTH: f64 = 16.0;
+const TRACK_LABEL_SOLO_BADGE_HEIGHT: f64 = 14.0;
 const RULER_HEIGHT: f64 = 24.0;
 const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
 const NS_PER_SECOND: f64 = 1_000_000_000.0;
@@ -216,6 +218,58 @@ impl TimelineState {
     pub fn x_to_ns(&self, x: f64) -> u64 {
         let secs = (x - TRACK_LABEL_WIDTH + self.scroll_offset) / self.pixels_per_second;
         (secs.max(0.0) * NS_PER_SECOND) as u64
+    }
+
+    fn track_index_at_y(&self, y: f64) -> Option<usize> {
+        if y <= RULER_HEIGHT {
+            return None;
+        }
+        let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
+        if track_idx < self.project.borrow().tracks.len() {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn solo_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        let track_idx = self.track_index_at_y(y)?;
+        let row_y = RULER_HEIGHT + track_idx as f64 * TRACK_HEIGHT;
+        let badge_x = track_label_solo_badge_x(self.show_track_audio_levels);
+        let badge_y = row_y + 6.0;
+        if x >= badge_x
+            && x <= badge_x + TRACK_LABEL_SOLO_BADGE_WIDTH
+            && y >= badge_y
+            && y <= badge_y + TRACK_LABEL_SOLO_BADGE_HEIGHT
+        {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn toggle_track_solo_by_index(&mut self, track_idx: usize) -> bool {
+        let mut proj = self.project.borrow_mut();
+        let Some(track) = proj.tracks.get_mut(track_idx) else {
+            return false;
+        };
+        track.soloed = !track.soloed;
+        self.selected_track_id = Some(track.id.clone());
+        proj.dirty = true;
+        true
+    }
+
+    fn toggle_selected_track_solo(&mut self) -> bool {
+        let Some(track_id) = self.selected_track_id.clone() else {
+            return false;
+        };
+        let mut proj = self.project.borrow_mut();
+        let Some(track) = proj.track_mut(&track_id) else {
+            return false;
+        };
+        track.soloed = !track.soloed;
+        proj.dirty = true;
+        true
     }
 
     pub fn undo(&mut self) {
@@ -709,19 +763,16 @@ impl TimelineState {
             .tracks
             .iter()
             .flat_map(|t| {
-                t.clips
-                    .iter()
-                    .filter(|c| ids.contains(&c.id))
-                    .map(|c| {
-                        (
-                            c.id.clone(),
-                            c.source_path.clone(),
-                            c.source_in,
-                            c.source_out,
-                            c.timeline_start,
-                            t.id.clone(),
-                        )
-                    })
+                t.clips.iter().filter(|c| ids.contains(&c.id)).map(|c| {
+                    (
+                        c.id.clone(),
+                        c.source_path.clone(),
+                        c.source_in,
+                        c.source_out,
+                        c.timeline_start,
+                        t.id.clone(),
+                    )
+                })
             })
             .collect();
         drop(proj);
@@ -1809,6 +1860,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     | ActiveTool::Roll
                     | ActiveTool::Slip
                     | ActiveTool::Slide => {
+                        if st.solo_badge_hit_track_index(x, y).is_some() {
+                            let changed = st
+                                .solo_badge_hit_track_index(x, y)
+                                .map(|track_idx| st.toggle_track_solo_by_index(track_idx))
+                                .unwrap_or(false);
+                            let proj_cb = if changed {
+                                st.on_project_changed.clone()
+                            } else {
+                                None
+                            };
+                            drop(st);
+                            if let Some(cb) = proj_cb {
+                                cb();
+                            }
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return;
+                        }
                         let mods = gesture.current_event_state();
                         let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
                         let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
@@ -2134,7 +2204,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
-                } else if x < TRACK_LABEL_WIDTH && y > RULER_HEIGHT {
+                } else if x < TRACK_LABEL_WIDTH
+                    && y > RULER_HEIGHT
+                    && st.solo_badge_hit_track_index(x, y).is_none()
+                {
                     // Drag started in track label area → track reorder
                     let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
                     let track_count = st.project.borrow().tracks.len();
@@ -3337,6 +3410,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     changed
                 }
+                Key::s | Key::S if !ctrl => {
+                    let changed = st.toggle_selected_track_solo();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
                 Key::space => {
                     let pp_cb = st.on_play_pause.clone();
                     drop(st);
@@ -3974,6 +4054,25 @@ fn draw_track_row(
     let _ = cr.move_to(6.0, y + TRACK_HEIGHT / 2.0 + 4.0);
     let _ = cr.show_text(&track.label);
 
+    let solo_x = track_label_solo_badge_x(st.show_track_audio_levels);
+    let solo_y = y + 6.0;
+    if track.soloed {
+        cr.set_source_rgb(0.9, 0.75, 0.2);
+    } else {
+        cr.set_source_rgb(0.35, 0.35, 0.4);
+    }
+    cr.rectangle(
+        solo_x,
+        solo_y,
+        TRACK_LABEL_SOLO_BADGE_WIDTH,
+        TRACK_LABEL_SOLO_BADGE_HEIGHT,
+    );
+    cr.fill().ok();
+    cr.set_source_rgb(0.1, 0.1, 0.12);
+    cr.set_font_size(10.0);
+    let _ = cr.move_to(solo_x + 4.5, solo_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
+    let _ = cr.show_text("S");
+
     if st.show_track_audio_levels {
         let meter_x = TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - 6.0;
         let meter_y = y + 8.0;
@@ -3999,6 +4098,14 @@ fn draw_track_row(
     cr.move_to(0.0, y + TRACK_HEIGHT);
     cr.line_to(width, y + TRACK_HEIGHT);
     cr.stroke().ok();
+}
+
+fn track_label_solo_badge_x(show_track_audio_levels: bool) -> f64 {
+    if show_track_audio_levels {
+        TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - TRACK_LABEL_SOLO_BADGE_WIDTH - 12.0
+    } else {
+        TRACK_LABEL_WIDTH - TRACK_LABEL_SOLO_BADGE_WIDTH - 8.0
+    }
 }
 
 fn draw_track_label_meter(
@@ -4552,6 +4659,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("E", "Toggle Roll edit tool"),
         ("Y", "Toggle Slip edit tool"),
         ("U", "Toggle Slide edit tool"),
+        ("S", "Toggle solo for selected track"),
         ("Escape", "Switch to Select tool"),
         ("Delete / Bksp", "Delete selected clip(s)"),
         (
@@ -4574,6 +4682,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("M", "Add marker at playhead"),
         ("Right-click ruler", "Remove nearest marker"),
         ("Right-click transition", "Remove transition at boundary"),
+        ("Click track 'S' badge", "Toggle solo on that track"),
         ("Ctrl+,", "Open Preferences"),
         ("Ctrl+Z", "Undo"),
         ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),

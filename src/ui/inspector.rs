@@ -142,9 +142,8 @@ impl InspectorView {
                 self.speed_section_box.set_visible(true);
                 self.lut_section_box.set_visible(is_video || is_image);
                 self.chroma_key_section.set_visible(is_video || is_image);
-                self.bg_removal_section.set_visible(
-                    (is_video || is_image) && self.bg_removal_model_available.get(),
-                );
+                self.bg_removal_section
+                    .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
 
                 self.name_entry.set_text(&c.label);
                 self.path_value.set_text(
@@ -539,8 +538,7 @@ pub fn build_inspector(
     bg_removal_inner.append(&bg_removal_enable);
 
     row_label(&bg_removal_inner, "Threshold");
-    let bg_removal_threshold_slider =
-        Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let bg_removal_threshold_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     bg_removal_threshold_slider.set_value(0.5);
     bg_removal_threshold_slider.set_draw_value(true);
     bg_removal_threshold_slider.set_digits(2);
@@ -831,8 +829,7 @@ pub fn build_inspector(
     let on_opacity_changed: Rc<dyn Fn(f64)> = Rc::new(on_opacity_changed);
     let on_reverse_changed: Rc<dyn Fn(bool)> = Rc::new(on_reverse_changed);
     let on_chroma_key_changed: Rc<dyn Fn()> = Rc::new(on_chroma_key_changed);
-    let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> =
-        Rc::new(on_chroma_key_slider_changed);
+    let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_chroma_key_slider_changed);
     let on_bg_removal_changed: Rc<dyn Fn()> = Rc::new(on_bg_removal_changed);
 
     // Apply name button — triggers full on_project_changed
@@ -974,11 +971,7 @@ pub fn build_inspector(
                         }
                     }
                 }
-                on_audio_changed(
-                    clip_id,
-                    linear_vol,
-                    pan_slider_cb.value() as f32,
-                );
+                on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
             }
         });
     }

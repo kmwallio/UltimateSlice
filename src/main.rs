@@ -18,11 +18,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mcp_enabled = args.iter().any(|a| a == "--mcp");
     let mcp_attach = args.iter().any(|a| a == "--mcp-attach");
-    let startup_project_path = args
-        .iter()
-        .skip(1)
-        .find(|a| !a.starts_with("--"))
-        .cloned();
+    let startup_project_path = args.iter().skip(1).find(|a| !a.starts_with("--")).cloned();
 
     // --mcp-attach: bridge stdio to the running instance's Unix domain socket
     // and exit. No GUI is started.

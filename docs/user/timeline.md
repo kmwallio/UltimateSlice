@@ -7,7 +7,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 - **Ruler** — shows time positions with adaptive major/mid/minor tick marks; higher zoom levels add more marks and intermediate labels, while lower zoom levels reduce clutter. Click to seek the playhead.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
-- **Track header** — shows the track name and a compact per-track stereo level meter (L/R) on the right.
+- **Track header** — shows the track name, a per-track **S** solo badge, and a compact per-track stereo level meter (L/R) on the right.
 - **Status bar** — bottom-left includes a **Track Audio Levels** eye toggle to show/hide track-header meters. Proxy queue label/progress appear only while proxies are actively generating.
 
 ## Navigation
@@ -69,18 +69,20 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ### Insert at Playhead (`,`)
 
-- Places the current source selection (In → Out from the source monitor) at the playhead position on the active track.
+- Places the current source selection (In → Out from the source monitor) at the playhead position, preferring the active track when kinds match.
 - All clips at or after the playhead are **shifted right** to make room — a ripple insert.
+- For sources with both video and audio, **Source Monitor A/V auto-link** controls behavior: **enabled** inserts a linked A/V pair when matching video+audio tracks exist (with embedded audio on the video clip muted), while **disabled** uses single-clip placement on a compatible track kind.
 - Also available via the **⤵ Insert** button in the source monitor transport bar.
-- Requires a source to be loaded with valid in/out marks.
+- Requires a source to be loaded with valid in/out marks; if no compatible track exists, the operation is skipped.
 
 ### Overwrite at Playhead (`.`)
 
-- Places the current source selection at the playhead position, **replacing** any existing material in the time range.
+- Places the current source selection at the playhead position, **replacing** any existing material in the time range and preferring the active track when kinds match.
 - Clips that fall within the overwrite range are trimmed, split, or removed as needed.
+- For sources with both video and audio, **Source Monitor A/V auto-link** controls behavior: **enabled** overwrites with a linked A/V pair when matching video+audio tracks exist (with embedded audio on the video clip muted), while **disabled** uses single-clip placement on a compatible track kind.
 - No subsequent clips are shifted — the timeline duration only changes if you overwrite past the end.
 - Also available via the **⏺ Overwrite** button in the source monitor transport bar.
-- Requires a source to be loaded with valid in/out marks.
+- Requires a source to be loaded with valid in/out marks; if no compatible track exists, the operation is skipped.
 
 ### Timeline Copy/Paste (`Ctrl+C`, `Ctrl+V`, `Ctrl+Shift+V`)
 
@@ -138,7 +140,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
 
-- Appending, inserting, overwriting, dragging, or MCP-placing a source that contains both video and audio now auto-creates a linked A/V pair when matching video and audio tracks exist.
+- Dragging or MCP-placing a source that contains both video and audio auto-creates a linked A/V pair when matching video and audio tracks exist. Source Monitor Append/Insert/Overwrite do the same only when Source Monitor A/V auto-link is enabled; when disabled, those operations use single-clip placement behavior.
 - Auto-linked pairs share the same clip link group immediately, so the picture and sound stay selected/moved/deleted together without requiring a manual `Ctrl+L`.
 - While a linked same-source audio-track peer exists, UltimateSlice suppresses the duplicate embedded audio from the linked video-track clip to avoid doubled playback/export audio. Unlinking restores the video clip's own embedded audio automatically.
 - **Link (`Ctrl+L`)** assigns the current multi-selection to a shared clip link group.
@@ -159,6 +161,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `E` | Toggle Roll edit tool |
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
+| `S` | Toggle solo for selected track |
 | `,` | Insert at playhead (from source monitor) |
 | `.` | Overwrite at playhead (from source monitor) |
 | `Escape` | Switch to Select tool |
@@ -203,6 +206,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a blue accent bar on its label. The active track is used as the target for the Append button and the Remove Track button.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Muting an audio track excludes it from both preview and export.
+- **Solo track** — click the **S** badge on a track header (or press **S** with that track active) to solo it. When one or more tracks are soloed, only soloed non-muted tracks are active for Program Monitor playback and export.
 
 ## Automatic Audio Crossfades
 

@@ -108,7 +108,12 @@ fn probe_media_bg(uri: &str) -> (u64, bool, bool, Option<u64>) {
     let is_audio_only = info.video_streams().is_empty();
     let has_audio = !info.audio_streams().is_empty();
     let source_timecode_base_ns = extract_timecode_ns(&info);
-    (duration_ns, is_audio_only, has_audio, source_timecode_base_ns)
+    (
+        duration_ns,
+        is_audio_only,
+        has_audio,
+        source_timecode_base_ns,
+    )
 }
 
 /// Extract time-of-day nanoseconds from GStreamer Discoverer tags.

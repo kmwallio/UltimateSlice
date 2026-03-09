@@ -17,6 +17,8 @@ pub struct Track {
     pub clips: Vec<Clip>,
     pub muted: bool,
     pub locked: bool,
+    #[serde(default)]
+    pub soloed: bool,
 }
 
 impl Track {
@@ -28,6 +30,7 @@ impl Track {
             clips: Vec::new(),
             muted: false,
             locked: false,
+            soloed: false,
         }
     }
 
@@ -39,6 +42,7 @@ impl Track {
             clips: Vec::new(),
             muted: false,
             locked: false,
+            soloed: false,
         }
     }
 
@@ -101,6 +105,7 @@ mod tests {
         assert!(track.clips.is_empty());
         assert!(!track.muted);
         assert!(!track.locked);
+        assert!(!track.soloed);
     }
 
     #[test]
@@ -108,6 +113,7 @@ mod tests {
         let track = Track::new_audio("A1");
         assert_eq!(track.label, "A1");
         assert_eq!(track.kind, TrackKind::Audio);
+        assert!(!track.soloed);
     }
 
     #[test]

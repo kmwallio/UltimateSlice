@@ -27,6 +27,11 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetTrackSolo {
+        track_id: String,
+        solo: bool,
+        reply: SyncSender<Value>,
+    },
     CloseSourcePreview {
         reply: SyncSender<Value>,
     },

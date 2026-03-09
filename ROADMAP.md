@@ -181,11 +181,11 @@ Tracking docs:
   - [x] Align grouped clips by audio or timecode
     - [x] Phase 1: Align grouped clips by stored timecode metadata
     - [x] Phase 2: Align grouped clips by audio (FFT cross-correlation via `rustfft`)
-- [ ] Audio/video linking (auto-link video and audio from same source)
+- [x] Audio/video linking (auto-link video and audio from same source)
   - [x] Manual clip linking / unlinking with synchronized selection, move, and delete behavior
   - [x] Auto-link same-source A/V clip creation on drag-and-drop
-  - [ ] Auto-link A/V for source monitor operations (Append/Insert/Overwrite) — reverted to single-clip placement; needs redesign to handle track targeting and edge cases before re-enabling
-- [ ] Solo track (play only selected tracks, complement to muted/locked)
+  - [x] Optional auto-link A/V mode for source monitor operations (Append/Insert/Overwrite): enabled creates linked pairs (with embedded video-track audio suppression while linked), disabled uses single-clip placement behavior; both retain single-kind fallback when only one matching track kind exists
+- [x] Solo track (play only selected tracks, complement to muted/locked)
 - [ ] Freeze frame (hold single frame for arbitrary duration)
 - [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
 - [x] Select clips forward/backward from playhead for bulk operations
