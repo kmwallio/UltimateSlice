@@ -139,6 +139,12 @@ pub struct ProgramClip {
     pub speed: f64,
     /// Reverse playback when true.
     pub reverse: bool,
+    /// Freeze-frame enabled for this clip (video-only hold semantics).
+    pub freeze_frame: bool,
+    /// Optional source timestamp (ns) used for freeze-frame sampling.
+    pub freeze_frame_source_ns: Option<u64>,
+    /// Optional explicit timeline hold duration (ns) for freeze-frames.
+    pub freeze_frame_hold_duration_ns: Option<u64>,
     /// True for clips that have no video (audio-track clips). They are routed
     /// to a dedicated audio-only pipeline instead of the video player.
     pub is_audio_only: bool,
@@ -184,8 +190,8 @@ impl ProgramClip {
     pub fn source_duration_ns(&self) -> u64 {
         self.source_out_ns.saturating_sub(self.source_in_ns)
     }
-    /// Timeline duration accounting for speed.
-    pub fn duration_ns(&self) -> u64 {
+
+    fn playback_duration_ns(&self) -> u64 {
         let src = self.source_duration_ns();
         if self.speed > 0.0 {
             (src as f64 / self.speed) as u64
@@ -193,11 +199,52 @@ impl ProgramClip {
             src
         }
     }
+
+    pub fn is_freeze_frame(&self) -> bool {
+        self.freeze_frame && !self.is_audio_only
+    }
+
+    pub fn freeze_frame_source_time_ns(&self) -> Option<u64> {
+        if !self.is_freeze_frame() {
+            return None;
+        }
+        let requested = self.freeze_frame_source_ns.unwrap_or(self.source_in_ns);
+        if self.source_out_ns > self.source_in_ns {
+            Some(requested.clamp(self.source_in_ns, self.source_out_ns.saturating_sub(1)))
+        } else {
+            Some(self.source_in_ns)
+        }
+    }
+
+    pub fn freeze_frame_duration_ns(&self) -> Option<u64> {
+        if !self.is_freeze_frame() {
+            return None;
+        }
+        let _source_time_ns = self.freeze_frame_source_time_ns()?;
+        Some(
+            self.freeze_frame_hold_duration_ns
+                .filter(|duration| *duration > 0)
+                .unwrap_or_else(|| self.playback_duration_ns()),
+        )
+    }
+
+    pub fn has_embedded_audio(&self) -> bool {
+        self.has_audio && !self.is_freeze_frame()
+    }
+
+    /// Timeline duration accounting for speed.
+    pub fn duration_ns(&self) -> u64 {
+        self.freeze_frame_duration_ns()
+            .unwrap_or_else(|| self.playback_duration_ns())
+    }
     pub fn timeline_end_ns(&self) -> u64 {
         self.timeline_start_ns + self.duration_ns()
     }
     /// Convert a timeline position offset to the corresponding source file position.
     pub fn source_pos_ns(&self, timeline_pos_ns: u64) -> u64 {
+        if let Some(source_ns) = self.freeze_frame_source_time_ns() {
+            return source_ns;
+        }
         let offset = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
         let src_span = self.source_duration_ns();
         if src_span == 0 {
@@ -213,6 +260,9 @@ impl ProgramClip {
     }
 
     pub fn seek_rate(&self) -> f64 {
+        if self.is_freeze_frame() {
+            return 1.0;
+        }
         let base = if self.speed > 0.0 { self.speed } else { 1.0 };
         if self.reverse {
             -base
@@ -230,6 +280,9 @@ impl ProgramClip {
     }
 
     pub fn seek_stop_ns(&self, source_pos_ns: u64) -> u64 {
+        if self.is_freeze_frame() {
+            return source_pos_ns.saturating_add(1);
+        }
         if self.reverse {
             source_pos_ns.max(self.source_in_ns)
         } else {
@@ -1750,7 +1803,7 @@ impl ProgramPlayer {
             .enumerate()
             .filter(|(idx, c)| {
                 *idx != clip_idx
-                    && c.has_audio
+                    && c.has_embedded_audio()
                     && c.track_index == clip.track_index
                     && c.timeline_end_ns() == clip.timeline_start_ns
             })
@@ -1768,7 +1821,7 @@ impl ProgramPlayer {
             .enumerate()
             .filter(|(idx, c)| {
                 *idx != clip_idx
-                    && c.has_audio
+                    && c.has_embedded_audio()
                     && c.track_index == clip.track_index
                     && c.timeline_start_ns == clip.timeline_end_ns()
             })
@@ -1816,7 +1869,7 @@ impl ProgramPlayer {
         let Some(clip) = clips.get(clip_idx) else {
             return 1.0;
         };
-        if !clip.has_audio {
+        if !clip.has_embedded_audio() {
             return 1.0;
         }
         let mut gain = 1.0_f64;
@@ -3088,6 +3141,9 @@ impl ProgramPlayer {
                 c.source_out_ns.hash(&mut hasher);
                 c.speed.to_bits().hash(&mut hasher);
                 c.reverse.hash(&mut hasher);
+                c.freeze_frame.hash(&mut hasher);
+                c.freeze_frame_source_ns.hash(&mut hasher);
+                c.freeze_frame_hold_duration_ns.hash(&mut hasher);
                 c.crop_left.hash(&mut hasher);
                 c.crop_right.hash(&mut hasher);
                 c.crop_top.hash(&mut hasher);
@@ -3119,6 +3175,14 @@ impl ProgramPlayer {
 
     fn maybe_request_background_prerender_segment(&mut self, boundary_ns: u64, active: &[usize]) {
         if !self.background_prerender || active.len() < 3 {
+            return;
+        }
+        if active.iter().any(|&idx| {
+            self.clips
+                .get(idx)
+                .map(|c| c.is_freeze_frame())
+                .unwrap_or(false)
+        }) {
             return;
         }
         let next_boundary = self
@@ -3161,7 +3225,7 @@ impl ProgramPlayer {
                     let c = clip.clone();
                     let path = self.effective_source_path_for_clip(&c);
                     let source_ns = c.source_pos_ns(boundary_ns);
-                    let has_audio = self.has_audio_for_path_fast(&path, c.has_audio);
+                    let has_audio = self.has_audio_for_path_fast(&path, c.has_embedded_audio());
                     (c, path, source_ns, has_audio)
                 })
             })
@@ -3325,7 +3389,7 @@ impl ProgramPlayer {
             } else {
                 !current_active.contains(&idx)
             };
-            if clip.has_audio {
+            if clip.has_embedded_audio() {
                 let effective_path = self.effective_source_path_for_clip(&clip);
                 let _ = self.probe_has_audio_stream_cached(&effective_path);
             }
@@ -3728,11 +3792,7 @@ impl ProgramPlayer {
         // the virtual overlap window.
         let effective_pos = timeline_pos_ns + slot.transition_enter_offset_ns;
         let source_ns = clip.source_pos_ns(effective_pos);
-        let effective_seek_flags = if clip.reverse {
-            (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
-        } else {
-            seek_flags
-        };
+        let effective_seek_flags = Self::effective_decode_seek_flags(clip, seek_flags);
         slot.decoder
             .seek(
                 clip.seek_rate(),
@@ -3743,6 +3803,14 @@ impl ProgramPlayer {
                 gst::ClockTime::from_nseconds(clip.seek_stop_ns(source_ns)),
             )
             .is_ok()
+    }
+
+    fn effective_decode_seek_flags(clip: &ProgramClip, seek_flags: gst::SeekFlags) -> gst::SeekFlags {
+        if clip.reverse || clip.is_freeze_frame() {
+            (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
+        } else {
+            seek_flags
+        }
     }
 
     fn seek_slot_decoder_paused(
@@ -5194,7 +5262,8 @@ impl ProgramPlayer {
         let (effective_path, using_proxy, proxy_key) = self.resolve_source_path_for_clip(&clip);
         let uri = format!("file://{}", effective_path);
 
-        let clip_has_audio = self.has_audio_for_path_fast(&effective_path, clip.has_audio);
+        let clip_has_audio =
+            self.has_audio_for_path_fast(&effective_path, clip.has_embedded_audio());
         if !clip_has_audio {
             log::info!(
                 "build_audio_only_slot: clip {} has no audio, skipping entirely",
@@ -5996,7 +6065,7 @@ impl ProgramPlayer {
         }
 
         // Detect whether the source file has an audio stream.
-        let clip_has_audio = if !clip.has_audio {
+        let clip_has_audio = if !clip.has_embedded_audio() {
             false
         } else {
             self.probe_has_audio_stream_cached(&effective_path)
@@ -6686,8 +6755,10 @@ impl ProgramPlayer {
         for &desired_clip_idx in desired {
             let desired_clip = &self.clips[desired_clip_idx];
             let desired_path = self.effective_source_path_for_clip(desired_clip);
-            let desired_has_audio =
-                self.has_audio_for_path_fast(&desired_path, self.clips[desired_clip_idx].has_audio);
+            let desired_has_audio = self.has_audio_for_path_fast(
+                &desired_path,
+                self.clips[desired_clip_idx].has_embedded_audio(),
+            );
 
             let mut matched: Option<(usize, usize)> = None; // (unmatched index, slot_idx)
             for (unmatched_idx, &slot_idx) in unmatched_slots.iter().enumerate() {
@@ -7574,7 +7645,7 @@ impl ProgramPlayer {
     fn reverse_video_clip_at_for_audio(&mut self, timeline_pos_ns: u64) -> Option<usize> {
         let idx = self.clip_at(timeline_pos_ns)?;
         let clip = self.clips.get(idx)?.clone();
-        if clip.is_audio_only || !clip.reverse || !clip.has_audio {
+        if clip.is_audio_only || !clip.reverse || !clip.has_embedded_audio() {
             return None;
         }
         let effective_path = self.effective_source_path_for_clip(&clip);
@@ -7724,6 +7795,9 @@ mod tests {
             title_y: 0.0,
             speed: 1.0,
             reverse: false,
+            freeze_frame: false,
+            freeze_frame_source_ns: None,
+            freeze_frame_hold_duration_ns: None,
             is_audio_only: false,
             track_index: 0,
             transition_after: String::new(),
@@ -7767,6 +7841,66 @@ mod tests {
         clip.rotate = 0;
         clip.flip_h = true;
         assert!(!clip_can_fully_occlude(&clip));
+    }
+
+    #[test]
+    fn freeze_frame_holds_source_position_for_preview_timing() {
+        let mut clip = make_clip();
+        clip.source_in_ns = 2_000_000_000;
+        clip.source_out_ns = 6_000_000_000;
+        clip.timeline_start_ns = 1_000_000_000;
+        clip.speed = 2.0;
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(4_200_000_000);
+        clip.freeze_frame_hold_duration_ns = Some(5_000_000_000);
+
+        assert_eq!(clip.duration_ns(), 5_000_000_000);
+        assert_eq!(clip.timeline_end_ns(), 6_000_000_000);
+        assert_eq!(clip.source_pos_ns(1_000_000_000), 4_200_000_000);
+        assert_eq!(clip.source_pos_ns(5_999_000_000), 4_200_000_000);
+    }
+
+    #[test]
+    fn freeze_frame_seek_uses_single_frame_window() {
+        let mut clip = make_clip();
+        clip.source_in_ns = 100;
+        clip.source_out_ns = 1_000;
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(2_000);
+
+        let source = clip.source_pos_ns(0);
+        assert_eq!(source, 999);
+        assert_eq!(clip.seek_rate(), 1.0);
+        assert_eq!(clip.seek_start_ns(source), source);
+        assert_eq!(clip.seek_stop_ns(source), source + 1);
+    }
+
+    #[test]
+    fn freeze_frame_decode_seek_forces_accurate_non_key_unit() {
+        let mut clip = make_clip();
+        clip.freeze_frame = true;
+        let requested = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
+        let effective = ProgramPlayer::effective_decode_seek_flags(&clip, requested);
+        assert!(effective.contains(gst::SeekFlags::ACCURATE));
+        assert!(!effective.contains(gst::SeekFlags::KEY_UNIT));
+        assert!(effective.contains(gst::SeekFlags::FLUSH));
+    }
+
+    #[test]
+    fn non_freeze_forward_decode_seek_preserves_key_unit_choice() {
+        let clip = make_clip();
+        let requested = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
+        let effective = ProgramPlayer::effective_decode_seek_flags(&clip, requested);
+        assert!(effective.contains(gst::SeekFlags::KEY_UNIT));
+        assert!(!effective.contains(gst::SeekFlags::ACCURATE));
+    }
+
+    #[test]
+    fn freeze_frame_embedded_audio_is_suppressed() {
+        let mut clip = make_clip();
+        clip.has_audio = true;
+        clip.freeze_frame = true;
+        assert!(!clip.has_embedded_audio());
     }
 
     #[test]

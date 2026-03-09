@@ -1,9 +1,10 @@
 use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::Project;
+use crate::model::through_edit::detect_track_through_edit_boundaries;
 use crate::model::track::TrackKind;
 use crate::undo::{
-    EditHistory, MoveClipCommand, ReorderTrackCommand, SetTrackClipsCommand, SplitClipCommand,
-    TrimClipCommand, TrimOutCommand,
+    EditHistory, JoinThroughEditCommand, MoveClipCommand, ReorderTrackCommand,
+    SetTrackClipsCommand, SplitClipCommand, TrimClipCommand, TrimOutCommand,
 };
 use glib;
 use gtk4::prelude::*;
@@ -749,6 +750,212 @@ impl TimelineState {
         }
         // All selected clips need a source_path (always true) — no further validation needed;
         // actual audio availability is checked at extraction time.
+        true
+    }
+
+    fn selected_joinable_through_edit_boundary(&self) -> Option<(String, Clip, Clip)> {
+        let selected_ids = self.selected_ids_or_primary();
+        if selected_ids.is_empty() {
+            return None;
+        }
+        let proj = self.project.borrow();
+        let mut candidates = Vec::new();
+        for track in &proj.tracks {
+            for boundary in detect_track_through_edit_boundaries(track) {
+                if !selected_ids.contains(&boundary.left_clip_id)
+                    && !selected_ids.contains(&boundary.right_clip_id)
+                {
+                    continue;
+                }
+                let Some(left) = track.clips.get(boundary.left_clip_index) else {
+                    continue;
+                };
+                let Some(right) = track.clips.get(boundary.right_clip_index) else {
+                    continue;
+                };
+                if left.id != boundary.left_clip_id || right.id != boundary.right_clip_id {
+                    continue;
+                }
+                if !through_edit_metadata_compatible(left, right) {
+                    continue;
+                }
+                candidates.push((track.id.clone(), left.clone(), right.clone()));
+            }
+        }
+        if candidates.len() == 1 {
+            candidates.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    fn can_join_selected_through_edit(&self) -> bool {
+        self.selected_joinable_through_edit_boundary().is_some()
+    }
+
+    pub fn join_selected_through_edit(&mut self) -> bool {
+        let Some((track_id, left_clip, right_clip)) =
+            self.selected_joinable_through_edit_boundary()
+        else {
+            return false;
+        };
+        let merged_clip = merge_through_edit_clips(&left_clip, &right_clip);
+        let merged_clip_id = merged_clip.id.clone();
+        let (old_clips, mut new_clips) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.iter().find(|track| track.id == track_id) else {
+                return false;
+            };
+            let old_clips = track.clips.clone();
+            let mut new_clips = Vec::with_capacity(old_clips.len().saturating_sub(1));
+            let mut replaced_left = false;
+            let mut removed_right = false;
+            for clip in &old_clips {
+                if clip.id == right_clip.id {
+                    removed_right = true;
+                    continue;
+                }
+                if clip.id == left_clip.id {
+                    replaced_left = true;
+                    new_clips.push(merged_clip.clone());
+                } else {
+                    new_clips.push(clip.clone());
+                }
+            }
+            if !replaced_left || !removed_right {
+                return false;
+            }
+            new_clips.sort_by_key(|clip| clip.timeline_start);
+            if old_clips == new_clips {
+                return false;
+            }
+            (old_clips, new_clips)
+        };
+        let cmd = JoinThroughEditCommand {
+            track_id: track_id.clone(),
+            old_clips,
+            new_clips: std::mem::take(&mut new_clips),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        drop(proj);
+        self.set_single_clip_selection(merged_clip_id, track_id);
+        true
+    }
+
+    fn selected_video_clip_at_playhead(&self) -> Option<(String, Clip)> {
+        let selected_clip_id = self.selected_clip_id.as_deref()?;
+        let playhead_ns = self.playhead_ns;
+        let proj = self.project.borrow();
+        proj.tracks.iter().find_map(|track| {
+            track
+                .clips
+                .iter()
+                .find(|clip| {
+                    clip.id == selected_clip_id
+                        && clip.kind == ClipKind::Video
+                        && playhead_ns >= clip.timeline_start
+                        && playhead_ns <= clip.timeline_end()
+                })
+                .cloned()
+                .map(|clip| (track.id.clone(), clip))
+        })
+    }
+
+    fn can_create_freeze_frame_at_playhead(&self) -> bool {
+        self.selected_video_clip_at_playhead().is_some()
+    }
+
+    pub fn create_freeze_frame_from_selected_at_playhead(&mut self, hold_duration_ns: u64) -> bool {
+        if hold_duration_ns == 0 {
+            return false;
+        }
+        let Some((track_id, selected_clip)) = self.selected_video_clip_at_playhead() else {
+            return false;
+        };
+        let playhead_ns = self.playhead_ns;
+        let freeze_source_ns = freeze_source_from_playhead(&selected_clip, playhead_ns);
+        let mut freeze_clip = selected_clip.clone();
+        freeze_clip.id = uuid::Uuid::new_v4().to_string();
+        let freeze_clip_id = freeze_clip.id.clone();
+        freeze_clip.kind = ClipKind::Video;
+        freeze_clip.timeline_start = playhead_ns;
+        freeze_clip.source_in = freeze_source_ns;
+        freeze_clip.source_out = freeze_source_ns.saturating_add(1);
+        freeze_clip.volume = 0.0;
+        freeze_clip.freeze_frame = true;
+        freeze_clip.freeze_frame_source_ns = Some(freeze_source_ns);
+        freeze_clip.freeze_frame_hold_duration_ns = Some(hold_duration_ns);
+        freeze_clip.group_id = None;
+        freeze_clip.link_group_id = None;
+        freeze_clip.transition_after.clear();
+        freeze_clip.transition_after_ns = 0;
+
+        let (old_clips, mut new_clips) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+                return false;
+            };
+            let old_clips = track.clips.clone();
+            let mut new_clips = Vec::with_capacity(old_clips.len() + 2);
+            let mut handled_selected = false;
+            for clip in &old_clips {
+                if clip.id == selected_clip.id {
+                    handled_selected = true;
+                    if playhead_ns <= clip.timeline_start {
+                        let mut shifted = clip.clone();
+                        shifted.timeline_start =
+                            shifted.timeline_start.saturating_add(hold_duration_ns);
+                        new_clips.push(shifted);
+                    } else if playhead_ns >= clip.timeline_end() {
+                        let mut left_clip = clip.clone();
+                        left_clip.transition_after.clear();
+                        left_clip.transition_after_ns = 0;
+                        new_clips.push(left_clip);
+                    } else {
+                        let cut_offset = playhead_ns.saturating_sub(clip.timeline_start);
+                        let mut left_clip = clip.clone();
+                        left_clip.source_out = left_clip.source_in.saturating_add(cut_offset);
+                        left_clip.transition_after.clear();
+                        left_clip.transition_after_ns = 0;
+                        new_clips.push(left_clip);
+
+                        let mut right_clip = clip.clone();
+                        right_clip.id = uuid::Uuid::new_v4().to_string();
+                        right_clip.source_in = right_clip.source_in.saturating_add(cut_offset);
+                        right_clip.timeline_start = playhead_ns.saturating_add(hold_duration_ns);
+                        new_clips.push(right_clip);
+                    }
+                    continue;
+                }
+
+                let mut adjusted = clip.clone();
+                if adjusted.timeline_start >= playhead_ns {
+                    adjusted.timeline_start =
+                        adjusted.timeline_start.saturating_add(hold_duration_ns);
+                }
+                new_clips.push(adjusted);
+            }
+            if !handled_selected {
+                return false;
+            }
+            new_clips.push(freeze_clip);
+            new_clips.sort_by_key(|c| c.timeline_start);
+            (old_clips, new_clips)
+        };
+        if old_clips == new_clips {
+            return false;
+        }
+        let cmd = SetTrackClipsCommand {
+            track_id: track_id.clone(),
+            old_clips,
+            new_clips: std::mem::take(&mut new_clips),
+            label: "Create freeze frame".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        drop(proj);
+        self.set_single_clip_selection(freeze_clip_id, track_id);
         true
     }
 
@@ -1556,6 +1763,101 @@ fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
     }
 }
 
+fn freeze_source_from_playhead(clip: &Clip, playhead_ns: u64) -> u64 {
+    let source_duration = clip.source_duration();
+    if source_duration == 0 {
+        return clip.source_in;
+    }
+    let timeline_duration = clip.duration().max(1);
+    let local_timeline_ns = playhead_ns
+        .saturating_sub(clip.timeline_start)
+        .min(timeline_duration.saturating_sub(1));
+    let mut source_offset =
+        ((local_timeline_ns as f64 / timeline_duration as f64) * source_duration as f64) as u64;
+    source_offset = source_offset.min(source_duration.saturating_sub(1));
+    if clip.reverse {
+        clip.source_out
+            .saturating_sub(1)
+            .saturating_sub(source_offset)
+    } else {
+        clip.source_in
+            .saturating_add(source_offset)
+            .min(clip.source_out.saturating_sub(1))
+    }
+}
+
+#[allow(deprecated)]
+pub fn open_freeze_frame_dialog(state: Rc<RefCell<TimelineState>>, area: DrawingArea) {
+    if !state.borrow().can_create_freeze_frame_at_playhead() {
+        return;
+    }
+
+    let parent = area.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+    let dialog = gtk::Dialog::builder()
+        .title("Create Freeze Frame")
+        .default_width(360)
+        .modal(true)
+        .build();
+    dialog.set_transient_for(parent.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Create", gtk::ResponseType::Accept);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+
+    let hold_label = gtk::Label::new(Some("Hold duration (seconds):"));
+    hold_label.set_halign(gtk::Align::Start);
+    let hold_spin = gtk::SpinButton::with_range(0.1, 60.0, 0.1);
+    hold_spin.set_digits(1);
+    hold_spin.set_value(2.0);
+    hold_spin.set_halign(gtk::Align::Start);
+    hold_spin.set_hexpand(false);
+    let hint = gtk::Label::new(Some("Freeze clips are video-only and silent by default."));
+    hint.set_halign(gtk::Align::Start);
+    hint.add_css_class("dim-label");
+
+    body.append(&hold_label);
+    body.append(&hold_spin);
+    body.append(&hint);
+    dialog.content_area().append(&body);
+
+    dialog.connect_response(move |d, resp| {
+        if resp == gtk::ResponseType::Accept {
+            let hold_duration_ns = (hold_spin.value().max(0.1) * NS_PER_SECOND).round() as u64;
+            let mut st = state.borrow_mut();
+            let changed = st.create_freeze_frame_from_selected_at_playhead(hold_duration_ns);
+            let proj_cb = if changed {
+                st.on_project_changed.clone()
+            } else {
+                None
+            };
+            let sel_cb = if changed {
+                st.on_clip_selected.clone()
+            } else {
+                None
+            };
+            let new_sel = st.selected_clip_id.clone();
+            drop(st);
+
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+                if let Some(cb) = sel_cb {
+                    cb(new_sel);
+                }
+                area.queue_draw();
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
 fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     let before = target.clone();
     target.brightness = source.brightness;
@@ -1589,7 +1891,38 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     target.midtones = source.midtones;
     target.highlights = source.highlights;
     target.reverse = source.reverse;
+    target.freeze_frame = source.freeze_frame;
+    target.freeze_frame_source_ns = source.freeze_frame_source_ns;
+    target.freeze_frame_hold_duration_ns = source.freeze_frame_hold_duration_ns;
     before != *target
+}
+
+fn through_edit_metadata_compatible(left: &Clip, right: &Clip) -> bool {
+    let mut left_norm = left.clone();
+    left_norm.id.clear();
+    left_norm.source_in = 0;
+    left_norm.source_out = 0;
+    left_norm.timeline_start = 0;
+    left_norm.transition_after.clear();
+    left_norm.transition_after_ns = 0;
+
+    let mut right_norm = right.clone();
+    right_norm.id.clear();
+    right_norm.source_in = 0;
+    right_norm.source_out = 0;
+    right_norm.timeline_start = 0;
+    right_norm.transition_after.clear();
+    right_norm.transition_after_ns = 0;
+
+    left_norm == right_norm
+}
+
+fn merge_through_edit_clips(left: &Clip, right: &Clip) -> Clip {
+    let mut merged = left.clone();
+    merged.source_out = right.source_out;
+    merged.transition_after = right.transition_after.clone();
+    merged.transition_after_ns = right.transition_after_ns;
+    merged
 }
 
 struct HitResult {
@@ -1633,6 +1966,15 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     clip_context_box.set_margin_end(4);
     clip_context_box.set_margin_top(4);
     clip_context_box.set_margin_bottom(4);
+    let btn_join_through_edit = gtk::Button::with_label("Join Through Edit");
+    btn_join_through_edit.add_css_class("flat");
+    btn_join_through_edit
+        .set_tooltip_text(Some("Join selected through-edit boundary (Ctrl+Shift+B)"));
+    let btn_freeze_frame = gtk::Button::with_label("Create Freeze Frame…");
+    btn_freeze_frame.add_css_class("flat");
+    btn_freeze_frame.set_tooltip_text(Some(
+        "Create a freeze-frame clip from the selected clip (Shift+F)",
+    ));
     let btn_link_selected = gtk::Button::with_label("Link Selected Clips");
     btn_link_selected.add_css_class("flat");
     btn_link_selected.set_tooltip_text(Some("Link the current selection (Ctrl+L)"));
@@ -1649,11 +1991,62 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     btn_sync_audio.set_tooltip_text(Some(
         "Align selected clips using audio cross-correlation (requires 2+ clips with audio)",
     ));
+    clip_context_box.append(&btn_join_through_edit);
+    clip_context_box.append(&btn_freeze_frame);
     clip_context_box.append(&btn_link_selected);
     clip_context_box.append(&btn_unlink_selected);
     clip_context_box.append(&btn_align_grouped);
     clip_context_box.append(&btn_sync_audio);
     clip_context_pop.set_child(Some(&clip_context_box));
+
+    {
+        let state = state.clone();
+        let area = area.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_join_through_edit.connect_clicked(move |_| {
+            let mut st = state.borrow_mut();
+            let changed = st.join_selected_through_edit();
+            let proj_cb = if changed {
+                st.on_project_changed.clone()
+            } else {
+                None
+            };
+            let sel_cb = if changed {
+                st.on_clip_selected.clone()
+            } else {
+                None
+            };
+            let new_sel = st.selected_clip_id.clone();
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+                if let Some(cb) = sel_cb {
+                    cb(new_sel);
+                }
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let area = area.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_freeze_frame.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            open_freeze_frame_dialog(state.clone(), area.clone());
+        });
+    }
 
     {
         let state = state.clone();
@@ -1786,6 +2179,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let state = state.clone();
         let area_weak = area.downgrade();
         let clip_context_pop = clip_context_pop.clone();
+        let btn_join_through_edit = btn_join_through_edit.clone();
+        let btn_freeze_frame = btn_freeze_frame.clone();
         let btn_link_selected = btn_link_selected.clone();
         let btn_unlink_selected = btn_unlink_selected.clone();
         let btn_align_grouped = btn_align_grouped.clone();
@@ -1988,15 +2383,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let mut show_context_menu = false;
                     if let Some(h) = hit {
                         st.prepare_clip_context_menu_selection(&h.clip_id, &h.track_id);
+                        let can_join_through_edit = st.can_join_selected_through_edit();
                         let can_link = st.can_link_selected_clips();
                         let can_unlink = st.can_unlink_selected_clips();
                         let can_align_grouped = st.can_align_selected_groups_by_timecode();
                         let can_sync_audio = st.can_sync_selected_clips_by_audio();
+                        let can_freeze_frame = st.can_create_freeze_frame_at_playhead();
+                        btn_join_through_edit.set_sensitive(can_join_through_edit);
+                        btn_freeze_frame.set_sensitive(can_freeze_frame);
                         btn_link_selected.set_sensitive(can_link);
                         btn_unlink_selected.set_sensitive(can_unlink);
                         btn_align_grouped.set_sensitive(can_align_grouped);
                         btn_sync_audio.set_sensitive(can_sync_audio);
-                        if can_link || can_unlink || can_align_grouped || can_sync_audio {
+                        if can_join_through_edit
+                            || can_freeze_frame
+                            || can_link
+                            || can_unlink
+                            || can_align_grouped
+                            || can_sync_audio
+                        {
                             clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                 x as i32, y as i32, 1, 1,
                             )));
@@ -3428,6 +3833,21 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     return glib::Propagation::Stop;
                 }
+                Key::f | Key::F if shift && !ctrl => {
+                    drop(st);
+                    if let Some(a) = area_weak.upgrade() {
+                        open_freeze_frame_dialog(state.clone(), a);
+                    }
+                    return glib::Propagation::Stop;
+                }
+                Key::b | Key::B if ctrl && shift => {
+                    let changed = st.join_selected_through_edit();
+                    if changed {
+                        notify_project = true;
+                        notify_selection = true;
+                    }
+                    changed
+                }
                 Key::b | Key::B => {
                     // B = Blade/Razor
                     st.active_tool = if st.active_tool == ActiveTool::Razor {
@@ -4021,6 +4441,11 @@ fn draw_track_row(
         );
     }
 
+    draw_through_edit_boundary_indicators(
+        cr,
+        &through_edit_indicator_geometry_for_track(track, st, y, width),
+    );
+
     // Draw transition markers (clip -> next clip) after clip bodies.
     for clip in &track.clips {
         if clip.transition_after_ns > 0 && !clip.transition_after.is_empty() {
@@ -4098,6 +4523,67 @@ fn draw_track_row(
     cr.move_to(0.0, y + TRACK_HEIGHT);
     cr.line_to(width, y + TRACK_HEIGHT);
     cr.stroke().ok();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ThroughEditIndicatorGeometry {
+    x: f64,
+    y_top: f64,
+    y_bottom: f64,
+}
+
+fn through_edit_indicator_geometry_for_track(
+    track: &crate::model::track::Track,
+    st: &TimelineState,
+    track_y: f64,
+    view_width: f64,
+) -> Vec<ThroughEditIndicatorGeometry> {
+    let y_top = track_y + 5.0;
+    let y_bottom = track_y + TRACK_HEIGHT - 5.0;
+    detect_track_through_edit_boundaries(track)
+        .into_iter()
+        .filter(|boundary| {
+            !st.is_clip_selected(&boundary.left_clip_id)
+                && !st.is_clip_selected(&boundary.right_clip_id)
+        })
+        .filter_map(|boundary| {
+            let left = track.clips.get(boundary.left_clip_index)?;
+            let right = track.clips.get(boundary.right_clip_index)?;
+            if left.id != boundary.left_clip_id || right.id != boundary.right_clip_id {
+                return None;
+            }
+            if !through_edit_metadata_compatible(left, right) {
+                return None;
+            }
+            let x = st.ns_to_x(boundary.boundary_ns);
+            (x >= TRACK_LABEL_WIDTH && x <= view_width).then_some(ThroughEditIndicatorGeometry {
+                x,
+                y_top,
+                y_bottom,
+            })
+        })
+        .collect()
+}
+
+fn draw_through_edit_boundary_indicators(
+    cr: &gtk::cairo::Context,
+    indicators: &[ThroughEditIndicatorGeometry],
+) {
+    if indicators.is_empty() {
+        return;
+    }
+
+    cr.save().ok();
+    cr.set_source_rgba(0.86, 0.88, 0.95, 0.55);
+    cr.set_line_width(1.0);
+    cr.set_dash(&[2.5, 2.5], 0.0);
+    for indicator in indicators {
+        let x = indicator.x.round() + 0.5;
+        cr.move_to(x, indicator.y_top);
+        cr.line_to(x, indicator.y_bottom);
+    }
+    cr.stroke().ok();
+    cr.restore().ok();
 }
 
 fn track_label_solo_badge_x(show_track_audio_levels: bool) -> f64 {
@@ -4660,6 +5146,11 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Y", "Toggle Slip edit tool"),
         ("U", "Toggle Slide edit tool"),
         ("S", "Toggle solo for selected track"),
+        ("Shift+F", "Create freeze-frame clip from selected clip"),
+        (
+            "Ctrl+Shift+B",
+            "Join selected through-edit boundary into one clip",
+        ),
         ("Escape", "Switch to Select tool"),
         ("Delete / Bksp", "Delete selected clip(s)"),
         (
@@ -4802,6 +5293,41 @@ mod tests {
             second_track_id,
             first_ids,
             second_ids,
+        )
+    }
+
+    fn timeline_state_with_through_edit_track() -> (TimelineState, String) {
+        let mut project = Project::new("Through-edit indicator tests");
+        let video_idx = project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .expect("default project should include a video track");
+
+        let track = &mut project.tracks[video_idx];
+        track.id = "through-edit-track".to_string();
+        track.clips.clear();
+
+        let mut left = Clip::new("camera-a.mov", 1_000_000_000, 0, ClipKind::Video);
+        left.id = "left".to_string();
+        left.source_in = 0;
+        left.source_out = 1_000_000_000;
+        track.add_clip(left);
+
+        let mut right = Clip::new(
+            "camera-a.mov",
+            2_000_000_000,
+            1_000_000_000,
+            ClipKind::Video,
+        );
+        right.id = "right".to_string();
+        right.source_in = 1_000_000_000;
+        right.source_out = 2_000_000_000;
+        track.add_clip(right);
+
+        (
+            TimelineState::new(Rc::new(RefCell::new(project))),
+            "through-edit-track".to_string(),
         )
     }
 
@@ -5139,6 +5665,174 @@ mod tests {
     }
 
     #[test]
+    fn create_freeze_frame_splits_selected_clip_and_inserts_silent_hold() {
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 4_000_000_000)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .expect("video track exists");
+            let clip_a = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == ids[0])
+                .expect("clip A exists");
+            clip_a.source_out = 4_000_000_000;
+        }
+        st.set_single_clip_selection(ids[0].clone(), track_id.clone());
+        st.playhead_ns = 1_000_000_000;
+
+        assert!(st.create_freeze_frame_from_selected_at_playhead(2_000_000_000));
+
+        let proj = st.project.borrow();
+        let track = proj
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .expect("video track exists");
+        let freeze_clip = track
+            .clips
+            .iter()
+            .find(|clip| clip.freeze_frame)
+            .expect("freeze clip should be created");
+        let freeze_clip_id = freeze_clip.id.clone();
+        assert_eq!(freeze_clip.kind, ClipKind::Video);
+        assert_eq!(freeze_clip.timeline_start, 1_000_000_000);
+        assert_eq!(freeze_clip.duration(), 2_000_000_000);
+        assert_eq!(
+            freeze_clip.freeze_frame_hold_duration_ns,
+            Some(2_000_000_000)
+        );
+        assert_eq!(
+            freeze_clip.source_out.saturating_sub(freeze_clip.source_in),
+            1
+        );
+        assert_eq!(freeze_clip.volume, 0.0);
+        assert!(freeze_clip.link_group_id.is_none());
+
+        let clip_a_left = track
+            .clips
+            .iter()
+            .find(|clip| clip.id == ids[0])
+            .expect("left split clip should exist");
+        assert_eq!(clip_a_left.timeline_start, 0);
+        assert_eq!(
+            clip_a_left.source_out.saturating_sub(clip_a_left.source_in),
+            1_000_000_000
+        );
+
+        let clip_b = track
+            .clips
+            .iter()
+            .find(|clip| clip.id == ids[1])
+            .expect("clip B should exist");
+        assert_eq!(clip_b.timeline_start, 6_000_000_000);
+        drop(proj);
+
+        assert_eq!(st.selected_track_id.as_deref(), Some(track_id.as_str()));
+        assert_eq!(
+            st.selected_clip_id.as_deref(),
+            Some(freeze_clip_id.as_str())
+        );
+    }
+
+    #[test]
+    fn create_freeze_frame_is_undoable() {
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 4_000_000_000)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .expect("video track exists");
+            let clip_a = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == ids[0])
+                .expect("clip A exists");
+            clip_a.source_out = 4_000_000_000;
+        }
+        st.set_single_clip_selection(ids[0].clone(), track_id.clone());
+        st.playhead_ns = 1_000_000_000;
+
+        let before = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("video track exists")
+                .clips
+                .clone()
+        };
+        assert!(st.create_freeze_frame_from_selected_at_playhead(2_000_000_000));
+        st.undo();
+        let after = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("video track exists")
+                .clips
+                .clone()
+        };
+
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn create_freeze_frame_clears_copied_transition_metadata() {
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 4_000_000_000)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .expect("video track exists");
+            let clip_a = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == ids[0])
+                .expect("clip A exists");
+            clip_a.source_out = 4_000_000_000;
+            clip_a.transition_after = "cross_dissolve".to_string();
+            clip_a.transition_after_ns = 500_000_000;
+        }
+        st.set_single_clip_selection(ids[0].clone(), track_id.clone());
+        st.playhead_ns = 1_000_000_000;
+
+        assert!(st.create_freeze_frame_from_selected_at_playhead(2_000_000_000));
+
+        let proj = st.project.borrow();
+        let track = proj
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .expect("video track exists");
+        let left_clip = track
+            .clips
+            .iter()
+            .find(|clip| clip.id == ids[0])
+            .expect("left split clip should exist");
+        assert!(left_clip.transition_after.is_empty());
+        assert_eq!(left_clip.transition_after_ns, 0);
+
+        let freeze_clip = track
+            .clips
+            .iter()
+            .find(|clip| clip.freeze_frame)
+            .expect("freeze clip should exist");
+        assert!(freeze_clip.transition_after.is_empty());
+        assert_eq!(freeze_clip.transition_after_ns, 0);
+    }
+
+    #[test]
     fn toggle_clip_selection_clears_removed_link_anchor() {
         let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
             &[("A", 0)],
@@ -5391,5 +6085,304 @@ mod tests {
             clamp_slide_delta(12_000_000, left_bounds, right_bounds),
             6_000_000
         );
+    }
+
+    #[test]
+    fn join_selected_through_edit_merges_with_metadata_and_undo_redo() {
+        let (mut st, track_id) = timeline_state_with_through_edit_track();
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist");
+            for clip in &mut track.clips {
+                if clip.id == "left" || clip.id == "right" {
+                    clip.group_id = Some("group-1".to_string());
+                    clip.link_group_id = Some("link-1".to_string());
+                    clip.brightness = 0.25;
+                    clip.lut_path = Some("/tmp/look.cube".to_string());
+                }
+                if clip.id == "right" {
+                    clip.transition_after = "cross_dissolve".to_string();
+                    clip.transition_after_ns = 250_000_000;
+                }
+            }
+        }
+        st.set_single_clip_selection("right".to_string(), track_id.clone());
+        let before = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist")
+                .clips
+                .clone()
+        };
+
+        assert!(st.can_join_selected_through_edit());
+        assert!(st.join_selected_through_edit());
+        assert_eq!(st.history.undo_description(), Some("Join through edit"));
+
+        {
+            let proj = st.project.borrow();
+            let track = proj
+                .tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist");
+            assert_eq!(track.clips.len(), 1);
+            let merged = &track.clips[0];
+            assert_eq!(merged.id, "left");
+            assert_eq!(merged.source_in, 0);
+            assert_eq!(merged.source_out, 2_000_000_000);
+            assert_eq!(merged.timeline_start, 0);
+            assert_eq!(merged.group_id.as_deref(), Some("group-1"));
+            assert_eq!(merged.link_group_id.as_deref(), Some("link-1"));
+            assert_eq!(merged.brightness, 0.25);
+            assert_eq!(merged.lut_path.as_deref(), Some("/tmp/look.cube"));
+            assert_eq!(merged.transition_after, "cross_dissolve");
+            assert_eq!(merged.transition_after_ns, 250_000_000);
+        }
+        assert_eq!(st.selected_clip_id.as_deref(), Some("left"));
+
+        st.undo();
+        let after_undo = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist")
+                .clips
+                .clone()
+        };
+        assert_eq!(after_undo, before);
+
+        st.redo();
+        let after_redo = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist")
+                .clips
+                .clone()
+        };
+        assert_eq!(after_redo.len(), 1);
+        assert_eq!(after_redo[0].source_out, 2_000_000_000);
+    }
+
+    #[test]
+    fn join_selected_through_edit_requires_matching_metadata() {
+        let (mut st, track_id) = timeline_state_with_through_edit_track();
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist");
+            let right = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == "right")
+                .expect("right clip should exist");
+            right.brightness = 0.5;
+        }
+
+        st.set_single_clip_selection("right".to_string(), track_id.clone());
+        assert!(!st.can_join_selected_through_edit());
+        assert!(!st.join_selected_through_edit());
+        assert!(st.history.undo_description().is_none());
+    }
+
+    #[test]
+    fn join_selected_through_edit_rejects_boundary_with_left_transition_metadata() {
+        let (mut st, track_id) = timeline_state_with_through_edit_track();
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist");
+            let left = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == "left")
+                .expect("left clip should exist");
+            left.transition_after = "cross_dissolve".to_string();
+            left.transition_after_ns = 125_000_000;
+        }
+
+        st.set_single_clip_selection("right".to_string(), track_id);
+        assert!(!st.can_join_selected_through_edit());
+        assert!(!st.join_selected_through_edit());
+    }
+
+    #[test]
+    fn through_edit_metadata_compatible_ignores_segment_timing_and_transition_fields() {
+        let mut left = Clip::new("camera-a.mov", 1_000_000_000, 0, ClipKind::Video);
+        left.id = "left".to_string();
+        left.source_in = 0;
+        left.source_out = 1_000_000_000;
+        left.group_id = Some("group-1".to_string());
+        left.link_group_id = Some("link-1".to_string());
+        left.brightness = 0.25;
+
+        let mut right = left.clone();
+        right.id = "right".to_string();
+        right.source_in = 1_000_000_000;
+        right.source_out = 2_000_000_000;
+        right.timeline_start = 1_000_000_000;
+        right.transition_after = "cross_dissolve".to_string();
+        right.transition_after_ns = 250_000_000;
+
+        assert!(through_edit_metadata_compatible(&left, &right));
+    }
+
+    #[test]
+    fn through_edit_indicator_geometry_updates_with_zoom_scroll_and_row_position() {
+        let (mut st, track_id) = timeline_state_with_through_edit_track();
+        let track = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist")
+                .clone()
+        };
+
+        st.pixels_per_second = 100.0;
+        st.scroll_offset = 0.0;
+        let base = through_edit_indicator_geometry_for_track(
+            &track,
+            &st,
+            RULER_HEIGHT,
+            TRACK_LABEL_WIDTH + 400.0,
+        );
+        assert_eq!(base.len(), 1);
+        assert!((base[0].x - (TRACK_LABEL_WIDTH + 100.0)).abs() < 0.001);
+        assert_eq!(base[0].y_top, RULER_HEIGHT + 5.0);
+        assert_eq!(base[0].y_bottom, RULER_HEIGHT + TRACK_HEIGHT - 5.0);
+
+        st.pixels_per_second = 200.0;
+        let zoomed = through_edit_indicator_geometry_for_track(
+            &track,
+            &st,
+            RULER_HEIGHT,
+            TRACK_LABEL_WIDTH + 400.0,
+        );
+        assert!((zoomed[0].x - (TRACK_LABEL_WIDTH + 200.0)).abs() < 0.001);
+
+        st.scroll_offset = 75.0;
+        let panned = through_edit_indicator_geometry_for_track(
+            &track,
+            &st,
+            RULER_HEIGHT,
+            TRACK_LABEL_WIDTH + 400.0,
+        );
+        assert!((panned[0].x - (TRACK_LABEL_WIDTH + 125.0)).abs() < 0.001);
+
+        let reordered_row = through_edit_indicator_geometry_for_track(
+            &track,
+            &st,
+            RULER_HEIGHT + TRACK_HEIGHT,
+            TRACK_LABEL_WIDTH + 400.0,
+        );
+        assert_eq!(reordered_row[0].y_top, RULER_HEIGHT + TRACK_HEIGHT + 5.0);
+        assert_eq!(
+            reordered_row[0].y_bottom,
+            RULER_HEIGHT + 2.0 * TRACK_HEIGHT - 5.0
+        );
+    }
+
+    #[test]
+    fn through_edit_indicator_geometry_filters_out_offscreen_boundaries() {
+        let (st, track_id) = timeline_state_with_through_edit_track();
+        let track = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist")
+                .clone()
+        };
+
+        let hidden_by_width = through_edit_indicator_geometry_for_track(
+            &track,
+            &st,
+            RULER_HEIGHT,
+            TRACK_LABEL_WIDTH + 90.0,
+        );
+        assert!(hidden_by_width.is_empty());
+
+        let mut st_scrolled = st;
+        st_scrolled.scroll_offset = 250.0;
+        let hidden_by_scroll = through_edit_indicator_geometry_for_track(
+            &track,
+            &st_scrolled,
+            RULER_HEIGHT,
+            TRACK_LABEL_WIDTH + 500.0,
+        );
+        assert!(hidden_by_scroll.is_empty());
+    }
+
+    #[test]
+    fn through_edit_indicator_geometry_hides_selected_boundaries() {
+        let (mut st, track_id) = timeline_state_with_through_edit_track();
+        st.set_single_clip_selection("left".to_string(), track_id.clone());
+        let track = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist")
+                .clone()
+        };
+
+        let indicators = through_edit_indicator_geometry_for_track(
+            &track,
+            &st,
+            RULER_HEIGHT,
+            TRACK_LABEL_WIDTH + 400.0,
+        );
+        assert!(indicators.is_empty());
+    }
+
+    #[test]
+    fn through_edit_indicator_geometry_hides_metadata_incompatible_boundaries() {
+        let (st, track_id) = timeline_state_with_through_edit_track();
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist");
+            let right = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == "right")
+                .expect("right clip should exist");
+            right.brightness = 0.5;
+        }
+        let track = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .expect("through-edit track should exist")
+                .clone()
+        };
+
+        let indicators = through_edit_indicator_geometry_for_track(
+            &track,
+            &st,
+            RULER_HEIGHT,
+            TRACK_LABEL_WIDTH + 400.0,
+        );
+        assert!(indicators.is_empty());
     }
 }

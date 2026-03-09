@@ -47,6 +47,8 @@
 | `E` | Toggle Roll edit tool |
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
+| `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
+| `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
 | `Escape` | Switch to Select tool |
@@ -66,6 +68,7 @@
 | `Ctrl+A` | Select all timeline clips |
 | Drag in empty timeline body | Marquee-select clips intersecting the rectangle |
 | `M` | Add chapter marker at playhead |
+| `Right-click clip` | Open clip context menu with join-through-edit, freeze-frame, link/unlink, grouped timecode-align, and audio sync actions |
 | `Right-click ruler` | Remove nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |
 | `Scroll (vertical)` | Zoom timeline in/out |

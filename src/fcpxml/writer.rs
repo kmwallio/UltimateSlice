@@ -156,6 +156,19 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
             asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
             asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
+            if clip.freeze_frame {
+                asset_clip.push_attribute(("us:freeze-frame", "true"));
+            }
+            if let Some(freeze_source_ns) = clip.freeze_frame_source_ns {
+                asset_clip
+                    .push_attribute(("us:freeze-source-ns", freeze_source_ns.to_string().as_str()));
+            }
+            if let Some(freeze_hold_duration_ns) = clip.freeze_frame_hold_duration_ns {
+                asset_clip.push_attribute((
+                    "us:freeze-hold-duration-ns",
+                    freeze_hold_duration_ns.to_string().as_str(),
+                ));
+            }
             if let Some(ref gid) = clip.group_id {
                 if !gid.is_empty() {
                     asset_clip.push_attribute(("us:group-id", gid.as_str()));
@@ -795,6 +808,9 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:reverse"
+            | "us:freeze-frame"
+            | "us:freeze-source-ns"
+            | "us:freeze-hold-duration-ns"
             | "us:group-id"
             | "us:link-group-id"
             | "us:source-timecode-base-ns"
@@ -920,6 +936,24 @@ mod tests {
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(xml.contains("us:source-timecode-base-ns=\"4000000000\""));
         assert!(xml.contains("start=\"120/24s\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_freeze_frame_attrs() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(1_250_000_000);
+        clip.freeze_frame_hold_duration_ns = Some(3_000_000_000);
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:freeze-frame=\"true\""));
+        assert!(xml.contains("us:freeze-source-ns=\"1250000000\""));
+        assert!(xml.contains("us:freeze-hold-duration-ns=\"3000000000\""));
     }
 
     #[test]

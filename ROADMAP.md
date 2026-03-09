@@ -186,8 +186,16 @@ Tracking docs:
   - [x] Auto-link same-source A/V clip creation on drag-and-drop
   - [x] Optional auto-link A/V mode for source monitor operations (Append/Insert/Overwrite): enabled creates linked pairs (with embedded video-track audio suppression while linked), disabled uses single-clip placement behavior; both retain single-kind fallback when only one matching track kind exists
 - [x] Solo track (play only selected tracks, complement to muted/locked)
-- [ ] Freeze frame (hold single frame for arbitrary duration)
-- [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
+- [x] Freeze frame (hold single frame for arbitrary duration)
+  - [x] Persist freeze-frame clip model fields (enable/source/hold duration) with backward-compatible serialization and helper semantics
+  - [x] Add timeline UI command (keyboard/context/toolbar) to create undoable freeze-frame clips with configurable hold duration
+  - [x] Program Monitor freeze-frame playback: hold a single sampled source frame for resolved freeze duration (including transition/composite timing)
+  - [x] Program Monitor freeze-frame seek reliability: force accurate, non-key-unit decoder seeks for single-frame freeze windows so held-frame preview does not black out
+  - [x] Export freeze-frame parity: ffmpeg output now matches preview hold timing and treats freeze-frame video clips as silent (video-only)
+- [x] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
+  - [x] Model-side detection for join-safe through-edit boundaries (same source, contiguous source/timeline ranges, compatible kind, transition-safe)
+  - [x] Timeline dotted boundary indicators
+  - [x] Join-back edit action
 - [x] Select clips forward/backward from playhead for bulk operations
 - [ ] Clip display options / adjustable per-track height, clip color labels
 

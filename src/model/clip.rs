@@ -166,6 +166,18 @@ pub struct Clip {
     /// indicator on the timeline clip.
     #[serde(default)]
     pub reverse: bool,
+    /// Freeze-frame enabled flag. When enabled for video clips, one source frame is held
+    /// for the timeline duration and audio is suppressed.
+    #[serde(default)]
+    pub freeze_frame: bool,
+    /// Optional source timestamp (ns) used for freeze-frame sampling.
+    /// When unset, `source_in` is used.
+    #[serde(default)]
+    pub freeze_frame_source_ns: Option<u64>,
+    /// Optional explicit timeline hold duration (ns) for freeze-frames.
+    /// When unset, normal speed-based duration semantics are used.
+    #[serde(default)]
+    pub freeze_frame_hold_duration_ns: Option<u64>,
     /// Chroma key enabled flag. Default false.
     #[serde(default)]
     pub chroma_key_enabled: bool,
@@ -268,6 +280,9 @@ impl Clip {
             midtones: 0.0,
             highlights: 0.0,
             reverse: false,
+            freeze_frame: false,
+            freeze_frame_source_ns: None,
+            freeze_frame_hold_duration_ns: None,
             chroma_key_enabled: false,
             chroma_key_color: default_chroma_key_color(),
             chroma_key_tolerance: default_chroma_key_tolerance(),
@@ -304,15 +319,48 @@ impl Clip {
             && self.source_path == peer.source_path
     }
 
-    /// Duration of the clip on the **timeline**, in nanoseconds.
-    /// A 2× speed clip occupies half the wall-clock time; 0.5× occupies double.
-    pub fn duration(&self) -> u64 {
+    pub fn is_freeze_frame(&self) -> bool {
+        self.freeze_frame && self.kind == ClipKind::Video
+    }
+
+    pub fn freeze_frame_source_time_ns(&self) -> Option<u64> {
+        if !self.is_freeze_frame() {
+            return None;
+        }
+        let requested = self.freeze_frame_source_ns.unwrap_or(self.source_in);
+        if self.source_out > self.source_in {
+            Some(requested.clamp(self.source_in, self.source_out.saturating_sub(1)))
+        } else {
+            Some(self.source_in)
+        }
+    }
+
+    pub fn freeze_frame_duration_ns(&self) -> Option<u64> {
+        if !self.is_freeze_frame() {
+            return None;
+        }
+        let _source_time_ns = self.freeze_frame_source_time_ns()?;
+        Some(
+            self.freeze_frame_hold_duration_ns
+                .filter(|duration| *duration > 0)
+                .unwrap_or_else(|| self.playback_duration_from_speed()),
+        )
+    }
+
+    fn playback_duration_from_speed(&self) -> u64 {
         let src = self.source_duration();
         if self.speed > 0.0 {
             (src as f64 / self.speed) as u64
         } else {
             src
         }
+    }
+
+    /// Duration of the clip on the **timeline**, in nanoseconds.
+    /// A 2× speed clip occupies half the wall-clock time; 0.5× occupies double.
+    pub fn duration(&self) -> u64 {
+        self.freeze_frame_duration_ns()
+            .unwrap_or_else(|| self.playback_duration_from_speed())
     }
 
     /// Exclusive end position on the timeline, in nanoseconds
@@ -354,6 +402,9 @@ mod tests {
         assert_eq!(clip.opacity, 1.0);
         assert!(!clip.flip_h);
         assert!(!clip.flip_v);
+        assert!(!clip.freeze_frame);
+        assert!(clip.freeze_frame_source_ns.is_none());
+        assert!(clip.freeze_frame_hold_duration_ns.is_none());
         assert!(clip.lut_path.is_none());
         assert!(clip.group_id.is_none());
         assert!(clip.link_group_id.is_none());
@@ -469,5 +520,74 @@ mod tests {
         clip.reverse = true;
         // Reverse does not change the timeline duration — only playback direction on export
         assert_eq!(clip.duration(), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_freeze_frame_requires_video_clip_kind() {
+        let mut clip = Clip::new("a.wav", 10, 0, ClipKind::Audio);
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(4);
+        clip.freeze_frame_hold_duration_ns = Some(7);
+        assert!(!clip.is_freeze_frame());
+        assert_eq!(clip.freeze_frame_source_time_ns(), None);
+        assert_eq!(clip.freeze_frame_duration_ns(), None);
+    }
+
+    #[test]
+    fn test_freeze_frame_source_defaults_to_source_in() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.source_in = 2_000_000_000;
+        clip.freeze_frame = true;
+        assert_eq!(clip.freeze_frame_source_time_ns(), Some(2_000_000_000));
+    }
+
+    #[test]
+    fn test_freeze_frame_source_is_clamped_to_source_bounds() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.source_in = 2_000_000_000;
+        clip.source_out = 4_000_000_000;
+        clip.freeze_frame = true;
+
+        clip.freeze_frame_source_ns = Some(1_000_000_000);
+        assert_eq!(clip.freeze_frame_source_time_ns(), Some(2_000_000_000));
+
+        clip.freeze_frame_source_ns = Some(9_000_000_000);
+        assert_eq!(clip.freeze_frame_source_time_ns(), Some(3_999_999_999));
+    }
+
+    #[test]
+    fn test_freeze_frame_duration_uses_explicit_hold_duration() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 4.0;
+        clip.freeze_frame = true;
+        clip.freeze_frame_hold_duration_ns = Some(3_000_000_000);
+        assert_eq!(clip.freeze_frame_duration_ns(), Some(3_000_000_000));
+        assert_eq!(clip.duration(), 3_000_000_000);
+    }
+
+    #[test]
+    fn test_freeze_frame_duration_defaults_to_speed_based_duration_when_unset() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 2.0;
+        clip.freeze_frame = true;
+        assert_eq!(clip.freeze_frame_duration_ns(), Some(5_000_000_000));
+        assert_eq!(clip.duration(), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_clip_deserialize_backwards_compatible_freeze_frame_defaults() {
+        let json = r#"{
+            "id":"clip-1",
+            "source_path":"/tmp/source.mp4",
+            "source_in":0,
+            "source_out":100,
+            "timeline_start":0,
+            "label":"source",
+            "kind":"Video"
+        }"#;
+        let clip: Clip = serde_json::from_str(json).expect("clip should deserialize");
+        assert!(!clip.freeze_frame);
+        assert_eq!(clip.freeze_frame_source_ns, None);
+        assert_eq!(clip.freeze_frame_hold_duration_ns, None);
     }
 }

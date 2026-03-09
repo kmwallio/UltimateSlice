@@ -68,7 +68,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 
 - The program monitor uses a GStreamer **compositor** pipeline that layers all active video tracks simultaneously at the playhead position.
 - Each active clip gets its own decoder branch with per-clip effects, connected to the compositor with correct z-ordering (higher tracks render on top).
-- Audio from all active video clips is mixed through an **audiomixer** element; audio-only tracks use a separate playbin.
+- Audio from active video clips is mixed through an **audiomixer** element (except freeze-frame video holds, which are intentionally silent); audio-only tracks use a separate playbin.
 - Program Monitor shows a **master stereo meter** (L/R), updated from GStreamer `level` elements.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
 - Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
@@ -76,6 +76,8 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
 - **Transitions** (cross-dissolve, fade-to-black, wipe-right, wipe-left) are previewed in real time during both playback and scrubbing, matching the FFmpeg `xfade` export output. Dissolve and fade transitions animate compositor pad alpha; wipe transitions use videocrop animation on the incoming clip to progressively reveal it.
+- Freeze-frame clips are rendered as true video holds: Program Monitor samples the configured freeze source frame and holds that frame for the clip's resolved freeze duration during playback and scrubbing.
+- Freeze-frame decoder seeks use accurate (non-key-unit) frame selection for the hold sample, preventing black-frame preview failures on long-GOP media.
 - Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.
 - If optional denoise filters are unavailable in your GStreamer runtime, Program Monitor still applies crop/scale/position transforms.
 - Program Monitor normalizes preview output to square pixels (`PAR 1:1`) so 21:9/ultra-wide sources don't keep aspect-ratio bars after zoom scaling.

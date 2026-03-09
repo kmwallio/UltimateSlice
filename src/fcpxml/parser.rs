@@ -787,6 +787,15 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:reverse") {
                 clip.reverse = v.parse().unwrap_or(false);
             }
+            if let Some(v) = attrs.get("us:freeze-frame") {
+                clip.freeze_frame = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:freeze-source-ns") {
+                clip.freeze_frame_source_ns = v.parse().ok();
+            }
+            if let Some(v) = attrs.get("us:freeze-hold-duration-ns") {
+                clip.freeze_frame_hold_duration_ns = v.parse().ok();
+            }
             if let Some(v) = attrs.get("us:group-id") {
                 clip.group_id = if v.is_empty() { None } else { Some(v.clone()) };
             }
@@ -1062,6 +1071,9 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:reverse"
+            | "us:freeze-frame"
+            | "us:freeze-source-ns"
+            | "us:freeze-hold-duration-ns"
             | "us:group-id"
             | "us:link-group-id"
             | "us:source-timecode-base-ns"
@@ -1729,7 +1741,9 @@ mod tests {
             <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s"
                         name="footage" us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
                         us:brightness="0.5" us:contrast="1.2" us:saturation="0.8"
-                        us:opacity="0.9" us:speed="2.0"/>
+                        us:opacity="0.9" us:speed="2.0"
+                        us:freeze-frame="true" us:freeze-source-ns="1200000000"
+                        us:freeze-hold-duration-ns="3000000000"/>
           </spine>
         </sequence>
       </project>
@@ -1744,6 +1758,9 @@ mod tests {
         assert!((clip.saturation - 0.8).abs() < 1e-5);
         assert!((clip.opacity - 0.9).abs() < 1e-5);
         assert!((clip.speed - 2.0).abs() < 1e-5);
+        assert!(clip.freeze_frame);
+        assert_eq!(clip.freeze_frame_source_ns, Some(1_200_000_000));
+        assert_eq!(clip.freeze_frame_hold_duration_ns, Some(3_000_000_000));
     }
 
     #[test]

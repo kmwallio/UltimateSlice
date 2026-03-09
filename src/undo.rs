@@ -528,6 +528,33 @@ impl EditCommand for SplitClipCommand {
     }
 }
 
+/// Join two through-edit clip segments back into a single clip.
+pub struct JoinThroughEditCommand {
+    pub track_id: String,
+    pub old_clips: Vec<Clip>,
+    pub new_clips: Vec<Clip>,
+}
+
+impl EditCommand for JoinThroughEditCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.clips = self.new_clips.clone();
+        }
+        project.dirty = true;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.clips = self.old_clips.clone();
+        }
+        project.dirty = true;
+    }
+
+    fn description(&self) -> &str {
+        "Join through edit"
+    }
+}
+
 /// Set color correction on a clip (brightness/contrast/saturation)
 #[allow(dead_code)]
 pub struct SetClipColorCommand {
@@ -1041,6 +1068,55 @@ mod tests {
         assert_eq!(track.clips.len(), 1);
         assert_eq!(track.clips[0].id, "ORIG");
         assert_eq!(track.clips[0].source_out, original_clip.source_out);
+    }
+
+    #[test]
+    fn test_join_through_edit_command() {
+        let mut project = Project::new("Test");
+        let mut track = Track::new_video("V1");
+        let track_id = track.id.clone();
+
+        let mut left = Clip::new("file.mp4", 10, 0, ClipKind::Video);
+        left.id = "L".to_string();
+        left.source_in = 0;
+        left.source_out = 10;
+        left.group_id = Some("g1".to_string());
+        left.link_group_id = Some("l1".to_string());
+        left.brightness = 0.2;
+        let mut right = left.clone();
+        right.id = "R".to_string();
+        right.source_in = 10;
+        right.source_out = 20;
+        right.timeline_start = 10;
+        right.transition_after = "cross_dissolve".to_string();
+        right.transition_after_ns = 500;
+        track.add_clip(left.clone());
+        track.add_clip(right.clone());
+        project.tracks.push(track);
+
+        let old_clips = vec![left.clone(), right.clone()];
+        let mut merged = left.clone();
+        merged.source_out = right.source_out;
+        merged.transition_after = right.transition_after.clone();
+        merged.transition_after_ns = right.transition_after_ns;
+        let new_clips = vec![merged.clone()];
+
+        let cmd = JoinThroughEditCommand {
+            track_id: track_id.clone(),
+            old_clips,
+            new_clips,
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0], merged);
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert_eq!(track.clips.len(), 2);
+        assert_eq!(track.clips[0], left);
+        assert_eq!(track.clips[1], right);
     }
 
     #[test]

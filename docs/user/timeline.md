@@ -91,6 +91,22 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Paste attributes (`Ctrl+Shift+V`)** applies copied clip attributes (color/effects/audio/transform/title settings) onto the currently selected clip.
 - Copy/paste currently operates on a single selected clip.
 
+### Freeze Frame (`Shift+F`)
+
+- Select a **video** clip and position the playhead on that clip, then press **Shift+F**.
+- UltimateSlice opens a hold-duration prompt and creates a new freeze-frame clip at the playhead on the same track.
+- The new freeze clip is **video-only and silent** by default, and stores freeze metadata for save/load/export pipelines.
+- If the playhead is inside the selected clip, the source clip is split and downstream material on that track is shifted to make room.
+- Also available via right-click clip context menu (**Create Freeze Frame…**) and the timeline track toolbar button (**❄ Freeze Frame…**).
+
+### Join Through Edit (`Ctrl+Shift+B`)
+
+- Select one side of a join-safe through-edit cut (or select both clips), then press **Ctrl+Shift+B**.
+- UltimateSlice merges the two adjacent segments back into a single clip when the boundary is through-edit-safe and clip metadata/effect settings are compatible.
+- The merged clip keeps the left segment identity/timing and carries forward the right segment's outgoing transition metadata (if any).
+- Join Through Edit is unavailable when metadata/effect settings have diverged between the two segments or when the selection resolves to multiple candidate boundaries.
+- Also available from the right-click clip context menu as **Join Through Edit**.
+
 ### Multi-Select (staged rollout)
 
 - **Shift+Click** adds a range from the anchor to the clicked clip:
@@ -162,6 +178,8 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
 | `S` | Toggle solo for selected track |
+| `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
+| `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (from source monitor) |
 | `.` | Overwrite at playhead (from source monitor) |
 | `Escape` | Switch to Select tool |
@@ -176,7 +194,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
-| `Right-click clip` | Open clip context menu with link/unlink, grouped timecode-align, and audio sync actions |
+| `Right-click clip` | Open clip context menu with join-through-edit, freeze-frame, link/unlink, grouped timecode-align, and audio sync actions |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |
@@ -243,6 +261,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Audio clips show a normalised waveform.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
 - Selected clips have a yellow highlight border.
+- Adjacent join-safe through-edits (same source with contiguous source/timeline ranges, no boundary transition, and compatible clip metadata/effects) are marked with a subtle dotted line at the cut on the track row.
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.
 - Linked clips show a `LINK` badge whenever they belong to a clip link group.
 - Non-primary linked peers in the current linked selection show a cyan inset border.

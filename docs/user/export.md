@@ -84,7 +84,7 @@ Export honors Timeline crossfade preferences (set in Preferences → Timeline, o
 When enabled, export applies automatic fades at adjacent same-track audio edit points for:
 
 - clips on non-muted audio tracks
-- embedded audio in eligible video clips (when embedded audio is not suppressed by linked audio peers and audio is present)
+- embedded audio in eligible video clips (when embedded audio is not suppressed by linked audio peers, clip audio is present, and the clip is not a freeze-frame hold)
 
 Fade lengths are clamped safely for very short clips and overlap boundaries so exports remain stable.
 
@@ -127,11 +127,17 @@ Clips with a speed multiplier are exported correctly:
 
 For reversed clips, export applies `reverse`/`areverse` before speed scaling so both video and audio are rendered backward.
 
+## Freeze-Frame Clips
+
+- Freeze-frame clips export as video-only holds: ffmpeg samples the resolved freeze source frame and clones it for the resolved hold duration.
+- Freeze-frame timing in export is aligned with Program Monitor preview so freeze durations and transition overlap timing match.
+- Embedded video-track audio is intentionally omitted for freeze-frame clips (silent hold behavior).
+
 ## Notes
 
 - Export requires **ffmpeg** to be installed and on `$PATH`.
 - All video tracks are processed in timeline order, with letterbox/pillarbox padding applied to each clip.
 - Secondary-track overlays keep transparent padding when zoomed out and honor per-clip opacity, so layered composites export closer to Program Monitor preview.
 - Overlay clips positioned near frame edges (where the PIP extends beyond the output boundary) are correctly clipped to match the preview — the export pre-crops overflow before padding so the visible portion and position match exactly.
-- Audio is mixed from all non-muted audio tracks plus embedded audio in video clips.
+- Audio is mixed from all non-muted audio tracks plus eligible embedded audio in video clips; freeze-frame video clips do not contribute embedded audio.
 - Export runs in a background thread; the UI remains responsive.

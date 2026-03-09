@@ -274,10 +274,7 @@ fn build_source_clips_for_plan(
             if target.mute_embedded_audio {
                 clip.volume = 0.0;
             }
-            (
-                target.track_index,
-                clip,
-            )
+            (target.track_index, clip)
         })
         .collect()
 }
@@ -668,7 +665,8 @@ mod tests {
             None,
         ));
 
-        let insert_plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
+        let insert_plan =
+            build_source_placement_plan_by_track_id(&project, None, source_info, true);
         let insert_link_group_id = insert_plan
             .link_group_id
             .clone()
@@ -2972,7 +2970,8 @@ pub fn build_window(
             let magnetic_mode = ts.magnetic_mode;
             let active_tid = ts.selected_track_id.clone();
             drop(ts);
-            let source_monitor_auto_link_av = preferences_state.borrow().source_monitor_auto_link_av;
+            let source_monitor_auto_link_av =
+                preferences_state.borrow().source_monitor_auto_link_av;
 
             {
                 let mut proj = project.borrow_mut();
@@ -3034,7 +3033,8 @@ pub fn build_window(
             let playhead = ts.playhead_ns;
             let active_tid = ts.selected_track_id.clone();
             drop(ts);
-            let source_monitor_auto_link_av = preferences_state.borrow().source_monitor_auto_link_av;
+            let source_monitor_auto_link_av =
+                preferences_state.borrow().source_monitor_auto_link_av;
 
             let clip_duration = out_ns.saturating_sub(in_ns);
             if clip_duration == 0 {
@@ -3125,7 +3125,8 @@ pub fn build_window(
             let playhead = ts.playhead_ns;
             let active_tid = ts.selected_track_id.clone();
             drop(ts);
-            let source_monitor_auto_link_av = preferences_state.borrow().source_monitor_auto_link_av;
+            let source_monitor_auto_link_av =
+                preferences_state.borrow().source_monitor_auto_link_av;
 
             let clip_duration = out_ns.saturating_sub(in_ns);
             if clip_duration == 0 {
@@ -3452,6 +3453,9 @@ pub fn build_window(
                             title_y: c.title_y,
                             speed: c.speed,
                             reverse: c.reverse,
+                            freeze_frame: c.freeze_frame,
+                            freeze_frame_source_ns: c.freeze_frame_source_ns,
+                            freeze_frame_hold_duration_ns: c.freeze_frame_hold_duration_ns,
                             is_audio_only: audio_only,
                             track_index: t_idx,
                             transition_after: c.transition_after.clone(),
@@ -3464,7 +3468,8 @@ pub fn build_window(
                             shadows: c.shadows as f64,
                             midtones: c.midtones as f64,
                             highlights: c.highlights as f64,
-                            has_audio: !suppress_embedded_audio_ids.contains(&c.id),
+                            has_audio: !c.is_freeze_frame()
+                                && !suppress_embedded_audio_ids.contains(&c.id),
                             chroma_key_enabled: c.chroma_key_enabled,
                             chroma_key_color: c.chroma_key_color,
                             chroma_key_tolerance: c.chroma_key_tolerance,
@@ -4847,7 +4852,8 @@ fn handle_mcp_command(
             reply,
         } => {
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
-            let source_monitor_auto_link_av = preferences_state.borrow().source_monitor_auto_link_av;
+            let source_monitor_auto_link_av =
+                preferences_state.borrow().source_monitor_auto_link_av;
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
@@ -6011,7 +6017,8 @@ fn handle_mcp_command(
             }
             let playhead = timeline_state.borrow().playhead_ns;
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
-            let source_monitor_auto_link_av = preferences_state.borrow().source_monitor_auto_link_av;
+            let source_monitor_auto_link_av =
+                preferences_state.borrow().source_monitor_auto_link_av;
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
@@ -6019,13 +6026,12 @@ fn handle_mcp_command(
             };
             let result = {
                 let mut proj = project.borrow_mut();
-                let placement_plan =
-                    build_source_placement_plan_by_track_index(
-                        &proj,
-                        track_index,
-                        source_info,
-                        source_monitor_auto_link_av,
-                    );
+                let placement_plan = build_source_placement_plan_by_track_index(
+                    &proj,
+                    track_index,
+                    source_info,
+                    source_monitor_auto_link_av,
+                );
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let mut created_clip_ids: Vec<String> = Vec::new();
                 let magnetic_mode_for_placement =
@@ -6114,7 +6120,8 @@ fn handle_mcp_command(
             }
             let playhead = timeline_state.borrow().playhead_ns;
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
-            let source_monitor_auto_link_av = preferences_state.borrow().source_monitor_auto_link_av;
+            let source_monitor_auto_link_av =
+                preferences_state.borrow().source_monitor_auto_link_av;
             let range_start = playhead;
             let range_end = playhead + clip_duration;
             let source_info = {
@@ -6124,13 +6131,12 @@ fn handle_mcp_command(
             };
             let result = {
                 let mut proj = project.borrow_mut();
-                let placement_plan =
-                    build_source_placement_plan_by_track_index(
-                        &proj,
-                        track_index,
-                        source_info,
-                        source_monitor_auto_link_av,
-                    );
+                let placement_plan = build_source_placement_plan_by_track_index(
+                    &proj,
+                    track_index,
+                    source_info,
+                    source_monitor_auto_link_av,
+                );
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let mut created_clip_ids: Vec<String> = Vec::new();
                 let magnetic_mode_for_placement =

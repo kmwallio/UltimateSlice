@@ -96,6 +96,12 @@ pub fn export_project(
     } else {
         options.output_height
     };
+    let frame_duration_s = if project.frame_rate.numerator > 0 && project.frame_rate.denominator > 0
+    {
+        project.frame_rate.denominator as f64 / project.frame_rate.numerator as f64
+    } else {
+        1.0 / 30.0
+    };
 
     // Primary video track (first active video track) — forms the base concat sequence.
     // Secondary active video tracks are composited on top with overlay.
@@ -183,8 +189,7 @@ pub fn export_project(
 
     // Inputs: primary video clips (0..primary_clips.len())
     for clip in &primary_clips {
-        let in_s = clip.source_in as f64 / 1_000_000_000.0;
-        let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
+        let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
         cmd.arg("-ss")
             .arg(format!("{in_s:.6}"))
             .arg("-t")
@@ -195,8 +200,7 @@ pub fn export_project(
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
     for clip in &secondary_clips_flat {
-        let in_s = clip.source_in as f64 / 1_000_000_000.0;
-        let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
+        let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
         cmd.arg("-ss")
             .arg(format!("{in_s:.6}"))
             .arg("-t")
@@ -230,7 +234,7 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
-        let speed_filter = build_speed_filter(clip);
+        let speed_filter = build_timing_filter(clip, frame_duration_s);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
@@ -329,7 +333,7 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
-        let speed_filter = build_speed_filter(clip);
+        let speed_filter = build_timing_filter(clip, frame_duration_s);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let rotate_filter = build_rotation_filter(clip, true);
@@ -364,6 +368,7 @@ pub fn export_project(
             let mut primary_embedded_audio_clips = Vec::new();
             for clip in &primary_clips {
                 if clip.kind == ClipKind::Video
+                    && !clip.is_freeze_frame()
                     && !has_linked_audio_peer(clip, &audio_clips)
                     && !uses_bg_removal_path(clip)
                     && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -379,6 +384,7 @@ pub fn export_project(
                 let mut secondary_embedded_audio_clips = Vec::new();
                 for clip in track_clips {
                     if clip.kind == ClipKind::Video
+                        && !clip.is_freeze_frame()
                         && !has_linked_audio_peer(clip, &audio_clips)
                         && !uses_bg_removal_path(clip)
                         && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -405,6 +411,7 @@ pub fn export_project(
     // Embedded audio from primary video clips, with per-clip volume scaling
     for (i, clip) in primary_clips.iter().enumerate() {
         if clip.kind == ClipKind::Video
+            && !clip.is_freeze_frame()
             && !has_linked_audio_peer(clip, &audio_clips)
             && !uses_bg_removal_path(clip)
             && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -427,6 +434,7 @@ pub fn export_project(
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         if clip.kind == ClipKind::Video
+            && !clip.is_freeze_frame()
             && !has_linked_audio_peer(clip, &audio_clips)
             && !uses_bg_removal_path(clip)
             && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -696,7 +704,32 @@ fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
+fn video_input_seek_and_duration(
+    clip: &crate::model::clip::Clip,
+    frame_duration_s: f64,
+) -> (f64, f64) {
+    if clip.is_freeze_frame() {
+        let source_ns = clip.freeze_frame_source_time_ns().unwrap_or(clip.source_in);
+        return (
+            source_ns as f64 / 1_000_000_000.0,
+            frame_duration_s.max(0.001),
+        );
+    }
+    (
+        clip.source_in as f64 / 1_000_000_000.0,
+        clip.source_duration() as f64 / 1_000_000_000.0,
+    )
+}
+
+fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -> String {
+    if clip.is_freeze_frame() {
+        let hold_s = clip.duration() as f64 / 1_000_000_000.0;
+        let frame_s = frame_duration_s.max(0.001);
+        let pad_s = (hold_s - frame_s).max(0.0);
+        return format!(
+            ",trim=duration={frame_s:.6},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={pad_s:.6},trim=duration={hold_s:.6},setpts=PTS-STARTPTS"
+        );
+    }
     let has_speed = (clip.speed - 1.0).abs() > 0.001;
     match (clip.reverse, has_speed) {
         (false, false) => String::new(),
@@ -1105,9 +1138,10 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_crossfade_curve_name, build_audio_crossfade_filters, compute_clip_audio_fades,
-        estimate_export_size_bytes, has_linked_audio_peer, parse_progress_line, AudioCodec,
-        ClipAudioFade, ExportOptions, VideoCodec,
+        audio_crossfade_curve_name, build_audio_crossfade_filters, build_timing_filter,
+        compute_clip_audio_fades, estimate_export_size_bytes, has_linked_audio_peer,
+        parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
+        ExportOptions, VideoCodec,
     };
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
@@ -1168,6 +1202,17 @@ mod tests {
             duration_ns,
             timeline_start,
             ClipKind::Audio,
+        );
+        clip.id = id.to_string();
+        clip
+    }
+
+    fn make_video_clip(id: &str, timeline_start: u64, source_duration_ns: u64) -> Clip {
+        let mut clip = Clip::new(
+            "/tmp/video.mp4",
+            source_duration_ns,
+            timeline_start,
+            ClipKind::Video,
         );
         clip.id = id.to_string();
         clip
@@ -1286,5 +1331,31 @@ mod tests {
         let linear = build_audio_crossfade_filters(&clip, fades, "tri");
         assert!(equal_power.contains("curve=qsin"));
         assert!(linear.contains("curve=tri"));
+    }
+
+    #[test]
+    fn freeze_frame_video_input_uses_freeze_source_and_single_frame_duration() {
+        let mut clip = make_video_clip("freeze", 0, 6_000_000_000);
+        clip.source_in = 1_000_000_000;
+        clip.source_out = 6_000_000_000;
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(4_500_000_000);
+        clip.freeze_frame_hold_duration_ns = Some(3_000_000_000);
+
+        let (seek_s, input_s) = video_input_seek_and_duration(&clip, 1.0 / 30.0);
+        assert!((seek_s - 4.5).abs() < 1e-6);
+        assert!((input_s - (1.0 / 30.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn freeze_frame_timing_filter_holds_single_frame_for_clip_duration() {
+        let mut clip = make_video_clip("freeze", 0, 6_000_000_000);
+        clip.freeze_frame = true;
+        clip.freeze_frame_hold_duration_ns = Some(2_500_000_000);
+
+        let filter = build_timing_filter(&clip, 1.0 / 25.0);
+        assert!(filter.contains("trim=duration=0.040000"));
+        assert!(filter.contains("tpad=stop_mode=clone:stop_duration=2.460000"));
+        assert!(filter.contains("trim=duration=2.500000"));
     }
 }
