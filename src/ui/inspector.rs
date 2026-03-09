@@ -98,6 +98,12 @@ pub struct InspectorView {
     pub chroma_custom_color_row: GBox,
     pub chroma_tolerance_slider: Scale,
     pub chroma_softness_slider: Scale,
+    // Background removal
+    pub bg_removal_section: GBox,
+    pub bg_removal_enable: CheckButton,
+    pub bg_removal_threshold_slider: Scale,
+    /// Set to `true` when the ONNX model is present; controls section visibility.
+    pub bg_removal_model_available: Cell<bool>,
 }
 
 impl InspectorView {
@@ -136,6 +142,9 @@ impl InspectorView {
                 self.speed_section_box.set_visible(true);
                 self.lut_section_box.set_visible(is_video || is_image);
                 self.chroma_key_section.set_visible(is_video || is_image);
+                self.bg_removal_section.set_visible(
+                    (is_video || is_image) && self.bg_removal_model_available.get(),
+                );
 
                 self.name_entry.set_text(&c.label);
                 self.path_value.set_text(
@@ -217,6 +226,10 @@ impl InspectorView {
                             .set_rgba(&gdk4::RGBA::new(r, g, b, 1.0));
                     }
                 }
+                // Background Removal
+                self.bg_removal_enable.set_active(c.bg_removal_enabled);
+                self.bg_removal_threshold_slider
+                    .set_value(c.bg_removal_threshold);
             }
             None => {
                 self.name_entry.set_text("");
@@ -265,6 +278,9 @@ impl InspectorView {
                 self.chroma_custom_color_row.set_visible(false);
                 self.chroma_tolerance_slider.set_value(0.3);
                 self.chroma_softness_slider.set_value(0.1);
+                // Background Removal defaults
+                self.bg_removal_enable.set_active(false);
+                self.bg_removal_threshold_slider.set_value(0.5);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -292,6 +308,7 @@ pub fn build_inspector(
     on_reverse_changed: impl Fn(bool) + 'static,
     on_chroma_key_changed: impl Fn() + 'static,
     on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
+    on_bg_removal_changed: impl Fn() + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(260);
@@ -506,6 +523,29 @@ pub fn build_inspector(
     chroma_softness_slider.set_digits(2);
     chroma_softness_slider.add_mark(0.1, gtk4::PositionType::Bottom, None);
     chroma_key_inner.append(&chroma_softness_slider);
+
+    // ── Background Removal section (Video + Image only) ──────────────────────
+    let bg_removal_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&bg_removal_section);
+
+    bg_removal_section.append(&Separator::new(Orientation::Horizontal));
+    let bg_removal_expander = Expander::new(Some("Background Removal"));
+    bg_removal_expander.set_expanded(false);
+    bg_removal_section.append(&bg_removal_expander);
+    let bg_removal_inner = GBox::new(Orientation::Vertical, 8);
+    bg_removal_expander.set_child(Some(&bg_removal_inner));
+
+    let bg_removal_enable = CheckButton::with_label("Enable Background Removal");
+    bg_removal_inner.append(&bg_removal_enable);
+
+    row_label(&bg_removal_inner, "Threshold");
+    let bg_removal_threshold_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    bg_removal_threshold_slider.set_value(0.5);
+    bg_removal_threshold_slider.set_draw_value(true);
+    bg_removal_threshold_slider.set_digits(2);
+    bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    bg_removal_inner.append(&bg_removal_threshold_slider);
 
     // ── Audio section (Video + Audio only) ───────────────────────────────────
     let audio_section = GBox::new(Orientation::Vertical, 8);
@@ -793,6 +833,7 @@ pub fn build_inspector(
     let on_chroma_key_changed: Rc<dyn Fn()> = Rc::new(on_chroma_key_changed);
     let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> =
         Rc::new(on_chroma_key_slider_changed);
+    let on_bg_removal_changed: Rc<dyn Fn()> = Rc::new(on_bg_removal_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -1936,6 +1977,60 @@ pub fn build_inspector(
         });
     }
 
+    // ── Background Removal signals ───────────────────────────────────────────
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_bg_removal_changed = on_bg_removal_changed.clone();
+        bg_removal_enable.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.bg_removal_enabled = enabled;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_bg_removal_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_bg_removal_changed = on_bg_removal_changed.clone();
+        bg_removal_threshold_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = s.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.bg_removal_threshold = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_bg_removal_changed();
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -1992,6 +2087,10 @@ pub fn build_inspector(
         chroma_custom_color_row,
         chroma_tolerance_slider,
         chroma_softness_slider,
+        bg_removal_section,
+        bg_removal_enable,
+        bg_removal_threshold_slider,
+        bg_removal_model_available: Cell::new(false),
     });
 
     (vbox, view)

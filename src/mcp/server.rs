@@ -408,6 +408,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_bg_removal",
+            "description": "Set AI background removal settings for a clip by id. Uses offline ONNX segmentation (MODNet) to produce an alpha-channel version of the clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":   { "type": "string",  "description": "Clip id (from list_clips)." },
+                    "enabled":   { "type": "boolean", "description": "Enable/disable background removal." },
+                    "threshold": { "type": "number",  "description": "Alpha threshold: 0.0 (aggressive) to 1.0 (conservative). Default 0.5." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_project_title",
             "description": "Rename the project.",
             "inputSchema": {
@@ -855,6 +868,13 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             color: args.get("color").and_then(|v| v.as_u64()).map(|v| v as u32),
             tolerance: args.get("tolerance").and_then(|v| v.as_f64()),
             softness: args.get("softness").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+
+        "set_clip_bg_removal" => McpCommand::SetClipBgRemoval {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()),
+            threshold: args.get("threshold").and_then(|v| v.as_f64()),
             reply: tx,
         },
 

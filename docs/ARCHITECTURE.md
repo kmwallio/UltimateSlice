@@ -237,6 +237,8 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 | `thiserror` | `1` | error types |
 | `log` + `env_logger` | latest | logging |
 | `rustfft` | `6` | FFT for audio cross-correlation sync |
+| `ort` | `2.0.0-rc.12` | ONNX Runtime for AI background removal |
+| `ndarray` | `0.17` | N-dimensional array for ONNX tensor I/O |
 
 **Do not upgrade gstreamer without also upgrading gtk4/gdk4/glib to the matching glib version.**
 

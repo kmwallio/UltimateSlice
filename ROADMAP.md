@@ -336,9 +336,11 @@ Tracking docs:
 - [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Transition effects (fade to black, wipe right, wipe left)
+- [x] Transition preview matching — program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions using compositor alpha animation and videocrop, matching FFmpeg `xfade` export output
 
 ### Visual Effects
 - [x] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls; GStreamer `alpha` element in preview, ffmpeg `colorkey` filter in export; Inspector panel with enable toggle, green/blue/custom color presets, tolerance and edge-softness sliders
+- [x] AI background removal — offline ONNX Runtime inference (MODNet segmentation model) produces alpha-channel VP9 WebM files; BgRemovalCache with 2-thread worker pool; preview and export use pre-processed result; Inspector toggle + threshold slider; MCP `set_clip_bg_removal` tool; FCPXML persistence
 - [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
 - [ ] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
 - [ ] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
@@ -469,6 +471,7 @@ Tracking docs:
 - [ ] Waveform sync (align external audio to camera reference audio by waveform analysis)
 
 ### AI & Automation
+- [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency
 - [ ] Speech-to-Text: Automatic subtitle generation and transcription
 - [ ] AI Scene Cut Detection for long source files
 - [ ] Smart Collections based on metadata (keywords, resolution, frame rate)

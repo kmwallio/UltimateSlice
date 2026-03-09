@@ -76,6 +76,26 @@ struct ThreePointParams {
     white_b: f64,
 }
 
+/// Role of a clip within a transition overlap region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TransitionRole {
+    /// The clip is fading out (clip A in A→B transition).
+    Outgoing,
+    /// The clip is fading in (clip B in A→B transition).
+    Incoming,
+}
+
+/// Per-slot transition state computed from timeline position.
+#[derive(Debug, Clone)]
+struct TransitionState {
+    /// Transition kind (e.g. "cross_dissolve", "fade_to_black", "wipe_right", "wipe_left").
+    kind: String,
+    /// Progress through the transition: 0.0 = start, 1.0 = end.
+    progress: f64,
+    /// Whether this slot's clip is the outgoing or incoming clip.
+    role: TransitionRole,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
     pub id: String,
@@ -125,10 +145,8 @@ pub struct ProgramClip {
     /// Track index — higher index clips (B-roll, overlays) take priority in preview.
     pub track_index: usize,
     /// Transition to next clip on same track (e.g. "cross_dissolve").
-    #[allow(dead_code)]
     pub transition_after: String,
     /// Transition duration in nanoseconds.
-    #[allow(dead_code)]
     pub transition_after_ns: u64,
     /// LUT file path for color grading (used for proxy lookup when proxy mode is enabled).
     pub lut_path: Option<String>,
@@ -156,6 +174,10 @@ pub struct ProgramClip {
     pub chroma_key_tolerance: f32,
     /// Chroma key edge softness: 0.0 (hard) to 1.0 (soft).
     pub chroma_key_softness: f32,
+    /// AI background removal enabled.
+    pub bg_removal_enabled: bool,
+    /// AI background removal threshold: 0.0 (aggressive) to 1.0 (conservative).
+    pub bg_removal_threshold: f64,
 }
 
 impl ProgramClip {
@@ -273,6 +295,11 @@ struct VideoSlot {
     is_prerender_slot: bool,
     /// Timeline start of the prerender segment for synthetic prerender slots.
     prerender_segment_start_ns: Option<u64>,
+    /// Nonzero when this slot was created for a clip entering early via a
+    /// transition overlap.  The value equals the preceding clip's
+    /// `transition_after_ns` and is added to timeline_pos when computing
+    /// source-file seek positions.
+    transition_enter_offset_ns: u64,
 }
 
 /// Result of `compute_reuse_plan()`: whether all current decoder slots can be
@@ -351,6 +378,8 @@ pub struct ProgramPlayer {
     /// Prewarm upcoming boundaries earlier during active playback.
     background_prerender: bool,
     proxy_paths: HashMap<String, String>,
+    /// Bg-removed file paths: source_path → bg_removed file path.
+    bg_removal_paths: HashMap<String, String>,
     /// Cache for per-path audio-stream probe results.
     audio_stream_probe_cache: HashMap<String, bool>,
     /// GStreamer `level` element on audiomixer output for metering.
@@ -892,6 +921,7 @@ impl ProgramPlayer {
                 realtime_preview: false,
                 background_prerender: false,
                 proxy_paths: HashMap::new(),
+                bg_removal_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
                 level_element_audio,
@@ -1030,6 +1060,13 @@ impl ProgramPlayer {
     pub fn update_proxy_paths(&mut self, paths: HashMap<String, String>) {
         if self.proxy_paths != paths {
             self.proxy_paths = paths;
+            self.prewarmed_boundary_ns = None;
+        }
+    }
+
+    pub fn update_bg_removal_paths(&mut self, paths: HashMap<String, String>) {
+        if self.bg_removal_paths != paths {
+            self.bg_removal_paths = paths;
             self.prewarmed_boundary_ns = None;
         }
     }
@@ -1439,6 +1476,7 @@ impl ProgramPlayer {
             fast_path = true;
             self.current_idx = self.clip_at(timeline_pos_ns);
             let needs_async = self.seek_slots_in_place(timeline_pos_ns);
+            self.apply_transition_effects(timeline_pos_ns);
             self.sync_audio_to(timeline_pos_ns);
             log::info!(
                 "seek: done timeline_pos={} fast_path={} needs_async={} slots={} elapsed_ms={}",
@@ -1454,6 +1492,7 @@ impl ProgramPlayer {
         // Full rebuild: needed when the set of active clips has changed (e.g.
         // crossing a clip boundary), on cold start, or when resuming from playing.
         self.rebuild_pipeline_at(timeline_pos_ns);
+        self.apply_transition_effects(timeline_pos_ns);
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
         let needs_async = if resume_playback {
@@ -1854,6 +1893,9 @@ impl ProgramPlayer {
 
         // Update current_idx to highest-priority active clip.
         self.current_idx = self.clip_at(new_pos);
+
+        // Animate transition effects (alpha, crop) for active transition overlaps.
+        self.apply_transition_effects(new_pos);
 
         // Advance audio pipeline across clip boundaries.
         self.poll_audio(new_pos);
@@ -2400,6 +2442,9 @@ impl ProgramPlayer {
     }
 
     /// Return ALL clip indices active at the given timeline position, sorted by track_index.
+    /// Includes clips that are entering early due to a transition overlap: when clip A
+    /// (active) has `transition_after_ns > 0`, the next same-track clip B is included
+    /// during the window `[A.end - A.transition_after_ns, A.end)`.
     fn clips_active_at(&self, timeline_pos_ns: u64) -> Vec<usize> {
         let mut active: Vec<usize> = self
             .clips
@@ -2410,6 +2455,31 @@ impl ProgramPlayer {
             })
             .map(|(i, _)| i)
             .collect();
+        // Include clips entering via transition overlap from a preceding clip.
+        for i in 0..self.clips.len() {
+            if active.contains(&i) {
+                continue;
+            }
+            let clip = &self.clips[i];
+            // Find preceding clip on same track with an active transition.
+            let prev = self
+                .clips
+                .iter()
+                .enumerate()
+                .find(|(_, c)| {
+                    c.track_index == clip.track_index
+                        && c.timeline_end_ns() == clip.timeline_start_ns
+                        && !c.transition_after.is_empty()
+                        && c.transition_after_ns > 0
+                });
+            if let Some((_, prev_clip)) = prev {
+                let trans_start =
+                    prev_clip.timeline_end_ns().saturating_sub(prev_clip.transition_after_ns);
+                if timeline_pos_ns >= trans_start && timeline_pos_ns < prev_clip.timeline_end_ns() {
+                    active.push(i);
+                }
+            }
+        }
         if active.is_empty() {
             const GAP_NS: u64 = 100_000_000;
             if let Some(next_start) = self
@@ -2435,6 +2505,179 @@ impl ProgramPlayer {
         active
     }
 
+    /// Compute the transition state for a clip at the given timeline position.
+    /// Returns `None` if the clip is not currently in a transition region.
+    fn compute_transition_state(
+        &self,
+        clip_idx: usize,
+        timeline_pos_ns: u64,
+    ) -> Option<TransitionState> {
+        let clip = &self.clips[clip_idx];
+        // Check if this clip is the OUTGOING clip (has transition_after set).
+        if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
+            let trans_start = clip.timeline_end_ns().saturating_sub(clip.transition_after_ns);
+            if timeline_pos_ns >= trans_start && timeline_pos_ns < clip.timeline_end_ns() {
+                let elapsed = timeline_pos_ns.saturating_sub(trans_start) as f64;
+                let duration = clip.transition_after_ns as f64;
+                let progress = (elapsed / duration).clamp(0.0, 1.0);
+                return Some(TransitionState {
+                    kind: clip.transition_after.clone(),
+                    progress,
+                    role: TransitionRole::Outgoing,
+                });
+            }
+        }
+        // Check if this clip is the INCOMING clip (preceding same-track clip has transition).
+        let prev = self.clips.iter().find(|c| {
+            c.track_index == clip.track_index
+                && c.timeline_end_ns() == clip.timeline_start_ns
+                && !c.transition_after.is_empty()
+                && c.transition_after_ns > 0
+        });
+        if let Some(prev_clip) = prev {
+            let trans_start =
+                prev_clip.timeline_end_ns().saturating_sub(prev_clip.transition_after_ns);
+            if timeline_pos_ns >= trans_start && timeline_pos_ns < prev_clip.timeline_end_ns() {
+                let elapsed = timeline_pos_ns.saturating_sub(trans_start) as f64;
+                let duration = prev_clip.transition_after_ns as f64;
+                let progress = (elapsed / duration).clamp(0.0, 1.0);
+                return Some(TransitionState {
+                    kind: prev_clip.transition_after.clone(),
+                    progress,
+                    role: TransitionRole::Incoming,
+                });
+            }
+        }
+        None
+    }
+
+    /// Find the transition_after_ns for a clip entering via transition overlap.
+    /// Returns the preceding clip's `transition_after_ns` if this clip starts
+    /// at the exact end of a clip with an active transition, otherwise 0.
+    fn transition_enter_offset_for_clip(&self, clip_idx: usize) -> u64 {
+        let clip = &self.clips[clip_idx];
+        self.clips
+            .iter()
+            .find(|c| {
+                c.track_index == clip.track_index
+                    && c.timeline_end_ns() == clip.timeline_start_ns
+                    && !c.transition_after.is_empty()
+                    && c.transition_after_ns > 0
+            })
+            .map(|c| c.transition_after_ns)
+            .unwrap_or(0)
+    }
+
+    /// Apply transition visual effects (alpha, crop) to all visible slots
+    /// based on the current timeline position.
+    fn apply_transition_effects(&self, timeline_pos: u64) {
+        let (proc_w, _proc_h) = self.preview_processing_dimensions();
+        for slot in &self.slots {
+            if slot.hidden || slot.is_prerender_slot {
+                continue;
+            }
+            let clip = &self.clips[slot.clip_idx];
+            let tstate = self.compute_transition_state(slot.clip_idx, timeline_pos);
+            if let Some(ref pad) = slot.compositor_pad {
+                let base_alpha = clip.opacity.clamp(0.0, 1.0);
+                match &tstate {
+                    Some(ts) => {
+                        let t = ts.progress;
+                        match (ts.kind.as_str(), ts.role) {
+                            ("cross_dissolve", TransitionRole::Outgoing) => {
+                                pad.set_property("alpha", base_alpha * (1.0 - t));
+                            }
+                            ("cross_dissolve", TransitionRole::Incoming) => {
+                                pad.set_property("alpha", base_alpha * t);
+                            }
+                            ("fade_to_black", TransitionRole::Outgoing) => {
+                                pad.set_property(
+                                    "alpha",
+                                    base_alpha * (1.0 - 2.0 * t).max(0.0),
+                                );
+                            }
+                            ("fade_to_black", TransitionRole::Incoming) => {
+                                pad.set_property(
+                                    "alpha",
+                                    base_alpha * (2.0 * t - 1.0).max(0.0),
+                                );
+                            }
+                            ("wipe_right", _) | ("wipe_left", _) => {
+                                // Wipes: both clips at full alpha; crop handles reveal.
+                                pad.set_property("alpha", base_alpha);
+                            }
+                            _ => {
+                                // Unknown transition: fall back to cross-dissolve behavior.
+                                let a = match ts.role {
+                                    TransitionRole::Outgoing => base_alpha * (1.0 - t),
+                                    TransitionRole::Incoming => base_alpha * t,
+                                };
+                                pad.set_property("alpha", a);
+                            }
+                        }
+                    }
+                    None => {
+                        // Not in a transition: restore full opacity.
+                        pad.set_property("alpha", base_alpha);
+                    }
+                }
+            }
+            // Wipe transitions: animate videocrop on incoming clip to progressively reveal.
+            if let Some(ref ts) = tstate {
+                if (ts.kind == "wipe_right" || ts.kind == "wipe_left")
+                    && ts.role == TransitionRole::Incoming
+                {
+                    let t = ts.progress;
+                    let crop_px = ((1.0 - t) * proc_w as f64).round() as i32;
+                    if let Some(ref vc) = slot.videocrop {
+                        let user_cl = clip.crop_left.max(0);
+                        let user_cr = clip.crop_right.max(0);
+                        let user_ct = clip.crop_top.max(0);
+                        let user_cb = clip.crop_bottom.max(0);
+                        if ts.kind == "wipe_right" {
+                            // Reveal from left to right: crop the right side.
+                            vc.set_property("left", user_cl);
+                            vc.set_property("right", user_cr + crop_px);
+                            vc.set_property("top", user_ct);
+                            vc.set_property("bottom", user_cb);
+                        } else {
+                            // Reveal from right to left: crop the left side.
+                            vc.set_property("left", user_cl + crop_px);
+                            vc.set_property("right", user_cr);
+                            vc.set_property("top", user_ct);
+                            vc.set_property("bottom", user_cb);
+                        }
+                    }
+                    // Re-pad with transparent borders to maintain frame dimensions.
+                    if let Some(ref vb) = slot.videobox_crop_alpha {
+                        let user_cl = clip.crop_left.max(0);
+                        let user_cr = clip.crop_right.max(0);
+                        let user_ct = clip.crop_top.max(0);
+                        let user_cb = clip.crop_bottom.max(0);
+                        if ts.kind == "wipe_right" {
+                            vb.set_property("left", -user_cl);
+                            vb.set_property("right", -(user_cr + crop_px));
+                            vb.set_property("top", -user_ct);
+                            vb.set_property("bottom", -user_cb);
+                        } else {
+                            vb.set_property("left", -(user_cl + crop_px));
+                            vb.set_property("right", -user_cr);
+                            vb.set_property("top", -user_ct);
+                            vb.set_property("bottom", -user_cb);
+                        }
+                        vb.set_property("border-alpha", 0.0_f64);
+                    }
+                } else if tstate.is_none()
+                    || !(ts.kind == "wipe_right" || ts.kind == "wipe_left")
+                {
+                    // Not in a wipe transition — ensure crop reflects user values only.
+                    // (Skip reset if this slot is the outgoing clip of a wipe, since
+                    // the outgoing clip's crop stays at user values naturally.)
+                }
+            }
+        }
+    }
+
     fn effective_source_path_for_clip(&self, clip: &ProgramClip) -> String {
         let (path, _, _) = self.resolve_source_path_for_clip(clip);
         path
@@ -2449,6 +2692,20 @@ impl ProgramPlayer {
                     .map(|_| p.clone())
             })
         };
+
+        // Check for bg-removed version first (takes priority — includes alpha channel).
+        if clip.bg_removal_enabled {
+            if let Some(bg_path) = self.bg_removal_paths.get(&clip.source_path) {
+                if std::fs::metadata(bg_path)
+                    .ok()
+                    .filter(|m| m.len() > 0)
+                    .is_some()
+                {
+                    return (bg_path.clone(), false, String::new());
+                }
+            }
+        }
+
         if self.proxy_enabled {
             let key =
                 crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
@@ -3267,7 +3524,11 @@ impl ProgramPlayer {
                 )
                 .is_ok();
         }
-        let source_ns = clip.source_pos_ns(timeline_pos_ns);
+        // For transition-entering clips, shift timeline_pos forward so
+        // source_pos_ns computes the correct source-file position within
+        // the virtual overlap window.
+        let effective_pos = timeline_pos_ns + slot.transition_enter_offset_ns;
+        let source_ns = clip.source_pos_ns(effective_pos);
         let effective_seek_flags = if clip.reverse {
             (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
         } else {
@@ -3300,12 +3561,14 @@ impl ProgramPlayer {
                 )
                 .is_ok();
         }
-        let source_ns = clip.source_pos_ns(timeline_pos_ns);
+        let effective_pos = timeline_pos_ns + slot.transition_enter_offset_ns;
+        let source_ns = clip.source_pos_ns(effective_pos);
         log::info!(
-            "seek_slot_decoder_paused: clip={} timeline_ns={} source_ns={}",
+            "seek_slot_decoder_paused: clip={} timeline_ns={} source_ns={} transition_offset={}",
             clip.id,
             timeline_pos_ns,
-            source_ns
+            source_ns,
+            slot.transition_enter_offset_ns
         );
         slot.decoder
             .seek_simple(
@@ -3440,6 +3703,12 @@ impl ProgramPlayer {
     /// rebuilding the pipeline.  Returns `true` if a non-blocking Playing pulse
     /// was started (3+ tracks); the caller must schedule `complete_playing_pulse()`.
     fn seek_slots_in_place(&mut self, timeline_pos_ns: u64) -> bool {
+        // Update transition_enter_offset_ns for each slot before seeking.
+        for i in 0..self.slots.len() {
+            let clip_idx = self.slots[i].clip_idx;
+            self.slots[i].transition_enter_offset_ns =
+                self.transition_enter_offset_for_clip(clip_idx);
+        }
         // Snapshot arrival counters BEFORE seeking so we can detect fresh buffers.
         let baseline = self.snapshot_arrival_seqs();
         // Atomically flush the compositor and ALL its sink pads (including
@@ -3741,7 +4010,9 @@ impl ProgramPlayer {
             if current.contains(clip_idx) {
                 continue;
             }
-            if let Some(slot) = self.build_slot_for_clip(*clip_idx, zorder_offset, true) {
+            if let Some(mut slot) = self.build_slot_for_clip(*clip_idx, zorder_offset, true) {
+                slot.transition_enter_offset_ns =
+                    self.transition_enter_offset_for_clip(*clip_idx);
                 self.slots.push(slot);
                 added_clip_idxs.push(*clip_idx);
             } else {
@@ -4031,6 +4302,8 @@ impl ProgramPlayer {
                         pad.set_offset(pipe_running_time_ns);
                     }
                     slot.hidden = false;
+                    slot.transition_enter_offset_ns =
+                        self.transition_enter_offset_for_clip(*clip_idx);
                     self.slots.push(slot);
                     added_clip_idxs.push(*clip_idx);
                 } else {
@@ -4105,6 +4378,7 @@ impl ProgramPlayer {
 
         self.current_idx = desired.last().copied();
         self.slot_queue_drop_late_active = false;
+        self.apply_transition_effects(timeline_pos);
         let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
         self.record_rebuild_duration_ms(elapsed_ms);
         log::info!(
@@ -4867,6 +5141,7 @@ impl ProgramPlayer {
             hidden: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
+            transition_enter_offset_ns: 0,
         })
     }
 
@@ -5102,6 +5377,7 @@ impl ProgramPlayer {
             hidden: false,
             is_prerender_slot: true,
             prerender_segment_start_ns: Some(segment_start_ns),
+            transition_enter_offset_ns: 0,
         })
     }
 
@@ -5774,6 +6050,7 @@ impl ProgramPlayer {
             hidden: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
+            transition_enter_offset_ns: 0,
         };
         Self::apply_transform_to_slot(
             &slot_ref_for_transform,
@@ -5831,6 +6108,7 @@ impl ProgramPlayer {
             hidden: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
+            transition_enter_offset_ns: 0,
         })
     }
 
@@ -6356,6 +6634,8 @@ impl ProgramPlayer {
         // 1. Update slot metadata: point each slot at its new clip.
         for &(slot_idx, desired_clip_idx) in &plan.mappings {
             self.slots[slot_idx].clip_idx = desired_clip_idx;
+            self.slots[slot_idx].transition_enter_offset_ns =
+                self.transition_enter_offset_for_clip(desired_clip_idx);
         }
 
         // Keep compositor z-order aligned to desired track order.
@@ -6417,6 +6697,8 @@ impl ProgramPlayer {
         if was_playing {
             let _ = self.pipeline.set_state(gst::State::Playing);
         }
+
+        self.apply_transition_effects(timeline_pos);
 
         let elapsed = rebuild_started.elapsed().as_millis();
         self.record_rebuild_duration_ms(elapsed as u64);
@@ -6482,6 +6764,8 @@ impl ProgramPlayer {
         self.prerender_active_clips = None;
         self.current_prerender_segment_key = None;
         for (zorder_offset, &clip_idx) in active.iter().enumerate() {
+            // Compute transition-enter offset for clips entering via transition overlap.
+            let trans_offset = self.transition_enter_offset_for_clip(clip_idx);
             // When experimental preview optimizations are enabled, use lightweight
             // audio-only decoder slots for clips that are fully occluded by an
             // opaque full-frame clip above them.
@@ -6490,18 +6774,20 @@ impl ProgramPlayer {
             {
                 if let Some(slot) = self.build_audio_only_slot_for_clip(clip_idx) {
                     self.slots.push(slot);
-                } else if let Some(slot) =
+                } else if let Some(mut slot) =
                     self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
                 {
                     log::warn!(
                         "rebuild_pipeline_at: audio-only occlusion slot failed for clip {}, falling back to full slot",
                         self.clips[clip_idx].id
                     );
+                    slot.transition_enter_offset_ns = trans_offset;
                     self.slots.push(slot);
                 }
-            } else if let Some(slot) =
+            } else if let Some(mut slot) =
                 self.build_slot_for_clip(clip_idx, zorder_offset, was_playing)
             {
+                slot.transition_enter_offset_ns = trans_offset;
                 self.slots.push(slot);
             }
         }
@@ -7243,6 +7529,8 @@ mod tests {
             chroma_key_color: 0x00FF00,
             chroma_key_tolerance: 0.3,
             chroma_key_softness: 0.1,
+            bg_removal_enabled: false,
+            bg_removal_threshold: 0.5,
         }
     }
 
@@ -7420,6 +7708,7 @@ mod tests {
             hidden: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
+            transition_enter_offset_ns: 0,
         }
     }
 

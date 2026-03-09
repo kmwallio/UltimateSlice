@@ -82,6 +82,7 @@ pub fn export_project(
     output_path: &str,
     options: ExportOptions,
     estimated_size_bytes: Option<u64>,
+    bg_removal_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
     let out_w = if options.output_width == 0 {
@@ -142,6 +143,18 @@ pub fn export_project(
         .arg("pipe:2")
         .arg("-nostats");
 
+    // Helper: resolve effective source path (bg-removed version if available).
+    let resolve_export_path = |clip: &Clip| -> String {
+        if clip.bg_removal_enabled {
+            if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
+                if std::path::Path::new(bg_path).exists() {
+                    return bg_path.clone();
+                }
+            }
+        }
+        clip.source_path.clone()
+    };
+
     // Inputs: primary video clips (0..primary_clips.len())
     for clip in &primary_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
@@ -151,7 +164,7 @@ pub fn export_project(
             .arg("-t")
             .arg(format!("{src_dur_s:.6}"))
             .arg("-i")
-            .arg(&clip.source_path);
+            .arg(resolve_export_path(clip));
     }
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
@@ -163,7 +176,7 @@ pub fn export_project(
             .arg("-t")
             .arg(format!("{src_dur_s:.6}"))
             .arg("-i")
-            .arg(&clip.source_path);
+            .arg(resolve_export_path(clip));
     }
 
     let sec_base = primary_clips.len();

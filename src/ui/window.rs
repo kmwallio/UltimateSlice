@@ -849,6 +849,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
+    let bg_removal_cache = Rc::new(RefCell::new(crate::media::bg_removal_cache::BgRemovalCache::new()));
     let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
     let effective_proxy_scale_divisor = Rc::new(Cell::new(match initial_proxy_mode {
         crate::ui_state::ProxyMode::QuarterRes => 4,
@@ -898,6 +899,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let timeline_state = timeline_state.clone();
         let mcp_sender = mcp_sender.clone();
         let mcp_socket_stop = mcp_socket_stop.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
@@ -911,6 +913,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 let timeline_state = timeline_state.clone();
                 let mcp_sender = mcp_sender.clone();
                 let mcp_socket_stop = mcp_socket_stop.clone();
+                let bg_removal_cache = bg_removal_cache.clone();
                 let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> =
                     Rc::new(move |new_state| {
                         *preferences_state.borrow_mut() = new_state.clone();
@@ -1035,7 +1038,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             }
                         }
                     });
-                preferences::show_preferences_dialog(win.upcast_ref(), current, on_save);
+                preferences::show_preferences_dialog(win.upcast_ref(), current, on_save, bg_removal_cache.clone());
             }
         })
     });
@@ -1291,7 +1294,20 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                 }
             }
         },
+        // on_bg_removal_changed: toggle/threshold → full project-changed cycle
+        {
+            let on_project_changed = on_project_changed.clone();
+            move || {
+                on_project_changed();
+            }
+        },
     );
+
+    // Set initial model availability on the inspector so the bg-removal
+    // section is hidden when no ONNX model is present.
+    inspector_view
+        .bg_removal_model_available
+        .set(bg_removal_cache.borrow().is_available());
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
     {
@@ -1441,6 +1457,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         project.clone(),
         library.clone(),
         timeline_state.clone(),
+        bg_removal_cache.clone(),
         {
             let cb = on_project_changed.clone();
             move || cb()
@@ -2745,6 +2762,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let window_weak = window_weak.clone();
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
         let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
         let transform_overlay_cell = transform_overlay_cell.clone();
@@ -2891,6 +2909,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             chroma_key_color: c.chroma_key_color,
                             chroma_key_tolerance: c.chroma_key_tolerance,
                             chroma_key_softness: c.chroma_key_softness,
+                            bg_removal_enabled: c.bg_removal_enabled,
+                            bg_removal_threshold: c.bg_removal_threshold,
                         })
                     })
                     .collect();
@@ -2965,6 +2985,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let preferences_state_reload = preferences_state.clone();
             let project_reload = project.clone();
             let proxy_cache_reload = proxy_cache.clone();
+            let bg_removal_cache_reload = bg_removal_cache.clone();
             let reload_ticket = pending_reload_ticket.get().wrapping_add(1);
             pending_reload_ticket.set(reload_ticket);
             let pending_reload_ticket_phase1 = pending_reload_ticket.clone();
@@ -3044,6 +3065,21 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                     let paths = proxy_cache_reload.borrow().proxies.clone();
                     prog_player_reload.borrow_mut().update_proxy_paths(paths);
+                }
+
+                // Request bg-removal for clips that have it enabled.
+                {
+                    let proj = project_reload.borrow();
+                    let mut cache = bg_removal_cache_reload.borrow_mut();
+                    for track in &proj.tracks {
+                        for clip in &track.clips {
+                            if clip.bg_removal_enabled {
+                                cache.request(&clip.source_path, clip.bg_removal_threshold);
+                            }
+                        }
+                    }
+                    let paths = cache.paths.clone();
+                    prog_player_reload.borrow_mut().update_bg_removal_paths(paths);
                 }
 
                 {
@@ -3298,6 +3334,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
 
     {
         let proxy_cache = proxy_cache.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
         let prog_player = prog_player.clone();
         let effective_proxy_enabled = effective_proxy_enabled.clone();
         let status_label = status_label.clone();
@@ -3305,6 +3342,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let player = player.clone();
         let source_marks = source_marks.clone();
         let audio_sync_in_progress = audio_sync_in_progress.clone();
+        let inspector_view = inspector_view.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
@@ -3331,55 +3369,50 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     }
                 }
             }
+            // Poll bg-removal cache and sync paths to ProgramPlayer.
+            {
+                let bg_resolved = bg_removal_cache.borrow_mut().poll();
+                if !bg_resolved.is_empty() || !bg_removal_cache.borrow().paths.is_empty() {
+                    let paths = bg_removal_cache.borrow().paths.clone();
+                    prog_player.borrow_mut().update_bg_removal_paths(paths);
+                }
+                // Keep inspector section visibility in sync with model availability.
+                inspector_view
+                    .bg_removal_model_available
+                    .set(bg_removal_cache.borrow().is_available());
+            }
             let proxy_progress = proxy_cache.borrow().progress();
             let prerender_progress = prog_player.borrow().background_prerender_progress();
+            let bg_progress = bg_removal_cache.borrow().progress();
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
+            let bg_active = bg_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
-            if proxy_active || prerender_active || syncing_audio {
+            if proxy_active || prerender_active || syncing_audio || bg_active {
                 status_label.set_visible(true);
-                let label = if syncing_audio && (proxy_active || prerender_active) {
-                    if proxy_active && prerender_active {
-                        format!(
-                            "Syncing audio… | Generating proxies + prerender… proxy {}/{} | prerender {}/{}",
-                            proxy_progress.completed,
-                            proxy_progress.total,
-                            prerender_progress.completed,
-                            prerender_progress.total
-                        )
-                    } else if proxy_active {
-                        format!(
-                            "Syncing audio… | Generating proxies… {}/{}",
-                            proxy_progress.completed, proxy_progress.total
-                        )
-                    } else {
-                        format!(
-                            "Syncing audio… | Prerendering timeline… {}/{}",
-                            prerender_progress.completed, prerender_progress.total
-                        )
-                    }
-                } else if syncing_audio {
-                    "Syncing clips by audio…".to_string()
-                } else if proxy_active && prerender_active {
-                    format!(
-                        "Generating proxies + prerender… proxy {}/{} | prerender {}/{}",
-                        proxy_progress.completed,
-                        proxy_progress.total,
-                        prerender_progress.completed,
-                        prerender_progress.total
-                    )
-                } else if proxy_active {
-                    format!(
+                let mut parts = Vec::new();
+                if syncing_audio {
+                    parts.push("Syncing audio…".to_string());
+                }
+                if proxy_active {
+                    parts.push(format!(
                         "Generating proxies… {}/{}",
                         proxy_progress.completed, proxy_progress.total
-                    )
-                } else {
-                    format!(
-                        "Prerendering timeline… {}/{}",
+                    ));
+                }
+                if prerender_active {
+                    parts.push(format!(
+                        "Prerendering… {}/{}",
                         prerender_progress.completed, prerender_progress.total
-                    )
-                };
-                status_label.set_text(&label);
+                    ));
+                }
+                if bg_active {
+                    parts.push(format!(
+                        "Removing backgrounds… {}/{}",
+                        bg_progress.completed, bg_progress.total
+                    ));
+                }
+                status_label.set_text(&parts.join(" | "));
                 if proxy_active {
                     status_progress.set_visible(true);
                     let fraction = proxy_progress.byte_fraction.unwrap_or_else(|| {
@@ -3399,8 +3432,14 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         .clamp(0.0, 0.99);
                     status_progress.set_fraction(fraction);
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                } else if bg_active && bg_progress.total > 0 {
+                    status_progress.set_visible(true);
+                    let fraction = (bg_progress.completed as f64
+                        / bg_progress.total as f64)
+                        .clamp(0.0, 0.99);
+                    status_progress.set_fraction(fraction);
+                    status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
                 } else {
-                    // Audio sync only — no meaningful progress bar, just show the label
                     status_progress.set_visible(false);
                 }
             } else {
@@ -3442,6 +3481,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
         let proxy_cache = proxy_cache.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
         let on_close_preview = on_close_preview.clone();
         let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
@@ -3462,6 +3502,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         &timeline_state,
                         &preferences_state,
                         &proxy_cache,
+                        &bg_removal_cache,
                         &on_close_preview,
                         &on_source_selected,
                         &on_project_changed,
@@ -3696,6 +3737,7 @@ fn handle_mcp_command(
     timeline_state: &Rc<RefCell<TimelineState>>,
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
+    bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     on_close_preview: &Rc<dyn Fn()>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
@@ -3765,6 +3807,8 @@ fn handle_mcp_command(
                             "midtones":         c.midtones,
                             "highlights":       c.highlights,
                             "opacity":          c.opacity,
+                            "bg_removal_enabled":   c.bg_removal_enabled,
+                            "bg_removal_threshold": c.bg_removal_threshold,
                         })
                     })
                 })
@@ -4738,6 +4782,36 @@ fn handle_mcp_command(
             }
         }
 
+        McpCommand::SetClipBgRemoval {
+            clip_id,
+            enabled,
+            threshold,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        if let Some(v) = enabled {
+                            clip.bg_removal_enabled = v;
+                        }
+                        if let Some(v) = threshold {
+                            clip.bg_removal_threshold = v;
+                        }
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
         McpCommand::SetClipLut {
             clip_id,
             lut_path,
@@ -4905,6 +4979,7 @@ fn handle_mcp_command(
 
         McpCommand::ExportMp4 { path, reply } => {
             let proj = project.borrow().clone();
+            let bg_paths = bg_removal_cache.borrow().paths.clone();
             std::thread::spawn(move || {
                 let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
                 let proj_worker = proj.clone();
@@ -4916,6 +4991,7 @@ fn handle_mcp_command(
                         &path_worker,
                         crate::media::export::ExportOptions::default(),
                         None,
+                        &bg_paths,
                         tx,
                     )
                     .map_err(|e| e.to_string())

@@ -178,6 +178,10 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                 asset_clip.push_attribute(("us:chroma-key-tolerance", clip.chroma_key_tolerance.to_string().as_str()));
                 asset_clip.push_attribute(("us:chroma-key-softness", clip.chroma_key_softness.to_string().as_str()));
             }
+            if clip.bg_removal_enabled {
+                asset_clip.push_attribute(("us:bg-removal-enabled", "true"));
+                asset_clip.push_attribute(("us:bg-removal-threshold", clip.bg_removal_threshold.to_string().as_str()));
+            }
             if let Some(ref lut) = clip.lut_path {
                 asset_clip.push_attribute(("us:lut-path", lut.as_str()));
             }

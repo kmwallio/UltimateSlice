@@ -106,6 +106,12 @@ pub enum McpCommand {
         softness: Option<f64>,
         reply: SyncSender<Value>,
     },
+    SetClipBgRemoval {
+        clip_id: String,
+        enabled: Option<bool>,
+        threshold: Option<f64>,
+        reply: SyncSender<Value>,
+    },
     SetTitle {
         title: String,
         reply: SyncSender<Value>,

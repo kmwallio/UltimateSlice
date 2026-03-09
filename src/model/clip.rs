@@ -48,6 +48,9 @@ fn default_chroma_key_tolerance() -> f32 {
 fn default_chroma_key_softness() -> f32 {
     0.1
 }
+fn default_bg_removal_threshold() -> f64 {
+    0.5
+}
 fn default_temperature() -> f32 {
     6500.0
 }
@@ -175,6 +178,12 @@ pub struct Clip {
     /// Chroma key edge softness (noise level): 0.0 (hard edge) to 1.0 (soft edge). Default 0.1.
     #[serde(default = "default_chroma_key_softness")]
     pub chroma_key_softness: f32,
+    /// AI background removal enabled flag. Default false.
+    #[serde(default)]
+    pub bg_removal_enabled: bool,
+    /// AI background removal matte threshold: 0.0 (aggressive) to 1.0 (conservative). Default 0.5.
+    #[serde(default = "default_bg_removal_threshold")]
+    pub bg_removal_threshold: f64,
     /// Optional clip-group identifier. Clips with the same group id are edited as a unit.
     #[serde(default)]
     pub group_id: Option<String>,
@@ -263,6 +272,8 @@ impl Clip {
             chroma_key_color: default_chroma_key_color(),
             chroma_key_tolerance: default_chroma_key_tolerance(),
             chroma_key_softness: default_chroma_key_softness(),
+            bg_removal_enabled: false,
+            bg_removal_threshold: default_bg_removal_threshold(),
             group_id: None,
             link_group_id: None,
             source_timecode_base_ns: None,

@@ -14,6 +14,8 @@ Third-party crates and libraries:\n\
 • uuid — MIT OR Apache-2.0\n\
 • anyhow / thiserror / log / env_logger — MIT OR Apache-2.0\n\
 • rustfft — MIT OR Apache-2.0\n\
+• ort (ONNX Runtime) — MIT OR Apache-2.0\n\
+• ndarray — MIT OR Apache-2.0\n\
 • FFmpeg (export/runtime tooling) — LGPL-2.1-or-later (built with GPL options in Flatpak)\n\
 • x264 (Flatpak build) — GPL-2.0-or-later\n\
 \n\
@@ -31,6 +33,7 @@ pub fn show_preferences_dialog(
     parent: &gtk::Window,
     current: PreferencesState,
     on_save: Rc<dyn Fn(PreferencesState)>,
+    _bg_removal_cache: Rc<std::cell::RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
 ) {
     let dialog = gtk::Dialog::builder()
         .title("Preferences")
@@ -290,6 +293,14 @@ pub fn show_preferences_dialog(
     integration_box.append(&mcp_socket_check);
     integration_box.append(&mcp_socket_hint);
     stack.add_titled(&integration_box, Some("integration"), "Integration");
+
+    // ── Models section — hidden until we have a self-hosted model with
+    //    secure distribution (see ROADMAP.md). ──────────────────────────────
+    // {
+    //     use crate::media::bg_removal_cache::{find_model_path, model_download_dir, MODEL_DOWNLOAD_URL, MODEL_FILENAME};
+    //     ... download UI ...
+    //     stack.add_titled(&models_box, Some("models"), "Models");
+    // }
 
     body.append(&sidebar);
     body.append(&stack);

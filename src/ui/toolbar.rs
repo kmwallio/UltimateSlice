@@ -123,6 +123,7 @@ pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
     _library: Rc<RefCell<Vec<MediaItem>>>,
     timeline_state: Rc<RefCell<TimelineState>>,
+    bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
@@ -603,6 +604,7 @@ pub fn build_toolbar(
     btn_export.add_css_class("suggested-action");
     {
         let project = project.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
         btn_export.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let proj_w = project.borrow().width;
@@ -708,6 +710,7 @@ pub fn build_toolbar(
             opt_dialog.add_button("Choose Output File…", gtk::ResponseType::Accept);
 
             let project = project.clone();
+            let bg_removal_cache = bg_removal_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept {
                     d.close();
@@ -766,6 +769,7 @@ pub fn build_toolbar(
 
                 let window: Option<gtk::Window> = None; // no parent at this point
                 let project = project.clone();
+                let bg_removal_cache = bg_removal_cache.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -773,11 +777,12 @@ pub fn build_toolbar(
                             let output_clone = output.clone();
                             let proj = project.borrow().clone();
                             let opts = options.clone();
+                            let bg_paths = bg_removal_cache.borrow().paths.clone();
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
                                 if let Err(e) =
-                                    export_project(&proj, &output_clone, opts, None, tx.clone())
+                                    export_project(&proj, &output_clone, opts, None, &bg_paths, tx.clone())
                                 {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
                                 }
