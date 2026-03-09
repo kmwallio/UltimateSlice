@@ -1626,6 +1626,7 @@ impl ProgramPlayer {
                 clip,
                 pos,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                self.frame_duration_ns,
             );
         }
         let _ = self.pipeline.set_state(gst::State::Playing);
@@ -3772,6 +3773,7 @@ impl ProgramPlayer {
         clip: &ProgramClip,
         timeline_pos_ns: u64,
         seek_flags: gst::SeekFlags,
+        frame_duration_ns: u64,
     ) -> bool {
         if let Some(segment_start_ns) = slot.prerender_segment_start_ns {
             let source_ns = timeline_pos_ns.saturating_sub(segment_start_ns);
@@ -3793,6 +3795,7 @@ impl ProgramPlayer {
         let effective_pos = timeline_pos_ns + slot.transition_enter_offset_ns;
         let source_ns = clip.source_pos_ns(effective_pos);
         let effective_seek_flags = Self::effective_decode_seek_flags(clip, seek_flags);
+        let stop_ns = Self::effective_video_seek_stop_ns(clip, source_ns, frame_duration_ns);
         slot.decoder
             .seek(
                 clip.seek_rate(),
@@ -3800,7 +3803,7 @@ impl ProgramPlayer {
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(clip.seek_start_ns(source_ns)),
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(clip.seek_stop_ns(source_ns)),
+                gst::ClockTime::from_nseconds(stop_ns),
             )
             .is_ok()
     }
@@ -3810,6 +3813,18 @@ impl ProgramPlayer {
             (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
         } else {
             seek_flags
+        }
+    }
+
+    fn effective_video_seek_stop_ns(
+        clip: &ProgramClip,
+        source_pos_ns: u64,
+        frame_duration_ns: u64,
+    ) -> u64 {
+        if clip.is_freeze_frame() {
+            source_pos_ns.saturating_add(frame_duration_ns.max(1))
+        } else {
+            clip.seek_stop_ns(source_pos_ns)
         }
     }
 
@@ -3850,9 +3865,16 @@ impl ProgramPlayer {
         clip: &ProgramClip,
         timeline_pos_ns: u64,
         seek_flags: gst::SeekFlags,
+        frame_duration_ns: u64,
     ) -> bool {
         for _ in 0..4 {
-            if Self::seek_slot_decoder(slot, clip, timeline_pos_ns, seek_flags) {
+            if Self::seek_slot_decoder(
+                slot,
+                clip,
+                timeline_pos_ns,
+                seek_flags,
+                frame_duration_ns,
+            ) {
                 return true;
             }
             let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
@@ -4208,7 +4230,13 @@ impl ProgramPlayer {
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             let ok = if was_playing {
-                Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags)
+                Self::seek_slot_decoder_with_retry(
+                    slot,
+                    clip,
+                    timeline_pos,
+                    seek_flags,
+                    self.frame_duration_ns,
+                )
             } else {
                 Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos)
             };
@@ -4352,7 +4380,13 @@ impl ProgramPlayer {
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             let ok = if was_playing {
-                Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags)
+                Self::seek_slot_decoder_with_retry(
+                    slot,
+                    clip,
+                    timeline_pos,
+                    seek_flags,
+                    self.frame_duration_ns,
+                )
             } else {
                 Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos)
             };
@@ -4610,7 +4644,13 @@ impl ProgramPlayer {
                     continue;
                 }
                 let clip = &self.clips[slot.clip_idx];
-                if !Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags) {
+                if !Self::seek_slot_decoder_with_retry(
+                    slot,
+                    clip,
+                    timeline_pos,
+                    seek_flags,
+                    self.frame_duration_ns,
+                ) {
                     log::warn!("try_realtime_boundary: seek FAILED for clip {}", clip.id);
                     if let Some(ref pad) = slot.compositor_pad {
                         let _ = pad.send_event(gst::event::Eos::new());
@@ -6991,6 +7031,7 @@ impl ProgramPlayer {
                     clip,
                     timeline_pos,
                     self.clip_seek_flags(),
+                    self.frame_duration_ns,
                 );
             } else {
                 let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
@@ -7374,7 +7415,13 @@ impl ProgramPlayer {
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
             if was_playing {
-                let ok = Self::seek_slot_decoder_with_retry(slot, clip, timeline_pos, seek_flags);
+                let ok = Self::seek_slot_decoder_with_retry(
+                    slot,
+                    clip,
+                    timeline_pos,
+                    seek_flags,
+                    self.frame_duration_ns,
+                );
                 if !ok {
                     log::warn!("rebuild_pipeline_at: seek FAILED for clip {}", clip.id);
                     if let Some(ref pad) = slot.compositor_pad {
@@ -7873,6 +7920,28 @@ mod tests {
         assert_eq!(clip.seek_rate(), 1.0);
         assert_eq!(clip.seek_start_ns(source), source);
         assert_eq!(clip.seek_stop_ns(source), source + 1);
+    }
+
+    #[test]
+    fn freeze_frame_preview_seek_stop_uses_frame_duration_window() {
+        let mut clip = make_clip();
+        clip.source_in_ns = 100;
+        clip.source_out_ns = 1_000;
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(2_000);
+
+        let source = clip.source_pos_ns(0);
+        let stop = ProgramPlayer::effective_video_seek_stop_ns(&clip, source, 41_666_667);
+        assert_eq!(stop, source + 41_666_667);
+    }
+
+    #[test]
+    fn freeze_frame_preview_seek_stop_clamps_to_minimum_window() {
+        let mut clip = make_clip();
+        clip.freeze_frame = true;
+        let source = clip.source_pos_ns(0);
+        let stop = ProgramPlayer::effective_video_seek_stop_ns(&clip, source, 0);
+        assert_eq!(stop, source + 1);
     }
 
     #[test]
