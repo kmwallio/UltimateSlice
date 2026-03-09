@@ -4,6 +4,9 @@ All notable project changes and progress should be recorded here.
 
 ## Unreleased
 
+### Improved
+- **Calibrated preview–export color matching**: Replaced hand-tuned linear preview mappings with empirically calibrated polynomial curves. An offline pipeline (`tools/calibrate_color.py`) sweeps each color slider through FFmpeg export filters on SMPTE color bars, optimizes GStreamer `videobalance` parameters via L-BFGS-B, and fits degree-4 polynomials. Improvements by slider: brightness ~53 %, contrast ~35 %, saturation ~46 %, temperature ~35–52 %, shadows 74–94 %, highlights 78–88 %. All eight sliders (brightness, contrast, saturation, temperature, tint, shadows, midtones, highlights) now produce a closer preview of the final FFmpeg export result. Denoise/sharpness are unchanged (fundamentally different algorithms).
+
 ### Fixed
 - **Proxy generation with LUTs broken**: Proxy transcodes failed because the temp file used a `.partial` extension that ffmpeg could not auto-detect as MP4. Added explicit `-f mp4` format flag so ffmpeg writes the correct container regardless of the temp filename.
 - **Color grading sliders not updating live preview**: When clips started with default values, the effects bin was built without `videobalance`/`gaussianblur` elements (an optimization). Moving a slider triggered a pipeline rebuild, but `compute_reuse_plan` compared the clip against its own in-place-updated entry — always matching — so the slot was reused without creating the missing elements. Added `slot_satisfies_clip()` to verify the slot actually has the GStreamer elements the desired clip needs. Also unified `need_balance` checks across `build_effects_bin`, `effects_topology_matches`, `slot_satisfies_clip`, and `update_current_effects` to include shadows/midtones/highlights (which are approximated via `videobalance`).

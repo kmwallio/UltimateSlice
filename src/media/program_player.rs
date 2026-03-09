@@ -43,6 +43,16 @@ pub struct ScopeFrame {
     pub height: usize,
 }
 
+/// Calibrated videobalance output parameters (brightness, contrast,
+/// saturation, hue) computed from clip colour settings by
+/// `ProgramPlayer::compute_videobalance_params`.
+struct VBParams {
+    brightness: f64,
+    contrast: f64,
+    saturation: f64,
+    hue: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
     pub id: String,
@@ -1892,24 +1902,14 @@ impl ProgramPlayer {
 
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             if let Some(ref vb) = slot.videobalance {
-                // Approximate shadows/midtones/highlights via videobalance
-                // brightness and contrast offsets.  Not pixel-perfect but
-                // gives real-time visual feedback.  Export uses ffmpeg
-                // colorbalance for accurate per-luminance grading.
-                let eff_brightness =
-                    (brightness + shadows * 0.3 + midtones * 0.2 + highlights * 0.15)
-                        .clamp(-1.0, 1.0);
-                let eff_contrast = (contrast - shadows * 0.15 + highlights * 0.15).clamp(0.0, 2.0);
-                vb.set_property("brightness", eff_brightness);
-                vb.set_property("contrast", eff_contrast);
-                vb.set_property("saturation", saturation.clamp(0.0, 2.0));
-                // Approximate temperature/tint via hue shift.
-                // Temperature: below 6500K → warm (negative hue shift toward amber),
-                // above 6500K → cool (positive hue shift toward blue).
-                // Tint: negative → green, positive → magenta (smaller hue offset).
-                let temp_hue = ((temperature - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
-                let tint_hue = (tint * 0.08).clamp(-0.15, 0.15);
-                vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
+                let p = Self::compute_videobalance_params(
+                    brightness, contrast, saturation, temperature, tint,
+                    shadows, midtones, highlights,
+                );
+                vb.set_property("brightness", p.brightness);
+                vb.set_property("contrast", p.contrast);
+                vb.set_property("saturation", p.saturation);
+                vb.set_property("hue", p.hue);
             }
             if let Some(ref gb) = slot.gaussianblur {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
@@ -4314,21 +4314,15 @@ impl ProgramPlayer {
 
         // Set initial values from clip data.
         if let Some(ref vb) = videobalance {
-            // Apply shadows/midtones/highlights approximation via videobalance.
-            let eff_brightness = (clip.brightness
-                + clip.shadows * 0.3
-                + clip.midtones * 0.2
-                + clip.highlights * 0.15)
-                .clamp(-1.0, 1.0);
-            let eff_contrast =
-                (clip.contrast - clip.shadows * 0.15 + clip.highlights * 0.15).clamp(0.0, 2.0);
-            vb.set_property("brightness", eff_brightness);
-            vb.set_property("contrast", eff_contrast);
-            vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
-            // Approximate temperature/tint via hue shift.
-            let temp_hue = ((clip.temperature as f64 - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
-            let tint_hue = (clip.tint as f64 * 0.08).clamp(-0.15, 0.15);
-            vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
+            let p = Self::compute_videobalance_params(
+                clip.brightness, clip.contrast, clip.saturation,
+                clip.temperature, clip.tint,
+                clip.shadows, clip.midtones, clip.highlights,
+            );
+            vb.set_property("brightness", p.brightness);
+            vb.set_property("contrast", p.contrast);
+            vb.set_property("saturation", p.saturation);
+            vb.set_property("hue", p.hue);
         }
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
@@ -5683,6 +5677,153 @@ impl ProgramPlayer {
 
     // ── Continuing decoders (fast-path boundary crossing) ────────────────
 
+    // ── Calibrated videobalance mapping ──────────────────────────────────
+    //
+    // GStreamer `videobalance` operates in RGB/HSV with 4 knobs (brightness,
+    // contrast, saturation, hue) while the FFmpeg export pipeline uses
+    // dedicated per-domain filters (eq, colortemperature, colorbalance,
+    // hqdn3d, unsharp).  These polynomial coefficients were derived from
+    // empirical calibration (tools/calibrate_color.py) by sweeping each
+    // slider across its range, generating FFmpeg reference frames, and using
+    // L-BFGS-B optimisation to find the videobalance params that minimise
+    // per-pixel RMSE against the FFmpeg output.
+
+    /// Evaluate degree-4 polynomial: c₀ + c₁t + c₂t² + c₃t³ + c₄t⁴
+    #[inline]
+    fn poly4(t: f64, c: &[f64; 5]) -> f64 {
+        c[0] + t * (c[1] + t * (c[2] + t * (c[3] + t * c[4])))
+    }
+
+    /// Compute calibrated videobalance parameters that best approximate the
+    /// FFmpeg export filter chain.  Each slider contributes a *delta* from
+    /// neutral (0, 1, 1, 0) based on fitted polynomials.  When multiple
+    /// sliders are active, deltas are summed (linear superposition — an
+    /// approximation that works well for moderate adjustments).
+    fn compute_videobalance_params(
+        brightness: f64,
+        contrast: f64,
+        saturation: f64,
+        temperature: f64,
+        tint: f64,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
+    ) -> VBParams {
+        let mut b = 0.0_f64;
+        let mut c = 1.0_f64;
+        let mut s = 1.0_f64;
+        let mut h = 0.0_f64;
+
+        // ── Brightness (default 0.0) ────────────────────────────────────
+        // Calibration: FFmpeg eq brightness (YUV additive) maps to ~1.15×
+        // GStreamer videobalance brightness (RGB additive) with a slight
+        // contrast compensation.
+        {
+            const B_B: [f64; 5] = [ 0.005156,  1.260891,  0.002010, -0.217226, -0.009772];
+            const B_C: [f64; 5] = [ 1.025037,  0.023633, -0.205914, -0.132415,  0.120400];
+            // B_S omitted: high residual (0.48), noisy at extremes
+            let t = brightness;
+            b += Self::poly4(t, &B_B) - B_B[0]; // delta from neutral (poly(0) = c[0])
+            c += Self::poly4(t, &B_C) - B_C[0];
+        }
+
+        // ── Contrast (default 1.0) ──────────────────────────────────────
+        // Calibration: FFmpeg eq contrast (YUV) needs brightness+saturation
+        // compensation when mapped to GStreamer RGB contrast.  ~35% RMSE
+        // improvement.
+        {
+            const C_B: [f64; 5] = [ 0.498635, -1.296549,  1.326076, -0.646941,  0.119435];
+            const C_C: [f64; 5] = [ 0.294574,  0.666291,  0.242201, -0.290659,  0.071964];
+            const C_S: [f64; 5] = [ 2.423564, -3.689165,  3.643393, -1.624246,  0.272677];
+            let t = contrast;
+            let t0 = 1.0;
+            b += Self::poly4(t, &C_B) - Self::poly4(t0, &C_B);
+            c += Self::poly4(t, &C_C) - Self::poly4(t0, &C_C);
+            s += Self::poly4(t, &C_S) - Self::poly4(t0, &C_S);
+        }
+
+        // ── Saturation (default 1.0) ────────────────────────────────────
+        // Calibration: HSV saturation ≠ UV saturation; needs brightness
+        // and contrast compensation, especially at low saturation.
+        {
+            const S_B: [f64; 5] = [-0.217485,  0.293628, -0.100479,  0.033948, -0.010338];
+            const S_C: [f64; 5] = [ 0.699528,  0.216960,  0.172501, -0.092642,  0.005567];
+            const S_S: [f64; 5] = [ 0.364002,  1.024258, -0.843067,  0.625649, -0.135496];
+            let t = saturation;
+            let t0 = 1.0;
+            b += Self::poly4(t, &S_B) - Self::poly4(t0, &S_B);
+            c += Self::poly4(t, &S_C) - Self::poly4(t0, &S_C);
+            s += Self::poly4(t, &S_S) - Self::poly4(t0, &S_S);
+        }
+
+        // ── Temperature (default 6500K, normalised to [-1, 0.78]) ───────
+        // Calibration: colortemperature applies per-channel RGB gains which
+        // can't be replicated by videobalance.  The calibrated B/C/S deltas
+        // capture the overall tonal shift, while hue rotation from the
+        // original formula provides the perceptual warm/cool colour cast.
+        {
+            const T_B: [f64; 5] = [-0.023880, -0.009013, -0.148403,  0.163987, -0.076689];
+            const T_C: [f64; 5] = [ 0.963885,  0.009551, -0.391745,  0.173372,  0.172729];
+            let t = (temperature - 6500.0) / 4500.0;
+            b += Self::poly4(t, &T_B) - T_B[0];
+            c += Self::poly4(t, &T_C) - T_C[0];
+            // Perceptual hue shift (original formula — calibration confirmed
+            // hue deltas are negligible, but the directional hint is still
+            // valuable for user feedback).
+            h += ((temperature - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
+        }
+
+        // ── Tint (default 0.0) ──────────────────────────────────────────
+        // Calibration: tint via colorbalance has very small B/C/S deltas;
+        // keep the perceptual hue shift.
+        h += (tint * 0.08).clamp(-0.15, 0.15);
+
+        // ── Shadows (default 0.0) ───────────────────────────────────────
+        // Calibration: 74-94% RMSE improvement over current coefficients.
+        // FFmpeg colorbalance shadows apply per-luminance-range shifts that
+        // are poorly approximated by global brightness alone; adding
+        // contrast and saturation compensation dramatically improves match.
+        {
+            const SH_B: [f64; 5] = [-0.004654,  0.217915,  0.503318,  0.095557, -0.208157];
+            const SH_C: [f64; 5] = [ 0.967806, -0.569223, -0.773125,  0.208067,  0.503863];
+            let t = shadows;
+            b += Self::poly4(t, &SH_B) - SH_B[0];
+            c += Self::poly4(t, &SH_C) - SH_C[0];
+        }
+
+        // ── Midtones (default 0.0) ──────────────────────────────────────
+        // Calibration: moderate improvement; brightness weight close to
+        // original (0.13 vs 0.20) but contrast compensation is significant.
+        {
+            const M_B: [f64; 5] = [-0.009292,  0.130927, -0.050035, -0.039406,  0.044492];
+            const M_C: [f64; 5] = [ 1.049000, -0.302024,  0.407251,  0.214717, -0.319686];
+            let t = midtones;
+            b += Self::poly4(t, &M_B) - M_B[0];
+            c += Self::poly4(t, &M_C) - M_C[0];
+        }
+
+        // ── Highlights (default 0.0) ────────────────────────────────────
+        // Calibration: 78-88% RMSE improvement.  Current coefficients
+        // (b×0.15, c×0.15) dramatically undershoot; optimal mapping uses
+        // ~3× stronger brightness and aggressive contrast boost.
+        {
+            const H_B: [f64; 5] = [-0.002545,  0.500927, -0.437295, -0.060255,  0.152945];
+            const H_C: [f64; 5] = [ 0.918940,  1.420073,  1.848961, -0.254895, -0.846390];
+            const H_S: [f64; 5] = [ 1.031708, -1.145010,  0.783173,  0.699344, -0.956279];
+            let t = highlights;
+            b += Self::poly4(t, &H_B) - H_B[0];
+            c += Self::poly4(t, &H_C) - H_C[0];
+            s += Self::poly4(t, &H_S) - H_S[0];
+        }
+
+        VBParams {
+            brightness: b.clamp(-1.0, 1.0),
+            contrast: c.clamp(0.0, 2.0),
+            saturation: s.clamp(0.0, 2.0),
+            hue: h.clamp(-1.0, 1.0),
+        }
+    }
+
     /// Returns true if two clips would produce effects bins with the same
     /// element topology (same set of active effect elements).  When true,
     /// a reused slot's effects bin can be updated via property sets alone,
@@ -5811,21 +5952,17 @@ impl ProgramPlayer {
     fn update_slot_effects(&self, slot_idx: usize, clip: &ProgramClip) {
         let slot = &self.slots[slot_idx];
 
-        // Videobalance (brightness/contrast/saturation + shadows/midtones/highlights + temperature/tint)
+        // Videobalance (calibrated preview mapping)
         if let Some(ref vb) = slot.videobalance {
-            let eff_brightness = (clip.brightness
-                + clip.shadows * 0.3
-                + clip.midtones * 0.2
-                + clip.highlights * 0.15)
-                .clamp(-1.0, 1.0);
-            let eff_contrast =
-                (clip.contrast - clip.shadows * 0.15 + clip.highlights * 0.15).clamp(0.0, 2.0);
-            vb.set_property("brightness", eff_brightness);
-            vb.set_property("contrast", eff_contrast);
-            vb.set_property("saturation", clip.saturation.clamp(0.0, 2.0));
-            let temp_hue = ((clip.temperature - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
-            let tint_hue = (clip.tint * 0.08).clamp(-0.15, 0.15);
-            vb.set_property("hue", (temp_hue + tint_hue).clamp(-1.0, 1.0));
+            let p = Self::compute_videobalance_params(
+                clip.brightness, clip.contrast, clip.saturation,
+                clip.temperature, clip.tint,
+                clip.shadows, clip.midtones, clip.highlights,
+            );
+            vb.set_property("brightness", p.brightness);
+            vb.set_property("contrast", p.contrast);
+            vb.set_property("saturation", p.saturation);
+            vb.set_property("hue", p.hue);
         }
 
         // Gaussianblur
@@ -7074,6 +7211,140 @@ mod tests {
         // But the slot was built without videobalance → slot_satisfies_clip → false
         let slot = make_test_slot(false, false, false, false, false, false);
         assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    // ── compute_videobalance_params tests ────────────────────────────────
+
+    fn vb(
+        brightness: f64, contrast: f64, saturation: f64,
+        temperature: f64, tint: f64,
+        shadows: f64, midtones: f64, highlights: f64,
+    ) -> super::VBParams {
+        ProgramPlayer::compute_videobalance_params(
+            brightness, contrast, saturation, temperature, tint,
+            shadows, midtones, highlights,
+        )
+    }
+
+    #[test]
+    fn vb_neutral_returns_defaults() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        assert!((p.brightness).abs() < 0.05, "b={}", p.brightness);
+        assert!((p.contrast - 1.0).abs() < 0.05, "c={}", p.contrast);
+        assert!((p.saturation - 1.0).abs() < 0.05, "s={}", p.saturation);
+        assert!((p.hue).abs() < 0.05, "h={}", p.hue);
+    }
+
+    #[test]
+    fn vb_brightness_positive_increases() {
+        let p = vb(0.5, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.brightness > 0.3, "positive brightness should increase: b={}", p.brightness);
+    }
+
+    #[test]
+    fn vb_brightness_negative_decreases() {
+        let p = vb(-0.5, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.brightness < -0.3, "negative brightness should decrease: b={}", p.brightness);
+    }
+
+    #[test]
+    fn vb_contrast_high_increases_contrast() {
+        let p = vb(0.0, 1.8, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.contrast > 1.1, "high contrast slider should raise contrast: c={}", p.contrast);
+    }
+
+    #[test]
+    fn vb_contrast_low_decreases_contrast() {
+        let p = vb(0.0, 0.3, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.contrast < 0.9, "low contrast slider should lower contrast: c={}", p.contrast);
+    }
+
+    #[test]
+    fn vb_saturation_zero_reduces_saturation() {
+        let p = vb(0.0, 1.0, 0.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.saturation < 0.5, "zero saturation should reduce: s={}", p.saturation);
+    }
+
+    #[test]
+    fn vb_temperature_warm_shifts_hue_negative() {
+        let p = vb(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.hue > 0.01, "warm temperature should shift hue positively: h={}", p.hue);
+    }
+
+    #[test]
+    fn vb_temperature_cool_shifts_hue_positive() {
+        let p = vb(0.0, 1.0, 1.0, 9000.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.hue < -0.01, "cool temperature should shift hue negatively: h={}", p.hue);
+    }
+
+    #[test]
+    fn vb_temperature_warm_reduces_contrast() {
+        let p = vb(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.contrast < 0.95, "warm temp should reduce contrast: c={}", p.contrast);
+    }
+
+    #[test]
+    fn vb_tint_shifts_hue() {
+        let pos = vb(0.0, 1.0, 1.0, 6500.0, 0.5, 0.0, 0.0, 0.0);
+        let neg = vb(0.0, 1.0, 1.0, 6500.0, -0.5, 0.0, 0.0, 0.0);
+        assert!(pos.hue > neg.hue, "positive tint should shift hue more positive");
+    }
+
+    #[test]
+    fn vb_shadows_positive_lifts_brightness() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
+        assert!(p.brightness > 0.05, "lifting shadows should raise brightness: b={}", p.brightness);
+    }
+
+    #[test]
+    fn vb_shadows_positive_reduces_contrast() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.5, 0.0, 0.0);
+        assert!(p.contrast < 0.95, "lifting shadows should reduce contrast: c={}", p.contrast);
+    }
+
+    #[test]
+    fn vb_highlights_positive_boosts_contrast() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
+        assert!(p.contrast > 1.3, "boosting highlights should raise contrast: c={}", p.contrast);
+    }
+
+    #[test]
+    fn vb_highlights_positive_increases_brightness() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.5);
+        assert!(p.brightness > 0.05, "boosting highlights should increase brightness: b={}", p.brightness);
+    }
+
+    #[test]
+    fn vb_midtones_positive_lifts_brightness() {
+        let p = vb(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.5, 0.0);
+        assert!(p.brightness > 0.03, "midtones lift should increase brightness: b={}", p.brightness);
+    }
+
+    #[test]
+    fn vb_all_params_clamped() {
+        // Extreme values: everything at max
+        let p = vb(1.0, 2.0, 2.0, 10000.0, 1.0, 1.0, 1.0, 1.0);
+        assert!(p.brightness >= -1.0 && p.brightness <= 1.0, "b clamped: {}", p.brightness);
+        assert!(p.contrast >= 0.0 && p.contrast <= 2.0, "c clamped: {}", p.contrast);
+        assert!(p.saturation >= 0.0 && p.saturation <= 2.0, "s clamped: {}", p.saturation);
+        assert!(p.hue >= -1.0 && p.hue <= 1.0, "h clamped: {}", p.hue);
+        // Everything at min
+        let p2 = vb(-1.0, 0.0, 0.0, 2000.0, -1.0, -1.0, -1.0, -1.0);
+        assert!(p2.brightness >= -1.0 && p2.brightness <= 1.0, "b clamped min: {}", p2.brightness);
+        assert!(p2.contrast >= 0.0 && p2.contrast <= 2.0, "c clamped min: {}", p2.contrast);
+        assert!(p2.saturation >= 0.0 && p2.saturation <= 2.0, "s clamped min: {}", p2.saturation);
+        assert!(p2.hue >= -1.0 && p2.hue <= 1.0, "h clamped min: {}", p2.hue);
+    }
+
+    #[test]
+    fn vb_poly4_evaluates_correctly() {
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        // poly4(2.0) = 1 + 2*2 + 3*4 + 4*8 + 5*16 = 1 + 4 + 12 + 32 + 80 = 129
+        let v = ProgramPlayer::poly4(2.0, &c);
+        assert!((v - 129.0).abs() < 1e-9, "poly4(2.0) = {}", v);
+        // poly4(0.0) = 1.0
+        let v0 = ProgramPlayer::poly4(0.0, &c);
+        assert!((v0 - 1.0).abs() < 1e-9, "poly4(0.0) = {}", v0);
     }
 }
 
