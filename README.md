@@ -117,6 +117,12 @@ To run with MCP server enabled:
 cargo run -- --mcp
 ```
 
+To open a project file at startup from program arguments:
+
+```/dev/null/bash#L1-3
+cargo run -- /path/to/project.uspxml
+```
+
 ## Python MCP Socket Client
 
 When using the MCP socket transport (running instance), you can use the Python bridge client:

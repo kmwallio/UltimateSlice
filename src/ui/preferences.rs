@@ -1,4 +1,6 @@
-use crate::ui_state::{GskRenderer, PlaybackPriority, PreferencesState, PreviewQuality, ProxyMode};
+use crate::ui_state::{
+    CrossfadeCurve, GskRenderer, PlaybackPriority, PreferencesState, PreviewQuality, ProxyMode,
+};
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, Box as GBox, CheckButton, Label, Orientation, ResponseType, Stack, StackSidebar,
@@ -268,6 +270,30 @@ pub fn show_preferences_dialog(
     timeline_preview_hint.set_max_width_chars(60);
     timeline_box.append(&timeline_preview_check);
     timeline_box.append(&timeline_preview_hint);
+    let crossfade_enabled_check =
+        CheckButton::with_label("Enable automatic audio crossfades at edit points");
+    crossfade_enabled_check.set_active(current.crossfade_enabled);
+    crossfade_enabled_check.set_halign(gtk::Align::Start);
+    let crossfade_curve = gtk4::ComboBoxText::new();
+    crossfade_curve.append(Some("equal_power"), "Equal power");
+    crossfade_curve.append(Some("linear"), "Linear");
+    crossfade_curve.set_active_id(Some(current.crossfade_curve.as_str()));
+    crossfade_curve.set_halign(gtk::Align::Start);
+    let crossfade_duration_ms = gtk4::SpinButton::with_range(10.0, 10_000.0, 10.0);
+    crossfade_duration_ms.set_value((current.crossfade_duration_ns as f64) / 1_000_000.0);
+    crossfade_duration_ms.set_digits(0);
+    crossfade_duration_ms.set_halign(gtk::Align::Start);
+    let crossfade_hint = Label::new(Some("Crossfades are used for adjacent audio edits. Equal power keeps perceived loudness more consistent. Duration is in milliseconds."));
+    crossfade_hint.set_halign(gtk::Align::Start);
+    crossfade_hint.add_css_class("dim-label");
+    crossfade_hint.set_wrap(true);
+    crossfade_hint.set_max_width_chars(60);
+    timeline_box.append(&crossfade_enabled_check);
+    timeline_box.append(&Label::new(Some("Crossfade curve")));
+    timeline_box.append(&crossfade_curve);
+    timeline_box.append(&Label::new(Some("Crossfade duration (ms)")));
+    timeline_box.append(&crossfade_duration_ms);
+    timeline_box.append(&crossfade_hint);
     stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
 
     // ── Integration section ───────────────────────────────────────────────
@@ -297,7 +323,9 @@ pub fn show_preferences_dialog(
     // ── Models section (only when ai-inference feature is enabled) ─────────
     #[cfg(feature = "ai-inference")]
     {
-        use crate::media::bg_removal_cache::{find_model_path, model_download_dir, MODEL_DOWNLOAD_URL, MODEL_FILENAME};
+        use crate::media::bg_removal_cache::{
+            find_model_path, model_download_dir, MODEL_DOWNLOAD_URL, MODEL_FILENAME,
+        };
 
         let models_box = GBox::new(Orientation::Vertical, 10);
         models_box.set_margin_start(8);
@@ -339,7 +367,11 @@ pub fn show_preferences_dialog(
         models_box.append(&modnet_hint);
 
         // Download button + progress bar.
-        let download_btn = gtk::Button::with_label(if has_model { "Re-download Model" } else { "Download Model" });
+        let download_btn = gtk::Button::with_label(if has_model {
+            "Re-download Model"
+        } else {
+            "Download Model"
+        });
         download_btn.set_halign(gtk::Align::Start);
         let progress_bar = gtk::ProgressBar::new();
         progress_bar.set_visible(false);
@@ -374,7 +406,7 @@ pub fn show_preferences_dialog(
                     .unwrap_or(false);
                 if ok {
                     let _ = std::fs::rename(&partial, &dest);
-                }  else {
+                } else {
                     let _ = std::fs::remove_file(&partial);
                 }
                 *result_w.lock().unwrap() = Some(ok);
@@ -445,6 +477,15 @@ pub fn show_preferences_dialog(
                 realtime_preview: realtime_check.is_active(),
                 background_prerender: background_prerender_check.is_active(),
                 preview_luts: preview_luts_check.is_active(),
+                crossfade_enabled: crossfade_enabled_check.is_active(),
+                crossfade_curve: CrossfadeCurve::from_str(
+                    crossfade_curve
+                        .active_id()
+                        .as_deref()
+                        .unwrap_or("equal_power"),
+                ),
+                crossfade_duration_ns: (crossfade_duration_ms.value().round() as u64)
+                    .saturating_mul(1_000_000),
             });
         }
         d.close();

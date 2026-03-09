@@ -204,6 +204,13 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Muting an audio track excludes it from both preview and export.
 
+## Automatic Audio Crossfades
+
+- Automatic audio crossfades are controlled in **Preferences → Timeline**.
+- When enabled, adjacent same-track edits with audio fade across the cut in Program Monitor playback and export.
+- The selected curve (`Equal power` or `Linear`) and duration are shared by preview/export.
+- Fade duration is automatically clamped for short adjacent clips.
+
 ## Transitions
 
 - Use the **Transitions** pane on the right (below Inspector) to browse available transitions.

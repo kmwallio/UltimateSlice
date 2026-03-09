@@ -252,6 +252,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_crossfade_settings",
+            "description": "Set automatic audio crossfade preferences (enabled flag, curve, and duration).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "Whether automatic audio crossfades are enabled." },
+                    "curve": { "type": "string", "enum": ["equal_power", "linear"], "description": "Crossfade curve shape." },
+                    "duration_ns": { "type": "integer", "description": "Crossfade duration in nanoseconds (10_000_000 to 10_000_000_000)." }
+                },
+                "required": ["enabled", "curve", "duration_ns"]
+            }
+        },
+        {
             "name": "add_clip",
             "description": "Add a new clip to a track. Durations are in nanoseconds (1 s = 1_000_000_000 ns).",
             "inputSchema": {
@@ -820,6 +833,18 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             priority: args["priority"].as_str().unwrap_or("smooth").to_string(),
             reply: tx,
         },
+        "set_crossfade_settings" => {
+            let (enabled, curve, duration_ns) = match parse_crossfade_settings_args(&args) {
+                Ok(parsed) => parsed,
+                Err(message) => return err(id.clone(), -32602, message),
+            };
+            McpCommand::SetCrossfadeSettings {
+                enabled,
+                curve: curve.to_string(),
+                duration_ns,
+                reply: tx,
+            }
+        }
 
         "add_clip" => McpCommand::AddClip {
             source_path: args["source_path"].as_str().unwrap_or("").to_string(),
@@ -1110,5 +1135,80 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
     match rx.recv() {
         Ok(result) => ok(id, text_content(result)),
         Err(_) => err(id.clone(), -32603, "No reply from app"),
+    }
+}
+
+fn parse_crossfade_settings_args(args: &Value) -> Result<(bool, &'static str, u64), &'static str> {
+    let enabled = match args.get("enabled").and_then(Value::as_bool) {
+        Some(enabled) => enabled,
+        None => return Err("enabled must be a boolean"),
+    };
+    let curve = match args.get("curve").and_then(Value::as_str) {
+        Some("equal_power") => "equal_power",
+        Some("linear") => "linear",
+        Some(_) => return Err("curve must be one of: equal_power, linear"),
+        None => return Err("curve must be a string"),
+    };
+    let duration_ns = match args.get("duration_ns").and_then(Value::as_u64) {
+        Some(duration_ns) => duration_ns,
+        None => return Err("duration_ns must be an integer"),
+    };
+    if !(10_000_000..=10_000_000_000).contains(&duration_ns) {
+        return Err("duration_ns must be between 10_000_000 and 10_000_000_000");
+    }
+    Ok((enabled, curve, duration_ns))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_crossfade_settings_args;
+    use serde_json::json;
+
+    #[test]
+    fn parse_crossfade_settings_accepts_valid_bounds() {
+        let min = json!({"enabled": true, "curve": "linear", "duration_ns": 10_000_000u64});
+        let max =
+            json!({"enabled": false, "curve": "equal_power", "duration_ns": 10_000_000_000u64});
+        assert_eq!(
+            parse_crossfade_settings_args(&min),
+            Ok((true, "linear", 10_000_000))
+        );
+        assert_eq!(
+            parse_crossfade_settings_args(&max),
+            Ok((false, "equal_power", 10_000_000_000))
+        );
+    }
+
+    #[test]
+    fn parse_crossfade_settings_rejects_invalid_curve() {
+        let args = json!({"enabled": true, "curve": "log", "duration_ns": 200_000_000u64});
+        assert_eq!(
+            parse_crossfade_settings_args(&args),
+            Err("curve must be one of: equal_power, linear")
+        );
+    }
+
+    #[test]
+    fn parse_crossfade_settings_rejects_duration_out_of_bounds() {
+        let too_small = json!({"enabled": true, "curve": "linear", "duration_ns": 9_999_999u64});
+        let too_large =
+            json!({"enabled": true, "curve": "linear", "duration_ns": 10_000_000_001u64});
+        assert_eq!(
+            parse_crossfade_settings_args(&too_small),
+            Err("duration_ns must be between 10_000_000 and 10_000_000_000")
+        );
+        assert_eq!(
+            parse_crossfade_settings_args(&too_large),
+            Err("duration_ns must be between 10_000_000 and 10_000_000_000")
+        );
+    }
+
+    #[test]
+    fn parse_crossfade_settings_rejects_non_integer_duration() {
+        let args = json!({"enabled": true, "curve": "linear", "duration_ns": 2.5});
+        assert_eq!(
+            parse_crossfade_settings_args(&args),
+            Err("duration_ns must be an integer")
+        );
     }
 }

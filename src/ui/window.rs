@@ -4,9 +4,10 @@ use crate::model::clip::{Clip, ClipKind};
 use crate::model::media_library::MediaItem;
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
-use crate::undo::TrackClipsChange;
+use crate::recent;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
 use crate::ui::{inspector, media_browser, preferences, preview, program_monitor, toolbar};
+use crate::undo::TrackClipsChange;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
@@ -114,7 +115,11 @@ fn find_preferred_track_index_by_index(
     kind: TrackKind,
 ) -> Option<usize> {
     if let Some(idx) = preferred_index {
-        if project.tracks.get(idx).is_some_and(|track| track.kind == kind) {
+        if project
+            .tracks
+            .get(idx)
+            .is_some_and(|track| track.kind == kind)
+        {
             return Some(idx);
         }
     }
@@ -401,7 +406,10 @@ fn apply_audio_sync_results(
                 project,
                 &format!(
                     "Audio sync failed — confidence too low ({:.1})",
-                    results.iter().map(|(_, _, c)| *c).fold(f32::INFINITY, f32::min)
+                    results
+                        .iter()
+                        .map(|(_, _, c)| *c)
+                        .fold(f32::INFINITY, f32::min)
                 ),
             );
         }
@@ -720,7 +728,11 @@ fn collect_near_playhead_clip_sources(
 }
 
 /// Build and show the main application window.
-pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
+pub fn build_window(
+    app: &gtk::Application,
+    mcp_enabled: bool,
+    startup_project_path: Option<String>,
+) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("UltimateSlice")
@@ -846,10 +858,17 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
     );
     prog_player_raw.set_realtime_preview(preferences_state.borrow().realtime_preview);
     prog_player_raw.set_background_prerender(initial_background_prerender);
+    prog_player_raw.set_audio_crossfade_preview(
+        preferences_state.borrow().crossfade_enabled,
+        preferences_state.borrow().crossfade_curve.clone(),
+        preferences_state.borrow().crossfade_duration_ns,
+    );
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
-    let bg_removal_cache = Rc::new(RefCell::new(crate::media::bg_removal_cache::BgRemovalCache::new()));
+    let bg_removal_cache = Rc::new(RefCell::new(
+        crate::media::bg_removal_cache::BgRemovalCache::new(),
+    ));
     let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
     let effective_proxy_scale_divisor = Rc::new(Cell::new(match initial_proxy_mode {
         crate::ui_state::ProxyMode::QuarterRes => 4,
@@ -956,6 +975,11 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         prog_player
                             .borrow_mut()
                             .set_preview_luts(new_state.preview_luts);
+                        prog_player.borrow_mut().set_audio_crossfade_preview(
+                            new_state.crossfade_enabled,
+                            new_state.crossfade_curve.clone(),
+                            new_state.crossfade_duration_ns,
+                        );
                         if new_state.proxy_mode.is_enabled() {
                             // If the proxy scale changed, invalidate old entries so clips are
                             // re-transcoded at the new resolution.
@@ -1038,7 +1062,12 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             }
                         }
                     });
-                preferences::show_preferences_dialog(win.upcast_ref(), current, on_save, bg_removal_cache.clone());
+                preferences::show_preferences_dialog(
+                    win.upcast_ref(),
+                    current,
+                    on_save,
+                    bg_removal_cache.clone(),
+                );
             }
         })
     });
@@ -1065,8 +1094,15 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
             let project = project.clone();
             move |b, c, s, temp, tnt, d, sh, shd, mid, hil| {
                 prog_player.borrow_mut().update_current_effects(
-                    b as f64, c as f64, s as f64, temp as f64, tnt as f64,
-                    d as f64, sh as f64, shd as f64, mid as f64,
+                    b as f64,
+                    c as f64,
+                    s as f64,
+                    temp as f64,
+                    tnt as f64,
+                    d as f64,
+                    sh as f64,
+                    shd as f64,
+                    mid as f64,
                     hil as f64,
                 );
                 // Update window title dirty marker without a full reload
@@ -1284,9 +1320,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         })
                         .unwrap_or((false, 0x00FF00))
                 };
-                prog_player.borrow_mut().update_current_chroma_key(
-                    enabled, color, tolerance, softness,
-                );
+                prog_player
+                    .borrow_mut()
+                    .update_current_chroma_key(enabled, color, tolerance, softness);
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -1700,8 +1736,7 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                             (id.clone(), path.clone(), *src_in, *src_out)
                         })
                         .collect();
-                    let sync_results =
-                        crate::media::audio_sync::sync_clips_by_audio(&clips);
+                    let sync_results = crate::media::audio_sync::sync_clips_by_audio(&clips);
                     let results: Vec<(String, i64, f32)> = sync_results
                         .into_iter()
                         .map(|r| (r.clip_id, r.offset_ns, r.confidence))
@@ -3079,7 +3114,9 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                         }
                     }
                     let paths = cache.paths.clone();
-                    prog_player_reload.borrow_mut().update_bg_removal_paths(paths);
+                    prog_player_reload
+                        .borrow_mut()
+                        .update_bg_removal_paths(paths);
                 }
 
                 {
@@ -3434,9 +3471,8 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
                 } else if bg_active && bg_progress.total > 0 {
                     status_progress.set_visible(true);
-                    let fraction = (bg_progress.completed as f64
-                        / bg_progress.total as f64)
-                        .clamp(0.0, 0.99);
+                    let fraction =
+                        (bg_progress.completed as f64 / bg_progress.total as f64).clamp(0.0, 0.99);
                     status_progress.set_fraction(fraction);
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
                 } else {
@@ -3722,6 +3758,54 @@ pub fn build_window(app: &gtk::Application, mcp_enabled: bool) {
         });
     }
 
+    if let Some(path) = startup_project_path {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+        let path_bg = path.clone();
+        std::thread::spawn(move || {
+            let result = std::fs::read_to_string(&path_bg)
+                .map_err(|e| format!("Failed to read startup project file: {e}"))
+                .and_then(|xml| {
+                    crate::fcpxml::parser::parse_fcpxml_with_path(
+                        &xml,
+                        Some(std::path::Path::new(&path_bg)),
+                    )
+                    .map_err(|e| format!("FCPXML parse error: {e}"))
+                });
+            let _ = tx.send(result);
+        });
+        timeline_state.borrow_mut().loading = true;
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+        let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+            match rx.try_recv() {
+                Ok(Ok(mut new_proj)) => {
+                    new_proj.file_path = Some(path.clone());
+                    recent::push(&path);
+                    *project.borrow_mut() = new_proj;
+                    timeline_state.borrow_mut().loading = false;
+                    suppress_resume_on_next_reload.set(true);
+                    clear_media_browser_on_next_reload.set(true);
+                    on_project_changed();
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(e)) => {
+                    timeline_state.borrow_mut().loading = false;
+                    eprintln!("{e}");
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    timeline_state.borrow_mut().loading = false;
+                    eprintln!("Startup project open worker disconnected");
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
     window.present();
 }
 
@@ -3862,7 +3946,10 @@ fn handle_mcp_command(
                     "experimental_preview_optimizations": prefs.experimental_preview_optimizations,
                     "realtime_preview": prefs.realtime_preview,
                     "background_prerender": prefs.background_prerender,
-                    "preview_luts": prefs.preview_luts
+                    "preview_luts": prefs.preview_luts,
+                    "crossfade_enabled": prefs.crossfade_enabled,
+                    "crossfade_curve": prefs.crossfade_curve.as_str(),
+                    "crossfade_duration_ns": prefs.crossfade_duration_ns
                 }))
                 .ok();
         }
@@ -3929,6 +4016,56 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "source_playback_priority": new_state.source_playback_priority.as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::SetCrossfadeSettings {
+            enabled,
+            curve,
+            duration_ns,
+            reply,
+        } => {
+            const MIN_CROSSFADE_DURATION_NS: u64 = 10_000_000;
+            const MAX_CROSSFADE_DURATION_NS: u64 = 10_000_000_000;
+            let parsed_curve = match curve.as_str() {
+                "equal_power" => crate::ui_state::CrossfadeCurve::EqualPower,
+                "linear" => crate::ui_state::CrossfadeCurve::Linear,
+                _ => {
+                    reply
+                        .send(json!({"success": false, "error": "curve must be one of: equal_power, linear"}))
+                        .ok();
+                    return;
+                }
+            };
+            if !(MIN_CROSSFADE_DURATION_NS..=MAX_CROSSFADE_DURATION_NS).contains(&duration_ns) {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": "duration_ns must be between 10_000_000 and 10_000_000_000"
+                    }))
+                    .ok();
+                return;
+            }
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.crossfade_enabled = enabled;
+                prefs.crossfade_curve = parsed_curve;
+                prefs.crossfade_duration_ns = duration_ns;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            prog_player.borrow_mut().set_audio_crossfade_preview(
+                new_state.crossfade_enabled,
+                new_state.crossfade_curve.clone(),
+                new_state.crossfade_duration_ns,
+            );
+            reply
+                .send(json!({
+                    "success": true,
+                    "crossfade_enabled": new_state.crossfade_enabled,
+                    "crossfade_curve": new_state.crossfade_curve.as_str(),
+                    "crossfade_duration_ns": new_state.crossfade_duration_ns
                 }))
                 .ok();
         }
@@ -4171,8 +4308,7 @@ fn handle_mcp_command(
                     find_preferred_track_index_by_index(&proj, Some(track_index), TrackKind::Audio);
 
                 if auto_link_pair {
-                    if let (Some(video_idx), Some(audio_idx)) = (video_track_idx, audio_track_idx)
-                    {
+                    if let (Some(video_idx), Some(audio_idx)) = (video_track_idx, audio_track_idx) {
                         let link_group_id = uuid::Uuid::new_v4().to_string();
                         let video_clip = build_source_clip(
                             &source_path,
@@ -4258,7 +4394,8 @@ fn handle_mcp_command(
                             None,
                         );
                         let clip_id = clip.id.clone();
-                        let _ = add_clip_to_track(&mut proj.tracks[target_idx], clip, magnetic_mode);
+                        let _ =
+                            add_clip_to_track(&mut proj.tracks[target_idx], clip, magnetic_mode);
                         proj.dirty = true;
                         Ok((clip_id, Vec::new(), None))
                     } else {
@@ -4543,14 +4680,12 @@ fn handle_mcp_command(
                             .map(|c| c.timeline_start)
                             .unwrap_or(0)
                     };
-                    let sync_results =
-                        crate::media::audio_sync::sync_clips_by_audio(&clips);
+                    let sync_results = crate::media::audio_sync::sync_clips_by_audio(&clips);
                     let mut result_json = Vec::new();
                     let mut assignments: HashMap<String, u64> = HashMap::new();
                     let mut all_confident = true;
                     for r in &sync_results {
-                        let new_start =
-                            (anchor_timeline_start as i64 + r.offset_ns).max(0) as u64;
+                        let new_start = (anchor_timeline_start as i64 + r.offset_ns).max(0) as u64;
                         result_json.push(json!({
                             "clip_id": r.clip_id,
                             "offset_ns": r.offset_ns,
@@ -5407,8 +5542,7 @@ fn handle_mcp_command(
                 let mut link_group_id: Option<String> = None;
 
                 if auto_link_pair {
-                    if let (Some(video_idx), Some(audio_idx)) = (video_track_idx, audio_track_idx)
-                    {
+                    if let (Some(video_idx), Some(audio_idx)) = (video_track_idx, audio_track_idx) {
                         let new_link_group_id = uuid::Uuid::new_v4().to_string();
                         let video_clip = build_source_clip(
                             &source_path,
@@ -5520,7 +5654,12 @@ fn handle_mcp_command(
                     Err("No matching track found")
                 } else {
                     proj.dirty = true;
-                    Ok((track_changes, clip_id.unwrap_or_default(), linked_clip_ids, link_group_id))
+                    Ok((
+                        track_changes,
+                        clip_id.unwrap_or_default(),
+                        linked_clip_ids,
+                        link_group_id,
+                    ))
                 }
             };
             match result {
@@ -5599,8 +5738,7 @@ fn handle_mcp_command(
                 let mut link_group_id: Option<String> = None;
 
                 if auto_link_pair {
-                    if let (Some(video_idx), Some(audio_idx)) = (video_track_idx, audio_track_idx)
-                    {
+                    if let (Some(video_idx), Some(audio_idx)) = (video_track_idx, audio_track_idx) {
                         let new_link_group_id = uuid::Uuid::new_v4().to_string();
                         let video_clip = build_source_clip(
                             &source_path,
@@ -5717,7 +5855,12 @@ fn handle_mcp_command(
                     Err("No matching track found")
                 } else {
                     proj.dirty = true;
-                    Ok((track_changes, clip_id.unwrap_or_default(), linked_clip_ids, link_group_id))
+                    Ok((
+                        track_changes,
+                        clip_id.unwrap_or_default(),
+                        linked_clip_ids,
+                        link_group_id,
+                    ))
                 }
             };
             match result {

@@ -201,6 +201,35 @@ impl ProxyMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CrossfadeCurve {
+    EqualPower,
+    Linear,
+}
+
+impl Default for CrossfadeCurve {
+    fn default() -> Self {
+        Self::EqualPower
+    }
+}
+
+impl CrossfadeCurve {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EqualPower => "equal_power",
+            Self::Linear => "linear",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "linear" => Self::Linear,
+            _ => Self::EqualPower,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExportVideoCodec {
     H264,
     H265,
@@ -524,6 +553,15 @@ pub struct PreferencesState {
     /// Pre-render LUT-assigned clips at project resolution for preview use when proxy mode is Off.
     #[serde(default)]
     pub preview_luts: bool,
+    /// Enable automatic audio crossfades at timeline edit points.
+    #[serde(default)]
+    pub crossfade_enabled: bool,
+    /// Audio crossfade curve shape used for automatic fades.
+    #[serde(default)]
+    pub crossfade_curve: CrossfadeCurve,
+    /// Audio crossfade duration in nanoseconds.
+    #[serde(default = "default_crossfade_duration_ns")]
+    pub crossfade_duration_ns: u64,
 }
 
 impl Default for PreferencesState {
@@ -543,6 +581,9 @@ impl Default for PreferencesState {
             realtime_preview: false,
             background_prerender: false,
             preview_luts: false,
+            crossfade_enabled: false,
+            crossfade_curve: CrossfadeCurve::default(),
+            crossfade_duration_ns: default_crossfade_duration_ns(),
         }
     }
 }
@@ -553,6 +594,10 @@ fn default_show_timeline_preview() -> bool {
 
 fn default_show_track_audio_levels() -> bool {
     true
+}
+
+fn default_crossfade_duration_ns() -> u64 {
+    200_000_000
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -705,5 +750,47 @@ mod tests {
                 .unwrap();
         assert!(parsed.export_presets.presets.is_empty());
         assert!(parsed.export_presets.last_used_preset.is_none());
+    }
+
+    #[test]
+    fn preferences_defaults_missing_crossfade_fields() {
+        let parsed: UiState =
+            serde_json::from_str(r#"{"preferences":{"hardware_acceleration_enabled":true}}"#)
+                .unwrap();
+        assert!(!parsed.preferences.crossfade_enabled);
+        assert_eq!(
+            parsed.preferences.crossfade_curve,
+            CrossfadeCurve::EqualPower
+        );
+        assert_eq!(
+            parsed.preferences.crossfade_duration_ns,
+            default_crossfade_duration_ns()
+        );
+    }
+
+    #[test]
+    fn preferences_crossfade_round_trip() {
+        let prefs = PreferencesState {
+            crossfade_enabled: true,
+            crossfade_curve: CrossfadeCurve::Linear,
+            crossfade_duration_ns: 350_000_000,
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert!(decoded.crossfade_enabled);
+        assert_eq!(decoded.crossfade_curve, CrossfadeCurve::Linear);
+        assert_eq!(decoded.crossfade_duration_ns, 350_000_000);
+    }
+
+    #[test]
+    fn preferences_crossfade_curve_serde_uses_snake_case_values() {
+        let decoded: PreferencesState = serde_json::from_str(
+            r#"{"crossfade_enabled":true,"crossfade_curve":"equal_power","crossfade_duration_ns":220000000}"#,
+        )
+        .unwrap();
+        assert_eq!(decoded.crossfade_curve, CrossfadeCurve::EqualPower);
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        assert!(encoded.contains(r#""crossfade_curve":"equal_power""#));
     }
 }
