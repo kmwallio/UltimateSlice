@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "ai-inference")]
 use std::process::Command;
 use std::sync::mpsc;
 
@@ -304,6 +305,7 @@ fn bg_removal_file_is_ready(path: &str) -> bool {
 ///
 /// Pipeline: FFmpeg decode → per-frame MODNet inference → FFmpeg VP9+alpha encode.
 /// Uses the `ort` crate for ONNX Runtime.
+#[cfg(feature = "ai-inference")]
 fn run_bg_removal(
     source_path: &str,
     output_path: &str,
@@ -501,7 +503,20 @@ fn run_bg_removal(
     true
 }
 
+/// Stub: when the `ai-inference` feature is disabled, bg removal always fails.
+#[cfg(not(feature = "ai-inference"))]
+fn run_bg_removal(
+    _source_path: &str,
+    _output_path: &str,
+    _model_path: &str,
+    _threshold: f64,
+) -> bool {
+    log::warn!("BgRemovalCache: ai-inference feature not enabled; cannot run bg removal");
+    false
+}
+
 /// Probe video info via ffprobe: returns (width, height, fps_num, fps_den).
+#[cfg(feature = "ai-inference")]
 fn probe_video_info(path: &str) -> Option<(u32, u32, u32, u32)> {
     let output = Command::new("ffprobe")
         .args([
@@ -527,6 +542,7 @@ fn probe_video_info(path: &str) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// Prepare a 512×512 CHW float32 tensor from an RGBA frame buffer.
+#[cfg(feature = "ai-inference")]
 fn prepare_input_tensor(
     frame: &[u8],
     src_w: usize,
@@ -557,6 +573,7 @@ fn prepare_input_tensor(
 ///
 /// `matte_shape` is the Shape from ort (e.g. [1, 1, 512, 512]).
 /// `matte_data` is the flat f32 slice of alpha values.
+#[cfg(feature = "ai-inference")]
 fn apply_matte_to_frame(
     frame: &mut [u8],
     src_w: usize,
