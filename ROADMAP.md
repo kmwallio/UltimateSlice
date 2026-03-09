@@ -418,7 +418,7 @@ Tracking docs:
   - Bitrate control: CRF / target bitrate mode
   - Audio codec: AAC, Opus, FLAC, PCM
   - Audio sample rate and channel layout (stereo / mono)
-- [ ] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
+- [x] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
 - [ ] ProRes / WebM / GIF export options
 - [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
 - [ ] Chapter markers in export (embed project markers as MP4/MKV chapter metadata)

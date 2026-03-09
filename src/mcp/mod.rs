@@ -128,6 +128,29 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    ListExportPresets {
+        reply: SyncSender<Value>,
+    },
+    SaveExportPreset {
+        name: String,
+        video_codec: String,
+        container: String,
+        output_width: u32,
+        output_height: u32,
+        crf: u32,
+        audio_codec: String,
+        audio_bitrate_kbps: u32,
+        reply: SyncSender<Value>,
+    },
+    DeleteExportPreset {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ExportWithPreset {
+        path: String,
+        preset_name: String,
+        reply: SyncSender<Value>,
+    },
     ListLibrary {
         reply: SyncSender<Value>,
     },

@@ -369,6 +369,10 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.14 to a file path |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
+| `list_export_presets` | List saved export presets from UI state |
+| `save_export_preset` | Create or overwrite a named export preset |
+| `delete_export_preset` | Delete a named export preset |
+| `export_with_preset` | Export to a path using a named export preset |
 | `list_library` | Items in the media library (not yet on timeline) |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
 | `reorder_track` | Move a track from one index to another (undoable) |

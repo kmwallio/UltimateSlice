@@ -465,6 +465,52 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_export_presets",
+            "description": "List saved named export presets from local UI state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "save_export_preset",
+            "description": "Create or overwrite a named export preset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Preset name." },
+                    "video_codec": { "type": "string", "enum": ["h264", "h265", "vp9", "prores", "av1"] },
+                    "container": { "type": "string", "enum": ["mp4", "mov", "webm", "mkv"] },
+                    "output_width": { "type": "integer", "description": "Output width, or 0 to use project width." },
+                    "output_height": { "type": "integer", "description": "Output height, or 0 to use project height." },
+                    "crf": { "type": "integer", "description": "CRF quality value (0-51)." },
+                    "audio_codec": { "type": "string", "enum": ["aac", "opus", "flac", "pcm"] },
+                    "audio_bitrate_kbps": { "type": "integer", "description": "Audio bitrate in kbps." }
+                },
+                "required": ["name", "video_codec", "container", "output_width", "output_height", "crf", "audio_codec", "audio_bitrate_kbps"]
+            }
+        },
+        {
+            "name": "delete_export_preset",
+            "description": "Delete a saved export preset by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Preset name." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "export_with_preset",
+            "description": "Export the current project to a path using a named saved export preset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute output file path." },
+                    "preset_name": { "type": "string", "description": "Name of the saved export preset." }
+                },
+                "required": ["path", "preset_name"]
+            }
+        },
+        {
             "name": "list_library",
             "description": "List all items currently in the media library (imported but not necessarily on the timeline).",
             "inputSchema": { "type": "object", "properties": {} }
@@ -895,6 +941,31 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
 
         "export_mp4" => McpCommand::ExportMp4 {
             path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "list_export_presets" => McpCommand::ListExportPresets { reply: tx },
+
+        "save_export_preset" => McpCommand::SaveExportPreset {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            video_codec: args["video_codec"].as_str().unwrap_or("h264").to_string(),
+            container: args["container"].as_str().unwrap_or("mp4").to_string(),
+            output_width: args["output_width"].as_u64().unwrap_or(0) as u32,
+            output_height: args["output_height"].as_u64().unwrap_or(0) as u32,
+            crf: args["crf"].as_u64().unwrap_or(23) as u32,
+            audio_codec: args["audio_codec"].as_str().unwrap_or("aac").to_string(),
+            audio_bitrate_kbps: args["audio_bitrate_kbps"].as_u64().unwrap_or(192) as u32,
+            reply: tx,
+        },
+
+        "delete_export_preset" => McpCommand::DeleteExportPreset {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "export_with_preset" => McpCommand::ExportWithPreset {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            preset_name: args["preset_name"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 

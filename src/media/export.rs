@@ -565,9 +565,7 @@ fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
         let gm = -t * 0.5;
         let rm = t * 0.25;
         let bm = t * 0.25;
-        f.push_str(&format!(
-            ",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"
-        ));
+        f.push_str(&format!(",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"));
     }
     f
 }

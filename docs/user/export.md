@@ -73,6 +73,27 @@ Applies to AAC and Opus. Ignored for FLAC and PCM.
 - Acceptable web quality: 128 kbps
 - High fidelity: 256–320 kbps
 
+## Export Presets
+
+Use the **Preset** row in the Export dialog to save and reuse named export configurations:
+
+- **Save As…** stores the current dialog settings as a named preset.
+- **Update** overwrites the currently selected preset with current widget values.
+- **Delete** removes the selected preset.
+- Selecting a preset immediately applies its codec/container/resolution/CRF/audio settings.
+- **(Custom)** means no saved preset is currently selected.
+
+Preset data is stored in local UI state and persists across app restarts.
+
+### MCP preset tools
+
+For automation workflows, MCP also exposes preset operations:
+
+- `list_export_presets`
+- `save_export_preset`
+- `delete_export_preset`
+- `export_with_preset`
+
 ## Export Progress
 
 After choosing the output file, an export progress dialog shows:

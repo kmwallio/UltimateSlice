@@ -5016,6 +5016,188 @@ fn handle_mcp_command(
             });
         }
 
+        McpCommand::ListExportPresets { reply } => {
+            let state = crate::ui_state::load_export_presets_state();
+            let presets: Vec<_> = state
+                .presets
+                .iter()
+                .map(|preset| {
+                    let options = preset.to_export_options();
+                    json!({
+                        "name": preset.name,
+                        "video_codec": match options.video_codec {
+                            crate::media::export::VideoCodec::H264 => "h264",
+                            crate::media::export::VideoCodec::H265 => "h265",
+                            crate::media::export::VideoCodec::Vp9 => "vp9",
+                            crate::media::export::VideoCodec::ProRes => "prores",
+                            crate::media::export::VideoCodec::Av1 => "av1",
+                        },
+                        "container": match options.container {
+                            crate::media::export::Container::Mp4 => "mp4",
+                            crate::media::export::Container::Mov => "mov",
+                            crate::media::export::Container::WebM => "webm",
+                            crate::media::export::Container::Mkv => "mkv",
+                        },
+                        "output_width": options.output_width,
+                        "output_height": options.output_height,
+                        "crf": options.crf,
+                        "audio_codec": match options.audio_codec {
+                            crate::media::export::AudioCodec::Aac => "aac",
+                            crate::media::export::AudioCodec::Opus => "opus",
+                            crate::media::export::AudioCodec::Flac => "flac",
+                            crate::media::export::AudioCodec::Pcm => "pcm",
+                        },
+                        "audio_bitrate_kbps": options.audio_bitrate_kbps
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({"presets": presets, "last_used_preset": state.last_used_preset}))
+                .ok();
+        }
+
+        McpCommand::SaveExportPreset {
+            name,
+            video_codec,
+            container,
+            output_width,
+            output_height,
+            crf,
+            audio_codec,
+            audio_bitrate_kbps,
+            reply,
+        } => {
+            let video_codec = match video_codec.as_str() {
+                "h264" => crate::media::export::VideoCodec::H264,
+                "h265" => crate::media::export::VideoCodec::H265,
+                "vp9" => crate::media::export::VideoCodec::Vp9,
+                "prores" => crate::media::export::VideoCodec::ProRes,
+                "av1" => crate::media::export::VideoCodec::Av1,
+                _ => {
+                    reply
+                        .send(json!({"success": false, "error": "video_codec must be one of: h264, h265, vp9, prores, av1"}))
+                        .ok();
+                    return;
+                }
+            };
+            let container = match container.as_str() {
+                "mp4" => crate::media::export::Container::Mp4,
+                "mov" => crate::media::export::Container::Mov,
+                "webm" => crate::media::export::Container::WebM,
+                "mkv" => crate::media::export::Container::Mkv,
+                _ => {
+                    reply
+                        .send(json!({"success": false, "error": "container must be one of: mp4, mov, webm, mkv"}))
+                        .ok();
+                    return;
+                }
+            };
+            let audio_codec = match audio_codec.as_str() {
+                "aac" => crate::media::export::AudioCodec::Aac,
+                "opus" => crate::media::export::AudioCodec::Opus,
+                "flac" => crate::media::export::AudioCodec::Flac,
+                "pcm" => crate::media::export::AudioCodec::Pcm,
+                _ => {
+                    reply
+                        .send(json!({"success": false, "error": "audio_codec must be one of: aac, opus, flac, pcm"}))
+                        .ok();
+                    return;
+                }
+            };
+            if crf > 51 {
+                reply
+                    .send(json!({"success": false, "error": "crf must be between 0 and 51"}))
+                    .ok();
+                return;
+            }
+            let options = crate::media::export::ExportOptions {
+                video_codec,
+                container,
+                output_width,
+                output_height,
+                crf,
+                audio_codec,
+                audio_bitrate_kbps,
+            };
+            let mut state = crate::ui_state::load_export_presets_state();
+            match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(
+                name, &options,
+            )) {
+                Ok(()) => {
+                    let saved_name = state.last_used_preset.clone();
+                    crate::ui_state::save_export_presets_state(&state);
+                    reply
+                        .send(json!({"success": true, "name": saved_name}))
+                        .ok();
+                }
+                Err(e) => {
+                    reply.send(json!({"success": false, "error": e})).ok();
+                }
+            }
+        }
+
+        McpCommand::DeleteExportPreset { name, reply } => {
+            let mut state = crate::ui_state::load_export_presets_state();
+            let removed = state.delete_preset(&name);
+            if removed {
+                crate::ui_state::save_export_presets_state(&state);
+            }
+            reply.send(json!({"success": removed, "name": name})).ok();
+        }
+
+        McpCommand::ExportWithPreset {
+            path,
+            preset_name,
+            reply,
+        } => {
+            let state = crate::ui_state::load_export_presets_state();
+            let Some(preset) = state.get_preset(&preset_name).cloned() else {
+                reply
+                    .send(json!({"success": false, "error": format!("Export preset not found: {preset_name}")}))
+                    .ok();
+                return;
+            };
+            let options = preset.to_export_options();
+            let proj = project.borrow().clone();
+            let bg_paths = bg_removal_cache.borrow().paths.clone();
+            std::thread::spawn(move || {
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+                let proj_worker = proj.clone();
+                let path_worker = path.clone();
+                std::thread::spawn(move || {
+                    let (tx, _rx) = std::sync::mpsc::channel();
+                    let result = crate::media::export::export_project(
+                        &proj_worker,
+                        &path_worker,
+                        options,
+                        None,
+                        &bg_paths,
+                        tx,
+                    )
+                    .map_err(|e| e.to_string())
+                    .map(|_| ());
+                    let _ = done_tx.send(result);
+                });
+
+                match done_rx.recv_timeout(std::time::Duration::from_secs(660)) {
+                    Ok(Ok(())) => {
+                        let _ = reply.send(
+                            json!({"success": true, "path": path, "preset_name": preset_name}),
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        let _ = reply.send(json!({"success": false, "error": e}));
+                    }
+                    Err(_) => {
+                        let _ = reply.send(json!({
+                            "success": false,
+                            "error": "export_with_preset timed out after 11 minutes (export thread still running)"
+                        }));
+                    }
+                }
+            });
+        }
+
         McpCommand::ListLibrary { reply } => {
             let lib = library.borrow();
             let items: Vec<_> = lib
