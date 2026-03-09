@@ -6,6 +6,7 @@ All notable project changes and progress should be recorded here.
 
 ### Improved
 - **Calibrated preview–export color matching**: Replaced hand-tuned linear preview mappings with empirically calibrated polynomial curves. An offline pipeline (`tools/calibrate_color.py`) sweeps each color slider through FFmpeg export filters on SMPTE color bars, optimizes GStreamer `videobalance` parameters via L-BFGS-B, and fits degree-4 polynomials. Improvements by slider: brightness ~53 %, contrast ~35 %, saturation ~46 %, temperature ~35–52 %, shadows 74–94 %, highlights 78–88 %. All eight sliders (brightness, contrast, saturation, temperature, tint, shadows, midtones, highlights) now produce a closer preview of the final FFmpeg export result. Denoise/sharpness are unchanged (fundamentally different algorithms).
+- **Per-channel RGB temperature/tint preview via frei0r**: Temperature and tint now use `frei0r-filter-coloradj-rgb` for per-channel RGB gain adjustment in the preview pipeline, matching FFmpeg's `colortemperature` filter (Tanner Helland algorithm). White areas now shift correctly with the temperature slider. Falls back to hue-rotation approximation if frei0r is unavailable.
 
 ### Fixed
 - **Proxy generation with LUTs broken**: Proxy transcodes failed because the temp file used a `.partial` extension that ffmpeg could not auto-detect as MP4. Added explicit `-f mp4` format flag so ffmpeg writes the correct container regardless of the temp filename.

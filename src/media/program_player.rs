@@ -53,6 +53,14 @@ struct VBParams {
     hue: f64,
 }
 
+/// Per-channel RGB gains for frei0r `coloradj_RGB` element.
+/// Values are in frei0r's [0,1] range where 0.5 = neutral (gain 1.0).
+struct ColorAdjRGBParams {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProgramClip {
     pub id: String,
@@ -223,6 +231,8 @@ struct VideoSlot {
     audio_level: Option<gst::Element>,
     /// Per-slot video effect elements.
     videobalance: Option<gst::Element>,
+    /// frei0r coloradj_RGB for per-channel RGB gains (temperature/tint).
+    coloradj_rgb: Option<gst::Element>,
     gaussianblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
@@ -1861,9 +1871,9 @@ impl ProgramPlayer {
         // element (because values were at defaults when the slot was created),
         // we must do a one-time pipeline rebuild so the element gets created.
         let need_balance = brightness != 0.0 || contrast != 1.0 || saturation != 1.0
-            || (temperature - 6500.0).abs() > 1.0 || tint.abs() > 0.001
             || shadows.abs() > f64::EPSILON || midtones.abs() > f64::EPSILON
             || highlights.abs() > f64::EPSILON;
+        let need_coloradj = (temperature - 6500.0).abs() > 1.0 || tint.abs() > 0.001;
         let need_blur = {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -1872,6 +1882,7 @@ impl ProgramPlayer {
             self.current_idx.and_then(|idx| self.slot_for_clip(idx))
         {
             (need_balance && slot.videobalance.is_none())
+                || (need_coloradj && slot.coloradj_rgb.is_none() && slot.videobalance.is_none())
                 || (need_blur && slot.gaussianblur.is_none())
         } else {
             false
@@ -1901,15 +1912,22 @@ impl ProgramPlayer {
         }
 
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
+            let has_coloradj = slot.coloradj_rgb.is_some();
             if let Some(ref vb) = slot.videobalance {
                 let p = Self::compute_videobalance_params(
                     brightness, contrast, saturation, temperature, tint,
-                    shadows, midtones, highlights,
+                    shadows, midtones, highlights, has_coloradj,
                 );
                 vb.set_property("brightness", p.brightness);
                 vb.set_property("contrast", p.contrast);
                 vb.set_property("saturation", p.saturation);
                 vb.set_property("hue", p.hue);
+            }
+            if let Some(ref ca) = slot.coloradj_rgb {
+                let cp = Self::compute_coloradj_params(temperature, tint);
+                ca.set_property("r", cp.r);
+                ca.set_property("g", cp.g);
+                ca.set_property("b", cp.b);
             }
             if let Some(ref gb) = slot.gaussianblur {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
@@ -4208,6 +4226,7 @@ impl ProgramPlayer {
     ) -> (
         gst::Bin,
         Option<gst::Element>, // videobalance
+        Option<gst::Element>, // coloradj_rgb (frei0r temperature/tint)
         Option<gst::Element>, // gaussianblur
         Option<gst::Element>, // videocrop
         Option<gst::Element>, // videobox_crop_alpha
@@ -4227,9 +4246,9 @@ impl ProgramPlayer {
         // dramatically reduces per-frame CPU cost for clips without effects
         // (3 concurrent clips drops from ~51 to ~22 pipeline elements).
         let need_balance = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0
-            || (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001
             || clip.shadows.abs() > f64::EPSILON || clip.midtones.abs() > f64::EPSILON
             || clip.highlights.abs() > f64::EPSILON;
+        let need_coloradj = (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
         let blur_sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
         let need_title = !clip.title_text.is_empty();
@@ -4249,6 +4268,25 @@ impl ProgramPlayer {
             )
         } else {
             (None, None)
+        };
+
+        // frei0r coloradj_RGB for per-channel temperature/tint (RGBA pipeline).
+        // Falls back to videobalance hue approximation if frei0r unavailable.
+        let coloradj_rgb = if need_coloradj {
+            gst::ElementFactory::make("frei0r-filter-coloradj-rgb").build().ok()
+        } else {
+            None
+        };
+        // If frei0r is unavailable for temperature/tint, ensure videobalance
+        // exists so we can fall back to the hue-rotation approximation.
+        let need_balance_for_temp_fallback = need_coloradj && coloradj_rgb.is_none();
+        let (conv1, videobalance) = if need_balance_for_temp_fallback && videobalance.is_none() {
+            (
+                conv1.or_else(|| gst::ElementFactory::make("videoconvert").build().ok()),
+                Some(gst::ElementFactory::make("videobalance").build().unwrap()),
+            )
+        } else {
+            (conv1, videobalance)
         };
 
         // conv2 + gaussianblur: only if blur/sharpen is active.
@@ -4313,16 +4351,27 @@ impl ProgramPlayer {
         let videobox_zoom = gst::ElementFactory::make("videobox").build().ok();
 
         // Set initial values from clip data.
+        let has_coloradj = coloradj_rgb.is_some();
         if let Some(ref vb) = videobalance {
             let p = Self::compute_videobalance_params(
                 clip.brightness, clip.contrast, clip.saturation,
                 clip.temperature, clip.tint,
                 clip.shadows, clip.midtones, clip.highlights,
+                has_coloradj,
             );
             vb.set_property("brightness", p.brightness);
             vb.set_property("contrast", p.contrast);
             vb.set_property("saturation", p.saturation);
             vb.set_property("hue", p.hue);
+        }
+        if let Some(ref ca) = coloradj_rgb {
+            // frei0r coloradj_RGB: action 0.333 = multiply mode, keep-luma off.
+            ca.set_property("action", 0.333_f64);
+            ca.set_property("keep-luma", false);
+            let cp = Self::compute_coloradj_params(clip.temperature, clip.tint);
+            ca.set_property("r", cp.r);
+            ca.set_property("g", cp.g);
+            ca.set_property("b", cp.b);
         }
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
@@ -4401,6 +4450,11 @@ impl ProgramPlayer {
             chain.push(e.clone());
         }
         if let Some(ref e) = videobalance {
+            chain.push(e.clone());
+        }
+        // frei0r coloradj_RGB (temperature/tint via per-channel RGB gains).
+        // Operates on RGBA which is already the pipeline format after capsfilter_proj.
+        if let Some(ref e) = coloradj_rgb {
             chain.push(e.clone());
         }
         if let Some(ref e) = conv2 {
@@ -4492,6 +4546,7 @@ impl ProgramPlayer {
         (
             bin,
             videobalance,
+            coloradj_rgb,
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
@@ -4720,6 +4775,7 @@ impl ProgramPlayer {
             audio_conv,
             audio_level,
             videobalance: None,
+            coloradj_rgb: None,
             gaussianblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
@@ -4953,6 +5009,7 @@ impl ProgramPlayer {
             audio_conv,
             audio_level,
             videobalance: None,
+            coloradj_rgb: None,
             gaussianblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
@@ -5363,6 +5420,7 @@ impl ProgramPlayer {
         let (
             effects_bin,
             videobalance,
+            coloradj_rgb,
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
@@ -5602,6 +5660,7 @@ impl ProgramPlayer {
             audio_conv: audio_conv.clone(),
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
+            coloradj_rgb: coloradj_rgb.clone(),
             gaussianblur: gaussianblur.clone(),
             videocrop: videocrop.clone(),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
@@ -5657,6 +5716,7 @@ impl ProgramPlayer {
             audio_conv,
             audio_level,
             videobalance,
+            coloradj_rgb,
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
@@ -5699,6 +5759,9 @@ impl ProgramPlayer {
     /// neutral (0, 1, 1, 0) based on fitted polynomials.  When multiple
     /// sliders are active, deltas are summed (linear superposition — an
     /// approximation that works well for moderate adjustments).
+    ///
+    /// When `has_coloradj` is true, temperature/tint are handled by the
+    /// frei0r `coloradj_RGB` element and excluded from videobalance.
     fn compute_videobalance_params(
         brightness: f64,
         contrast: f64,
@@ -5708,6 +5771,7 @@ impl ProgramPlayer {
         shadows: f64,
         midtones: f64,
         highlights: f64,
+        has_coloradj: bool,
     ) -> VBParams {
         let mut b = 0.0_f64;
         let mut c = 1.0_f64;
@@ -5752,19 +5816,20 @@ impl ProgramPlayer {
         }
 
         // ── Temperature (default 6500K, normalised to [-1, 0.78]) ───────
-        // Hue rotation only.  Brightness and contrast cross-effects
-        // removed: FFmpeg colortemperature changes per-channel RGB gains
-        // which shift overall luminance, but users expect temperature to
-        // only shift colour cast.
-        {
+        // When frei0r coloradj_RGB is available, temperature is handled
+        // there via per-channel RGB gains.  Otherwise, fall back to a
+        // hue-rotation approximation.
+        if !has_coloradj {
             let t_norm = (temperature - 6500.0) / 6500.0;
             h += (t_norm * -0.15).clamp(-0.25, 0.25);
         }
 
         // ── Tint (default 0.0) ──────────────────────────────────────────
-        // Calibration: tint via colorbalance has very small B/C/S deltas;
-        // keep the perceptual hue shift.
-        h += (tint * 0.08).clamp(-0.15, 0.15);
+        // When frei0r coloradj_RGB is available, tint is handled there.
+        // Otherwise, keep the perceptual hue shift.
+        if !has_coloradj {
+            h += (tint * 0.08).clamp(-0.15, 0.15);
+        }
 
         // ── Shadows (default 0.0) ───────────────────────────────────────
         // Calibration: 74-94% RMSE improvement over current coefficients.
@@ -5812,6 +5877,64 @@ impl ProgramPlayer {
         }
     }
 
+    /// Compute frei0r `coloradj_RGB` parameters for temperature and tint.
+    ///
+    /// Uses the Tanner Helland algorithm (same as FFmpeg's `colortemperature`
+    /// filter) to convert a Kelvin value into per-channel RGB gains, then
+    /// maps those gains into frei0r's [0,1] parameter space where 0.5 is
+    /// neutral (gain 1.0).
+    ///
+    /// Tint is applied as a green-channel shift with complementary R/B
+    /// boost, matching FFmpeg's `colorbalance` midtones approach.
+    fn compute_coloradj_params(temperature: f64, tint: f64) -> ColorAdjRGBParams {
+        // Tanner Helland algorithm: Kelvin → approximate RGB (0–255).
+        let kelvin_to_rgb = |temp_k: f64| -> (f64, f64, f64) {
+            let t = temp_k / 100.0;
+            let r = if t <= 66.0 {
+                255.0
+            } else {
+                (329.698_727_446 * (t - 60.0).powf(-0.133_204_759_2)).clamp(0.0, 255.0)
+            };
+            let g = if t <= 66.0 {
+                (99.470_802_586_1 * t.ln() - 161.119_568_166_1).clamp(0.0, 255.0)
+            } else {
+                (288.122_169_528_3 * (t - 60.0).powf(-0.075_514_849_2)).clamp(0.0, 255.0)
+            };
+            let b = if t >= 66.0 {
+                255.0
+            } else if t <= 19.0 {
+                0.0
+            } else {
+                (138.517_731_223_1 * (t - 10.0).ln() - 305.044_792_730_7).clamp(0.0, 255.0)
+            };
+            (r, g, b)
+        };
+
+        // Reference point: 6500 K (daylight neutral).
+        let (ref_r, ref_g, ref_b) = kelvin_to_rgb(6500.0);
+        let (tgt_r, tgt_g, tgt_b) = kelvin_to_rgb(temperature.clamp(1000.0, 15000.0));
+
+        // Per-channel gains = target / reference.
+        let mut gain_r = tgt_r / ref_r;
+        let mut gain_g = tgt_g / ref_g;
+        let mut gain_b = tgt_b / ref_b;
+
+        // Apply tint as green-channel offset with complementary R/B boost
+        // (same approach as FFmpeg colorbalance midtones).
+        let t = tint.clamp(-1.0, 1.0);
+        gain_r += t * 0.25;
+        gain_g -= t * 0.50;
+        gain_b += t * 0.25;
+
+        // frei0r coloradj_RGB in multiply mode: param = gain / 2.0
+        // (param 0.5 = gain 1.0, param 1.0 = gain 2.0, param 0.0 = gain 0.0).
+        ColorAdjRGBParams {
+            r: (gain_r / 2.0).clamp(0.0, 1.0),
+            g: (gain_g / 2.0).clamp(0.0, 1.0),
+            b: (gain_b / 2.0).clamp(0.0, 1.0),
+        }
+    }
+
     /// Returns true if two clips would produce effects bins with the same
     /// element topology (same set of active effect elements).  When true,
     /// a reused slot's effects bin can be updated via property sets alone,
@@ -5819,9 +5942,10 @@ impl ProgramPlayer {
     fn effects_topology_matches(a: &ProgramClip, b: &ProgramClip) -> bool {
         let need_balance =
             |c: &ProgramClip| c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0
-                || (c.temperature - 6500.0).abs() > 1.0 || c.tint.abs() > 0.001
                 || c.shadows.abs() > f64::EPSILON || c.midtones.abs() > f64::EPSILON
                 || c.highlights.abs() > f64::EPSILON;
+        let need_coloradj =
+            |c: &ProgramClip| (c.temperature - 6500.0).abs() > 1.0 || c.tint.abs() > 0.001;
         let need_blur = |c: &ProgramClip| {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -5832,6 +5956,7 @@ impl ProgramPlayer {
         let need_chroma_key = |c: &ProgramClip| c.chroma_key_enabled;
 
         need_balance(a) == need_balance(b)
+            && need_coloradj(a) == need_coloradj(b)
             && need_blur(a) == need_blur(b)
             && need_rotate(a) == need_rotate(b)
             && need_flip(a) == need_flip(b)
@@ -5848,11 +5973,10 @@ impl ProgramPlayer {
         let need_balance = clip.brightness != 0.0
             || clip.contrast != 1.0
             || clip.saturation != 1.0
-            || (clip.temperature - 6500.0).abs() > 1.0
-            || clip.tint.abs() > 0.001
             || clip.shadows.abs() > f64::EPSILON
             || clip.midtones.abs() > f64::EPSILON
             || clip.highlights.abs() > f64::EPSILON;
+        let need_coloradj = (clip.temperature - 6500.0).abs() > 1.0 || clip.tint.abs() > 0.001;
         let need_blur = {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
@@ -5862,7 +5986,14 @@ impl ProgramPlayer {
         let need_title = !clip.title_text.is_empty();
         let need_chroma_key = clip.chroma_key_enabled;
 
+        // Temperature/tint needs either coloradj_rgb (preferred) or
+        // videobalance (hue-rotation fallback).
+        let coloradj_ok = !need_coloradj
+            || slot.coloradj_rgb.is_some()
+            || slot.videobalance.is_some();
+
         (!need_balance || slot.videobalance.is_some())
+            && coloradj_ok
             && (!need_blur || slot.gaussianblur.is_some())
             && (!need_rotate || slot.videoflip_rotate.is_some())
             && (!need_flip || slot.videoflip_flip.is_some())
@@ -5941,16 +6072,26 @@ impl ProgramPlayer {
         let slot = &self.slots[slot_idx];
 
         // Videobalance (calibrated preview mapping)
+        let has_coloradj = slot.coloradj_rgb.is_some();
         if let Some(ref vb) = slot.videobalance {
             let p = Self::compute_videobalance_params(
                 clip.brightness, clip.contrast, clip.saturation,
                 clip.temperature, clip.tint,
                 clip.shadows, clip.midtones, clip.highlights,
+                has_coloradj,
             );
             vb.set_property("brightness", p.brightness);
             vb.set_property("contrast", p.contrast);
             vb.set_property("saturation", p.saturation);
             vb.set_property("hue", p.hue);
+        }
+
+        // frei0r coloradj_RGB (per-channel temperature/tint)
+        if let Some(ref ca) = slot.coloradj_rgb {
+            let cp = Self::compute_coloradj_params(clip.temperature, clip.tint);
+            ca.set_property("r", cp.r);
+            ca.set_property("g", cp.g);
+            ca.set_property("b", cp.b);
         }
 
         // Gaussianblur
@@ -6990,7 +7131,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_mismatch_temperature_triggers_balance() {
+    fn topology_mismatch_temperature_triggers_coloradj() {
         let a = make_clip();
         let mut b = make_clip();
         b.temperature = 3000.0;
@@ -6998,7 +7139,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_mismatch_tint_triggers_balance() {
+    fn topology_mismatch_tint_triggers_coloradj() {
         let a = make_clip();
         let mut b = make_clip();
         b.tint = 0.5;
@@ -7056,6 +7197,18 @@ mod tests {
         has_textoverlay: bool,
         has_chroma_key: bool,
     ) -> VideoSlot {
+        make_test_slot_ext(has_videobalance, false, has_gaussianblur, has_rotate, has_flip, has_textoverlay, has_chroma_key)
+    }
+
+    fn make_test_slot_ext(
+        has_videobalance: bool,
+        has_coloradj_rgb: bool,
+        has_gaussianblur: bool,
+        has_rotate: bool,
+        has_flip: bool,
+        has_textoverlay: bool,
+        has_chroma_key: bool,
+    ) -> VideoSlot {
         let _ = gst::init();
         let identity = || gst::ElementFactory::make("identity").build().ok();
         VideoSlot {
@@ -7070,6 +7223,7 @@ mod tests {
             audio_conv: None,
             audio_level: None,
             videobalance: if has_videobalance { identity() } else { None },
+            coloradj_rgb: if has_coloradj_rgb { identity() } else { None },
             gaussianblur: if has_gaussianblur { identity() } else { None },
             videocrop: None,
             videobox_crop_alpha: None,
@@ -7208,9 +7362,21 @@ mod tests {
         temperature: f64, tint: f64,
         shadows: f64, midtones: f64, highlights: f64,
     ) -> super::VBParams {
+        // Default: assume coloradj_rgb is available (no hue fallback).
         ProgramPlayer::compute_videobalance_params(
             brightness, contrast, saturation, temperature, tint,
-            shadows, midtones, highlights,
+            shadows, midtones, highlights, true,
+        )
+    }
+
+    fn vb_no_coloradj(
+        brightness: f64, contrast: f64, saturation: f64,
+        temperature: f64, tint: f64,
+        shadows: f64, midtones: f64, highlights: f64,
+    ) -> super::VBParams {
+        ProgramPlayer::compute_videobalance_params(
+            brightness, contrast, saturation, temperature, tint,
+            shadows, midtones, highlights, false,
         )
     }
 
@@ -7254,15 +7420,21 @@ mod tests {
     }
 
     #[test]
-    fn vb_temperature_warm_shifts_hue_negative() {
-        let p = vb(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.hue > 0.01, "warm temperature should shift hue positively: h={}", p.hue);
+    fn vb_temperature_warm_shifts_hue_without_coloradj() {
+        let p = vb_no_coloradj(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.hue > 0.01, "warm temperature should shift hue positively (fallback): h={}", p.hue);
     }
 
     #[test]
-    fn vb_temperature_cool_shifts_hue_positive() {
-        let p = vb(0.0, 1.0, 1.0, 9000.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.hue < -0.01, "cool temperature should shift hue negatively: h={}", p.hue);
+    fn vb_temperature_cool_shifts_hue_without_coloradj() {
+        let p = vb_no_coloradj(0.0, 1.0, 1.0, 9000.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(p.hue < -0.01, "cool temperature should shift hue negatively (fallback): h={}", p.hue);
+    }
+
+    #[test]
+    fn vb_temperature_no_hue_with_coloradj() {
+        let p = vb(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
+        assert!((p.hue).abs() < 0.01, "with coloradj, temp should not shift hue: h={}", p.hue);
     }
 
     #[test]
@@ -7281,10 +7453,17 @@ mod tests {
     }
 
     #[test]
-    fn vb_tint_shifts_hue() {
+    fn vb_tint_shifts_hue_without_coloradj() {
+        let pos = vb_no_coloradj(0.0, 1.0, 1.0, 6500.0, 0.5, 0.0, 0.0, 0.0);
+        let neg = vb_no_coloradj(0.0, 1.0, 1.0, 6500.0, -0.5, 0.0, 0.0, 0.0);
+        assert!(pos.hue > neg.hue, "positive tint should shift hue more positive (fallback)");
+    }
+
+    #[test]
+    fn vb_tint_no_hue_with_coloradj() {
         let pos = vb(0.0, 1.0, 1.0, 6500.0, 0.5, 0.0, 0.0, 0.0);
         let neg = vb(0.0, 1.0, 1.0, 6500.0, -0.5, 0.0, 0.0, 0.0);
-        assert!(pos.hue > neg.hue, "positive tint should shift hue more positive");
+        assert!((pos.hue - neg.hue).abs() < 0.01, "with coloradj, tint should not shift hue");
     }
 
     #[test]
@@ -7342,6 +7521,73 @@ mod tests {
         // poly4(0.0) = 1.0
         let v0 = ProgramPlayer::poly4(0.0, &c);
         assert!((v0 - 1.0).abs() < 1e-9, "poly4(0.0) = {}", v0);
+    }
+
+    // ── compute_coloradj_params tests ────────────────────────────────
+
+    #[test]
+    fn coloradj_neutral_at_6500k() {
+        let cp = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
+        assert!((cp.r - 0.5).abs() < 0.01, "neutral r={}", cp.r);
+        assert!((cp.g - 0.5).abs() < 0.01, "neutral g={}", cp.g);
+        assert!((cp.b - 0.5).abs() < 0.01, "neutral b={}", cp.b);
+    }
+
+    #[test]
+    fn coloradj_warm_boosts_red_cuts_blue() {
+        let cp = ProgramPlayer::compute_coloradj_params(3000.0, 0.0);
+        assert!(cp.r > cp.b, "warm should boost R over B: r={} b={}", cp.r, cp.b);
+        assert!(cp.b < 0.4, "warm should cut blue: b={}", cp.b);
+    }
+
+    #[test]
+    fn coloradj_cool_boosts_blue_cuts_red() {
+        let cp = ProgramPlayer::compute_coloradj_params(10000.0, 0.0);
+        assert!(cp.b > cp.r, "cool should boost B over R: r={} b={}", cp.r, cp.b);
+        assert!(cp.r < 0.45, "cool should cut red: r={}", cp.r);
+    }
+
+    #[test]
+    fn coloradj_tint_shifts_green() {
+        let pos = ProgramPlayer::compute_coloradj_params(6500.0, 0.5);
+        let neg = ProgramPlayer::compute_coloradj_params(6500.0, -0.5);
+        // Positive tint = cut green (lower param), boost R/B
+        assert!(pos.g < neg.g, "positive tint cuts green: pos_g={} neg_g={}", pos.g, neg.g);
+        assert!(pos.r > neg.r, "positive tint boosts red: pos_r={} neg_r={}", pos.r, neg.r);
+    }
+
+    #[test]
+    fn coloradj_params_clamped() {
+        let cp = ProgramPlayer::compute_coloradj_params(1000.0, 1.0);
+        assert!(cp.r >= 0.0 && cp.r <= 1.0, "r clamped: {}", cp.r);
+        assert!(cp.g >= 0.0 && cp.g <= 1.0, "g clamped: {}", cp.g);
+        assert!(cp.b >= 0.0 && cp.b <= 1.0, "b clamped: {}", cp.b);
+    }
+
+    // ── slot_satisfies_clip with coloradj ────────────────────────────
+
+    #[test]
+    fn slot_with_coloradj_accepts_temperature() {
+        let slot = make_test_slot_ext(false, true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.temperature = 3000.0;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_videobalance_accepts_temperature_fallback() {
+        let slot = make_test_slot(true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.temperature = 3000.0;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_coloradj_accepts_tint() {
+        let slot = make_test_slot_ext(false, true, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.tint = 0.5;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
     }
 }
 
