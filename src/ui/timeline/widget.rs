@@ -754,6 +754,17 @@ impl TimelineState {
         true
     }
 
+    fn clip_context_menu_actionability(&self) -> ClipContextMenuActionability {
+        ClipContextMenuActionability {
+            join_through_edit: self.can_join_selected_through_edit(),
+            freeze_frame: self.can_create_freeze_frame_at_playhead(),
+            link_selected: self.can_link_selected_clips(),
+            unlink_selected: self.can_unlink_selected_clips(),
+            align_grouped: self.can_align_selected_groups_by_timecode(),
+            sync_audio: self.can_sync_selected_clips_by_audio(),
+        }
+    }
+
     fn selected_joinable_through_edit_boundary(&self) -> Option<(String, Clip, Clip)> {
         let selected_ids = self.selected_ids_or_primary();
         if selected_ids.is_empty() {
@@ -1982,6 +1993,49 @@ enum HitZone {
     Roll,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ClipContextMenuActionability {
+    join_through_edit: bool,
+    freeze_frame: bool,
+    link_selected: bool,
+    unlink_selected: bool,
+    align_grouped: bool,
+    sync_audio: bool,
+}
+
+impl ClipContextMenuActionability {
+    fn any(self) -> bool {
+        self.join_through_edit
+            || self.freeze_frame
+            || self.link_selected
+            || self.unlink_selected
+            || self.align_grouped
+            || self.sync_audio
+    }
+}
+
+fn apply_clip_context_menu_actionability(
+    btn_join_through_edit: &gtk::Button,
+    btn_freeze_frame: &gtk::Button,
+    btn_link_selected: &gtk::Button,
+    btn_unlink_selected: &gtk::Button,
+    btn_align_grouped: &gtk::Button,
+    btn_sync_audio: &gtk::Button,
+    actionability: ClipContextMenuActionability,
+) -> bool {
+    let set_state = |button: &gtk::Button, actionable: bool| {
+        button.set_visible(actionable);
+        button.set_sensitive(actionable);
+    };
+    set_state(btn_join_through_edit, actionability.join_through_edit);
+    set_state(btn_freeze_frame, actionability.freeze_frame);
+    set_state(btn_link_selected, actionability.link_selected);
+    set_state(btn_unlink_selected, actionability.unlink_selected);
+    set_state(btn_align_grouped, actionability.align_grouped);
+    set_state(btn_sync_audio, actionability.sync_audio);
+    actionability.any()
+}
+
 /// Build and return the timeline `DrawingArea` widget.
 pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     let area = DrawingArea::new();
@@ -2423,25 +2477,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let mut show_context_menu = false;
                     if let Some(h) = hit {
                         st.prepare_clip_context_menu_selection(&h.clip_id, &h.track_id);
-                        let can_join_through_edit = st.can_join_selected_through_edit();
-                        let can_link = st.can_link_selected_clips();
-                        let can_unlink = st.can_unlink_selected_clips();
-                        let can_align_grouped = st.can_align_selected_groups_by_timecode();
-                        let can_sync_audio = st.can_sync_selected_clips_by_audio();
-                        let can_freeze_frame = st.can_create_freeze_frame_at_playhead();
-                        btn_join_through_edit.set_sensitive(can_join_through_edit);
-                        btn_freeze_frame.set_sensitive(can_freeze_frame);
-                        btn_link_selected.set_sensitive(can_link);
-                        btn_unlink_selected.set_sensitive(can_unlink);
-                        btn_align_grouped.set_sensitive(can_align_grouped);
-                        btn_sync_audio.set_sensitive(can_sync_audio);
-                        if can_join_through_edit
-                            || can_freeze_frame
-                            || can_link
-                            || can_unlink
-                            || can_align_grouped
-                            || can_sync_audio
-                        {
+                        let actionability = st.clip_context_menu_actionability();
+                        if apply_clip_context_menu_actionability(
+                            &btn_join_through_edit,
+                            &btn_freeze_frame,
+                            &btn_link_selected,
+                            &btn_unlink_selected,
+                            &btn_align_grouped,
+                            &btn_sync_audio,
+                            actionability,
+                        ) {
                             clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                 x as i32, y as i32, 1, 1,
                             )));
@@ -5642,6 +5687,50 @@ mod tests {
         let selected = st.selected_ids_or_primary();
         assert_eq!(selected.len(), 1);
         assert!(selected.contains(&ids_b[0]));
+    }
+
+    #[test]
+    fn clip_context_menu_actionability_is_empty_without_selection() {
+        let (st, _track_id, _ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        let actionability = st.clip_context_menu_actionability();
+        assert_eq!(actionability, ClipContextMenuActionability::default());
+        assert!(!actionability.any());
+    }
+
+    #[test]
+    fn clip_context_menu_actionability_enables_freeze_for_single_selected_video_clip() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        st.set_single_clip_selection(ids[0].clone(), track_id);
+        st.playhead_ns = 500_000_000;
+
+        let actionability = st.clip_context_menu_actionability();
+        assert!(!actionability.join_through_edit);
+        assert!(actionability.freeze_frame);
+        assert!(!actionability.link_selected);
+        assert!(!actionability.unlink_selected);
+        assert!(!actionability.align_grouped);
+        assert!(!actionability.sync_audio);
+        assert!(actionability.any());
+    }
+
+    #[test]
+    fn clip_context_menu_actionability_enables_link_and_sync_for_multi_selection() {
+        let (mut st, track_a, _track_b, ids_a, ids_b) =
+            timeline_state_with_two_video_tracks(&[("A", 0)], &[("X", 1_000_000_000)]);
+        let mut selected = HashSet::new();
+        selected.insert(ids_a[0].clone());
+        selected.insert(ids_b[0].clone());
+        st.set_selection_with_primary(ids_a[0].clone(), track_a, selected);
+        st.playhead_ns = 5_000_000_000;
+
+        let actionability = st.clip_context_menu_actionability();
+        assert!(!actionability.join_through_edit);
+        assert!(!actionability.freeze_frame);
+        assert!(actionability.link_selected);
+        assert!(!actionability.unlink_selected);
+        assert!(!actionability.align_grouped);
+        assert!(actionability.sync_audio);
+        assert!(actionability.any());
     }
 
     #[test]

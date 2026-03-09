@@ -68,7 +68,7 @@
 | `Ctrl+A` | Select all timeline clips |
 | Drag in empty timeline body | Marquee-select clips intersecting the rectangle |
 | `M` | Add chapter marker at playhead |
-| `Right-click clip` | Open clip context menu with join-through-edit, freeze-frame, link/unlink, grouped timecode-align, and audio sync actions |
+| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync when applicable) |
 | `Right-click ruler` | Remove nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |
 | `Scroll (vertical)` | Zoom timeline in/out |

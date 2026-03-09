@@ -196,6 +196,7 @@ Tracking docs:
   - [x] Model-side detection for join-safe through-edit boundaries (same source, contiguous source/timeline ranges, compatible kind, transition-safe)
   - [x] Timeline dotted boundary indicators
   - [x] Join-back edit action
+- [x] Right-click clip context menu now shows only currently actionable clip operations (hides unavailable actions)
 - [x] Select clips forward/backward from playhead for bulk operations
 - [ ] Clip display options / adjustable per-track height, clip color labels
 

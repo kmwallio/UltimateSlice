@@ -164,7 +164,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Unlink (`Ctrl+Shift+L`)** clears linking for the selected linked clip(s) and any linked peers in the same link group.
 - Linked clips are selected together, move together when dragging any linked member, and delete together for both normal delete and ripple delete.
 - Link behavior is intentionally narrower than clip grouping: trims remain independent in this first pass.
-- Right-clicking a selected clip now opens a clip context menu with **Link Selected Clips** and **Unlink Selected Clips** actions so link editing is available without remembering the shortcuts.
+- Right-clicking a selected clip opens a context menu that only shows currently actionable clip operations (for example Link/Unlink when applicable), so link editing is available without extra disabled entries.
 - Linked clips show a **LINK** badge in the timeline so linked relationships stay visible even when nothing is selected.
 - When a linked selection spans multiple clips, non-primary linked peers also get a cyan inset border so they stay visually distinct from the primary selected clip.
 
@@ -195,7 +195,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
-| `Right-click clip` | Open clip context menu with join-through-edit, freeze-frame, link/unlink, grouped timecode-align, and audio sync actions |
+| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync when applicable) |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |
