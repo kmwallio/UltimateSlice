@@ -5144,50 +5144,47 @@ impl ProgramPlayer {
                 if clip.chroma_key_enabled {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
                         fps.max(1),
+                        Self::prerender_build_lut_filter(clip),
                         Self::prerender_build_color_filter(clip),
+                        Self::prerender_build_temperature_tint_filter(clip),
                         Self::prerender_build_grading_filter(clip),
                         Self::prerender_build_denoise_filter(clip),
-                        format!(
-                            "{}{}",
-                            Self::prerender_build_sharpen_filter(clip),
-                            Self::prerender_build_lut_filter(clip)
-                        ),
+                        Self::prerender_build_sharpen_filter(clip),
                         Self::prerender_build_chroma_key_filter(clip),
                     ));
                 } else {
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
                         fps.max(1),
+                        Self::prerender_build_lut_filter(clip),
                         Self::prerender_build_color_filter(clip),
+                        Self::prerender_build_temperature_tint_filter(clip),
                         Self::prerender_build_grading_filter(clip),
                         Self::prerender_build_denoise_filter(clip),
-                        format!(
-                            "{}{}",
-                            Self::prerender_build_sharpen_filter(clip),
-                            Self::prerender_build_lut_filter(clip)
-                        ),
+                        Self::prerender_build_sharpen_filter(clip),
                     ));
                 }
             } else {
                 // Overlay tracks: convert to yuva420p early so pad fills transparent.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
                     Self::prerender_build_rotation_filter(clip, true),
+                    Self::prerender_build_lut_filter(clip),
                     Self::prerender_build_color_filter(clip),
+                    Self::prerender_build_temperature_tint_filter(clip),
                     Self::prerender_build_grading_filter(clip),
                     Self::prerender_build_denoise_filter(clip),
                     Self::prerender_build_sharpen_filter(clip),
-                    Self::prerender_build_lut_filter(clip),
                     Self::prerender_build_chroma_key_filter(clip),
                     clip.opacity.clamp(0.0, 1.0),
                 ));
@@ -5275,6 +5272,28 @@ impl ProgramPlayer {
         } else {
             String::new()
         }
+    }
+
+    fn prerender_build_temperature_tint_filter(clip: &ProgramClip) -> String {
+        let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
+        let has_tint = clip.tint.abs() > 0.001;
+        let mut f = String::new();
+        if has_temp {
+            f.push_str(&format!(
+                ",colortemperature=temperature={:.0}",
+                clip.temperature.clamp(2000.0, 10000.0)
+            ));
+        }
+        if has_tint {
+            let t = clip.tint.clamp(-1.0, 1.0);
+            let gm = -t * 0.5;
+            let rm = t * 0.25;
+            let bm = t * 0.25;
+            f.push_str(&format!(
+                ",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"
+            ));
+        }
+        f
     }
 
     fn prerender_build_denoise_filter(clip: &ProgramClip) -> String {
