@@ -6,7 +6,7 @@ All notable project changes and progress should be recorded here.
 
 ### Added
 - **AI background removal**: Offline background removal using ONNX Runtime inference (MODNet segmentation model). Enable per-clip in the Inspector's "Background Removal" section. Processes video frames through a neural network to produce an alpha-channel WebM (VP9 alpha) file. Both preview and export use the pre-processed result for exact visual match. Controlled via Inspector checkbox + threshold slider, FCPXML persistence, and MCP `set_clip_bg_removal` tool.
-- **Export presets + MCP preset automation**: The Export dialog now supports named preset workflows (save-as, update, delete, and recall). Presets persist in local UI state and can also be automated via MCP (`list_export_presets`, `save_export_preset`, `delete_export_preset`, `export_with_preset`) for repeatable renders.
+- **Export presets + MCP preset automation**: The Export dialog now supports named preset workflows (save-as, update, delete, and recall). Presets persist in local UI state and can also be automated via MCP (`list_export_presets`, `save_export_preset`, `delete_export_preset`, `export_with_preset`) for repeatable renders. New installs (and older UI-state files missing `export_presets`) now start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, and **WebM VP9 1080p**.
 
 ### Improved
 - **Transition preview matching**: The program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions in real time, matching FFmpeg `xfade` export output. Uses compositor pad alpha animation for dissolve/fade transitions and videocrop animation for wipe transitions. Both playback and scrubbing show the transition effect.

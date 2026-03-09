@@ -82,6 +82,7 @@ Use the **Preset** row in the Export dialog to save and reuse named export confi
 - **Delete** removes the selected preset.
 - Selecting a preset immediately applies its codec/container/resolution/CRF/audio settings.
 - **(Custom)** means no saved preset is currently selected.
+- New installs (and older UI-state files missing export preset config) start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, and **WebM VP9 1080p**.
 
 Preset data is stored in local UI state and persists across app restarts.
 
