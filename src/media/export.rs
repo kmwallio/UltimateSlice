@@ -144,6 +144,15 @@ pub fn export_project(
         .arg("-nostats");
 
     // Helper: resolve effective source path (bg-removed version if available).
+    // Helper: true when the clip's actual FFmpeg input is a bg-removed file (video-only, no audio).
+    let uses_bg_removal_path = |clip: &Clip| -> bool {
+        clip.bg_removal_enabled
+            && bg_removal_paths
+                .get(&clip.source_path)
+                .map(|p| std::path::Path::new(p).exists())
+                .unwrap_or(false)
+    };
+
     let resolve_export_path = |clip: &Clip| -> String {
         if clip.bg_removal_enabled {
             if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
@@ -209,7 +218,7 @@ pub fn export_project(
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
-        if clip.chroma_key_enabled {
+        if clip.chroma_key_enabled || clip.bg_removal_enabled {
             filter.push_str(&format!(
                 "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
@@ -336,6 +345,7 @@ pub fn export_project(
     for (i, clip) in primary_clips.iter().enumerate() {
         if clip.kind == ClipKind::Video
             && !has_linked_audio_peer(clip, &audio_clips)
+            && !uses_bg_removal_path(clip)
             && probe_has_audio(&ffmpeg, &clip.source_path)
         {
             let delay_ms = clip.timeline_start / 1_000_000;
@@ -355,6 +365,7 @@ pub fn export_project(
         let in_idx = sec_base + k;
         if clip.kind == ClipKind::Video
             && !has_linked_audio_peer(clip, &audio_clips)
+            && !uses_bg_removal_path(clip)
             && probe_has_audio(&ffmpeg, &clip.source_path)
         {
             let delay_ms = clip.timeline_start / 1_000_000;
