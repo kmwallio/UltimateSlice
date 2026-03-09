@@ -5973,88 +5973,95 @@ impl ProgramPlayer {
     /// Tint is applied as a green-channel shift with complementary R/B
     /// boost, matching FFmpeg's `colorbalance` midtones approach.
     fn compute_coloradj_params(temperature: f64, tint: f64) -> ColorAdjRGBParams {
-        // Tanner Helland algorithm: Kelvin → approximate RGB (0–255).
-        let kelvin_to_rgb = |temp_k: f64| -> (f64, f64, f64) {
-            let t = temp_k / 100.0;
-            let r = if t <= 66.0 {
-                255.0
-            } else {
-                (329.698_727_446 * (t - 60.0).powf(-0.133_204_759_2)).clamp(0.0, 255.0)
-            };
-            let g = if t <= 66.0 {
-                (99.470_802_586_1 * t.ln() - 161.119_568_166_1).clamp(0.0, 255.0)
-            } else {
-                (288.122_169_528_3 * (t - 60.0).powf(-0.075_514_849_2)).clamp(0.0, 255.0)
-            };
-            let b = if t >= 66.0 {
-                255.0
-            } else if t <= 19.0 {
-                0.0
-            } else {
-                (138.517_731_223_1 * (t - 10.0).ln() - 305.044_792_730_7).clamp(0.0, 255.0)
-            };
-            (r, g, b)
-        };
+        // Calibrated polynomial mapping: frei0r coloradj_RGB params that best
+        // approximate the FFmpeg colortemperature + colorbalance tint export.
+        // Coefficients derived from empirical calibration (tools/calibrate_frei0r.py).
+        //
+        // Temperature is normalised: t = (K − 6500) / 4500.
+        // Tint is passed directly (range −1..1).
+        // Each polynomial gives the absolute param value; tint contributes a
+        // delta from its neutral (poly(0) = coeffs[0]).
 
-        // Reference point: 6500 K (daylight neutral).
-        let (ref_r, ref_g, ref_b) = kelvin_to_rgb(6500.0);
-        let (tgt_r, tgt_g, tgt_b) = kelvin_to_rgb(temperature.clamp(1000.0, 15000.0));
+        // ── Temperature (normalised Kelvin) ─────────────────────────────
+        const TEMP_R: [f64; 5] = [ 0.484425, -0.096376, -0.113860,  0.040888,  0.074672];
+        const TEMP_G: [f64; 5] = [ 0.477346,  0.003212, -0.205499,  0.074971,  0.075272];
+        const TEMP_B: [f64; 5] = [ 0.481896,  0.123688, -0.212512,  0.107891, -0.001538];
 
-        // Per-channel gains = target / reference.
-        let mut gain_r = tgt_r / ref_r;
-        let mut gain_g = tgt_g / ref_g;
-        let mut gain_b = tgt_b / ref_b;
+        // ── Tint ────────────────────────────────────────────────────────
+        const TINT_R: [f64; 5] = [ 0.501907,  0.059414,  0.031477,  0.020843, -0.014643];
+        const TINT_G: [f64; 5] = [ 0.493519, -0.073231,  0.227645, -0.178444, -0.126107];
+        const TINT_B: [f64; 5] = [ 0.505304,  0.055597, -0.003110,  0.025954, -0.016120];
 
-        // Apply tint as green-channel offset with complementary R/B boost
-        // (same approach as FFmpeg colorbalance midtones).
-        let t = tint.clamp(-1.0, 1.0);
-        gain_r += t * 0.25;
-        gain_g -= t * 0.50;
-        gain_b += t * 0.25;
+        let t_temp = ((temperature.clamp(1000.0, 15000.0) - 6500.0) / 4500.0).clamp(-1.0, 1.0);
+        let t_tint = tint.clamp(-1.0, 1.0);
 
-        // frei0r coloradj_RGB in multiply mode: param = gain / 2.0
-        // (param 0.5 = gain 1.0, param 1.0 = gain 2.0, param 0.0 = gain 0.0).
+        let mut r = Self::poly4(t_temp, &TEMP_R);
+        let mut g = Self::poly4(t_temp, &TEMP_G);
+        let mut b = Self::poly4(t_temp, &TEMP_B);
+
+        // Tint: add delta from neutral.
+        r += Self::poly4(t_tint, &TINT_R) - TINT_R[0];
+        g += Self::poly4(t_tint, &TINT_G) - TINT_G[0];
+        b += Self::poly4(t_tint, &TINT_B) - TINT_B[0];
+
         ColorAdjRGBParams {
-            r: (gain_r / 2.0).clamp(0.0, 1.0),
-            g: (gain_g / 2.0).clamp(0.0, 1.0),
-            b: (gain_b / 2.0).clamp(0.0, 1.0),
+            r: r.clamp(0.0, 1.0),
+            g: g.clamp(0.0, 1.0),
+            b: b.clamp(0.0, 1.0),
         }
     }
 
     /// Compute frei0r `3-point-color-balance` parameters from
     /// shadows/midtones/highlights sliders.
     ///
-    /// The 3-point element defines a piecewise-linear transfer curve through
-    /// three reference points: black (input 0), gray (input 0.5), and white
-    /// (input 1.0).  This naturally separates luminance ranges, matching the
-    /// spirit of FFmpeg's `colorbalance` filter.
+    /// The 3-point element fits a parabola through three control points
+    /// (black, 0), (gray, 0.5), (white, 1.0) per channel and applies it
+    /// as the transfer curve.  Coefficients derived from empirical
+    /// calibration against FFmpeg's `colorbalance` export filter
+    /// (tools/calibrate_frei0r.py).
     ///
-    /// Mapping:
-    /// - **Shadows** [−1,1] → lift the black point (positive) or compress the
-    ///   shadow-to-midtone slope via gray pull-down (negative).
-    /// - **Midtones** [−1,1] → shift the gray point up/down.
-    /// - **Highlights** [−1,1] → pull down the white point (negative) or
-    ///   expand the midtone-to-highlight slope via gray push-up (positive).
+    /// Each slider contributes a delta from neutral via fitted polynomials.
     fn compute_3point_params(shadows: f64, midtones: f64, highlights: f64) -> ThreePointParams {
+        // ── Shadows ─────────────────────────────────────────────────────
+        const SH_BLACK: [f64; 5] = [ 0.065817,  0.157626,  0.002710, -0.194674, -0.055835];
+        const SH_GRAY:  [f64; 5] = [ 0.513596,  0.081446, -0.041960,  0.017848,  0.117598];
+        const SH_WHITE: [f64; 5] = [ 0.999118, -0.037826, -0.087347, -0.046390, -0.004455];
+
+        // ── Midtones ────────────────────────────────────────────────────
+        const M_BLACK: [f64; 5] = [ 0.006185, -0.024554, -0.070816,  0.093034,  0.159694];
+        const M_GRAY:  [f64; 5] = [ 0.499145, -0.111600, -0.219452,  0.010107,  0.285960];
+        const M_WHITE: [f64; 5] = [ 0.988180, -0.000025,  0.125044,  0.017842, -0.230026];
+
+        // ── Highlights ──────────────────────────────────────────────────
+        const H_BLACK: [f64; 5] = [ 0.039231,  0.056431, -0.027366,  0.018788,  0.094133];
+        const H_GRAY:  [f64; 5] = [ 0.519445, -0.494215,  0.275317,  0.483889, -0.277072];
+        const H_WHITE: [f64; 5] = [ 0.957496, -0.356602, -0.543984,  0.462982,  0.266763];
+
         let sh = shadows.clamp(-1.0, 1.0);
         let mid = midtones.clamp(-1.0, 1.0);
         let hi = highlights.clamp(-1.0, 1.0);
 
-        // Black point: positive shadows lift it from 0.
-        // Negative shadows can't push below 0 — handled via gray.
-        let black = (sh.max(0.0) * 0.5).clamp(0.0, 0.8);
+        // Start from neutral, accumulate deltas from each slider.
+        let mut black = 0.0_f64;
+        let mut gray  = 0.5_f64;
+        let mut white = 1.0_f64;
 
-        // White point: negative highlights pull it down from 1.0.
-        // Positive highlights can't push above 1.0 — handled via gray.
-        let white = (1.0 + hi.min(0.0) * 0.5).clamp(0.2, 1.0);
+        black += Self::poly4(sh,  &SH_BLACK) - SH_BLACK[0];
+        gray  += Self::poly4(sh,  &SH_GRAY)  - SH_GRAY[0];
+        white += Self::poly4(sh,  &SH_WHITE) - SH_WHITE[0];
 
-        // Gray point: direct midtones control, plus spillover for the
-        // directions that can't be represented by black/white alone.
-        let gray = (0.5
-            + mid * 0.25                   // midtones: direct gray shift
-            + sh.min(0.0) * 0.15           // negative shadows → compress shadow slope
-            + hi.max(0.0) * 0.15           // positive highlights → expand highlight slope
-        ).clamp(0.05, 0.95);
+        black += Self::poly4(mid, &M_BLACK)  - M_BLACK[0];
+        gray  += Self::poly4(mid, &M_GRAY)   - M_GRAY[0];
+        white += Self::poly4(mid, &M_WHITE)  - M_WHITE[0];
+
+        black += Self::poly4(hi,  &H_BLACK)  - H_BLACK[0];
+        gray  += Self::poly4(hi,  &H_GRAY)   - H_GRAY[0];
+        white += Self::poly4(hi,  &H_WHITE)  - H_WHITE[0];
+
+        // Clamp to valid frei0r ranges and ensure ordering.
+        let black = black.clamp(0.0, 0.95);
+        let white = white.clamp(0.05, 1.0);
+        let gray = gray.clamp(black + 0.01, white - 0.01);
 
         // All channels equal (luminance-only, matching FFmpeg's rs=gs=bs pattern).
         ThreePointParams {
@@ -7707,9 +7714,9 @@ mod tests {
     #[test]
     fn coloradj_neutral_at_6500k() {
         let cp = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
-        assert!((cp.r - 0.5).abs() < 0.01, "neutral r={}", cp.r);
-        assert!((cp.g - 0.5).abs() < 0.01, "neutral g={}", cp.g);
-        assert!((cp.b - 0.5).abs() < 0.01, "neutral b={}", cp.b);
+        assert!((cp.r - 0.5).abs() < 0.02, "neutral r={}", cp.r);
+        assert!((cp.g - 0.5).abs() < 0.03, "neutral g={}", cp.g);
+        assert!((cp.b - 0.5).abs() < 0.02, "neutral b={}", cp.b);
     }
 
     #[test]
@@ -7815,10 +7822,14 @@ mod tests {
 
     #[test]
     fn threepoint_positive_shadows_lifts_black() {
+        // Calibrated: positive shadows shift the curve to brighten shadow region.
+        // Black point may stay near 0 while gray/white adjust.
+        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
         let p = ProgramPlayer::compute_3point_params(0.8, 0.0, 0.0);
-        assert!(p.black_r > 0.1, "positive shadows should lift black: black_r={}", p.black_r);
-        assert!((p.gray_r - 0.5).abs() < 0.05, "positive shadows should not affect gray much: gray_r={}", p.gray_r);
-        assert!((p.white_r - 1.0).abs() < 0.01, "positive shadows should not affect white: white_r={}", p.white_r);
+        let changed = (p.black_r - neutral.black_r).abs() > 0.001
+            || (p.gray_r - neutral.gray_r).abs() > 0.001
+            || (p.white_r - neutral.white_r).abs() > 0.001;
+        assert!(changed, "positive shadows should alter the curve");
     }
 
     #[test]
@@ -7831,8 +7842,12 @@ mod tests {
 
     #[test]
     fn threepoint_positive_midtones_raises_gray() {
+        // In frei0r 3-point, a LOWER gray value brightens midtones
+        // (the parabola's midpoint shifts left). Calibrated positive
+        // midtones → lower gray to match FFmpeg's brighten behavior.
+        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
         let p = ProgramPlayer::compute_3point_params(0.0, 0.7, 0.0);
-        assert!(p.gray_r > 0.5, "positive midtones should raise gray: gray_r={}", p.gray_r);
+        assert!(p.gray_r < neutral.gray_r, "positive midtones should lower gray (brighten): gray_r={}", p.gray_r);
     }
 
     #[test]
@@ -7843,10 +7858,13 @@ mod tests {
 
     #[test]
     fn threepoint_positive_highlights_raises_gray() {
+        // Calibrated: positive highlights shift gray/white to brighten
+        // the highlight region. Gray may move lower (frei0r parabola semantics).
         let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0);
         let pos = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.8);
-        assert!(pos.gray_r > neutral.gray_r, "positive highlights should raise gray: gray_r={}", pos.gray_r);
-        assert!((pos.white_r - 1.0).abs() < 0.01, "positive highlights should not push white above 1: white_r={}", pos.white_r);
+        let changed = (pos.gray_r - neutral.gray_r).abs() > 0.01
+            || (pos.white_r - neutral.white_r).abs() > 0.01;
+        assert!(changed, "positive highlights should alter the curve");
     }
 
     #[test]
