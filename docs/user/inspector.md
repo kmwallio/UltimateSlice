@@ -28,6 +28,8 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 | **Brightness** | −1.0 → 1.0 | 0.0 | Additive luminance shift |
 | **Contrast** | 0.0 → 2.0 | 1.0 | Contrast multiplier |
 | **Saturation** | 0.0 → 2.0 | 1.0 | 0 = greyscale, 2 = vivid |
+| **Temperature** | 2000 → 10000 K | 6500 | Color temperature: low = warm/amber, high = cool/blue |
+| **Tint** | −1.0 → 1.0 | 0.0 | Green–magenta axis: negative = green, positive = magenta |
 
 ---
 
@@ -62,12 +64,13 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Position X** | −1.0 → 1.0 | Horizontal offset within the frame. 0.0 = center, −1.0 = full left, 1.0 = full right |
 | **Position Y** | −1.0 → 1.0 | Vertical offset within the frame. 0.0 = center, −1.0 = full top, 1.0 = full bottom |
 | **Crop Left/Right/Top/Bottom** | 0 → 500 px | Crop pixels from each edge |
-| **Rotate** | 0° / 90° / 180° / 270° | Rotation preset |
+| **Rotate** | Dial/knob + numeric angle (−180° → 180°) | Arbitrary-angle rotation |
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
 
 Program Monitor overlay integration:
 - Drag **corner handles** to scale (hold **Shift** for constrained scaling).
+- Drag the **orange rotation handle** above the clip box to set rotation angle.
 - Drag **edge midpoint handles** to adjust crop left/right/top/bottom directly in preview.
 - Use keyboard nudges in the Program Monitor overlay for fine position/scale adjustments.
 
@@ -117,6 +120,23 @@ Assigns a 3D Look-Up Table (LUT) file for professional color grading. LUTs remap
 > **Applied on export** — The LUT is applied via FFmpeg's `lut3d` filter during export (full quality). Preview playback does not apply the LUT. A cyan **LUT** badge appears on the clip in the timeline when a LUT is assigned.
 
 Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacking is a future feature.
+
+---
+
+## Chroma Key
+
+Removes a target color (green screen / blue screen) from the clip, making those pixels transparent so lower video tracks show through the compositor pipeline.
+
+| Control | Range | Default | Description |
+|---|---|---|---|
+| **Enable Chroma Key** | on/off | off | Activates/deactivates chroma keying for this clip |
+| **Key Color** | Green / Blue / Custom | Green | Target color to make transparent; Custom shows a hex entry |
+| **Tolerance** | 0.0 → 1.0 | 0.3 | How far from the target color to key out (higher = wider range) |
+| **Edge Softness** | 0.0 → 1.0 | 0.1 | Softens the key edge for smoother blending (higher = softer) |
+
+> **Pipeline placement** — Chroma key is applied after color correction (so you can white-balance a green screen clip before keying) but before crop/rotation. Preview uses GStreamer's `alpha` element; export uses FFmpeg's `colorkey` filter.
+
+Place the chroma-keyed clip on an upper video track with the background on a lower track. The compositor automatically composites transparent regions.
 
 ---
 

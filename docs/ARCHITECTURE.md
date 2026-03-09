@@ -40,6 +40,7 @@ src/
     media_library.rs        MediaItem (library entry) + SourceMarks (source in/out state)
 
   media/
+    audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
     thumbnail.rs            Frame extraction via GStreamer AppSink pipeline (unused in UI yet)
     export.rs               MP4 export via ffmpeg subprocess: filter_complex concat (video) + adelay/amix (audio) → libx264 + aac
@@ -235,6 +236,9 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 | `anyhow` | `1` | error handling |
 | `thiserror` | `1` | error types |
 | `log` + `env_logger` | latest | logging |
+| `rustfft` | `6` | FFT for audio cross-correlation sync |
+| `ort` | `2.0.0-rc.12` | ONNX Runtime for AI background removal |
+| `ndarray` | `0.17` | N-dimensional array for ONNX tensor I/O |
 
 **Do not upgrade gstreamer without also upgrading gtk4/gdk4/glib to the matching glib version.**
 
@@ -325,8 +329,9 @@ Before declaring a task finished, agents must verify via MCP:
 |---|---|
 | `get_project` | Full project JSON (title, tracks, clips) |
 | `list_tracks` | Track index, id, kind, clip count |
-| `list_clips` | All clips with id, path, track\_index, ns positions |
+| `list_clips` | All clips with id, path, track\_index, ns positions, `group_id` / `link_group_id`, and source-time metadata when present |
 | `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
+| `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
 | `close_source_preview` | Deselect current source media and hide the source preview |
 | `get_preferences` | Get persisted application preferences |
@@ -336,9 +341,17 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_proxy_mode` | Set proxy preview mode (`off` / `half_res` / `quarter_res`) |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |
 | `set_preview_quality` | Set compositor preview quality (`auto` / `full` / `half` / `quarter`); takes effect immediately |
+| `set_realtime_preview` | Toggle real-time preview decoder prebuilds (`true` / `false`) |
+| `set_experimental_preview_optimizations` | Toggle occlusion optimization (audio-only decode for fully-occluded clips) |
+| `set_background_prerender` | Toggle background prerender of complex overlap windows (`true` / `false`) |
+| `set_preview_luts` | Toggle LUT-baked project-resolution preview media generation when proxy mode is off (`true` / `false`) |
 | `add_clip` | Add clip at track\_index + timeline position |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |
+| `link_clips` | Assign a shared clip link group to two or more clips |
+| `unlink_clips` | Clear clip link groups for the provided clips and their linked peers |
+| `align_grouped_clips_by_timecode` | Align grouped clips referenced by clip ids using stored source-time metadata |
+| `sync_clips_by_audio` | Synchronize 2+ clips by FFT audio cross-correlation (first clip is anchor) |
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |
@@ -352,9 +365,14 @@ Before declaring a task finished, agents must verify via MCP:
 | `take_screenshot` | Capture a PNG screenshot of the full application window (GTK snapshot + GSK CairoRenderer); saved to CWD as `ultimateslice-screenshot-<epoch>.png` |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
+| `set_clip_chroma_key` | Set chroma key (green/blue screen) params on a clip by id |
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.14 to a file path |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
+| `list_export_presets` | List saved export presets from UI state |
+| `save_export_preset` | Create or overwrite a named export preset |
+| `delete_export_preset` | Delete a named export preset |
+| `export_with_preset` | Export to a path using a named export preset |
 | `list_library` | Items in the media library (not yet on timeline) |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
 | `reorder_track` | Move a track from one index to another (undoable) |

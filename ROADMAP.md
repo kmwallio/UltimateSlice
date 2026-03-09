@@ -13,9 +13,14 @@ Tracking docs:
 ### Foundation
 - [x] GTK4 + Rust project scaffold (`gtk4-rs 0.11`, `gstreamer-rs 0.25`, `glib 0.22`)
 - [x] Dark theme via custom CSS (`src/style.css`)
+- [x] GTK4/libadwaita-style control polish in dark theme (linked tabs, popovers, dropdown/combo controls, sliders, check/radio)
+- [x] Preferences selector styling fix: narrowed ComboBox/DropDown CSS selectors to avoid nested/double borders on settings selectors
 - [x] GApplication entry point with CSS loading
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
+- [x] Non-deprecation warning cleanup pass for `cargo build --quiet` / `cargo test --quiet` (unused imports/vars/mut, `unused_must_use`, and targeted intentional dead-code allowances)
+- [x] Legacy GTK deprecation-warning suppression pass for existing Dialog/ComboBoxText UI paths with narrowly scoped `#[allow(deprecated)]` (no runtime behavior change)
+- [x] Runtime GTK slider warning cleanup: added a generic slider CSS reset (border/margin/padding/box-shadow none) plus explicit scale-thumb sizing to remove negative min-size warnings (`GtkGizmo ... slider ... -4`)
 
 ### Data Model
 - [x] `Clip` — source path, source in/out (ns), timeline position, label, kind
@@ -27,8 +32,9 @@ Tracking docs:
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
-- [x] GStreamer Discoverer probes duration on import (background thread via `MediaProbeCache`)
+- [x] GStreamer Discoverer probes duration and source timecode on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
+- [x] Thumbnails auto-refresh when extraction completes (debounced batch redraw) without requiring manual panel/window redraw
 - [x] Selecting a library item loads it in the source preview
 - [x] Imported clips are **not** auto-added to the timeline
 - [x] Import no longer auto-loads Source Monitor; selecting a library item loads preview on demand (avoids import-time playbin reconfiguration races)
@@ -125,9 +131,13 @@ Tracking docs:
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
 - [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
+- [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
+- [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
+- [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
+- [x] Local perf tooling scripts: `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py`
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
 - [x] `select_library_item`, `source_play`, `source_pause` tools — select media in the library and control Source Monitor playback via MCP
 
@@ -161,6 +171,25 @@ Tracking docs:
 - [x] Ripple edit mode (Trim In/Out)
 - [x] Roll edit mode
 - [x] Slip/slide edit modes
+- [x] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
+- [x] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
+  - [x] Phase 1: Shift+click range select (same-track + cross-track time-range), Ctrl/Cmd+click toggle selection, Ctrl+A select all
+  - [x] Phase 2: rubber-band marquee selection
+- [x] Ripple Delete (Shift+Delete closes gap by shifting subsequent clips)
+- [x] Clip grouping / ungrouping (persist clip-group IDs; grouped move/delete as a unit)
+  - [x] Visual group context: selecting a grouped clip highlights non-selected group peers with a secondary border
+  - [x] Align grouped clips by audio or timecode
+    - [x] Phase 1: Align grouped clips by stored timecode metadata
+    - [x] Phase 2: Align grouped clips by audio (FFT cross-correlation via `rustfft`)
+- [ ] Audio/video linking (auto-link video and audio from same source)
+  - [x] Manual clip linking / unlinking with synchronized selection, move, and delete behavior
+  - [x] Auto-link same-source A/V clip creation on drag-and-drop
+  - [ ] Auto-link A/V for source monitor operations (Append/Insert/Overwrite) — reverted to single-clip placement; needs redesign to handle track targeting and edge cases before re-enabling
+- [ ] Solo track (play only selected tracks, complement to muted/locked)
+- [ ] Freeze frame (hold single frame for arbitrary duration)
+- [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
+- [x] Select clips forward/backward from playhead for bulk operations
+- [ ] Clip display options / adjustable per-track height, clip color labels
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
@@ -169,6 +198,10 @@ Tracking docs:
 - [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies to Program Monitor preview and export (`reverse`/`areverse`), timeline shows `◀` badge, and state persists via `us:reverse` FCPXML attribute
 - [ ] Variable speed ramps: multiple keyframed speed segments within a single clip
 - [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
+
+### Keyframe Animation
+- [ ] Property keyframes with interpolation (position, scale, opacity, volume over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
+- [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
 
 ### Program Monitor
 - [x] Program Monitor panel showing assembled timeline playback
@@ -194,9 +227,11 @@ Tracking docs:
     - [x] Frame-boundary seek deduplication: quantize paused scrub positions to frame boundaries and skip redundant pipeline work for same-frame seeks
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
    - [x] Managed local proxy cache root (`$XDG_CACHE_HOME/ultimateslice/proxies`, fallback `/tmp/ultimateslice/proxies`) with fallback to alongside-media `UltimateSlice.cache` when local-cache transcodes fail
-   - [x] Managed proxy cache lifecycle cleanup (startup stale prune for ownership-index entries older than 24h, plus project unload/app-close cleanup of managed cache files)
-   - [x] Eager near-playhead proxy priming during project reload (capped, proximity-ordered source requests before first program-player rebuild)
-   - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
+    - [x] Managed proxy cache lifecycle cleanup (startup stale prune for ownership-index entries older than 24h, plus project unload/app-close cleanup of managed cache files)
+    - [x] Eager near-playhead proxy priming during project reload (capped, proximity-ordered source requests before first program-player rebuild)
+    - [x] Proxy readiness hardening: incomplete/unprobeable proxy files are treated as invalid for playback fallback, and proxy outputs are promoted atomically only after successful completion
+    - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
+   - [x] Apply preview quality divisor to Program Monitor processing resolution (slot effects/compositor), reducing heavy-overlap playback cost when `Half`/`Quarter` preview is selected
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
     - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops
       - [x] Ensure paused timeline seek in compositor preview re-prerolls after decoder seek so Program Monitor/transform overlay frame refresh remains reliable while scrubbing
@@ -212,13 +247,30 @@ Tracking docs:
           - [x] Enable audio-master drop-late preview policy during 3+ track playback overlap (leaky display queue + sink QoS/max-lateness) so displayed frames stay closer to audio clock under decode pressure
           - [x] Apply adaptive per-slot queue drop-late policy during heavy-overlap playback to reduce compositor-branch backpressure at handoff
           - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
-          - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
-          - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
+           - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
+           - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to temporary disk clips and use them at boundary rebuilds when available
+           - [x] Background prerender boundary correctness hardening: track prerender-active clip sets for boundary transitions and normalize prerender segment timestamps to avoid freeze/black handoff regressions
+           - [x] Background prerender safety fallback: when a prerender video slot fails to link at boundary rebuild, immediately rebuild with normal live slots; cache keys are versioned with timeline/track identity to prevent stale segment reuse
+           - [x] Background prerender link-race guard: allow a short post-preroll link grace for prerender slots, then force live fallback + segment invalidation when still unlinked to prevent unstable playback states
+           - [x] Background prerender priority over realtime boundary path for 3+ overlaps: when both settings are enabled, boundary handling now chooses prerender-capable rebuilds so prerender clips are consumed during full playthrough
+           - [x] Background prerender scheduling bounded during playback: queue by upcoming boundaries only (not moving playhead ticks) to avoid excessive in-flight segment churn
+           - [x] Background prerender slot sizing parity: prerender decode branch now scales to current preview-processing dimensions before compositor to avoid top-left crop artifacts at reduced preview quality
+           - [x] Background prerender A/V prototype: prerender segments now include mixed audio and prerender playback uses a single prerender decoder branch for both video and audio
+           - [x] Background prerender segment window now spans full overlap to next boundary (no fixed 4s truncation), preventing mid-overlap black tails when prerender is active
+           - [x] Background prerender render dimensions now follow active proxy scale when proxy mode is enabled (Half/Quarter), reducing prerender decode/render load
+           - [x] Correctness-first 3+ track boundary settle: relax playback arrival wait cap so compositor frames arrive before boundary resume (avoids audio-only/black-video handoffs), and add prerender queued/ready/failed telemetry logs
+           - [x] Prerender promotion correctness: when prerender becomes ready mid-overlap, force full rebuild (bypass continue-decoder short-circuit) so prerender segment is actually consumed; add explicit unavailable/promote/used diagnostics
+            - [x] Idle prerender warmup + shared status bar: when background prerender is enabled, schedule nearby prerender jobs while paused/stopped and surface progress in the existing proxy generation status bar
+            - [x] Status-bar quick toggle for background prerender next to Track Audio Levels
+            - [x] Status-bar Background Render toggle icon state cues (process-stop/system-run for off/on)
+            - [x] Prerender-exit warmup: while a prerender slot is active, prewarm the immediate post-prerender boundary clip resources to reduce handoff stalls
+            - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
-          - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
-          - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
-          - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
+           - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
+           - [x] Debounce duplicate playback boundary rebuild attempts (same desired clip set within ~120ms) to reduce transient rebuild thrash
+           - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
+           - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
            - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
@@ -233,7 +285,9 @@ Tracking docs:
             - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
-  - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
+   - [x] Preview LUTs preference: when Proxy mode is Off, generate/use project-resolution LUT-baked preview media for LUT-assigned clips
+   - [x] Export/proxy progress percentage now uses bitrate×duration size estimates with ffmpeg `total_size` tracking, capped below 100% until ffmpeg completion
+   - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
   - [x] Optimized effects pipeline: single-pass `videoconvertscale` for decode→RGBA downscale, early downscale before effects, conditional element creation for no-op effects, leaky scope queue to prevent display backpressure
   - [x] Throttle UI redraws to monitor refresh rate and coalesce timeline invalidations (avoid redundant `queue_draw`)
   - [x] ~~Reuse per-clip filter bins/elements across seeks where possible instead of rebuilding pipeline state on every handoff~~ *(superseded by compositor rewrite — full rebuild at clip boundaries)*
@@ -244,7 +298,11 @@ Tracking docs:
 ### Audio
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
 - [x] Volume / pan controls per clip in the inspector (volume slider now dB-based: `-100 dB` to `+12 dB`, mapped to linear gain for playback/export, persisted in FCPXML)
-- [ ] Basic audio mixing (level meters)
+- [x] Basic audio mixing (level meters)
+  - [x] Program Monitor master stereo VU meter (L/R)
+  - [x] Per-track stereo meters in timeline track labels (timeline track order)
+  - [x] Status-bar eye toggle to show/hide track audio levels
+- [ ] Audio crossfades (automatic crossfade at audio edit points, equal-power or linear, adjustable duration)
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
@@ -255,15 +313,43 @@ Tracking docs:
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Shadows and Highlights
 - [ ] Advanced color grading
-- [ ] Color management pipeline (Rec.709 / Rec.2020 / ACES with display transform)
-- [ ] HDR workflow (PQ/HLG preview + export metadata)
+- [ ] Color management pipeline via OpenColorIO (OCIO)
+  - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
+  - [ ] OCIO config loading (ACES 2.0, Rec.709, sRGB built-in configs; user-supplied config file path in Preferences)
+  - [ ] Display transform in Program Monitor (source colorspace → display colorspace via OCIO processor; GStreamer element or per-frame CPU path)
+  - [ ] GPU-accelerated color transforms (OCIO GPU shader extraction applied via OpenGL/Vulkan in preview pipeline)
+  - [ ] Per-clip input colorspace override (Inspector dropdown: Auto-detect, sRGB, Rec.709, Rec.2020, S-Log3, LogC, Protune, etc.)
+  - [ ] Export colorspace selection (output color profile in export dialog; OCIO baked into ffmpeg filter or pre-transform frames)
+  - [ ] Working colorspace preference (scene-linear, ACEScg, Rec.709 — controls internal processing space)
+- [ ] HDR workflow via libplacebo
+  - [ ] libplacebo Vulkan integration for GPU-accelerated video rendering in Program Monitor
+  - [ ] HDR tone mapping (PQ/HLG → SDR) using libplacebo algorithms (hable, bt2446a, st2094-40) for accurate SDR preview of HDR sources
+  - [ ] Inverse tone mapping (SDR → HDR) for HDR display output and export
+  - [ ] High-quality upscaling/downscaling (libplacebo polar/orthogonal scalers as alternative to GStreamer `videoscale`)
+  - [ ] HDR export metadata (PQ/HLG transfer characteristics, mastering display color volume, MaxCLL/MaxFALL)
+  - [ ] HDR passthrough mode for native HDR display output
+- [ ] Frei0r video effects plugin support
+  - [ ] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
+  - [ ] Effects browser UI listing available Frei0r filters/generators/mixers with categories
+  - [ ] Per-clip Frei0r effect application with parameter controls in Inspector
+  - [ ] Effect stacking (multiple Frei0r filters per clip, reorderable)
+- [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Transition effects (fade to black, wipe right, wipe left)
+- [x] Transition preview matching — program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions using compositor alpha animation and videocrop, matching FFmpeg `xfade` export output
+
+### Visual Effects
+- [x] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls; GStreamer `alpha` element in preview, ffmpeg `colorkey` filter in export; Inspector panel with enable toggle, green/blue/custom color presets, tolerance and edge-softness sliders
+- [x] AI background removal — offline ONNX Runtime inference (MODNet segmentation model) produces alpha-channel VP9 WebM files; BgRemovalCache with 2-thread worker pool; preview and export use pre-processed result; Inspector toggle + threshold slider; MCP `set_clip_bg_removal` tool; FCPXML persistence
+- [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
+- [ ] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
+- [ ] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
+- [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
 
 ### Video Transform (per clip)
 - [x] Scale / resize clip (zoom in/out within frame) via GStreamer `videoscale` + `videobox`
 - [x] Crop clip (left / right / top / bottom margins) via GStreamer `videocrop`
-- [x] Rotate clip (90° / 180° / 270° presets) via GStreamer `videoflip`
+- [x] Rotate clip by arbitrary angle via Inspector dial/numeric control and GStreamer `rotate` preview path
 - [x] Flip horizontal / flip vertical via GStreamer `videoflip`
 - [x] Position offset (X / Y translation within the output frame) via GStreamer `videobox`
 - [x] Transform edits (Scale/Position) now refresh immediately in Program Monitor preview/playback without stale black-bar framing
@@ -293,15 +379,30 @@ Tracking docs:
   - Inspector shows which track layer a clip is on; layer order controls composite z-order
   - [x] Per-clip opacity control so tracks can blend softly over each other
 - [x] Crop handles in transform overlay — edge midpoint handles (top/bottom/left/right) to adjust crop_left/right/top/bottom directly in the preview
+- [x] Rotation handle in transform overlay — drag the top-center handle to set clip rotation, synchronized with Inspector rotation controls
 - [x] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
 - [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 - [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
+
+### Monitoring
+- [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state
+- [ ] False color overlay — map luminance to color spectrum for exposure evaluation
+- [ ] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
+- [ ] Focus peaking — highlight in-focus edges with colored overlay
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [ ] Proxy media generation and management
+- [ ] Auto-backup with versioned history (timestamped backups to dedicated directory with restore UI)
+
+### Media Management
+- [ ] Relink dialog — general-purpose UI to find and repoint all offline/missing media
+- [ ] Bins / folders — hierarchical media browser organization for large projects
+- [ ] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
+- [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
+- [ ] Metadata display & filtering — show resolution, codec, frame rate, duration, file size in media browser
 
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
@@ -317,8 +418,13 @@ Tracking docs:
   - Bitrate control: CRF / target bitrate mode
   - Audio codec: AAC, Opus, FLAC, PCM
   - Audio sample rate and channel layout (stereo / mono)
-- [ ] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
+- [x] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
 - [ ] ProRes / WebM / GIF export options
+- [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
+- [ ] Chapter markers in export (embed project markers as MP4/MKV chapter metadata)
+- [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
+- [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
+- [ ] AAF export — standard interchange for audio post-production (Pro Tools)
 - [x] Export progress dialog with cancel (ProgressBar + status label)
 
 ### Polish
@@ -331,12 +437,19 @@ Tracking docs:
 - [ ] Welcome window for choosing recent project or new one
 - [ ] Help documentation and tutorials
 - [ ] Application icon and desktop integration (`.desktop` file)
+- [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
+- [ ] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
+- [ ] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
+- [ ] Customizable workspace layouts (save/restore panel arrangements for different tasks)
+- [ ] Named project snapshots (create named versions at milestones without separate files)
 
 ### Professional Workflow (The "Pro" Edge)
 - [ ] Multicam editing (sync by audio or timecode)
+  - [x] Audio cross-correlation sync for selected clips (FFT-based, background thread, MCP tool)
+  - [x] Automatic timecode extraction from media files on import (GST_TAG_DATE_TIME)
 - [ ] Nested Timelines / Compound Clips
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
-- [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio is a future enhancement)
+- [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [ ] Match Frame (shortcut to find timeline clip in media library)
 - [ ] Proxy Workflow: One-click toggle between original and proxy media
 - [ ] Keyword ranges + favorite/reject ratings in browser
@@ -344,17 +457,29 @@ Tracking docs:
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 
 ### Advanced Audio
+- [ ] Pitch-corrected audio time-stretching via Rubberband
+  - [ ] Rubberband C library integration (FFI bindings or GStreamer `rubberband` element)
+  - [ ] Pitch-preserved playback at variable speeds (J/K/L shuttle, constant speed changes)
+  - [ ] Independent audio clip time-stretch without pitch shift (fit audio to duration)
+  - [ ] Pitch-shift effect per clip (transpose audio without changing duration)
 - [ ] Audio Roles (Dialogue, Effects, Music) with submixing
 - [ ] Support for LV2 / LADSPA audio plugins
 - [ ] Voiceover recording tool with countdown and punch-in
 - [ ] Automatic Ducking (music volume lowers during dialogue)
 - [ ] Audio normalization and peak-matching
+- [ ] Built-in parametric EQ (3-band minimum: low/mid/high with frequency/gain/Q)
+- [ ] Waveform sync (align external audio to camera reference audio by waveform analysis)
 
 ### AI & Automation
+- [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency
 - [ ] Speech-to-Text: Automatic subtitle generation and transcription
 - [ ] AI Scene Cut Detection for long source files
 - [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
 - [ ] Optical Flow slow-motion (AI frame interpolation)
+- [ ] AI Music Generation (MusicGen / MusicGPT)
+  - [ ] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
+  - [ ] Phase 2 — Local model backend: Preferences entry for local model path; candidate runtimes include the `musicgpt` Rust crate (native, no Python dependency), MusicGen-small ONNX via `ort`, or Python `audiocraft` subprocess; background generation with status-bar progress (same pattern as proxy transcoding)
+  - [ ] Phase 3 — Prompt UI: popover on drawn region with text prompt input, optional reference audio, duration auto-calculated from region length; generated audio written as a WAV clip and placed in the region
 
 ### Script-to-Timeline (Create Project from Script & Clips)
 - [ ] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order

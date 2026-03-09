@@ -8,7 +8,7 @@ pub fn build_timeline_panel(
     on_project_changed: std::rc::Rc<dyn Fn()>,
 ) -> (gtk4::Box, gtk4::DrawingArea) {
     use gtk4::prelude::*;
-    use gtk4::{self as gtk, Box as GBox, Button, Orientation};
+    use gtk4::{Box as GBox, Button, Orientation};
 
     let vbox = GBox::new(Orientation::Vertical, 0);
 

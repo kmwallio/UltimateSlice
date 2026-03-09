@@ -1,6 +1,15 @@
 # Export
 
-Click **Export…** in the toolbar to open the advanced export dialog.
+Use the toolbar linked split control **Export | ▼** (styled as one control):
+- Click **Export** to open the advanced export dialog.
+- Click **▼** for additional options such as **Export Frame…**.
+
+**Export Frame…** saves the currently displayed Program Monitor frame as:
+- **PNG** (`.png`)
+- **JPEG** (`.jpg` / `.jpeg`)
+- **PPM** (`.ppm`)
+- Frame capture is written at the **project canvas resolution** (not reduced preview quality resolution).
+- If playback is active, UltimateSlice pauses internally for capture and then resumes playback.
 
 ## Export Dialog Options
 
@@ -64,10 +73,32 @@ Applies to AAC and Opus. Ignored for FLAC and PCM.
 - Acceptable web quality: 128 kbps
 - High fidelity: 256–320 kbps
 
+## Export Presets
+
+Use the **Preset** row in the Export dialog to save and reuse named export configurations:
+
+- **Save As…** stores the current dialog settings as a named preset.
+- **Update** overwrites the currently selected preset with current widget values.
+- **Delete** removes the selected preset.
+- Selecting a preset immediately applies its codec/container/resolution/CRF/audio settings.
+- **(Custom)** means no saved preset is currently selected.
+- New installs (and older UI-state files missing export preset config) start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, and **WebM VP9 1080p**.
+
+Preset data is stored in local UI state and persists across app restarts.
+
+### MCP preset tools
+
+For automation workflows, MCP also exposes preset operations:
+
+- `list_export_presets`
+- `save_export_preset`
+- `delete_export_preset`
+- `export_with_preset`
+
 ## Export Progress
 
 After choosing the output file, an export progress dialog shows:
-- A progress bar driven by ffmpeg progress output. It estimates progress from ffmpeg `total_size` against the largest imported media-library file.
+- A progress bar driven by ffmpeg progress output. It estimates final file size from bitrate × duration and then tracks ffmpeg `total_size` against that estimate.
 - Progress is capped at **99%** while encoding/muxing is still running, then switches to **100%** only after export completes successfully.
 - A status label showing the output path.
 - A **Close** button (available once export completes or errors).

@@ -1,4 +1,4 @@
-use crate::model::clip::ClipKind;
+use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
 use std::io::{BufRead, BufReader};
@@ -82,6 +82,7 @@ pub fn export_project(
     output_path: &str,
     options: ExportOptions,
     estimated_size_bytes: Option<u64>,
+    bg_removal_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
     let out_w = if options.output_width == 0 {
@@ -127,7 +128,9 @@ pub fn export_project(
     let secondary_clips_flat: Vec<_> = secondary_track_clips.iter().flatten().copied().collect();
 
     let total_duration_us = project.duration().max(1) / 1_000;
-    let estimated_size_bytes = estimated_size_bytes.filter(|v| *v > 0);
+    let estimated_size_bytes = estimated_size_bytes
+        .filter(|v| *v > 0)
+        .or_else(|| estimate_export_size_bytes(project, &options, out_w, out_h));
     let _ = tx.send(ExportProgress::Progress(0.0));
 
     let ffmpeg = find_ffmpeg()?;
@@ -140,6 +143,27 @@ pub fn export_project(
         .arg("pipe:2")
         .arg("-nostats");
 
+    // Helper: resolve effective source path (bg-removed version if available).
+    // Helper: true when the clip's actual FFmpeg input is a bg-removed file (video-only, no audio).
+    let uses_bg_removal_path = |clip: &Clip| -> bool {
+        clip.bg_removal_enabled
+            && bg_removal_paths
+                .get(&clip.source_path)
+                .map(|p| std::path::Path::new(p).exists())
+                .unwrap_or(false)
+    };
+
+    let resolve_export_path = |clip: &Clip| -> String {
+        if clip.bg_removal_enabled {
+            if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
+                if std::path::Path::new(bg_path).exists() {
+                    return bg_path.clone();
+                }
+            }
+        }
+        clip.source_path.clone()
+    };
+
     // Inputs: primary video clips (0..primary_clips.len())
     for clip in &primary_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
@@ -149,7 +173,7 @@ pub fn export_project(
             .arg("-t")
             .arg(format!("{src_dur_s:.6}"))
             .arg("-i")
-            .arg(&clip.source_path);
+            .arg(resolve_export_path(clip));
     }
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
@@ -161,7 +185,7 @@ pub fn export_project(
             .arg("-t")
             .arg(format!("{src_dur_s:.6}"))
             .arg("-i")
-            .arg(&clip.source_path);
+            .arg(resolve_export_path(clip));
     }
 
     let sec_base = primary_clips.len();
@@ -184,17 +208,27 @@ pub fn export_project(
     // === Primary video track: scale/correct each clip then concatenate ===
     for (i, clip) in primary_clips.iter().enumerate() {
         let color_filter = build_color_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter(clip);
         let grading_filter = build_grading_filter(clip);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
+        let chroma_key_filter = build_chroma_key_filter(clip);
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
+        let rotate_filter = build_rotation_filter(clip, false);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
-        filter.push_str(&format!(
-            "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter},fps={}/{},format=yuv420p{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter}{speed_filter}[pv{i}];",
-            project.frame_rate.numerator, project.frame_rate.denominator
-        ));
+        if clip.chroma_key_enabled || clip.bg_removal_enabled {
+            filter.push_str(&format!(
+                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}[pv{i}];",
+                project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        } else {
+            filter.push_str(&format!(
+                "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{speed_filter}[pv{i}];",
+                project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        }
     }
     // Check for xfade and tpad support
     let has_xfade = check_filter_support(&ffmpeg, "xfade");
@@ -273,18 +307,21 @@ pub fn export_project(
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         let color_filter = build_color_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter(clip);
         let grading_filter = build_grading_filter(clip);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
+        let chroma_key_filter = build_chroma_key_filter(clip);
         let speed_filter = build_speed_filter(clip);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, true);
+        let rotate_filter = build_rotation_filter(clip, true);
         let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
         let opacity = clip.opacity.clamp(0.0, 1.0);
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         filter.push_str(&format!(
-            ";[{in_idx}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{color_filter}{grading_filter}{denoise_filter}{sharpen_filter}{lut_filter},format=yuva420p{crop_filter}{scale_pos_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
         ));
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
@@ -306,7 +343,11 @@ pub fn export_project(
 
     // Embedded audio from primary video clips, with per-clip volume scaling
     for (i, clip) in primary_clips.iter().enumerate() {
-        if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
+        if clip.kind == ClipKind::Video
+            && !has_linked_audio_peer(clip, &audio_clips)
+            && !uses_bg_removal_path(clip)
+            && probe_has_audio(&ffmpeg, &clip.source_path)
+        {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
@@ -322,7 +363,11 @@ pub fn export_project(
     // Embedded audio from secondary video clips (with their volume)
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
-        if clip.kind == ClipKind::Video && probe_has_audio(&ffmpeg, &clip.source_path) {
+        if clip.kind == ClipKind::Video
+            && !has_linked_audio_peer(clip, &audio_clips)
+            && !uses_bg_removal_path(clip)
+            && probe_has_audio(&ffmpeg, &clip.source_path)
+        {
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
@@ -502,6 +547,29 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
+fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
+    let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
+    let has_tint = clip.tint.abs() > 0.001;
+    let mut f = String::new();
+    if has_temp {
+        f.push_str(&format!(
+            ",colortemperature=temperature={:.0}",
+            clip.temperature.clamp(2000.0, 10000.0)
+        ));
+    }
+    if has_tint {
+        // Map tint to green channel offset via colorbalance midtones.
+        // Negative tint = boost green (positive gm), positive tint = cut green (negative gm)
+        // and complementary red+blue boost.
+        let t = clip.tint.clamp(-1.0, 1.0);
+        let gm = -t * 0.5;
+        let rm = t * 0.25;
+        let bm = t * 0.25;
+        f.push_str(&format!(",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"));
+    }
+    f
+}
+
 fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.denoise > 0.0 {
         let d = clip.denoise.clamp(0.0, 1.0);
@@ -550,6 +618,17 @@ fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
+fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.chroma_key_enabled {
+        let color = format!("{:06x}", clip.chroma_key_color & 0xFFFFFF);
+        let similarity = (clip.chroma_key_tolerance * 0.5).clamp(0.01, 0.5);
+        let blend = (clip.chroma_key_softness * 0.5).clamp(0.0, 0.5);
+        format!(",colorkey=0x{color}:{similarity:.4}:{blend:.4}")
+    } else {
+        String::new()
+    }
+}
+
 fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
     let has_speed = (clip.speed - 1.0).abs() > 0.001;
     match (clip.reverse, has_speed) {
@@ -586,6 +665,16 @@ fn build_crop_filter(
         "black"
     };
     format!(",crop={cw}:{ch}:{cl}:{ct},pad={out_w}:{out_h}:{cl}:{ct}:{pad_color}")
+}
+
+/// Build a rotation filter for arbitrary-angle clip rotation.
+fn build_rotation_filter(clip: &crate::model::clip::Clip, transparent_pad: bool) -> String {
+    let rot = clip.rotate;
+    if rot == 0 {
+        return String::new();
+    }
+    let fill = if transparent_pad { "black@0" } else { "black" };
+    format!(",rotate={:.10}:fillcolor={fill}", (rot as f64).to_radians())
 }
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.
@@ -715,6 +804,57 @@ fn parse_progress_line(
     None
 }
 
+fn estimate_export_size_bytes(
+    project: &Project,
+    options: &ExportOptions,
+    out_w: u32,
+    out_h: u32,
+) -> Option<u64> {
+    let duration_secs = project.duration() as f64 / 1_000_000_000.0;
+    if duration_secs <= 0.0 {
+        return None;
+    }
+    let total_bitrate_bps = estimate_export_total_bitrate_bps(project, options, out_w, out_h);
+    if total_bitrate_bps == 0 {
+        return None;
+    }
+    Some(((total_bitrate_bps as f64 * duration_secs) / 8.0).round() as u64)
+}
+
+fn estimate_export_total_bitrate_bps(
+    project: &Project,
+    options: &ExportOptions,
+    out_w: u32,
+    out_h: u32,
+) -> u64 {
+    let fps = project.frame_rate.as_f64().clamp(1.0, 120.0);
+    let pixel_scale = ((out_w.max(1) as f64 * out_h.max(1) as f64) / (1920.0 * 1080.0)).max(0.1);
+    let fps_scale = (fps / 30.0).max(0.5);
+    let crf_scale = (1.0 + ((23.0 - options.crf as f64) * 0.04)).clamp(0.4, 2.0);
+
+    let base_video_kbps = match options.video_codec {
+        VideoCodec::H264 => 6_000.0,
+        VideoCodec::H265 => 4_200.0,
+        VideoCodec::Vp9 => 3_600.0,
+        VideoCodec::Av1 => 3_200.0,
+        VideoCodec::ProRes => 95_000.0,
+    };
+    let mut video_kbps = base_video_kbps * pixel_scale * fps_scale * crf_scale;
+    if matches!(options.video_codec, VideoCodec::ProRes) {
+        video_kbps = video_kbps.max(40_000.0);
+    } else {
+        video_kbps = video_kbps.clamp(700.0, 40_000.0);
+    }
+
+    let audio_kbps = match options.audio_codec {
+        AudioCodec::Aac | AudioCodec::Opus => options.audio_bitrate_kbps.max(64) as f64,
+        AudioCodec::Flac => 1_000.0,
+        AudioCodec::Pcm => 4_608.0, // 48kHz * 24-bit * 2ch
+    };
+
+    ((video_kbps + audio_kbps) * 1_000.0) as u64
+}
+
 fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
     let output = Command::new(ffmpeg)
         .arg("-filters")
@@ -729,6 +869,12 @@ fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
             false
         }
     })
+}
+
+fn has_linked_audio_peer(clip: &Clip, audio_clips: &[&Clip]) -> bool {
+    audio_clips
+        .iter()
+        .any(|audio_clip| clip.suppresses_embedded_audio_for_linked_peer(audio_clip))
 }
 
 fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
@@ -778,7 +924,12 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_progress_line;
+    use super::{
+        estimate_export_size_bytes, has_linked_audio_peer, parse_progress_line, AudioCodec,
+        ExportOptions, VideoCodec,
+    };
+    use crate::model::clip::{Clip, ClipKind};
+    use crate::model::project::Project;
 
     #[test]
     fn total_size_progress_uses_estimate_and_caps() {
@@ -798,5 +949,34 @@ mod tests {
     fn time_mode_out_time_ms_treated_as_microseconds() {
         let p = parse_progress_line("out_time_ms=500000", 1_000_000, None).unwrap();
         assert!((p - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn export_size_estimate_returns_positive_value() {
+        let mut project = Project::new("Test");
+        project.tracks[0].add_clip(Clip::new(
+            "/tmp/test.mp4",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        let options = ExportOptions {
+            video_codec: VideoCodec::H264,
+            audio_codec: AudioCodec::Aac,
+            ..ExportOptions::default()
+        };
+        let est = estimate_export_size_bytes(&project, &options, project.width, project.height);
+        assert!(est.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn linked_audio_peer_suppresses_embedded_video_audio() {
+        let mut video = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        video.link_group_id = Some("link-1".to_string());
+
+        let mut audio = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Audio);
+        audio.link_group_id = Some("link-1".to_string());
+
+        assert!(has_linked_audio_peer(&video, std::slice::from_ref(&&audio)));
     }
 }

@@ -1,3 +1,4 @@
+use crate::media::export::{AudioCodec, Container, ExportOptions, VideoCodec};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -11,6 +12,8 @@ pub struct ProgramMonitorState {
     pub height: i32,
     #[serde(default = "default_docked_split_pos")]
     pub docked_split_pos: i32,
+    #[serde(default)]
+    pub show_safe_areas: bool,
 }
 
 fn default_width() -> i32 {
@@ -30,6 +33,7 @@ impl Default for ProgramMonitorState {
             width: default_width(),
             height: default_height(),
             docked_split_pos: default_docked_split_pos(),
+            show_safe_areas: false,
         }
     }
 }
@@ -195,6 +199,289 @@ impl ProxyMode {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportVideoCodec {
+    H264,
+    H265,
+    Vp9,
+    ProRes,
+    Av1,
+}
+
+impl Default for ExportVideoCodec {
+    fn default() -> Self {
+        Self::H264
+    }
+}
+
+impl ExportVideoCodec {
+    pub fn from_video_codec(value: &VideoCodec) -> Self {
+        match value {
+            VideoCodec::H264 => Self::H264,
+            VideoCodec::H265 => Self::H265,
+            VideoCodec::Vp9 => Self::Vp9,
+            VideoCodec::ProRes => Self::ProRes,
+            VideoCodec::Av1 => Self::Av1,
+        }
+    }
+
+    pub fn to_video_codec(&self) -> VideoCodec {
+        match self {
+            Self::H264 => VideoCodec::H264,
+            Self::H265 => VideoCodec::H265,
+            Self::Vp9 => VideoCodec::Vp9,
+            Self::ProRes => VideoCodec::ProRes,
+            Self::Av1 => VideoCodec::Av1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportContainer {
+    Mp4,
+    Mov,
+    WebM,
+    Mkv,
+}
+
+impl Default for ExportContainer {
+    fn default() -> Self {
+        Self::Mp4
+    }
+}
+
+impl ExportContainer {
+    pub fn from_container(value: &Container) -> Self {
+        match value {
+            Container::Mp4 => Self::Mp4,
+            Container::Mov => Self::Mov,
+            Container::WebM => Self::WebM,
+            Container::Mkv => Self::Mkv,
+        }
+    }
+
+    pub fn to_container(&self) -> Container {
+        match self {
+            Self::Mp4 => Container::Mp4,
+            Self::Mov => Container::Mov,
+            Self::WebM => Container::WebM,
+            Self::Mkv => Container::Mkv,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportAudioCodec {
+    Aac,
+    Opus,
+    Flac,
+    Pcm,
+}
+
+impl Default for ExportAudioCodec {
+    fn default() -> Self {
+        Self::Aac
+    }
+}
+
+impl ExportAudioCodec {
+    pub fn from_audio_codec(value: &AudioCodec) -> Self {
+        match value {
+            AudioCodec::Aac => Self::Aac,
+            AudioCodec::Opus => Self::Opus,
+            AudioCodec::Flac => Self::Flac,
+            AudioCodec::Pcm => Self::Pcm,
+        }
+    }
+
+    pub fn to_audio_codec(&self) -> AudioCodec {
+        match self {
+            Self::Aac => AudioCodec::Aac,
+            Self::Opus => AudioCodec::Opus,
+            Self::Flac => AudioCodec::Flac,
+            Self::Pcm => AudioCodec::Pcm,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportPreset {
+    pub name: String,
+    #[serde(default)]
+    pub video_codec: ExportVideoCodec,
+    #[serde(default)]
+    pub container: ExportContainer,
+    /// 0 = use project resolution
+    #[serde(default)]
+    pub output_width: u32,
+    /// 0 = use project resolution
+    #[serde(default)]
+    pub output_height: u32,
+    #[serde(default = "default_export_crf")]
+    pub crf: u32,
+    #[serde(default)]
+    pub audio_codec: ExportAudioCodec,
+    #[serde(default = "default_export_audio_bitrate_kbps")]
+    pub audio_bitrate_kbps: u32,
+}
+
+impl ExportPreset {
+    pub fn from_export_options(name: impl Into<String>, options: &ExportOptions) -> Self {
+        Self {
+            name: name.into(),
+            video_codec: ExportVideoCodec::from_video_codec(&options.video_codec),
+            container: ExportContainer::from_container(&options.container),
+            output_width: options.output_width,
+            output_height: options.output_height,
+            crf: options.crf,
+            audio_codec: ExportAudioCodec::from_audio_codec(&options.audio_codec),
+            audio_bitrate_kbps: options.audio_bitrate_kbps,
+        }
+    }
+
+    pub fn to_export_options(&self) -> ExportOptions {
+        ExportOptions {
+            video_codec: self.video_codec.to_video_codec(),
+            container: self.container.to_container(),
+            output_width: self.output_width,
+            output_height: self.output_height,
+            crf: self.crf,
+            audio_codec: self.audio_codec.to_audio_codec(),
+            audio_bitrate_kbps: self.audio_bitrate_kbps,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportPresetsState {
+    #[serde(default = "default_export_presets")]
+    pub presets: Vec<ExportPreset>,
+    #[serde(default)]
+    pub last_used_preset: Option<String>,
+}
+
+impl Default for ExportPresetsState {
+    fn default() -> Self {
+        Self {
+            presets: default_export_presets(),
+            last_used_preset: None,
+        }
+    }
+}
+
+impl ExportPresetsState {
+    fn normalize_name(name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    pub fn upsert_preset(&mut self, mut preset: ExportPreset) -> Result<(), String> {
+        let normalized = Self::normalize_name(&preset.name)
+            .ok_or_else(|| "Preset name cannot be empty".to_string())?;
+        preset.name = normalized.clone();
+        if let Some(existing) = self
+            .presets
+            .iter_mut()
+            .find(|p| p.name.eq_ignore_ascii_case(&normalized))
+        {
+            *existing = preset;
+        } else {
+            self.presets.push(preset);
+            self.presets.sort_by(|a, b| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            });
+        }
+        self.last_used_preset = Some(normalized);
+        Ok(())
+    }
+
+    pub fn delete_preset(&mut self, name: &str) -> bool {
+        let Some(normalized) = Self::normalize_name(name) else {
+            return false;
+        };
+        let before = self.presets.len();
+        self.presets
+            .retain(|p| !p.name.eq_ignore_ascii_case(&normalized));
+        if self
+            .last_used_preset
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(&normalized))
+        {
+            self.last_used_preset = None;
+        }
+        self.presets.len() != before
+    }
+
+    pub fn get_preset(&self, name: &str) -> Option<&ExportPreset> {
+        let normalized = Self::normalize_name(name)?;
+        self.presets
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&normalized))
+    }
+}
+
+fn default_export_crf() -> u32 {
+    23
+}
+
+fn default_export_audio_bitrate_kbps() -> u32 {
+    192
+}
+
+fn default_export_presets() -> Vec<ExportPreset> {
+    vec![
+        ExportPreset {
+            name: "Web H.264 1080p".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Mp4,
+            output_width: 1920,
+            output_height: 1080,
+            crf: 23,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 192,
+        },
+        ExportPreset {
+            name: "High Quality H.264 4K".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Mp4,
+            output_width: 3840,
+            output_height: 2160,
+            crf: 18,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 320,
+        },
+        ExportPreset {
+            name: "Archive ProRes 4K".to_string(),
+            video_codec: ExportVideoCodec::ProRes,
+            container: ExportContainer::Mov,
+            output_width: 3840,
+            output_height: 2160,
+            crf: 18,
+            audio_codec: ExportAudioCodec::Pcm,
+            audio_bitrate_kbps: 320,
+        },
+        ExportPreset {
+            name: "WebM VP9 1080p".to_string(),
+            video_codec: ExportVideoCodec::Vp9,
+            container: ExportContainer::WebM,
+            output_width: 1920,
+            output_height: 1080,
+            crf: 30,
+            audio_codec: ExportAudioCodec::Opus,
+            audio_bitrate_kbps: 160,
+        },
+    ]
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreferencesState {
     #[serde(default)]
@@ -211,6 +498,9 @@ pub struct PreferencesState {
     /// Show thumbnail preview strips on timeline video clips.
     #[serde(default = "default_show_timeline_preview")]
     pub show_timeline_preview: bool,
+    /// Show per-track audio levels in timeline track labels.
+    #[serde(default = "default_show_track_audio_levels")]
+    pub show_track_audio_levels: bool,
     /// Enable the MCP Unix-domain-socket server so agents can connect to this instance.
     #[serde(default)]
     pub mcp_socket_enabled: bool,
@@ -227,6 +517,13 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub realtime_preview: bool,
+    /// Prewarm upcoming playback boundaries earlier in the background.
+    /// Uses more CPU and memory during playback.
+    #[serde(default)]
+    pub background_prerender: bool,
+    /// Pre-render LUT-assigned clips at project resolution for preview use when proxy mode is Off.
+    #[serde(default)]
+    pub preview_luts: bool,
 }
 
 impl Default for PreferencesState {
@@ -238,16 +535,23 @@ impl Default for PreferencesState {
             proxy_mode: ProxyMode::default(),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),
+            show_track_audio_levels: default_show_track_audio_levels(),
             mcp_socket_enabled: false,
             gsk_renderer: GskRenderer::default(),
             preview_quality: PreviewQuality::default(),
             experimental_preview_optimizations: false,
             realtime_preview: false,
+            background_prerender: false,
+            preview_luts: false,
         }
     }
 }
 
 fn default_show_timeline_preview() -> bool {
+    true
+}
+
+fn default_show_track_audio_levels() -> bool {
     true
 }
 
@@ -257,6 +561,8 @@ struct UiState {
     program_monitor: ProgramMonitorState,
     #[serde(default)]
     preferences: PreferencesState,
+    #[serde(default)]
+    export_presets: ExportPresetsState,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -309,4 +615,95 @@ pub fn save_preferences_state(state: &PreferencesState) {
     let mut ui = load_ui_state();
     ui.preferences = state.clone();
     save_ui_state(&ui);
+}
+
+pub fn load_export_presets_state() -> ExportPresetsState {
+    load_ui_state().export_presets
+}
+
+pub fn save_export_presets_state(state: &ExportPresetsState) {
+    let mut ui = load_ui_state();
+    ui.export_presets = state.clone();
+    save_ui_state(&ui);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_preset_round_trip_to_export_options() {
+        let options = ExportOptions {
+            video_codec: VideoCodec::Av1,
+            container: Container::Mkv,
+            output_width: 1920,
+            output_height: 1080,
+            crf: 18,
+            audio_codec: AudioCodec::Opus,
+            audio_bitrate_kbps: 256,
+        };
+        let preset = ExportPreset::from_export_options("High Quality", &options);
+        assert_eq!(preset.name, "High Quality");
+        assert_eq!(preset.to_export_options().video_codec, VideoCodec::Av1);
+        assert_eq!(preset.to_export_options().container, Container::Mkv);
+        assert_eq!(preset.to_export_options().output_width, 1920);
+        assert_eq!(preset.to_export_options().output_height, 1080);
+        assert_eq!(preset.to_export_options().crf, 18);
+        assert_eq!(preset.to_export_options().audio_codec, AudioCodec::Opus);
+        assert_eq!(preset.to_export_options().audio_bitrate_kbps, 256);
+    }
+
+    #[test]
+    fn export_presets_upsert_and_delete() {
+        let mut state = ExportPresetsState {
+            presets: Vec::new(),
+            last_used_preset: None,
+        };
+        let preset = ExportPreset::from_export_options(" Social ", &ExportOptions::default());
+        state.upsert_preset(preset).unwrap();
+        assert_eq!(state.presets.len(), 1);
+        assert_eq!(state.presets[0].name, "Social");
+        let mut opts = ExportOptions::default();
+        opts.crf = 16;
+        state
+            .upsert_preset(ExportPreset::from_export_options("social", &opts))
+            .unwrap();
+        assert_eq!(state.presets.len(), 1);
+        assert_eq!(state.presets[0].crf, 16);
+        assert!(state.delete_preset("SOCIAL"));
+        assert!(state.presets.is_empty());
+        assert!(state.last_used_preset.is_none());
+    }
+
+    #[test]
+    fn ui_state_defaults_missing_export_presets_field() {
+        let parsed: UiState =
+            serde_json::from_str(r#"{"preferences":{"hardware_acceleration_enabled":true}}"#)
+                .unwrap();
+        let names: Vec<&str> = parsed
+            .export_presets
+            .presets
+            .iter()
+            .map(|preset| preset.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Web H.264 1080p",
+                "High Quality H.264 4K",
+                "Archive ProRes 4K",
+                "WebM VP9 1080p",
+            ]
+        );
+        assert!(parsed.export_presets.last_used_preset.is_none());
+    }
+
+    #[test]
+    fn ui_state_keeps_explicit_empty_export_presets_array() {
+        let parsed: UiState =
+            serde_json::from_str(r#"{"export_presets":{"presets":[],"last_used_preset":null}}"#)
+                .unwrap();
+        assert!(parsed.export_presets.presets.is_empty());
+        assert!(parsed.export_presets.last_used_preset.is_none());
+    }
 }

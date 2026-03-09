@@ -5,6 +5,7 @@ use crate::model::project::Project;
 pub trait EditCommand {
     fn execute(&self, project: &mut Project);
     fn undo(&self, project: &mut Project);
+    #[allow(dead_code)]
     fn description(&self) -> &str;
 }
 
@@ -395,6 +396,7 @@ impl EditCommand for RollEditCommand {
 }
 
 /// Delete a clip from a track
+#[allow(dead_code)]
 pub struct DeleteClipCommand {
     pub clip: Clip,
     pub track_id: String,
@@ -423,6 +425,7 @@ pub struct SetTrackClipsCommand {
     pub track_id: String,
     pub old_clips: Vec<Clip>,
     pub new_clips: Vec<Clip>,
+    #[allow(dead_code)]
     pub label: String,
 }
 
@@ -439,6 +442,44 @@ impl EditCommand for SetTrackClipsCommand {
         }
         project.dirty = true;
     }
+    fn description(&self) -> &str {
+        &self.label
+    }
+}
+
+#[derive(Clone)]
+pub struct TrackClipsChange {
+    pub track_id: String,
+    pub old_clips: Vec<Clip>,
+    pub new_clips: Vec<Clip>,
+}
+
+/// Replace multiple tracks' full clip lists as a single undo step.
+pub struct SetMultipleTracksClipsCommand {
+    pub changes: Vec<TrackClipsChange>,
+    #[allow(dead_code)]
+    pub label: String,
+}
+
+impl EditCommand for SetMultipleTracksClipsCommand {
+    fn execute(&self, project: &mut Project) {
+        for change in &self.changes {
+            if let Some(track) = project.track_mut(&change.track_id) {
+                track.clips = change.new_clips.clone();
+            }
+        }
+        project.dirty = true;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        for change in &self.changes {
+            if let Some(track) = project.track_mut(&change.track_id) {
+                track.clips = change.old_clips.clone();
+            }
+        }
+        project.dirty = true;
+    }
+
     fn description(&self) -> &str {
         &self.label
     }
@@ -488,6 +529,7 @@ impl EditCommand for SplitClipCommand {
 }
 
 /// Set color correction on a clip (brightness/contrast/saturation)
+#[allow(dead_code)]
 pub struct SetClipColorCommand {
     pub clip_id: String,
     pub track_id: String,
@@ -672,13 +714,16 @@ impl EditHistory {
         }
     }
 
+    #[allow(dead_code)]
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
+    #[allow(dead_code)]
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn undo_description(&self) -> Option<&str> {
         self.undo_stack.last().map(|c| c.description())
     }
@@ -715,7 +760,7 @@ mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
-    use crate::model::track::{Track, TrackKind};
+    use crate::model::track::Track;
 
     #[test]
     fn test_ripple_trim_out() {
@@ -837,7 +882,7 @@ mod tests {
         let mut project = Project::new("Test");
         let mut track_a = Track::new_video("A");
         let track_a_id = track_a.id.clone();
-        let mut track_b = Track::new_video("B");
+        let track_b = Track::new_video("B");
         let track_b_id = track_b.id.clone();
 
         let mut clip = Clip::new("file.mp4", 10, 0, ClipKind::Video);
@@ -1050,8 +1095,6 @@ mod tests {
         project.add_video_track(); // tracks[2] = Video 2
 
         let id0 = project.tracks[0].id.clone();
-        let id2 = project.tracks[2].id.clone();
-
         let cmd = ReorderTrackCommand {
             from_index: 0,
             to_index: 2,
@@ -1061,6 +1104,65 @@ mod tests {
 
         cmd.undo(&mut project);
         assert_eq!(project.tracks[0].id, id0);
+    }
+
+    #[test]
+    fn test_set_multiple_tracks_clips_command_updates_and_undoes_together() {
+        let mut project = Project::new("Test");
+        let mut video_track = Track::new_video("V1");
+        let video_track_id = video_track.id.clone();
+        let mut audio_track = Track::new_audio("A1");
+        let audio_track_id = audio_track.id.clone();
+
+        let mut video_clip = Clip::new("file.mp4", 10, 0, ClipKind::Video);
+        video_clip.id = "video-a".to_string();
+        let mut audio_clip = Clip::new("file.mp4", 10, 0, ClipKind::Audio);
+        audio_clip.id = "audio-a".to_string();
+        video_track.add_clip(video_clip.clone());
+        audio_track.add_clip(audio_clip.clone());
+        project.tracks.push(video_track);
+        project.tracks.push(audio_track);
+
+        let mut new_video_clip = video_clip.clone();
+        new_video_clip.timeline_start = 20;
+        let mut new_audio_clip = audio_clip.clone();
+        new_audio_clip.timeline_start = 20;
+
+        let cmd = SetMultipleTracksClipsCommand {
+            changes: vec![
+                TrackClipsChange {
+                    track_id: video_track_id.clone(),
+                    old_clips: vec![video_clip.clone()],
+                    new_clips: vec![new_video_clip],
+                },
+                TrackClipsChange {
+                    track_id: audio_track_id.clone(),
+                    old_clips: vec![audio_clip.clone()],
+                    new_clips: vec![new_audio_clip],
+                },
+            ],
+            label: "Move linked pair".to_string(),
+        };
+
+        cmd.execute(&mut project);
+        assert_eq!(
+            project.track_mut(&video_track_id).unwrap().clips[0].timeline_start,
+            20
+        );
+        assert_eq!(
+            project.track_mut(&audio_track_id).unwrap().clips[0].timeline_start,
+            20
+        );
+
+        cmd.undo(&mut project);
+        assert_eq!(
+            project.track_mut(&video_track_id).unwrap().clips[0].timeline_start,
+            0
+        );
+        assert_eq!(
+            project.track_mut(&audio_track_id).unwrap().clips[0].timeline_start,
+            0
+        );
     }
 
     #[test]

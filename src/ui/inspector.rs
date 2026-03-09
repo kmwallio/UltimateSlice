@@ -1,11 +1,12 @@
 use crate::model::project::Project;
+use gdk4;
 use gio;
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, Box as GBox, Button, CheckButton, Entry, Expander, Label, Orientation, Scale,
     Separator,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const VOLUME_DB_MIN: f64 = -100.0;
@@ -42,6 +43,8 @@ pub struct InspectorView {
     pub brightness_slider: Scale,
     pub contrast_slider: Scale,
     pub saturation_slider: Scale,
+    pub temperature_slider: Scale,
+    pub tint_slider: Scale,
     // Denoise / sharpness sliders
     pub denoise_slider: Scale,
     pub sharpness_slider: Scale,
@@ -57,7 +60,7 @@ pub struct InspectorView {
     pub crop_right_slider: Scale,
     pub crop_top_slider: Scale,
     pub crop_bottom_slider: Scale,
-    pub rotate_combo: gtk4::ComboBoxText,
+    pub rotate_spin: gtk4::SpinButton,
     pub flip_h_btn: gtk4::ToggleButton,
     pub flip_v_btn: gtk4::ToggleButton,
     pub scale_slider: Scale,
@@ -85,6 +88,22 @@ pub struct InspectorView {
     pub title_section_box: GBox,
     pub speed_section_box: GBox,
     pub lut_section_box: GBox,
+    // Chroma key
+    pub chroma_key_section: GBox,
+    pub chroma_key_enable: CheckButton,
+    pub chroma_green_btn: gtk4::ToggleButton,
+    pub chroma_blue_btn: gtk4::ToggleButton,
+    pub chroma_custom_btn: gtk4::ToggleButton,
+    pub chroma_color_btn: gtk4::ColorDialogButton,
+    pub chroma_custom_color_row: GBox,
+    pub chroma_tolerance_slider: Scale,
+    pub chroma_softness_slider: Scale,
+    // Background removal
+    pub bg_removal_section: GBox,
+    pub bg_removal_enable: CheckButton,
+    pub bg_removal_threshold_slider: Scale,
+    /// Set to `true` when the ONNX model is present; controls section visibility.
+    pub bg_removal_model_available: Cell<bool>,
 }
 
 impl InspectorView {
@@ -122,6 +141,10 @@ impl InspectorView {
                 self.title_section_box.set_visible(is_video || is_image);
                 self.speed_section_box.set_visible(true);
                 self.lut_section_box.set_visible(is_video || is_image);
+                self.chroma_key_section.set_visible(is_video || is_image);
+                self.bg_removal_section.set_visible(
+                    (is_video || is_image) && self.bg_removal_model_available.get(),
+                );
 
                 self.name_entry.set_text(&c.label);
                 self.path_value.set_text(
@@ -137,6 +160,8 @@ impl InspectorView {
                 self.brightness_slider.set_value(c.brightness as f64);
                 self.contrast_slider.set_value(c.contrast as f64);
                 self.saturation_slider.set_value(c.saturation as f64);
+                self.temperature_slider.set_value(c.temperature as f64);
+                self.tint_slider.set_value(c.tint as f64);
                 self.denoise_slider.set_value(c.denoise as f64);
                 self.sharpness_slider.set_value(c.sharpness as f64);
                 self.shadows_slider.set_value(c.shadows as f64);
@@ -149,7 +174,7 @@ impl InspectorView {
                 self.crop_right_slider.set_value(c.crop_right as f64);
                 self.crop_top_slider.set_value(c.crop_top as f64);
                 self.crop_bottom_slider.set_value(c.crop_bottom as f64);
-                self.rotate_combo.set_active_id(Some(&c.rotate.to_string()));
+                self.rotate_spin.set_value(c.rotate as f64);
                 self.flip_h_btn.set_active(c.flip_h);
                 self.flip_v_btn.set_active(c.flip_v);
                 self.scale_slider.set_value(c.scale);
@@ -176,6 +201,35 @@ impl InspectorView {
                         self.lut_clear_btn.set_sensitive(false);
                     }
                 }
+                // Chroma Key
+                self.chroma_key_enable.set_active(c.chroma_key_enabled);
+                self.chroma_tolerance_slider
+                    .set_value(c.chroma_key_tolerance as f64);
+                self.chroma_softness_slider
+                    .set_value(c.chroma_key_softness as f64);
+                match c.chroma_key_color {
+                    0x00FF00 => {
+                        self.chroma_green_btn.set_active(true);
+                        self.chroma_custom_color_row.set_visible(false);
+                    }
+                    0x0000FF => {
+                        self.chroma_blue_btn.set_active(true);
+                        self.chroma_custom_color_row.set_visible(false);
+                    }
+                    custom => {
+                        self.chroma_custom_btn.set_active(true);
+                        self.chroma_custom_color_row.set_visible(true);
+                        let r = ((custom >> 16) & 0xFF) as f32 / 255.0;
+                        let g = ((custom >> 8) & 0xFF) as f32 / 255.0;
+                        let b = (custom & 0xFF) as f32 / 255.0;
+                        self.chroma_color_btn
+                            .set_rgba(&gdk4::RGBA::new(r, g, b, 1.0));
+                    }
+                }
+                // Background Removal
+                self.bg_removal_enable.set_active(c.bg_removal_enabled);
+                self.bg_removal_threshold_slider
+                    .set_value(c.bg_removal_threshold);
             }
             None => {
                 self.name_entry.set_text("");
@@ -191,6 +245,8 @@ impl InspectorView {
                 self.brightness_slider.set_value(0.0);
                 self.contrast_slider.set_value(1.0);
                 self.saturation_slider.set_value(1.0);
+                self.temperature_slider.set_value(6500.0);
+                self.tint_slider.set_value(0.0);
                 self.denoise_slider.set_value(0.0);
                 self.sharpness_slider.set_value(0.0);
                 self.shadows_slider.set_value(0.0);
@@ -202,7 +258,7 @@ impl InspectorView {
                 self.crop_right_slider.set_value(0.0);
                 self.crop_top_slider.set_value(0.0);
                 self.crop_bottom_slider.set_value(0.0);
-                self.rotate_combo.set_active_id(Some("0"));
+                self.rotate_spin.set_value(0.0);
                 self.flip_h_btn.set_active(false);
                 self.flip_v_btn.set_active(false);
                 self.scale_slider.set_value(1.0);
@@ -216,6 +272,15 @@ impl InspectorView {
                 self.reverse_check.set_active(false);
                 self.lut_path_label.set_text("None");
                 self.lut_clear_btn.set_sensitive(false);
+                // Chroma Key defaults
+                self.chroma_key_enable.set_active(false);
+                self.chroma_green_btn.set_active(true);
+                self.chroma_custom_color_row.set_visible(false);
+                self.chroma_tolerance_slider.set_value(0.3);
+                self.chroma_softness_slider.set_value(0.1);
+                // Background Removal defaults
+                self.bg_removal_enable.set_active(false);
+                self.bg_removal_threshold_slider.set_value(0.5);
             }
         }
         *self.updating.borrow_mut() = false;
@@ -227,13 +292,13 @@ impl InspectorView {
 ///
 /// - `on_clip_changed`: fired when the clip name is applied (triggers full project-changed cycle).
 /// - `on_color_changed`: fired on every color/effects slider movement with
-///   `(brightness, contrast, saturation, denoise, sharpness, shadows, midtones, highlights)`;
+///   `(brightness, contrast, saturation, temperature, tint, denoise, sharpness, shadows, midtones, highlights)`;
 ///   should update the program player's video filter elements directly without a full pipeline reload.
 /// - `on_audio_changed`: fired on every audio slider movement with `(clip_id, volume, pan)`.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
+    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
@@ -241,6 +306,9 @@ pub fn build_inspector(
     on_lut_changed: impl Fn(Option<String>) + 'static,
     on_opacity_changed: impl Fn(f64) + 'static,
     on_reverse_changed: impl Fn(bool) + 'static,
+    on_chroma_key_changed: impl Fn() + 'static,
+    on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
+    on_bg_removal_changed: impl Fn() + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(260);
@@ -338,6 +406,22 @@ pub fn build_inspector(
     saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&saturation_slider);
 
+    row_label(&color_inner, "Temperature (K)");
+    let temperature_slider = Scale::with_range(Orientation::Horizontal, 2000.0, 10000.0, 100.0);
+    temperature_slider.set_value(6500.0);
+    temperature_slider.set_draw_value(true);
+    temperature_slider.set_digits(0);
+    temperature_slider.add_mark(6500.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&temperature_slider);
+
+    row_label(&color_inner, "Tint");
+    let tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    tint_slider.set_value(0.0);
+    tint_slider.set_draw_value(true);
+    tint_slider.set_digits(2);
+    tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&tint_slider);
+
     let ds_title = Label::new(Some("Denoise / Sharpness"));
     ds_title.set_halign(gtk::Align::Start);
     ds_title.add_css_class("browser-header");
@@ -387,6 +471,81 @@ pub fn build_inspector(
     highlights_slider.set_digits(2);
     highlights_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&highlights_slider);
+
+    // ── Chroma Key section (Video + Image only) ──────────────────────────────
+    let chroma_key_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&chroma_key_section);
+
+    chroma_key_section.append(&Separator::new(Orientation::Horizontal));
+    let chroma_key_expander = Expander::new(Some("Chroma Key"));
+    chroma_key_expander.set_expanded(false);
+    chroma_key_section.append(&chroma_key_expander);
+    let chroma_key_inner = GBox::new(Orientation::Vertical, 8);
+    chroma_key_expander.set_child(Some(&chroma_key_inner));
+
+    let chroma_key_enable = CheckButton::with_label("Enable Chroma Key");
+    chroma_key_inner.append(&chroma_key_enable);
+
+    row_label(&chroma_key_inner, "Key Color");
+    let chroma_key_color_row = GBox::new(Orientation::Horizontal, 8);
+    let chroma_green_btn = gtk4::ToggleButton::with_label("Green");
+    let chroma_blue_btn = gtk4::ToggleButton::with_label("Blue");
+    let chroma_custom_btn = gtk4::ToggleButton::with_label("Custom");
+    chroma_green_btn.set_active(true);
+    chroma_blue_btn.set_group(Some(&chroma_green_btn));
+    chroma_custom_btn.set_group(Some(&chroma_green_btn));
+    chroma_key_color_row.append(&chroma_green_btn);
+    chroma_key_color_row.append(&chroma_blue_btn);
+    chroma_key_color_row.append(&chroma_custom_btn);
+    chroma_key_inner.append(&chroma_key_color_row);
+
+    let chroma_custom_color_row = GBox::new(Orientation::Horizontal, 8);
+    let chroma_color_dialog = gtk4::ColorDialog::new();
+    chroma_color_dialog.set_with_alpha(false);
+    let chroma_color_btn = gtk4::ColorDialogButton::new(Some(chroma_color_dialog));
+    chroma_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 1.0, 0.0, 1.0));
+    chroma_custom_color_row.append(&chroma_color_btn);
+    chroma_key_inner.append(&chroma_custom_color_row);
+    chroma_custom_color_row.set_visible(false);
+
+    row_label(&chroma_key_inner, "Tolerance");
+    let chroma_tolerance_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    chroma_tolerance_slider.set_value(0.3);
+    chroma_tolerance_slider.set_draw_value(true);
+    chroma_tolerance_slider.set_digits(2);
+    chroma_tolerance_slider.add_mark(0.3, gtk4::PositionType::Bottom, None);
+    chroma_key_inner.append(&chroma_tolerance_slider);
+
+    row_label(&chroma_key_inner, "Edge Softness");
+    let chroma_softness_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    chroma_softness_slider.set_value(0.1);
+    chroma_softness_slider.set_draw_value(true);
+    chroma_softness_slider.set_digits(2);
+    chroma_softness_slider.add_mark(0.1, gtk4::PositionType::Bottom, None);
+    chroma_key_inner.append(&chroma_softness_slider);
+
+    // ── Background Removal section (Video + Image only) ──────────────────────
+    let bg_removal_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&bg_removal_section);
+
+    bg_removal_section.append(&Separator::new(Orientation::Horizontal));
+    let bg_removal_expander = Expander::new(Some("Background Removal"));
+    bg_removal_expander.set_expanded(false);
+    bg_removal_section.append(&bg_removal_expander);
+    let bg_removal_inner = GBox::new(Orientation::Vertical, 8);
+    bg_removal_expander.set_child(Some(&bg_removal_inner));
+
+    let bg_removal_enable = CheckButton::with_label("Enable Background Removal");
+    bg_removal_inner.append(&bg_removal_enable);
+
+    row_label(&bg_removal_inner, "Threshold");
+    let bg_removal_threshold_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    bg_removal_threshold_slider.set_value(0.5);
+    bg_removal_threshold_slider.set_draw_value(true);
+    bg_removal_threshold_slider.set_digits(2);
+    bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    bg_removal_inner.append(&bg_removal_threshold_slider);
 
     // ── Audio section (Video + Audio only) ───────────────────────────────────
     let audio_section = GBox::new(Orientation::Vertical, 8);
@@ -508,13 +667,55 @@ pub fn build_inspector(
     transform_inner.append(&crop_bottom_slider);
 
     row_label(&transform_inner, "Rotate");
-    let rotate_combo = gtk4::ComboBoxText::new();
-    rotate_combo.append(Some("0"), "0°");
-    rotate_combo.append(Some("90"), "90° CW");
-    rotate_combo.append(Some("180"), "180°");
-    rotate_combo.append(Some("270"), "270° CW");
-    rotate_combo.set_active_id(Some("0"));
-    transform_inner.append(&rotate_combo);
+    let rotate_row = GBox::new(Orientation::Horizontal, 8);
+    let rotate_value = Rc::new(Cell::new(0.0_f64));
+    let rotate_dial = gtk4::DrawingArea::new();
+    rotate_dial.set_content_width(72);
+    rotate_dial.set_content_height(72);
+    rotate_dial.set_hexpand(false);
+    rotate_dial.set_vexpand(false);
+    rotate_dial.set_tooltip_text(Some("Drag dial to rotate clip (−180° to +180°)"));
+    {
+        let rotate_value = rotate_value.clone();
+        rotate_dial.set_draw_func(move |_da, cr, ww, wh| {
+            let w = ww as f64;
+            let h = wh as f64;
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let r = w.min(h) * 0.42;
+            cr.save().ok();
+            cr.set_source_rgba(0.15, 0.15, 0.15, 0.95);
+            cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
+            cr.fill_preserve().ok();
+            cr.set_source_rgba(0.85, 0.85, 0.85, 0.9);
+            cr.set_line_width(1.5);
+            cr.stroke().ok();
+            // 0° marker (up)
+            cr.move_to(cx, cy - r + 4.0);
+            cr.line_to(cx, cy - r - 6.0);
+            cr.set_source_rgba(1.0, 0.95, 0.3, 0.9);
+            cr.set_line_width(2.0);
+            cr.stroke().ok();
+            // Needle
+            let rad = (rotate_value.get() - 90.0).to_radians();
+            let nx = cx + rad.cos() * (r - 8.0);
+            let ny = cy + rad.sin() * (r - 8.0);
+            cr.move_to(cx, cy);
+            cr.line_to(nx, ny);
+            cr.set_source_rgba(0.25, 0.55, 1.0, 1.0);
+            cr.set_line_width(2.2);
+            cr.stroke().ok();
+            cr.restore().ok();
+        });
+    }
+    let rotate_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    rotate_spin.set_digits(0);
+    rotate_spin.set_value(0.0);
+    rotate_spin.set_hexpand(true);
+    rotate_spin.set_tooltip_text(Some("Rotation angle in degrees"));
+    rotate_row.append(&rotate_dial);
+    rotate_row.append(&rotate_spin);
+    transform_inner.append(&rotate_row);
 
     row_label(&transform_inner, "Flip");
     let flip_row = GBox::new(Orientation::Horizontal, 8);
@@ -619,7 +820,7 @@ pub fn build_inspector(
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed = Rc::new(on_clip_changed);
-    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32)> =
+    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)> =
         Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
@@ -629,6 +830,10 @@ pub fn build_inspector(
     let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
     let on_opacity_changed: Rc<dyn Fn(f64)> = Rc::new(on_opacity_changed);
     let on_reverse_changed: Rc<dyn Fn(bool)> = Rc::new(on_reverse_changed);
+    let on_chroma_key_changed: Rc<dyn Fn()> = Rc::new(on_chroma_key_changed);
+    let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> =
+        Rc::new(on_chroma_key_slider_changed);
+    let on_bg_removal_changed: Rc<dyn Fn()> = Rc::new(on_bg_removal_changed);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -660,16 +865,18 @@ pub fn build_inspector(
     }
 
     // Helper: connect an effects slider — updates the model field then fires on_color_changed
-    // with all eight current values so the program player can update its filters directly.
+    // with all ten current values so the program player can update its filters directly.
     fn connect_color_slider(
         slider: &Scale,
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32)>,
+        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>,
         brightness_slider: Scale,
         contrast_slider: Scale,
         saturation_slider: Scale,
+        temperature_slider: Scale,
+        tint_slider: Scale,
         denoise_slider: Scale,
         sharpness_slider: Scale,
         shadows_slider: Scale,
@@ -681,7 +888,7 @@ pub fn build_inspector(
             if *updating.borrow() {
                 return;
             }
-            let val = db_to_linear_volume(s.value()) as f32;
+            let val = s.value() as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -697,144 +904,51 @@ pub fn build_inspector(
                 let b = brightness_slider.value() as f32;
                 let c = contrast_slider.value() as f32;
                 let sat = saturation_slider.value() as f32;
+                let temp = temperature_slider.value() as f32;
+                let tnt = tint_slider.value() as f32;
                 let d = denoise_slider.value() as f32;
                 let sh = sharpness_slider.value() as f32;
                 let shd = shadows_slider.value() as f32;
                 let mid = midtones_slider.value() as f32;
                 let hil = highlights_slider.value() as f32;
-                on_color_changed(b, c, sat, d, sh, shd, mid, hil);
+                on_color_changed(b, c, sat, temp, tnt, d, sh, shd, mid, hil);
             }
         });
     }
 
-    connect_color_slider(
-        &brightness_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.brightness = v,
-    );
-    connect_color_slider(
-        &contrast_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.contrast = v,
-    );
-    connect_color_slider(
-        &saturation_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.saturation = v,
-    );
-    connect_color_slider(
-        &denoise_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.denoise = v,
-    );
-    connect_color_slider(
-        &sharpness_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.sharpness = v,
-    );
-    connect_color_slider(
-        &shadows_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.shadows = v,
-    );
-    connect_color_slider(
-        &midtones_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.midtones = v,
-    );
-    connect_color_slider(
-        &highlights_slider,
-        project.clone(),
-        selected_clip_id.clone(),
-        updating.clone(),
-        on_color_changed.clone(),
-        brightness_slider.clone(),
-        contrast_slider.clone(),
-        saturation_slider.clone(),
-        denoise_slider.clone(),
-        sharpness_slider.clone(),
-        shadows_slider.clone(),
-        midtones_slider.clone(),
-        highlights_slider.clone(),
-        |clip, v| clip.highlights = v,
-    );
+    macro_rules! wire_color_slider {
+        ($slider:expr, $apply:expr) => {
+            connect_color_slider(
+                &$slider,
+                project.clone(),
+                selected_clip_id.clone(),
+                updating.clone(),
+                on_color_changed.clone(),
+                brightness_slider.clone(),
+                contrast_slider.clone(),
+                saturation_slider.clone(),
+                temperature_slider.clone(),
+                tint_slider.clone(),
+                denoise_slider.clone(),
+                sharpness_slider.clone(),
+                shadows_slider.clone(),
+                midtones_slider.clone(),
+                highlights_slider.clone(),
+                $apply,
+            );
+        };
+    }
+
+    wire_color_slider!(brightness_slider, |clip, v| clip.brightness = v);
+    wire_color_slider!(contrast_slider, |clip, v| clip.contrast = v);
+    wire_color_slider!(saturation_slider, |clip, v| clip.saturation = v);
+    wire_color_slider!(temperature_slider, |clip, v| clip.temperature = v);
+    wire_color_slider!(tint_slider, |clip, v| clip.tint = v);
+    wire_color_slider!(denoise_slider, |clip, v| clip.denoise = v);
+    wire_color_slider!(sharpness_slider, |clip, v| clip.sharpness = v);
+    wire_color_slider!(shadows_slider, |clip, v| clip.shadows = v);
+    wire_color_slider!(midtones_slider, |clip, v| clip.midtones = v);
+    wire_color_slider!(highlights_slider, |clip, v| clip.highlights = v);
 
     // Wire audio sliders
     {
@@ -842,20 +956,19 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_audio_changed = on_audio_changed.clone();
-        let volume_slider_cb = volume_slider.clone();
         let pan_slider_cb = pan_slider.clone();
         volume_slider.connect_value_changed(move |s| {
             if *updating.borrow() {
                 return;
             }
-            let val = s.value() as f32;
+            let linear_vol = db_to_linear_volume(s.value()) as f32;
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.volume = val;
+                            clip.volume = linear_vol;
                             proj.dirty = true;
                             break;
                         }
@@ -863,7 +976,7 @@ pub fn build_inspector(
                 }
                 on_audio_changed(
                     clip_id,
-                    db_to_linear_volume(volume_slider_cb.value()) as f32,
+                    linear_vol,
                     pan_slider_cb.value() as f32,
                 );
             }
@@ -914,7 +1027,7 @@ pub fn build_inspector(
         crop_right_s: Scale,
         crop_top_s: Scale,
         crop_bottom_s: Scale,
-        rotate_c: gtk4::ComboBoxText,
+        rotate_s: gtk4::SpinButton,
         flip_h_b: gtk4::ToggleButton,
         flip_v_b: gtk4::ToggleButton,
         scale_s: Scale,
@@ -943,10 +1056,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 let sc = scale_s.value();
@@ -967,7 +1077,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -985,7 +1095,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -1003,7 +1113,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -1021,7 +1131,7 @@ pub fn build_inspector(
         crop_right_slider.clone(),
         crop_top_slider.clone(),
         crop_bottom_slider.clone(),
-        rotate_combo.clone(),
+        rotate_spin.clone(),
         flip_h_btn.clone(),
         flip_v_btn.clone(),
         scale_slider.clone(),
@@ -1030,12 +1140,14 @@ pub fn build_inspector(
         |clip, v| clip.crop_bottom = v,
     );
 
-    // Wire rotate combo
+    // Wire rotate dial + numeric spin
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_transform_changed = on_transform_changed.clone();
+        let rotate_value = rotate_value.clone();
+        let rotate_dial = rotate_dial.clone();
         let crop_left_s = crop_left_slider.clone();
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
@@ -1045,14 +1157,13 @@ pub fn build_inspector(
         let scale_s = scale_slider.clone();
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
-        rotate_combo.connect_changed(move |combo| {
+        rotate_spin.connect_value_changed(move |spin| {
+            let rot = spin.value().clamp(-180.0, 180.0).round() as i32;
+            rotate_value.set(rot as f64);
+            rotate_dial.queue_draw();
             if *updating.borrow() {
                 return;
             }
-            let rot = combo
-                .active_id()
-                .and_then(|id| id.parse::<i32>().ok())
-                .unwrap_or(0);
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -1086,6 +1197,76 @@ pub fn build_inspector(
             }
         });
     }
+    {
+        let rotate_spin = rotate_spin.clone();
+        let rotate_dial = rotate_dial.clone();
+        let updating = updating.clone();
+        let rotate_dial_for_click = rotate_dial.clone();
+        let click = gtk4::GestureClick::new();
+        click.set_button(1);
+        click.connect_pressed(move |_g, _n, x, y| {
+            if *updating.borrow() {
+                return;
+            }
+            let rot = dial_point_to_degrees(
+                x,
+                y,
+                rotate_dial_for_click.width() as f64,
+                rotate_dial_for_click.height() as f64,
+            );
+            rotate_spin.set_value(rot as f64);
+        });
+        rotate_dial.add_controller(click);
+    }
+    {
+        let rotate_spin = rotate_spin.clone();
+        let rotate_dial = rotate_dial.clone();
+        let updating = updating.clone();
+        let drag_start = Rc::new(RefCell::new((0.0_f64, 0.0_f64)));
+        let drag = gtk4::GestureDrag::new();
+        drag.set_button(1);
+        {
+            let drag_start = drag_start.clone();
+            let rotate_spin = rotate_spin.clone();
+            let rotate_dial = rotate_dial.clone();
+            let updating = updating.clone();
+            drag.connect_drag_begin(move |_g, x, y| {
+                if *updating.borrow() {
+                    return;
+                }
+                *drag_start.borrow_mut() = (x, y);
+                let rot = dial_point_to_degrees(
+                    x,
+                    y,
+                    rotate_dial.width() as f64,
+                    rotate_dial.height() as f64,
+                );
+                rotate_spin.set_value(rot as f64);
+            });
+        }
+        {
+            let drag_start = drag_start.clone();
+            let rotate_spin = rotate_spin.clone();
+            let rotate_dial = rotate_dial.clone();
+            let updating = updating.clone();
+            drag.connect_drag_update(move |_g, off_x, off_y| {
+                if *updating.borrow() {
+                    return;
+                }
+                let (sx, sy) = *drag_start.borrow();
+                let x = sx + off_x;
+                let y = sy + off_y;
+                let rot = dial_point_to_degrees(
+                    x,
+                    y,
+                    rotate_dial.width() as f64,
+                    rotate_dial.height() as f64,
+                );
+                rotate_spin.set_value(rot as f64);
+            });
+        }
+        rotate_dial.add_controller(drag);
+    }
 
     // Wire flip buttons
     {
@@ -1097,7 +1278,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_v_b = flip_v_btn.clone();
         let scale_s = scale_slider.clone();
         let pos_x_s = position_x_slider.clone();
@@ -1123,10 +1304,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
                     cl,
@@ -1152,7 +1330,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let scale_s = scale_slider.clone();
         let pos_x_s = position_x_slider.clone();
@@ -1178,10 +1356,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 on_transform_changed(
                     cl,
@@ -1209,7 +1384,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let flip_v_b = flip_v_btn.clone();
         let pos_x_s = position_x_slider.clone();
@@ -1236,10 +1411,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
@@ -1293,7 +1465,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let flip_v_b = flip_v_btn.clone();
         let scale_s = scale_slider.clone();
@@ -1320,10 +1492,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
@@ -1351,7 +1520,7 @@ pub fn build_inspector(
         let crop_right_s = crop_right_slider.clone();
         let crop_top_s = crop_top_slider.clone();
         let crop_bottom_s = crop_bottom_slider.clone();
-        let rotate_c = rotate_combo.clone();
+        let rotate_s = rotate_spin.clone();
         let flip_h_b = flip_h_btn.clone();
         let flip_v_b = flip_v_btn.clone();
         let scale_s = scale_slider.clone();
@@ -1378,10 +1547,7 @@ pub fn build_inspector(
                 let cr = crop_right_s.value() as i32;
                 let ct = crop_top_s.value() as i32;
                 let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_c
-                    .active_id()
-                    .and_then(|id| id.parse::<i32>().ok())
-                    .unwrap_or(0);
+                let rot = rotate_s.value().round() as i32;
                 let fh = flip_h_b.is_active();
                 let fv = flip_v_b.is_active();
                 on_transform_changed(
@@ -1627,6 +1793,244 @@ pub fn build_inspector(
         });
     }
 
+    // Chroma Key enable toggle — toggling on/off changes pipeline topology → full rebuild
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        chroma_key_enable.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_enabled = enabled;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+
+    // Chroma Key color preset buttons
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        let custom_row = chroma_custom_color_row.clone();
+        chroma_green_btn.connect_toggled(move |btn| {
+            if *updating.borrow() || !btn.is_active() {
+                return;
+            }
+            custom_row.set_visible(false);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_color = 0x00FF00;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        let custom_row = chroma_custom_color_row.clone();
+        chroma_blue_btn.connect_toggled(move |btn| {
+            if *updating.borrow() || !btn.is_active() {
+                return;
+            }
+            custom_row.set_visible(false);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_color = 0x0000FF;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+    {
+        let custom_row = chroma_custom_color_row.clone();
+        let updating = updating.clone();
+        chroma_custom_btn.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            custom_row.set_visible(btn.is_active());
+        });
+    }
+
+    // Chroma Key color picker — ColorDialogButton rgba notify
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_changed = on_chroma_key_changed.clone();
+        chroma_color_btn.connect_rgba_notify(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0).round() as u32;
+            let g = (rgba.green() * 255.0).round() as u32;
+            let b = (rgba.blue() * 255.0).round() as u32;
+            let color = (r << 16) | (g << 8) | b;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_changed();
+            }
+        });
+    }
+
+    // Chroma Key tolerance slider — live property update (no pipeline rebuild)
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_slider_changed = on_chroma_key_slider_changed.clone();
+        let softness_slider = chroma_softness_slider.clone();
+        chroma_tolerance_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = s.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_tolerance = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_slider_changed(val, softness_slider.value() as f32);
+            }
+        });
+    }
+
+    // Chroma Key softness slider — live property update (no pipeline rebuild)
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_chroma_key_slider_changed = on_chroma_key_slider_changed.clone();
+        let tolerance_slider = chroma_tolerance_slider.clone();
+        chroma_softness_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = s.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.chroma_key_softness = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_chroma_key_slider_changed(tolerance_slider.value() as f32, val);
+            }
+        });
+    }
+
+    // ── Background Removal signals ───────────────────────────────────────────
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_bg_removal_changed = on_bg_removal_changed.clone();
+        bg_removal_enable.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.bg_removal_enabled = enabled;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_bg_removal_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_bg_removal_changed = on_bg_removal_changed.clone();
+        bg_removal_threshold_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = s.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.bg_removal_threshold = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_bg_removal_changed();
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -1638,6 +2042,8 @@ pub fn build_inspector(
         brightness_slider,
         contrast_slider,
         saturation_slider,
+        temperature_slider,
+        tint_slider,
         denoise_slider,
         sharpness_slider,
         shadows_slider,
@@ -1649,7 +2055,7 @@ pub fn build_inspector(
         crop_right_slider,
         crop_top_slider,
         crop_bottom_slider,
-        rotate_combo,
+        rotate_spin,
         flip_h_btn,
         flip_v_btn,
         scale_slider,
@@ -1672,9 +2078,32 @@ pub fn build_inspector(
         title_section_box,
         speed_section_box,
         lut_section_box,
+        chroma_key_section,
+        chroma_key_enable,
+        chroma_green_btn,
+        chroma_blue_btn,
+        chroma_custom_btn,
+        chroma_color_btn,
+        chroma_custom_color_row,
+        chroma_tolerance_slider,
+        chroma_softness_slider,
+        bg_removal_section,
+        bg_removal_enable,
+        bg_removal_threshold_slider,
+        bg_removal_model_available: Cell::new(false),
     });
 
     (vbox, view)
+}
+
+fn dial_point_to_degrees(x: f64, y: f64, width: f64, height: f64) -> i32 {
+    let cx = width / 2.0;
+    let cy = height / 2.0;
+    let mut deg = ((y - cy).atan2(x - cx).to_degrees() + 90.0).rem_euclid(360.0);
+    if deg > 180.0 {
+        deg -= 360.0;
+    }
+    deg.round().clamp(-180.0, 180.0) as i32
 }
 
 fn row_label(parent: &GBox, text: &str) {

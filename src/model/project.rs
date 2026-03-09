@@ -52,12 +52,14 @@ impl FrameRate {
             denominator: 1,
         }
     }
+    #[allow(dead_code)]
     pub fn fps_30() -> Self {
         Self {
             numerator: 30000,
             denominator: 1001,
         }
     }
+    #[allow(dead_code)]
     pub fn fps_60() -> Self {
         Self {
             numerator: 60,
@@ -156,12 +158,14 @@ impl Project {
         self.tracks.iter().map(|t| t.duration()).max().unwrap_or(0)
     }
 
+    #[allow(dead_code)]
     pub fn add_video_track(&mut self) {
         let n = self.video_tracks().count() + 1;
         self.tracks.push(Track::new_video(format!("Video {n}")));
         self.dirty = true;
     }
 
+    #[allow(dead_code)]
     pub fn add_audio_track(&mut self) {
         let n = self.audio_tracks().count() + 1;
         self.tracks.push(Track::new_audio(format!("Audio {n}")));

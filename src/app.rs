@@ -43,7 +43,7 @@ fn load_css() {
 
     let css = gtk4::CssProvider::new();
     let css_data = include_str!("style.css");
-    css.load_from_data(css_data);
+    css.load_from_string(css_data);
     gtk4::style_context_add_provider_for_display(
         &gdk4::Display::default().expect("no display"),
         &css,

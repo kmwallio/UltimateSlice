@@ -21,3 +21,10 @@ log = "0.4"
 env_logger = "0.11"
 thiserror = "2"
 anyhow = "1"
+rustfft = "6"
+ort = { version = "2.0.0-rc.12", optional = true }
+ndarray = { version = "0.17", optional = true }
+
+[features]
+default = []
+ai-inference = ["ort", "ndarray"]

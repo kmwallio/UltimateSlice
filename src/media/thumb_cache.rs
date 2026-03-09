@@ -80,7 +80,12 @@ impl ThumbnailCache {
     /// Drain completed background frames → convert to Cairo surfaces.
     /// Returns `true` if at least one new surface was added (caller should redraw).
     pub fn poll(&mut self) -> bool {
-        let mut dirty = false;
+        !self.poll_ready_keys().is_empty()
+    }
+
+    /// Drain completed frames and return cache keys that became available.
+    pub fn poll_ready_keys(&mut self) -> Vec<String> {
+        let mut ready = Vec::new();
         while let Ok(frame) = self.rx.try_recv() {
             self.loading.remove(&frame.key);
             self.in_flight = self.in_flight.saturating_sub(1);
@@ -88,12 +93,12 @@ impl ThumbnailCache {
                 continue;
             }
             if let Ok(surf) = rgba_to_surface(&frame.data) {
-                self.surfaces.insert(frame.key, surf);
-                dirty = true;
+                self.surfaces.insert(frame.key.clone(), surf);
+                ready.push(frame.key);
             }
         }
         self.flush_pending();
-        dirty
+        ready
     }
 
     /// Returns the cached surface for `source_path` at `time_ns`, if available.

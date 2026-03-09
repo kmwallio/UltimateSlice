@@ -1,8 +1,7 @@
 use crate::ui_state::{GskRenderer, PlaybackPriority, PreferencesState, PreviewQuality, ProxyMode};
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, CheckButton, Dialog, Label, Orientation, ResponseType, Stack,
-    StackSidebar,
+    self as gtk, Box as GBox, CheckButton, Label, Orientation, ResponseType, Stack, StackSidebar,
 };
 use std::rc::Rc;
 
@@ -14,24 +13,29 @@ Third-party crates and libraries:\n\
 • serde / serde_json — MIT OR Apache-2.0\n\
 • uuid — MIT OR Apache-2.0\n\
 • anyhow / thiserror / log / env_logger — MIT OR Apache-2.0\n\
+• rustfft — MIT OR Apache-2.0\n\
+• ort (ONNX Runtime) — MIT OR Apache-2.0\n\
+• ndarray — MIT OR Apache-2.0\n\
 • FFmpeg (export/runtime tooling) — LGPL-2.1-or-later (built with GPL options in Flatpak)\n\
 • x264 (Flatpak build) — GPL-2.0-or-later\n\
 \n\
 See Cargo.toml/Cargo.lock and io.github.kmwallio.ultimateslice.yml for full dependency details.";
 
 const LICENSE_NOTICE: &str = "\
-UltimateSlice project license: TBD.\n\
+UltimateSlice project license: GPL-3.0-or-later.\n\
 \n\
 This application uses third-party open-source crates and libraries.\n\
 Please review each dependency license in Cargo.lock, the Flatpak manifest,\n\
 and upstream project repositories for complete terms and notices.";
 
+#[allow(deprecated)]
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
     current: PreferencesState,
     on_save: Rc<dyn Fn(PreferencesState)>,
+    _bg_removal_cache: Rc<std::cell::RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
 ) {
-    let dialog = Dialog::builder()
+    let dialog = gtk::Dialog::builder()
         .title("Preferences")
         .transient_for(parent)
         .modal(true)
@@ -153,6 +157,17 @@ pub fn show_preferences_dialog(
     playback_box.append(&proxy_mode);
     playback_box.append(&proxy_hint);
 
+    let preview_luts_check = CheckButton::with_label("Preview LUTs (Proxy Off mode)");
+    preview_luts_check.set_active(current.preview_luts);
+    preview_luts_check.set_halign(gtk::Align::Start);
+    let preview_luts_hint = Label::new(Some("When Proxy mode is Off, render project-size LUT-baked preview media for LUT-assigned clips."));
+    preview_luts_hint.set_halign(gtk::Align::Start);
+    preview_luts_hint.add_css_class("dim-label");
+    preview_luts_hint.set_wrap(true);
+    preview_luts_hint.set_max_width_chars(60);
+    playback_box.append(&preview_luts_check);
+    playback_box.append(&preview_luts_hint);
+
     let pq_label = Label::new(Some("Preview quality"));
     pq_label.set_halign(gtk::Align::Start);
     let preview_quality = gtk4::ComboBoxText::new();
@@ -211,6 +226,17 @@ pub fn show_preferences_dialog(
     playback_box.append(&realtime_check);
     playback_box.append(&realtime_hint);
 
+    let background_prerender_check = CheckButton::with_label("Background prerender");
+    background_prerender_check.set_active(current.background_prerender);
+    background_prerender_check.set_halign(gtk::Align::Start);
+    let background_prerender_hint = Label::new(Some("Renders upcoming complex overlap sections (3+ video tracks) to temporary disk clips in the background and uses them when available. Falls back to normal playback when unavailable."));
+    background_prerender_hint.set_halign(gtk::Align::Start);
+    background_prerender_hint.add_css_class("dim-label");
+    background_prerender_hint.set_wrap(true);
+    background_prerender_hint.set_max_width_chars(60);
+    playback_box.append(&background_prerender_check);
+    playback_box.append(&background_prerender_hint);
+
     stack.add_titled(&playback_box, Some("playback"), "Playback");
 
     // ── Timeline section ──────────────────────────────────────────────────
@@ -268,6 +294,125 @@ pub fn show_preferences_dialog(
     integration_box.append(&mcp_socket_hint);
     stack.add_titled(&integration_box, Some("integration"), "Integration");
 
+    // ── Models section (only when ai-inference feature is enabled) ─────────
+    #[cfg(feature = "ai-inference")]
+    {
+        use crate::media::bg_removal_cache::{find_model_path, model_download_dir, MODEL_DOWNLOAD_URL, MODEL_FILENAME};
+
+        let models_box = GBox::new(Orientation::Vertical, 10);
+        models_box.set_margin_start(8);
+        models_box.set_margin_end(8);
+        models_box.set_margin_top(8);
+        let models_label = Label::new(Some("Models"));
+        models_label.set_halign(gtk::Align::Start);
+        models_label.add_css_class("title-4");
+        models_box.append(&models_label);
+
+        // MODNet status row.
+        let modnet_row = GBox::new(Orientation::Horizontal, 8);
+        let modnet_name = Label::new(Some("MODNet (Background Removal)"));
+        modnet_name.set_halign(gtk::Align::Start);
+        modnet_name.set_hexpand(true);
+        let status_label = Label::new(None);
+        status_label.set_halign(gtk::Align::End);
+
+        let has_model = find_model_path().is_some();
+        if has_model {
+            status_label.set_text("✓ Installed");
+            status_label.add_css_class("success");
+        } else {
+            status_label.set_text("Not installed");
+            status_label.add_css_class("dim-label");
+        }
+        modnet_row.append(&modnet_name);
+        modnet_row.append(&status_label);
+        models_box.append(&modnet_row);
+
+        let modnet_hint = Label::new(Some(
+            "MODNet is used for AI-powered background removal on video clips. \
+             The model file (~25 MB) will be downloaded to your local data directory.",
+        ));
+        modnet_hint.set_halign(gtk::Align::Start);
+        modnet_hint.add_css_class("dim-label");
+        modnet_hint.set_wrap(true);
+        modnet_hint.set_max_width_chars(60);
+        models_box.append(&modnet_hint);
+
+        // Download button + progress bar.
+        let download_btn = gtk::Button::with_label(if has_model { "Re-download Model" } else { "Download Model" });
+        download_btn.set_halign(gtk::Align::Start);
+        let progress_bar = gtk::ProgressBar::new();
+        progress_bar.set_visible(false);
+        progress_bar.set_hexpand(true);
+
+        let bg_cache = _bg_removal_cache.clone();
+        let status_label_c = status_label.clone();
+        let progress_bar_c = progress_bar.clone();
+        let download_btn_c = download_btn.clone();
+        download_btn.connect_clicked(move |_| {
+            let dest_dir = model_download_dir();
+            let _ = std::fs::create_dir_all(&dest_dir);
+            let dest = dest_dir.join(MODEL_FILENAME);
+            let partial = dest_dir.join(format!("{MODEL_FILENAME}.partial"));
+            let url = MODEL_DOWNLOAD_URL.to_string();
+
+            progress_bar_c.set_visible(true);
+            progress_bar_c.set_fraction(0.0);
+            progress_bar_c.set_text(Some("Downloading…"));
+            progress_bar_c.set_show_text(true);
+            download_btn_c.set_sensitive(false);
+            status_label_c.set_text("Downloading…");
+
+            // result: None = still running, Some(true) = success, Some(false) = failure.
+            let result = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
+            let result_w = result.clone();
+            std::thread::spawn(move || {
+                let ok = std::process::Command::new("curl")
+                    .args(["-L", "-o", &partial.to_string_lossy(), &url])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if ok {
+                    let _ = std::fs::rename(&partial, &dest);
+                }  else {
+                    let _ = std::fs::remove_file(&partial);
+                }
+                *result_w.lock().unwrap() = Some(ok);
+            });
+
+            let bg_cache_c = bg_cache.clone();
+            let status_label_cc = status_label_c.clone();
+            let progress_bar_cc = progress_bar_c.clone();
+            let download_btn_cc = download_btn_c.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                let done = result.lock().unwrap().clone();
+                match done {
+                    None => glib::ControlFlow::Continue,
+                    Some(true) => {
+                        progress_bar_cc.set_fraction(1.0);
+                        progress_bar_cc.set_text(Some("Done"));
+                        status_label_cc.set_text("✓ Installed");
+                        download_btn_cc.set_label("Re-download Model");
+                        download_btn_cc.set_sensitive(true);
+                        bg_cache_c.borrow_mut().refresh_model_path();
+                        glib::ControlFlow::Break
+                    }
+                    Some(false) => {
+                        progress_bar_cc.set_text(Some("Download failed"));
+                        progress_bar_cc.set_fraction(0.0);
+                        status_label_cc.set_text("Download failed");
+                        download_btn_cc.set_sensitive(true);
+                        glib::ControlFlow::Break
+                    }
+                }
+            });
+        });
+        models_box.append(&download_btn);
+        models_box.append(&progress_bar);
+
+        stack.add_titled(&models_box, Some("models"), "Models");
+    }
+
     body.append(&sidebar);
     body.append(&stack);
     dialog.content_area().append(&body);
@@ -288,6 +433,7 @@ pub fn show_preferences_dialog(
                 proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
+                show_track_audio_levels: current.show_track_audio_levels,
                 mcp_socket_enabled: mcp_socket_check.is_active(),
                 gsk_renderer: GskRenderer::from_str(
                     gsk_renderer.active_id().as_deref().unwrap_or("auto"),
@@ -297,6 +443,8 @@ pub fn show_preferences_dialog(
                 ),
                 experimental_preview_optimizations: experimental_check.is_active(),
                 realtime_preview: realtime_check.is_active(),
+                background_prerender: background_prerender_check.is_active(),
+                preview_luts: preview_luts_check.is_active(),
             });
         }
         d.close();

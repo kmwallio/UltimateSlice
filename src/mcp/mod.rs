@@ -20,6 +20,9 @@ pub enum McpCommand {
     GetTimelineSettings {
         reply: SyncSender<Value>,
     },
+    GetPlayheadPosition {
+        reply: SyncSender<Value>,
+    },
     SetMagneticMode {
         enabled: bool,
         reply: SyncSender<Value>,
@@ -63,6 +66,18 @@ pub enum McpCommand {
         new_start_ns: u64,
         reply: SyncSender<Value>,
     },
+    LinkClips {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    UnlinkClips {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    AlignGroupedClipsByTimecode {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
     TrimClip {
         clip_id: String,
         source_in_ns: u64,
@@ -74,11 +89,27 @@ pub enum McpCommand {
         brightness: f64,
         contrast: f64,
         saturation: f64,
+        temperature: f64,
+        tint: f64,
         denoise: f64,
         sharpness: f64,
         shadows: f64,
         midtones: f64,
         highlights: f64,
+        reply: SyncSender<Value>,
+    },
+    SetClipChromaKey {
+        clip_id: String,
+        enabled: Option<bool>,
+        color: Option<u32>,
+        tolerance: Option<f64>,
+        softness: Option<f64>,
+        reply: SyncSender<Value>,
+    },
+    SetClipBgRemoval {
+        clip_id: String,
+        enabled: Option<bool>,
+        threshold: Option<f64>,
         reply: SyncSender<Value>,
     },
     SetTitle {
@@ -95,6 +126,29 @@ pub enum McpCommand {
     },
     ExportMp4 {
         path: String,
+        reply: SyncSender<Value>,
+    },
+    ListExportPresets {
+        reply: SyncSender<Value>,
+    },
+    SaveExportPreset {
+        name: String,
+        video_codec: String,
+        container: String,
+        output_width: u32,
+        output_height: u32,
+        crf: u32,
+        audio_codec: String,
+        audio_bitrate_kbps: u32,
+        reply: SyncSender<Value>,
+    },
+    DeleteExportPreset {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ExportWithPreset {
+        path: String,
+        preset_name: String,
         reply: SyncSender<Value>,
     },
     ListLibrary {
@@ -130,6 +184,7 @@ pub enum McpCommand {
         scale: f64,
         position_x: f64,
         position_y: f64,
+        rotate: Option<i32>,
         reply: SyncSender<Value>,
     },
     SetClipOpacity {
@@ -156,6 +211,18 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     SetRealtimePreview {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetExperimentalPreviewOptimizations {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetBackgroundPrerender {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetPreviewLuts {
         enabled: bool,
         reply: SyncSender<Value>,
     },
@@ -203,11 +270,16 @@ pub enum McpCommand {
     SourcePause {
         reply: SyncSender<Value>,
     },
+    SyncClipsByAudio {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.
 /// Returns the `Sender` (for sharing with other transports) and the `Receiver`
 /// that the GTK main thread should poll for commands.
+#[allow(dead_code)]
 pub fn start_mcp_server() -> (
     std::sync::mpsc::Sender<McpCommand>,
     std::sync::mpsc::Receiver<McpCommand>,

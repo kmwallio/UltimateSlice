@@ -33,6 +33,7 @@ modules:
       - install -Dm644 data/io.github.kmwallio.ultimateslice.mime.xml /app/share/mime/packages/io.github.kmwallio.ultimateslice.mime.xml
       - install -Dm644 data/io.github.kmwallio.ultimateslice.metainfo.xml /app/share/metainfo/io.github.kmwallio.ultimateslice.metainfo.xml
       - install -Dm644 data/io.github.kmwallio.ultimateslice.svg /app/share/icons/hicolor/scalable/apps/io.github.kmwallio.ultimateslice.svg
+      - install -Dm644 data/io.github.kmwallio.ultimateslice-file.svg /app/share/icons/hicolor/scalable/mimetypes/io.github.kmwallio.ultimateslice-file.svg
     sources:
       - type: dir
         path: .

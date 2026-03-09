@@ -8,7 +8,7 @@ The **Media Library** panel (left side) holds all source clips available for you
 2. Once media has been imported, use the **+** button next to the **Media Library** title to import more files.
 3. Choose one or more video, audio, or image files from the file chooser.
 4. Imported items appear in the list showing the clip name and filename.
-5. GStreamer probes each file on import to determine its duration.
+5. GStreamer probes each file on import to determine its duration and extract source timecode (creation date/time) when available.
 
 You can also drag files directly from your file manager into the **Media Library** pane to import them.
 
@@ -40,4 +40,6 @@ Supported formats depend on your installed GStreamer plugins (any format `playbi
 - Deleting a clip from the timeline does not remove it from the library.
 - The library list is saved as part of the FCPXML project file.
 - Creating a new project or opening a different project clears the current library view first, then loads that project's media list.
+- Thumbnails are generated asynchronously and refresh automatically as they become available (no manual panel/window resize needed).
+- Source timecode (from camera creation timestamps) is automatically extracted during import and used for timecode-based alignment of grouped clips without manual entry.
 - When the library is empty, the panel shows a short hint reminding you that you can import or drag files to begin.

@@ -39,6 +39,21 @@ fn default_title_x() -> f64 {
 fn default_title_y() -> f64 {
     0.9
 }
+fn default_chroma_key_color() -> u32 {
+    0x00FF00
+}
+fn default_chroma_key_tolerance() -> f32 {
+    0.3
+}
+fn default_chroma_key_softness() -> f32 {
+    0.1
+}
+fn default_bg_removal_threshold() -> f64 {
+    0.5
+}
+fn default_temperature() -> f32 {
+    6500.0
+}
 
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +80,12 @@ pub struct Clip {
     /// Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid), default 1.0
     #[serde(default = "default_saturation")]
     pub saturation: f32,
+    /// Color temperature in Kelvin: 2000 (warm/amber) to 10000 (cool/blue), default 6500 (daylight neutral).
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// Tint shift on the green–magenta axis: −1.0 (green) to 1.0 (magenta), default 0.0.
+    #[serde(default)]
+    pub tint: f32,
     /// Denoise strength: 0.0 (off) to 1.0 (heavy), default 0.0
     #[serde(default)]
     pub denoise: f32,
@@ -89,7 +110,7 @@ pub struct Clip {
     pub crop_top: i32,
     #[serde(default)]
     pub crop_bottom: i32,
-    /// Rotation in degrees: 0, 90, 180, or 270
+    /// Rotation in degrees (arbitrary angle, normalized by consumers as needed).
     #[serde(default)]
     pub rotate: i32,
     #[serde(default)]
@@ -145,6 +166,34 @@ pub struct Clip {
     /// indicator on the timeline clip.
     #[serde(default)]
     pub reverse: bool,
+    /// Chroma key enabled flag. Default false.
+    #[serde(default)]
+    pub chroma_key_enabled: bool,
+    /// Chroma key target color as 0xRRGGBB. Default 0x00FF00 (green).
+    #[serde(default = "default_chroma_key_color")]
+    pub chroma_key_color: u32,
+    /// Chroma key tolerance (angle): 0.0 (tight key) to 1.0 (wide key). Default 0.3.
+    #[serde(default = "default_chroma_key_tolerance")]
+    pub chroma_key_tolerance: f32,
+    /// Chroma key edge softness (noise level): 0.0 (hard edge) to 1.0 (soft edge). Default 0.1.
+    #[serde(default = "default_chroma_key_softness")]
+    pub chroma_key_softness: f32,
+    /// AI background removal enabled flag. Default false.
+    #[serde(default)]
+    pub bg_removal_enabled: bool,
+    /// AI background removal matte threshold: 0.0 (aggressive) to 1.0 (conservative). Default 0.5.
+    #[serde(default = "default_bg_removal_threshold")]
+    pub bg_removal_threshold: f64,
+    /// Optional clip-group identifier. Clips with the same group id are edited as a unit.
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// Optional strict link-group identifier used for synchronized A/V-linked edits.
+    #[serde(default)]
+    pub link_group_id: Option<String>,
+    /// Optional absolute source time reference for the start of the underlying media.
+    /// When present, source clip start timecode is `source_timecode_base_ns + source_in`.
+    #[serde(default)]
+    pub source_timecode_base_ns: Option<u64>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -189,6 +238,8 @@ impl Clip {
             brightness: 0.0,
             contrast: 1.0,
             saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
             denoise: 0.0,
             sharpness: 0.0,
             volume: 1.0,
@@ -217,6 +268,15 @@ impl Clip {
             midtones: 0.0,
             highlights: 0.0,
             reverse: false,
+            chroma_key_enabled: false,
+            chroma_key_color: default_chroma_key_color(),
+            chroma_key_tolerance: default_chroma_key_tolerance(),
+            chroma_key_softness: default_chroma_key_softness(),
+            bg_removal_enabled: false,
+            bg_removal_threshold: default_bg_removal_threshold(),
+            group_id: None,
+            link_group_id: None,
+            source_timecode_base_ns: None,
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
@@ -229,6 +289,19 @@ impl Clip {
     /// Raw source material duration (source_out − source_in), unaffected by speed.
     pub fn source_duration(&self) -> u64 {
         self.source_out.saturating_sub(self.source_in)
+    }
+
+    pub fn source_timecode_start_ns(&self) -> Option<u64> {
+        self.source_timecode_base_ns
+            .map(|base| base.saturating_add(self.source_in))
+    }
+
+    pub fn suppresses_embedded_audio_for_linked_peer(&self, peer: &Clip) -> bool {
+        self.kind == ClipKind::Video
+            && peer.kind == ClipKind::Audio
+            && self.link_group_id.is_some()
+            && self.link_group_id == peer.link_group_id
+            && self.source_path == peer.source_path
     }
 
     /// Duration of the clip on the **timeline**, in nanoseconds.
@@ -273,15 +346,52 @@ mod tests {
         assert_eq!(clip.volume, 1.0);
         assert_eq!(clip.speed, 1.0);
         assert!(!clip.reverse);
+        assert!(!clip.chroma_key_enabled);
+        assert_eq!(clip.chroma_key_color, 0x00FF00);
+        assert!((clip.chroma_key_tolerance - 0.3).abs() < f32::EPSILON);
+        assert!((clip.chroma_key_softness - 0.1).abs() < f32::EPSILON);
         assert_eq!(clip.scale, 1.0);
         assert_eq!(clip.opacity, 1.0);
         assert!(!clip.flip_h);
         assert!(!clip.flip_v);
         assert!(clip.lut_path.is_none());
+        assert!(clip.group_id.is_none());
+        assert!(clip.link_group_id.is_none());
+        assert!(clip.source_timecode_base_ns.is_none());
         assert!(clip.transition_after.is_empty());
         assert!(clip.fcpxml_unknown_attrs.is_empty());
         assert!(clip.fcpxml_unknown_children.is_empty());
         assert!(clip.fcpxml_original_source_path.is_none());
+    }
+
+    #[test]
+    fn test_source_timecode_start_uses_base_and_source_in() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.source_in = 2_000_000_000;
+        clip.source_timecode_base_ns = Some(10_000_000_000);
+        assert_eq!(clip.source_timecode_start_ns(), Some(12_000_000_000));
+    }
+
+    #[test]
+    fn test_linked_audio_peer_suppresses_embedded_audio() {
+        let mut video = make_test_clip(5_000_000_000, 0);
+        video.link_group_id = Some("link-1".to_string());
+
+        let mut audio = Clip::new("/path/to/video.mp4", 5_000_000_000, 0, ClipKind::Audio);
+        audio.link_group_id = Some("link-1".to_string());
+
+        assert!(video.suppresses_embedded_audio_for_linked_peer(&audio));
+    }
+
+    #[test]
+    fn test_unlinked_or_different_source_peer_does_not_suppress_embedded_audio() {
+        let mut video = make_test_clip(5_000_000_000, 0);
+        video.link_group_id = Some("link-1".to_string());
+
+        let mut audio = Clip::new("/path/to/other.wav", 5_000_000_000, 0, ClipKind::Audio);
+        audio.link_group_id = Some("link-1".to_string());
+
+        assert!(!video.suppresses_embedded_audio_for_linked_peer(&audio));
     }
 
     #[test]

@@ -45,6 +45,23 @@ printf '%s\n' \
 | python3 tools/mcp_socket_client.py
 ```
 
+## Helper scripts for perf/FPS checks
+
+- `python3 tools/mcp_call.py <tool_name> '<json-args>'`
+  - Sends one MCP `tools/call` over the socket and prints the response JSON.
+- `python3 tools/proxy_fps_regression.py --project Sample-Media/three-video-tracks.fcpxml`
+  - Runs a relative FPS regression check (optimized config vs baseline) using playhead-speed measurement.
+- `tools/proxy_perf_matrix.sh <app-pid> <project.fcpxml>`
+  - Runs the 2x2x2 hardware/occlusion/realtime perf matrix and writes per-run `perf stat` artifacts.
+
+Useful playback-tuning toggles:
+
+- `python3 tools/mcp_call.py set_realtime_preview '{"enabled":true}'`
+- `python3 tools/mcp_call.py set_experimental_preview_optimizations '{"enabled":true}'`
+- `python3 tools/mcp_call.py set_background_prerender '{"enabled":true}'`
+
+`set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
+
 ## `.mcp.json` server entry
 
 This repository includes a Python socket entry:

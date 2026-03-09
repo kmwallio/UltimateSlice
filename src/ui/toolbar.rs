@@ -6,6 +6,7 @@ use crate::model::media_library::MediaItem;
 use crate::model::project::{FrameRate, Project};
 use crate::recent;
 use crate::ui::timeline::{ActiveTool, TimelineState};
+use crate::ui_state::{self, ExportPreset, ExportPresetsState};
 use gio;
 use glib;
 use gtk4::prelude::*;
@@ -33,14 +34,153 @@ fn save_project_to_path(
     Ok(())
 }
 
-fn largest_library_file_size_bytes(library: &[MediaItem]) -> Option<u64> {
-    library
-        .iter()
-        .filter_map(|item| std::fs::metadata(&item.source_path).ok().map(|m| m.len()))
-        .max()
-        .filter(|size| *size > 0)
+fn video_codec_from_selected(selected: u32) -> VideoCodec {
+    match selected {
+        0 => VideoCodec::H264,
+        1 => VideoCodec::H265,
+        2 => VideoCodec::Vp9,
+        3 => VideoCodec::ProRes,
+        4 => VideoCodec::Av1,
+        _ => VideoCodec::H264,
+    }
 }
 
+fn selected_from_video_codec(codec: &VideoCodec) -> u32 {
+    match codec {
+        VideoCodec::H264 => 0,
+        VideoCodec::H265 => 1,
+        VideoCodec::Vp9 => 2,
+        VideoCodec::ProRes => 3,
+        VideoCodec::Av1 => 4,
+    }
+}
+
+fn container_from_selected(selected: u32) -> Container {
+    match selected {
+        0 => Container::Mp4,
+        1 => Container::Mov,
+        2 => Container::WebM,
+        3 => Container::Mkv,
+        _ => Container::Mp4,
+    }
+}
+
+fn selected_from_container(container: &Container) -> u32 {
+    match container {
+        Container::Mp4 => 0,
+        Container::Mov => 1,
+        Container::WebM => 2,
+        Container::Mkv => 3,
+    }
+}
+
+fn output_resolution_from_selected(selected: u32) -> (u32, u32) {
+    match selected {
+        0 => (0, 0),
+        1 => (3840, 2160),
+        2 => (1920, 1080),
+        3 => (1280, 720),
+        4 => (854, 480),
+        _ => (0, 0),
+    }
+}
+
+fn selected_from_output_resolution(width: u32, height: u32) -> u32 {
+    match (width, height) {
+        (0, 0) => 0,
+        (3840, 2160) => 1,
+        (1920, 1080) => 2,
+        (1280, 720) => 3,
+        (854, 480) => 4,
+        _ => 0,
+    }
+}
+
+fn audio_codec_from_selected(selected: u32) -> AudioCodec {
+    match selected {
+        0 => AudioCodec::Aac,
+        1 => AudioCodec::Opus,
+        2 => AudioCodec::Flac,
+        3 => AudioCodec::Pcm,
+        _ => AudioCodec::Aac,
+    }
+}
+
+fn selected_from_audio_codec(codec: &AudioCodec) -> u32 {
+    match codec {
+        AudioCodec::Aac => 0,
+        AudioCodec::Opus => 1,
+        AudioCodec::Flac => 2,
+        AudioCodec::Pcm => 3,
+    }
+}
+
+fn collect_export_options(
+    vc_combo: &gtk::DropDown,
+    ct_combo: &gtk::DropDown,
+    or_combo: &gtk::DropDown,
+    crf_slider: &gtk::Scale,
+    ac_combo: &gtk::DropDown,
+    ab_entry: &gtk::Entry,
+) -> ExportOptions {
+    let (output_width, output_height) = output_resolution_from_selected(or_combo.selected());
+    ExportOptions {
+        video_codec: video_codec_from_selected(vc_combo.selected()),
+        container: container_from_selected(ct_combo.selected()),
+        output_width,
+        output_height,
+        crf: crf_slider.value() as u32,
+        audio_codec: audio_codec_from_selected(ac_combo.selected()),
+        audio_bitrate_kbps: ab_entry.text().parse::<u32>().unwrap_or(192),
+    }
+}
+
+fn apply_export_options(
+    options: &ExportOptions,
+    vc_combo: &gtk::DropDown,
+    ct_combo: &gtk::DropDown,
+    or_combo: &gtk::DropDown,
+    crf_slider: &gtk::Scale,
+    ac_combo: &gtk::DropDown,
+    ab_entry: &gtk::Entry,
+) {
+    vc_combo.set_selected(selected_from_video_codec(&options.video_codec));
+    ct_combo.set_selected(selected_from_container(&options.container));
+    or_combo.set_selected(selected_from_output_resolution(
+        options.output_width,
+        options.output_height,
+    ));
+    crf_slider.set_value(options.crf as f64);
+    ac_combo.set_selected(selected_from_audio_codec(&options.audio_codec));
+    ab_entry.set_text(&options.audio_bitrate_kbps.to_string());
+}
+
+fn refresh_preset_dropdown(
+    dropdown: &gtk::DropDown,
+    state: &ExportPresetsState,
+    selected_name: Option<&str>,
+) {
+    let model = gtk::StringList::new(&[]);
+    model.append("(Custom)");
+    for preset in &state.presets {
+        model.append(&preset.name);
+    }
+    dropdown.set_model(Some(&model));
+    let mut selected = 0_u32;
+    if let Some(name) = selected_name {
+        if let Some((idx, _)) = state
+            .presets
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.name.eq_ignore_ascii_case(name))
+        {
+            selected = (idx + 1) as u32;
+        }
+    }
+    dropdown.set_selected(selected);
+}
+
+#[allow(deprecated)]
 pub fn confirm_unsaved_then(
     window: Option<gtk::Window>,
     project: Rc<RefCell<Project>>,
@@ -125,12 +265,15 @@ pub fn confirm_unsaved_then(
 }
 
 /// Build the main `HeaderBar` toolbar.
+#[allow(deprecated)]
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
-    library: Rc<RefCell<Vec<MediaItem>>>,
+    _library: Rc<RefCell<Vec<MediaItem>>>,
     timeline_state: Rc<RefCell<TimelineState>>,
+    bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
+    on_export_frame: impl Fn() + 'static + Clone,
 ) -> HeaderBar {
     let header = HeaderBar::new();
 
@@ -603,11 +746,12 @@ pub fn build_toolbar(
     header.pack_start(&btn_settings);
 
     // ── Advanced Export ──────────────────────────────────────────────────
-    let btn_export = Button::with_label("Export…");
+    let btn_export = Button::with_label("Export");
     btn_export.set_tooltip_text(Some("Export with codec and resolution options"));
     btn_export.add_css_class("suggested-action");
     {
         let project = project.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
         btn_export.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let proj_w = project.borrow().width;
@@ -629,6 +773,26 @@ pub fn build_toolbar(
             grid.set_row_spacing(10);
             grid.set_column_spacing(12);
 
+            let presets_state = Rc::new(RefCell::new(ui_state::load_export_presets_state()));
+
+            // Preset controls
+            let preset_label = gtk::Label::new(Some("Preset:"));
+            preset_label.set_halign(gtk::Align::End);
+            let preset_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let preset_dropdown = gtk::DropDown::from_strings(&["(Custom)"]);
+            preset_dropdown.set_hexpand(true);
+            let btn_save_preset = gtk::Button::with_label("Save As…");
+            let btn_update_preset = gtk::Button::with_label("Update");
+            let btn_delete_preset = gtk::Button::with_label("Delete");
+            btn_update_preset.set_sensitive(false);
+            btn_delete_preset.set_sensitive(false);
+            preset_box.append(&preset_dropdown);
+            preset_box.append(&btn_save_preset);
+            preset_box.append(&btn_update_preset);
+            preset_box.append(&btn_delete_preset);
+            grid.attach(&preset_label, 0, 0, 1, 1);
+            grid.attach(&preset_box, 1, 0, 1, 1);
+
             // Video codec
             let vc_label = gtk::Label::new(Some("Video Codec:"));
             vc_label.set_halign(gtk::Align::End);
@@ -640,8 +804,8 @@ pub fn build_toolbar(
                 "AV1 (libaom-av1)",
             ]);
             vc_combo.set_selected(0);
-            grid.attach(&vc_label, 0, 0, 1, 1);
-            grid.attach(&vc_combo, 1, 0, 1, 1);
+            grid.attach(&vc_label, 0, 1, 1, 1);
+            grid.attach(&vc_combo, 1, 1, 1, 1);
 
             // Container
             let ct_label = gtk::Label::new(Some("Container:"));
@@ -653,8 +817,8 @@ pub fn build_toolbar(
                 "Matroska (.mkv)",
             ]);
             ct_combo.set_selected(0);
-            grid.attach(&ct_label, 0, 1, 1, 1);
-            grid.attach(&ct_combo, 1, 1, 1, 1);
+            grid.attach(&ct_label, 0, 2, 1, 1);
+            grid.attach(&ct_combo, 1, 2, 1, 1);
 
             // Output resolution
             let or_label = gtk::Label::new(Some("Resolution:"));
@@ -667,8 +831,8 @@ pub fn build_toolbar(
                 "854 × 480    (480p)",
             ]);
             or_combo.set_selected(0);
-            grid.attach(&or_label, 0, 2, 1, 1);
-            grid.attach(&or_combo, 1, 2, 1, 1);
+            grid.attach(&or_label, 0, 3, 1, 1);
+            grid.attach(&or_combo, 1, 3, 1, 1);
 
             // CRF
             let crf_label = gtk::Label::new(Some("Quality (CRF):"));
@@ -683,8 +847,8 @@ pub fn build_toolbar(
             crf_hint.add_css_class("dim-label");
             crf_box.append(&crf_slider);
             crf_box.append(&crf_hint);
-            grid.attach(&crf_label, 0, 3, 1, 1);
-            grid.attach(&crf_box, 1, 3, 1, 1);
+            grid.attach(&crf_label, 0, 4, 1, 1);
+            grid.attach(&crf_box, 1, 4, 1, 1);
 
             // Audio codec
             let ac_label = gtk::Label::new(Some("Audio Codec:"));
@@ -696,8 +860,8 @@ pub fn build_toolbar(
                 "PCM (uncompressed)",
             ]);
             ac_combo.set_selected(0);
-            grid.attach(&ac_label, 0, 4, 1, 1);
-            grid.attach(&ac_combo, 1, 4, 1, 1);
+            grid.attach(&ac_label, 0, 5, 1, 1);
+            grid.attach(&ac_combo, 1, 5, 1, 1);
 
             // Audio bitrate
             let ab_label = gtk::Label::new(Some("Audio Bitrate:"));
@@ -705,64 +869,232 @@ pub fn build_toolbar(
             let ab_entry = gtk::Entry::new();
             ab_entry.set_text("192");
             ab_entry.set_tooltip_text(Some("Audio bitrate in kbps (ignored for FLAC/PCM)"));
-            grid.attach(&ab_label, 0, 5, 1, 1);
-            grid.attach(&ab_entry, 1, 5, 1, 1);
+            grid.attach(&ab_label, 0, 6, 1, 1);
+            grid.attach(&ab_entry, 1, 6, 1, 1);
+
+            {
+                let state = presets_state.borrow();
+                refresh_preset_dropdown(
+                    &preset_dropdown,
+                    &state,
+                    state.last_used_preset.as_deref(),
+                );
+                if let Some(name) = state.last_used_preset.as_deref() {
+                    if let Some(preset) = state.get_preset(name) {
+                        apply_export_options(
+                            &preset.to_export_options(),
+                            &vc_combo,
+                            &ct_combo,
+                            &or_combo,
+                            &crf_slider,
+                            &ac_combo,
+                            &ab_entry,
+                        );
+                    }
+                }
+            }
+            let preset_selected = preset_dropdown.selected() > 0;
+            btn_update_preset.set_sensitive(preset_selected);
+            btn_delete_preset.set_sensitive(preset_selected);
+
+            {
+                let presets_state = presets_state.clone();
+                let vc_combo = vc_combo.clone();
+                let ct_combo = ct_combo.clone();
+                let or_combo = or_combo.clone();
+                let crf_slider = crf_slider.clone();
+                let ac_combo = ac_combo.clone();
+                let ab_entry = ab_entry.clone();
+                let btn_update_preset = btn_update_preset.clone();
+                let btn_delete_preset = btn_delete_preset.clone();
+                preset_dropdown.connect_selected_notify(move |dropdown| {
+                    let selected = dropdown.selected();
+                    btn_update_preset.set_sensitive(selected > 0);
+                    btn_delete_preset.set_sensitive(selected > 0);
+                    let mut state = presets_state.borrow_mut();
+                    if selected == 0 {
+                        state.last_used_preset = None;
+                        ui_state::save_export_presets_state(&state);
+                        return;
+                    }
+                    let Some(preset) = state.presets.get((selected - 1) as usize).cloned() else {
+                        return;
+                    };
+                    state.last_used_preset = Some(preset.name.clone());
+                    ui_state::save_export_presets_state(&state);
+                    drop(state);
+                    apply_export_options(
+                        &preset.to_export_options(),
+                        &vc_combo,
+                        &ct_combo,
+                        &or_combo,
+                        &crf_slider,
+                        &ac_combo,
+                        &ab_entry,
+                    );
+                });
+            }
+
+            {
+                let presets_state = presets_state.clone();
+                let preset_dropdown = preset_dropdown.clone();
+                let vc_combo = vc_combo.clone();
+                let ct_combo = ct_combo.clone();
+                let or_combo = or_combo.clone();
+                let crf_slider = crf_slider.clone();
+                let ac_combo = ac_combo.clone();
+                let ab_entry = ab_entry.clone();
+                btn_save_preset.connect_clicked(move |_| {
+                    let dialog = gtk::Dialog::builder()
+                        .title("Save Export Preset")
+                        .default_width(360)
+                        .modal(true)
+                        .build();
+                    let entry = gtk::Entry::new();
+                    entry.set_placeholder_text(Some("Preset name"));
+                    dialog.content_area().append(&entry);
+                    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+                    dialog.add_button("Save", gtk::ResponseType::Accept);
+                    dialog.connect_response({
+                        let presets_state = presets_state.clone();
+                        let preset_dropdown = preset_dropdown.clone();
+                        let vc_combo = vc_combo.clone();
+                        let ct_combo = ct_combo.clone();
+                        let or_combo = or_combo.clone();
+                        let crf_slider = crf_slider.clone();
+                        let ac_combo = ac_combo.clone();
+                        let ab_entry = ab_entry.clone();
+                        move |d, resp| {
+                            if resp == gtk::ResponseType::Accept {
+                                let name = entry.text().to_string();
+                                let options = collect_export_options(
+                                    &vc_combo,
+                                    &ct_combo,
+                                    &or_combo,
+                                    &crf_slider,
+                                    &ac_combo,
+                                    &ab_entry,
+                                );
+                                let mut state = presets_state.borrow_mut();
+                                if state
+                                    .upsert_preset(ExportPreset::from_export_options(
+                                        name, &options,
+                                    ))
+                                    .is_ok()
+                                {
+                                    ui_state::save_export_presets_state(&state);
+                                    refresh_preset_dropdown(
+                                        &preset_dropdown,
+                                        &state,
+                                        state.last_used_preset.as_deref(),
+                                    );
+                                }
+                            }
+                            d.close();
+                        }
+                    });
+                    dialog.present();
+                });
+            }
+
+            {
+                let presets_state = presets_state.clone();
+                let preset_dropdown = preset_dropdown.clone();
+                let vc_combo = vc_combo.clone();
+                let ct_combo = ct_combo.clone();
+                let or_combo = or_combo.clone();
+                let crf_slider = crf_slider.clone();
+                let ac_combo = ac_combo.clone();
+                let ab_entry = ab_entry.clone();
+                btn_update_preset.connect_clicked(move |_| {
+                    let selected = preset_dropdown.selected();
+                    if selected == 0 {
+                        return;
+                    }
+                    let mut state = presets_state.borrow_mut();
+                    let Some(existing_name) = state
+                        .presets
+                        .get((selected - 1) as usize)
+                        .map(|preset| preset.name.clone())
+                    else {
+                        return;
+                    };
+                    let options = collect_export_options(
+                        &vc_combo,
+                        &ct_combo,
+                        &or_combo,
+                        &crf_slider,
+                        &ac_combo,
+                        &ab_entry,
+                    );
+                    if state
+                        .upsert_preset(ExportPreset::from_export_options(existing_name, &options))
+                        .is_ok()
+                    {
+                        ui_state::save_export_presets_state(&state);
+                        refresh_preset_dropdown(
+                            &preset_dropdown,
+                            &state,
+                            state.last_used_preset.as_deref(),
+                        );
+                    }
+                });
+            }
+
+            {
+                let presets_state = presets_state.clone();
+                let preset_dropdown = preset_dropdown.clone();
+                btn_delete_preset.connect_clicked(move |_| {
+                    let selected = preset_dropdown.selected();
+                    if selected == 0 {
+                        return;
+                    }
+                    let mut state = presets_state.borrow_mut();
+                    let Some(existing_name) = state
+                        .presets
+                        .get((selected - 1) as usize)
+                        .map(|preset| preset.name.clone())
+                    else {
+                        return;
+                    };
+                    if state.delete_preset(&existing_name) {
+                        ui_state::save_export_presets_state(&state);
+                        refresh_preset_dropdown(&preset_dropdown, &state, None);
+                    }
+                });
+            }
 
             opt_dialog.content_area().append(&grid);
             opt_dialog.add_button("Cancel", gtk::ResponseType::Cancel);
             opt_dialog.add_button("Choose Output File…", gtk::ResponseType::Accept);
 
             let project = project.clone();
-            let library = library.clone();
+            let bg_removal_cache = bg_removal_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept {
                     d.close();
                     return;
                 }
 
-                let video_codec = match vc_combo.selected() {
-                    0 => VideoCodec::H264,
-                    1 => VideoCodec::H265,
-                    2 => VideoCodec::Vp9,
-                    3 => VideoCodec::ProRes,
-                    4 => VideoCodec::Av1,
-                    _ => VideoCodec::H264,
+                let options = collect_export_options(
+                    &vc_combo,
+                    &ct_combo,
+                    &or_combo,
+                    &crf_slider,
+                    &ac_combo,
+                    &ab_entry,
+                );
+                let mut state = presets_state.borrow_mut();
+                state.last_used_preset = if preset_dropdown.selected() > 0 {
+                    state
+                        .presets
+                        .get((preset_dropdown.selected() - 1) as usize)
+                        .map(|preset| preset.name.clone())
+                } else {
+                    None
                 };
-                let container = match ct_combo.selected() {
-                    0 => Container::Mp4,
-                    1 => Container::Mov,
-                    2 => Container::WebM,
-                    3 => Container::Mkv,
-                    _ => Container::Mp4,
-                };
-                let (out_w, out_h) = match or_combo.selected() {
-                    0 => (0u32, 0u32),
-                    1 => (3840, 2160),
-                    2 => (1920, 1080),
-                    3 => (1280, 720),
-                    4 => (854, 480),
-                    _ => (0, 0),
-                };
-                let crf = crf_slider.value() as u32;
-                let audio_codec = match ac_combo.selected() {
-                    0 => AudioCodec::Aac,
-                    1 => AudioCodec::Opus,
-                    2 => AudioCodec::Flac,
-                    3 => AudioCodec::Pcm,
-                    _ => AudioCodec::Aac,
-                };
-                let audio_bitrate_kbps = ab_entry.text().parse::<u32>().unwrap_or(192);
-                let ext = container.extension();
-
-                let options = ExportOptions {
-                    video_codec,
-                    container,
-                    output_width: out_w,
-                    output_height: out_h,
-                    crf,
-                    audio_codec,
-                    audio_bitrate_kbps,
-                };
+                ui_state::save_export_presets_state(&state);
+                let ext = options.container.extension();
                 d.close();
 
                 // Now open file-chooser for the output path
@@ -772,7 +1104,7 @@ pub fn build_toolbar(
 
                 let window: Option<gtk::Window> = None; // no parent at this point
                 let project = project.clone();
-                let library = library.clone();
+                let bg_removal_cache = bg_removal_cache.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -780,9 +1112,7 @@ pub fn build_toolbar(
                             let output_clone = output.clone();
                             let proj = project.borrow().clone();
                             let opts = options.clone();
-                            let estimated_size_bytes =
-                                largest_library_file_size_bytes(&library.borrow());
-
+                            let bg_paths = bg_removal_cache.borrow().paths.clone();
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
@@ -790,7 +1120,8 @@ pub fn build_toolbar(
                                     &proj,
                                     &output_clone,
                                     opts,
-                                    estimated_size_bytes,
+                                    None,
+                                    &bg_paths,
                                     tx.clone(),
                                 ) {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
@@ -869,7 +1200,48 @@ pub fn build_toolbar(
             opt_dialog.present();
         });
     }
-    header.pack_end(&btn_export);
+    let btn_export_more = gtk::Button::with_label("▼");
+    btn_export_more.set_tooltip_text(Some("More export options"));
+    btn_export_more.add_css_class("suggested-action");
+    btn_export_more.add_css_class("export-split-toggle");
+    let export_pop = gtk::Popover::new();
+    let export_pop_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    export_pop_box.set_margin_start(4);
+    export_pop_box.set_margin_end(4);
+    export_pop_box.set_margin_top(4);
+    export_pop_box.set_margin_bottom(4);
+    let btn_export_frame = gtk::Button::with_label("Export Frame…");
+    btn_export_frame.add_css_class("flat");
+    {
+        let on_export_frame = on_export_frame.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_frame.connect_clicked(move |_| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            on_export_frame();
+        });
+    }
+    export_pop_box.append(&btn_export_frame);
+    export_pop.set_child(Some(&export_pop_box));
+    export_pop.set_parent(&btn_export_more);
+    {
+        let export_pop = export_pop.clone();
+        btn_export_more.connect_clicked(move |_| {
+            if export_pop.is_visible() {
+                export_pop.popdown();
+            } else {
+                export_pop.popup();
+            }
+        });
+    }
+
+    let export_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    export_group.add_css_class("linked");
+    export_group.add_css_class("export-split");
+    export_group.append(&btn_export);
+    export_group.append(&btn_export_more);
+    header.pack_end(&export_group);
 
     let sep_history = Separator::new(gtk::Orientation::Vertical);
     sep_history.add_css_class("toolbar-separator");
@@ -996,6 +1368,25 @@ pub fn build_toolbar(
     header.pack_start(&btn_slip);
     header.pack_start(&btn_slide);
     header.pack_start(&btn_magnetic);
+
+    // Wire on_tool_changed so keyboard shortcuts sync toolbar buttons
+    {
+        let btn_select = btn_select.clone();
+        let btn_razor = btn_razor.clone();
+        let btn_ripple = btn_ripple.clone();
+        let btn_roll = btn_roll.clone();
+        let btn_slip = btn_slip.clone();
+        let btn_slide = btn_slide.clone();
+        timeline_state.borrow_mut().on_tool_changed =
+            Some(Rc::new(move |tool: ActiveTool| match tool {
+                ActiveTool::Select => btn_select.set_active(true),
+                ActiveTool::Razor => btn_razor.set_active(true),
+                ActiveTool::Ripple => btn_ripple.set_active(true),
+                ActiveTool::Roll => btn_roll.set_active(true),
+                ActiveTool::Slip => btn_slip.set_active(true),
+                ActiveTool::Slide => btn_slide.set_active(true),
+            }));
+    }
 
     header
 }

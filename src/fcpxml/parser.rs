@@ -13,6 +13,7 @@ const MAX_IMPORTED_LINEAR_VOLUME: f64 = 3.981_071_705_5; // +12 dB
 
 /// Represents a parsed FCPXML asset
 struct Asset {
+    #[allow(dead_code)]
     id: String,
     src: String,
     name: String,
@@ -56,6 +57,7 @@ struct ActiveClipContext {
 }
 
 /// Parse an FCPXML string into a `Project`.
+#[allow(dead_code)]
 pub fn parse_fcpxml(xml: &str) -> Result<Project> {
     parse_fcpxml_with_path(xml, None)
 }
@@ -600,7 +602,12 @@ fn parse_asset_clip(
                 .get("start")
                 .and_then(|t| parse_fcpxml_time(t))
                 .unwrap_or(asset.start_ns);
-            let source_in = if raw_source_start >= asset.start_ns {
+            let vendor_source_timecode_base_ns = attrs
+                .get("us:source-timecode-base-ns")
+                .and_then(|t| t.parse::<u64>().ok());
+            let source_in = if let Some(base_ns) = vendor_source_timecode_base_ns {
+                raw_source_start.saturating_sub(base_ns)
+            } else if raw_source_start >= asset.start_ns {
                 raw_source_start - asset.start_ns
             } else {
                 raw_source_start
@@ -683,6 +690,12 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:saturation") {
                 clip.saturation = v.parse().unwrap_or(1.0);
             }
+            if let Some(v) = attrs.get("us:temperature") {
+                clip.temperature = v.parse().unwrap_or(6500.0);
+            }
+            if let Some(v) = attrs.get("us:tint") {
+                clip.tint = v.parse().unwrap_or(0.0);
+            }
             if let Some(v) = attrs.get("us:denoise") {
                 clip.denoise = v.parse().unwrap_or(0.0);
             }
@@ -749,6 +762,19 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:reverse") {
                 clip.reverse = v.parse().unwrap_or(false);
             }
+            if let Some(v) = attrs.get("us:group-id") {
+                clip.group_id = if v.is_empty() { None } else { Some(v.clone()) };
+            }
+            if let Some(v) = attrs.get("us:link-group-id") {
+                clip.link_group_id = if v.is_empty() { None } else { Some(v.clone()) };
+            }
+            clip.source_timecode_base_ns = vendor_source_timecode_base_ns.or_else(|| {
+                if asset.start_ns > 0 {
+                    Some(asset.start_ns)
+                } else {
+                    None
+                }
+            });
             if let Some(v) = attrs.get("us:shadows") {
                 clip.shadows = v.parse().unwrap_or(0.0);
             }
@@ -757,6 +783,24 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:highlights") {
                 clip.highlights = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:chroma-key-enabled") {
+                clip.chroma_key_enabled = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:chroma-key-color") {
+                clip.chroma_key_color = u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0x00FF00);
+            }
+            if let Some(v) = attrs.get("us:chroma-key-tolerance") {
+                clip.chroma_key_tolerance = v.parse().unwrap_or(0.3);
+            }
+            if let Some(v) = attrs.get("us:chroma-key-softness") {
+                clip.chroma_key_softness = v.parse().unwrap_or(0.1);
+            }
+            if let Some(v) = attrs.get("us:bg-removal-enabled") {
+                clip.bg_removal_enabled = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:bg-removal-threshold") {
+                clip.bg_removal_threshold = v.parse().unwrap_or(0.5);
             }
             if let Some(v) = attrs.get("us:lut-path") {
                 clip.lut_path = Some(v.clone());
@@ -988,9 +1032,18 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:reverse"
+            | "us:group-id"
+            | "us:link-group-id"
+            | "us:source-timecode-base-ns"
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
+            | "us:chroma-key-enabled"
+            | "us:chroma-key-color"
+            | "us:chroma-key-tolerance"
+            | "us:chroma-key-softness"
+            | "us:bg-removal-enabled"
+            | "us:bg-removal-threshold"
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
@@ -1383,7 +1436,7 @@ fn parse_flag(value: Option<&String>, default: bool) -> bool {
 }
 
 fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, String>> {
-    let mut attrs = e.attributes();
+    let attrs = e.attributes();
     let mut map = HashMap::with_capacity(attrs.size_hint().0);
     for attr in attrs {
         let attr = attr?;
@@ -1661,6 +1714,64 @@ mod tests {
         assert!((clip.saturation - 0.8).abs() < 1e-5);
         assert!((clip.opacity - 0.9).abs() < 1e-5);
         assert!((clip.speed - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_link_group_attr() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="LinkTest">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s"
+                        name="footage" us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                        us:link-group-id="link-1"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.link_group_id.as_deref(), Some("link-1"));
+    }
+
+    #[test]
+    fn test_parse_fcpxml_source_timecode_base_attr() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimecodeTest">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="120/24s"
+                        name="footage" us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                        us:source-timecode-base-ns="4000000000"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.source_timecode_base_ns, Some(4_000_000_000));
+        assert_eq!(clip.source_in, 1_000_000_000);
+        assert_eq!(clip.source_timecode_start_ns(), Some(5_000_000_000));
     }
 
     #[test]

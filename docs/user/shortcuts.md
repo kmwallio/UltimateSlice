@@ -50,7 +50,21 @@
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
 | `Escape` | Switch to Select tool |
-| `Delete` / `Backspace` | Delete selected clip |
+| `Delete` / `Backspace` | Delete selected clip(s) |
+| `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
+| `Ctrl+Shift+→` | Select clips forward from playhead |
+| `Ctrl+Shift+←` | Select clips backward from playhead |
+| `Ctrl+C` | Copy selected timeline clip |
+| `Ctrl+V` | Paste copied clip as insert at playhead |
+| `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
+| `Ctrl+G` | Group selected clips |
+| `Ctrl+Shift+G` | Ungroup selected clips |
+| `Ctrl+L` | Link selected clips |
+| `Ctrl+Shift+L` | Unlink selected clips |
+| `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
+| `Ctrl`/`Cmd` + Click (timeline) | Toggle a clip in the current selection |
+| `Ctrl+A` | Select all timeline clips |
+| Drag in empty timeline body | Marquee-select clips intersecting the rectangle |
 | `M` | Add chapter marker at playhead |
 | `Right-click ruler` | Remove nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |
@@ -78,3 +92,4 @@ All Inspector controls are mouse-driven sliders and text fields. Transform edits
 - **J/K/L** shuttle works globally: J/K/L control the **Program Monitor** from anywhere in the window (no focus needed). In the Source Monitor, J/K/L still work as before when the Source Monitor panel has focus.
 - **M** is captured globally so the timeline does not need to be focused.
 - **Space** toggles playback in whichever monitor is contextually active.
+- In timeline selection, **Ctrl/Cmd+Shift+Click** behaves like **Ctrl/Cmd+Click** (toggle clicked clip).
