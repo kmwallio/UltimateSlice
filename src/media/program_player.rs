@@ -5728,49 +5728,37 @@ impl ProgramPlayer {
         }
 
         // ── Contrast (default 1.0) ──────────────────────────────────────
-        // Calibration: FFmpeg eq contrast (YUV) needs brightness+saturation
-        // compensation when mapped to GStreamer RGB contrast.  ~35% RMSE
-        // improvement.
+        // Calibrated contrast + saturation compensation (YUV↔RGB).
+        // Brightness cross-effect removed: RMSE-optimal but perceptually
+        // jarring (Δb ≈ +0.5 at contrast=0).
         {
-            const C_B: [f64; 5] = [ 0.498635, -1.296549,  1.326076, -0.646941,  0.119435];
             const C_C: [f64; 5] = [ 0.294574,  0.666291,  0.242201, -0.290659,  0.071964];
             const C_S: [f64; 5] = [ 2.423564, -3.689165,  3.643393, -1.624246,  0.272677];
             let t = contrast;
             let t0 = 1.0;
-            b += Self::poly4(t, &C_B) - Self::poly4(t0, &C_B);
             c += Self::poly4(t, &C_C) - Self::poly4(t0, &C_C);
             s += Self::poly4(t, &C_S) - Self::poly4(t0, &C_S);
         }
 
         // ── Saturation (default 1.0) ────────────────────────────────────
-        // Calibration: HSV saturation ≠ UV saturation; needs brightness
-        // and contrast compensation, especially at low saturation.
+        // Primary saturation polynomial only.  Brightness and contrast
+        // cross-effects removed: optimizer found them RMSE-helpful but
+        // users expect the saturation slider to change color, not luminance.
         {
-            const S_B: [f64; 5] = [-0.217485,  0.293628, -0.100479,  0.033948, -0.010338];
-            const S_C: [f64; 5] = [ 0.699528,  0.216960,  0.172501, -0.092642,  0.005567];
             const S_S: [f64; 5] = [ 0.364002,  1.024258, -0.843067,  0.625649, -0.135496];
             let t = saturation;
             let t0 = 1.0;
-            b += Self::poly4(t, &S_B) - Self::poly4(t0, &S_B);
-            c += Self::poly4(t, &S_C) - Self::poly4(t0, &S_C);
             s += Self::poly4(t, &S_S) - Self::poly4(t0, &S_S);
         }
 
         // ── Temperature (default 6500K, normalised to [-1, 0.78]) ───────
-        // Calibration: colortemperature applies per-channel RGB gains which
-        // can't be replicated by videobalance.  The calibrated B/C/S deltas
-        // capture the overall tonal shift, while hue rotation from the
-        // original formula provides the perceptual warm/cool colour cast.
+        // Hue rotation only.  Brightness and contrast cross-effects
+        // removed: FFmpeg colortemperature changes per-channel RGB gains
+        // which shift overall luminance, but users expect temperature to
+        // only shift colour cast.
         {
-            const T_B: [f64; 5] = [-0.023880, -0.009013, -0.148403,  0.163987, -0.076689];
-            const T_C: [f64; 5] = [ 0.963885,  0.009551, -0.391745,  0.173372,  0.172729];
-            let t = (temperature - 6500.0) / 4500.0;
-            b += Self::poly4(t, &T_B) - T_B[0];
-            c += Self::poly4(t, &T_C) - T_C[0];
-            // Perceptual hue shift (original formula — calibration confirmed
-            // hue deltas are negligible, but the directional hint is still
-            // valuable for user feedback).
-            h += ((temperature - 6500.0) / 6500.0 * -0.15).clamp(-0.25, 0.25);
+            let t_norm = (temperature - 6500.0) / 6500.0;
+            h += (t_norm * -0.15).clamp(-0.25, 0.25);
         }
 
         // ── Tint (default 0.0) ──────────────────────────────────────────
@@ -7278,9 +7266,18 @@ mod tests {
     }
 
     #[test]
-    fn vb_temperature_warm_reduces_contrast() {
+    fn vb_temperature_warm_preserves_brightness_and_contrast() {
         let p = vb(0.0, 1.0, 1.0, 3000.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(p.contrast < 0.95, "warm temp should reduce contrast: c={}", p.contrast);
+        assert!((p.brightness).abs() < 0.05, "warm temp should not change brightness: b={}", p.brightness);
+        assert!((p.contrast - 1.0).abs() < 0.05, "warm temp should not change contrast: c={}", p.contrast);
+    }
+
+    #[test]
+    fn vb_saturation_preserves_brightness() {
+        let low = vb(0.0, 1.0, 0.2, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        let high = vb(0.0, 1.0, 1.8, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        assert!((low.brightness).abs() < 0.05, "low saturation should not change brightness: b={}", low.brightness);
+        assert!((high.brightness).abs() < 0.05, "high saturation should not change brightness: b={}", high.brightness);
     }
 
     #[test]
