@@ -1950,15 +1950,15 @@ impl ProgramPlayer {
             }
             if let Some(ref tp) = slot.colorbalance_3pt {
                 let p = Self::compute_3point_params(shadows, midtones, highlights);
-                tp.set_property("black-color-r", p.black_r);
-                tp.set_property("black-color-g", p.black_g);
-                tp.set_property("black-color-b", p.black_b);
-                tp.set_property("gray-color-r", p.gray_r);
-                tp.set_property("gray-color-g", p.gray_g);
-                tp.set_property("gray-color-b", p.gray_b);
-                tp.set_property("white-color-r", p.white_r);
-                tp.set_property("white-color-g", p.white_g);
-                tp.set_property("white-color-b", p.white_b);
+                tp.set_property("black-color-r", p.black_r as f32);
+                tp.set_property("black-color-g", p.black_g as f32);
+                tp.set_property("black-color-b", p.black_b as f32);
+                tp.set_property("gray-color-r", p.gray_r as f32);
+                tp.set_property("gray-color-g", p.gray_g as f32);
+                tp.set_property("gray-color-b", p.gray_b as f32);
+                tp.set_property("white-color-r", p.white_r as f32);
+                tp.set_property("white-color-g", p.white_g as f32);
+                tp.set_property("white-color-b", p.white_b as f32);
             }
             if let Some(ref gb) = slot.gaussianblur {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
@@ -4433,15 +4433,15 @@ impl ProgramPlayer {
         }
         if let Some(ref tp) = colorbalance_3pt {
             let p = Self::compute_3point_params(clip.shadows, clip.midtones, clip.highlights);
-            tp.set_property("black-color-r", p.black_r);
-            tp.set_property("black-color-g", p.black_g);
-            tp.set_property("black-color-b", p.black_b);
-            tp.set_property("gray-color-r", p.gray_r);
-            tp.set_property("gray-color-g", p.gray_g);
-            tp.set_property("gray-color-b", p.gray_b);
-            tp.set_property("white-color-r", p.white_r);
-            tp.set_property("white-color-g", p.white_g);
-            tp.set_property("white-color-b", p.white_b);
+            tp.set_property("black-color-r", p.black_r as f32);
+            tp.set_property("black-color-g", p.black_g as f32);
+            tp.set_property("black-color-b", p.black_b as f32);
+            tp.set_property("gray-color-r", p.gray_r as f32);
+            tp.set_property("gray-color-g", p.gray_g as f32);
+            tp.set_property("gray-color-b", p.gray_b as f32);
+            tp.set_property("white-color-r", p.white_r as f32);
+            tp.set_property("white-color-g", p.white_g as f32);
+            tp.set_property("white-color-b", p.white_b as f32);
         }
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
@@ -6236,15 +6236,15 @@ impl ProgramPlayer {
         // frei0r 3-point-color-balance (shadows/midtones/highlights)
         if let Some(ref tp) = slot.colorbalance_3pt {
             let p = Self::compute_3point_params(clip.shadows, clip.midtones, clip.highlights);
-            tp.set_property("black-color-r", p.black_r);
-            tp.set_property("black-color-g", p.black_g);
-            tp.set_property("black-color-b", p.black_b);
-            tp.set_property("gray-color-r", p.gray_r);
-            tp.set_property("gray-color-g", p.gray_g);
-            tp.set_property("gray-color-b", p.gray_b);
-            tp.set_property("white-color-r", p.white_r);
-            tp.set_property("white-color-g", p.white_g);
-            tp.set_property("white-color-b", p.white_b);
+            tp.set_property("black-color-r", p.black_r as f32);
+            tp.set_property("black-color-g", p.black_g as f32);
+            tp.set_property("black-color-b", p.black_b as f32);
+            tp.set_property("gray-color-r", p.gray_r as f32);
+            tp.set_property("gray-color-g", p.gray_g as f32);
+            tp.set_property("gray-color-b", p.gray_b as f32);
+            tp.set_property("white-color-r", p.white_r as f32);
+            tp.set_property("white-color-g", p.white_g as f32);
+            tp.set_property("white-color-b", p.white_b as f32);
         }
 
         // Gaussianblur
