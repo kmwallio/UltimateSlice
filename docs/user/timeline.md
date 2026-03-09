@@ -96,7 +96,8 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Select a **video** clip and position the playhead on that clip, then press **Shift+F**.
 - UltimateSlice opens a hold-duration prompt and creates a new freeze-frame clip at the playhead on the same track.
 - The new freeze clip is **video-only and silent** by default, and stores freeze metadata for save/load/export pipelines.
-- If the playhead is inside the selected clip, the source clip is split and downstream material on that track is shifted to make room.
+- If the playhead is inside the selected clip, the source clip is split and downstream material on **all tracks** is rippled right to make room.
+- On non-selected tracks, clips that overlap the playhead are split at the playhead; only their right segment is shifted.
 - Also available via right-click clip context menu (**Create Freeze Frame…**) and the timeline track toolbar button (**❄ Freeze Frame…**).
 
 ### Join Through Edit (`Ctrl+Shift+B`)

@@ -328,6 +328,7 @@ struct VideoSlot {
     gaussianblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
+    imagefreeze: Option<gst::Element>,
     videoflip_rotate: Option<gst::Element>,
     videoflip_flip: Option<gst::Element>,
     textoverlay: Option<gst::Element>,
@@ -4842,6 +4843,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // gaussianblur
         Option<gst::Element>, // videocrop
         Option<gst::Element>, // videobox_crop_alpha
+        Option<gst::Element>, // imagefreeze
         Option<gst::Element>, // videoflip_rotate
         Option<gst::Element>, // videoflip_flip
         Option<gst::Element>, // textoverlay
@@ -4974,6 +4976,11 @@ impl ProgramPlayer {
         // Textoverlay: only if title text is set.
         let textoverlay = if need_title {
             gst::ElementFactory::make("textoverlay").build().ok()
+        } else {
+            None
+        };
+        let imagefreeze = if clip.is_freeze_frame() {
+            gst::ElementFactory::make("imagefreeze").build().ok()
         } else {
             None
         };
@@ -5112,6 +5119,9 @@ impl ProgramPlayer {
         if let Some(ref e) = videobox_crop_alpha {
             chain.push(e.clone());
         }
+        if let Some(ref e) = imagefreeze {
+            chain.push(e.clone());
+        }
         // 3. Effects at project resolution (much cheaper than source res).
         if let Some(ref e) = conv1 {
             chain.push(e.clone());
@@ -5222,6 +5232,7 @@ impl ProgramPlayer {
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
+            imagefreeze,
             videoflip_rotate,
             videoflip_flip,
             textoverlay,
@@ -5456,6 +5467,7 @@ impl ProgramPlayer {
             gaussianblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
+            imagefreeze: None,
             videoflip_rotate: None,
             videoflip_flip: None,
             textoverlay: None,
@@ -5692,6 +5704,7 @@ impl ProgramPlayer {
             gaussianblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
+            imagefreeze: None,
             videoflip_rotate: None,
             videoflip_flip: None,
             textoverlay: None,
@@ -6122,6 +6135,7 @@ impl ProgramPlayer {
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
+            imagefreeze,
             videoflip_rotate,
             videoflip_flip,
             textoverlay,
@@ -6366,6 +6380,7 @@ impl ProgramPlayer {
             gaussianblur: gaussianblur.clone(),
             videocrop: videocrop.clone(),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
+            imagefreeze: imagefreeze.clone(),
             videoflip_rotate: videoflip_rotate.clone(),
             videoflip_flip: videoflip_flip.clone(),
             textoverlay: textoverlay.clone(),
@@ -6424,6 +6439,7 @@ impl ProgramPlayer {
             gaussianblur,
             videocrop,
             videobox_crop_alpha,
+            imagefreeze,
             videoflip_rotate,
             videoflip_flip,
             textoverlay,
@@ -6733,6 +6749,7 @@ impl ProgramPlayer {
             && need_flip(a) == need_flip(b)
             && need_title(a) == need_title(b)
             && need_chroma_key(a) == need_chroma_key(b)
+            && a.is_freeze_frame() == b.is_freeze_frame()
     }
 
     /// Verify a slot actually has the GStreamer elements required by the desired
@@ -6754,6 +6771,7 @@ impl ProgramPlayer {
         let need_flip = clip.flip_h || clip.flip_v;
         let need_title = !clip.title_text.is_empty();
         let need_chroma_key = clip.chroma_key_enabled;
+        let need_freeze_hold = clip.is_freeze_frame();
 
         // Temperature/tint needs either coloradj_rgb (preferred) or
         // videobalance (hue-rotation fallback).
@@ -6773,6 +6791,7 @@ impl ProgramPlayer {
             && (!need_flip || slot.videoflip_flip.is_some())
             && (!need_title || slot.textoverlay.is_some())
             && (!need_chroma_key || slot.alpha_chroma_key.is_some())
+            && (!need_freeze_hold || slot.imagefreeze.is_some())
     }
 
     /// Determine whether all current slots can be reused for the desired
@@ -8068,6 +8087,14 @@ mod tests {
         assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
     }
 
+    #[test]
+    fn topology_mismatch_freeze_hold() {
+        let a = make_clip();
+        let mut b = make_clip();
+        b.freeze_frame = true;
+        assert!(!ProgramPlayer::effects_topology_matches(&a, &b));
+    }
+
     // ── slot_satisfies_clip tests ─────────────────────────────────────
 
     /// Create a minimal VideoSlot for testing.  Requires `gst::init()`.
@@ -8088,6 +8115,7 @@ mod tests {
             has_flip,
             has_textoverlay,
             has_chroma_key,
+            false,
         )
     }
 
@@ -8100,6 +8128,7 @@ mod tests {
         has_flip: bool,
         has_textoverlay: bool,
         has_chroma_key: bool,
+        has_imagefreeze: bool,
     ) -> VideoSlot {
         let _ = gst::init();
         let identity = || gst::ElementFactory::make("identity").build().ok();
@@ -8125,6 +8154,7 @@ mod tests {
             gaussianblur: if has_gaussianblur { identity() } else { None },
             videocrop: None,
             videobox_crop_alpha: None,
+            imagefreeze: if has_imagefreeze { identity() } else { None },
             videoflip_rotate: if has_rotate { identity() } else { None },
             videoflip_flip: if has_flip { identity() } else { None },
             textoverlay: if has_textoverlay { identity() } else { None },
@@ -8234,6 +8264,22 @@ mod tests {
         let slot = make_test_slot(false, false, false, false, false, true);
         let mut clip = make_clip();
         clip.chroma_key_enabled = true;
+        assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_without_imagefreeze_rejects_freeze_frame() {
+        let slot = make_test_slot(false, false, false, false, false, false);
+        let mut clip = make_clip();
+        clip.freeze_frame = true;
+        assert!(!ProgramPlayer::slot_satisfies_clip(&slot, &clip));
+    }
+
+    #[test]
+    fn slot_with_imagefreeze_accepts_freeze_frame() {
+        let slot = make_test_slot_ext(false, false, false, false, false, false, false, false, true);
+        let mut clip = make_clip();
+        clip.freeze_frame = true;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
     }
 
@@ -8660,7 +8706,7 @@ mod tests {
 
     #[test]
     fn slot_with_coloradj_accepts_temperature() {
-        let slot = make_test_slot_ext(false, true, false, false, false, false, false, false);
+        let slot = make_test_slot_ext(false, true, false, false, false, false, false, false, false);
         let mut clip = make_clip();
         clip.temperature = 3000.0;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
@@ -8676,7 +8722,7 @@ mod tests {
 
     #[test]
     fn slot_with_coloradj_accepts_tint() {
-        let slot = make_test_slot_ext(false, true, false, false, false, false, false, false);
+        let slot = make_test_slot_ext(false, true, false, false, false, false, false, false, false);
         let mut clip = make_clip();
         clip.tint = 0.5;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
@@ -8686,7 +8732,7 @@ mod tests {
 
     #[test]
     fn slot_with_3point_accepts_shadows() {
-        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false);
+        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false, false);
         let mut clip = make_clip();
         clip.shadows = 0.5;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
@@ -8694,7 +8740,7 @@ mod tests {
 
     #[test]
     fn slot_with_3point_accepts_midtones() {
-        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false);
+        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false, false);
         let mut clip = make_clip();
         clip.midtones = -0.3;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));
@@ -8702,7 +8748,7 @@ mod tests {
 
     #[test]
     fn slot_with_3point_accepts_highlights() {
-        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false);
+        let slot = make_test_slot_ext(false, false, true, false, false, false, false, false, false);
         let mut clip = make_clip();
         clip.highlights = 0.7;
         assert!(ProgramPlayer::slot_satisfies_clip(&slot, &clip));

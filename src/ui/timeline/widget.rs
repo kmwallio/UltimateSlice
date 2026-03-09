@@ -4,7 +4,8 @@ use crate::model::through_edit::detect_track_through_edit_boundaries;
 use crate::model::track::TrackKind;
 use crate::undo::{
     EditHistory, JoinThroughEditCommand, MoveClipCommand, ReorderTrackCommand,
-    SetTrackClipsCommand, SplitClipCommand, TrimClipCommand, TrimOutCommand,
+    SetMultipleTracksClipsCommand, SetTrackClipsCommand, SplitClipCommand, TrackClipsChange,
+    TrimClipCommand, TrimOutCommand,
 };
 use glib;
 use gtk4::prelude::*;
@@ -891,65 +892,104 @@ impl TimelineState {
         freeze_clip.transition_after.clear();
         freeze_clip.transition_after_ns = 0;
 
-        let (old_clips, mut new_clips) = {
+        let mut changes = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+            if proj.tracks.iter().all(|t| t.id != track_id) {
                 return false;
-            };
-            let old_clips = track.clips.clone();
-            let mut new_clips = Vec::with_capacity(old_clips.len() + 2);
+            }
+            let mut changes = Vec::new();
             let mut handled_selected = false;
-            for clip in &old_clips {
-                if clip.id == selected_clip.id {
-                    handled_selected = true;
-                    if playhead_ns <= clip.timeline_start {
-                        let mut shifted = clip.clone();
-                        shifted.timeline_start =
-                            shifted.timeline_start.saturating_add(hold_duration_ns);
-                        new_clips.push(shifted);
-                    } else if playhead_ns >= clip.timeline_end() {
-                        let mut left_clip = clip.clone();
-                        left_clip.transition_after.clear();
-                        left_clip.transition_after_ns = 0;
-                        new_clips.push(left_clip);
-                    } else {
+
+            for track in &proj.tracks {
+                let old_clips = track.clips.clone();
+                let mut new_clips = Vec::with_capacity(old_clips.len() + 2);
+                let mut track_changed = false;
+                let is_selected_track = track.id == track_id;
+
+                for clip in &old_clips {
+                    if is_selected_track && clip.id == selected_clip.id {
+                        handled_selected = true;
+                        track_changed = true;
+                        if playhead_ns <= clip.timeline_start {
+                            let mut shifted = clip.clone();
+                            shifted.timeline_start =
+                                shifted.timeline_start.saturating_add(hold_duration_ns);
+                            new_clips.push(shifted);
+                        } else if playhead_ns >= clip.timeline_end() {
+                            let mut left_clip = clip.clone();
+                            left_clip.transition_after.clear();
+                            left_clip.transition_after_ns = 0;
+                            new_clips.push(left_clip);
+                        } else {
+                            let cut_offset = playhead_ns.saturating_sub(clip.timeline_start);
+                            let mut left_clip = clip.clone();
+                            left_clip.source_out = left_clip.source_in.saturating_add(cut_offset);
+                            left_clip.transition_after.clear();
+                            left_clip.transition_after_ns = 0;
+                            new_clips.push(left_clip);
+
+                            let mut right_clip = clip.clone();
+                            right_clip.id = uuid::Uuid::new_v4().to_string();
+                            right_clip.source_in = right_clip.source_in.saturating_add(cut_offset);
+                            right_clip.timeline_start = playhead_ns.saturating_add(hold_duration_ns);
+                            new_clips.push(right_clip);
+                        }
+                        continue;
+                    }
+
+                    if !is_selected_track
+                        && playhead_ns > clip.timeline_start
+                        && playhead_ns < clip.timeline_end()
+                    {
                         let cut_offset = playhead_ns.saturating_sub(clip.timeline_start);
                         let mut left_clip = clip.clone();
                         left_clip.source_out = left_clip.source_in.saturating_add(cut_offset);
-                        left_clip.transition_after.clear();
-                        left_clip.transition_after_ns = 0;
-                        new_clips.push(left_clip);
-
                         let mut right_clip = clip.clone();
                         right_clip.id = uuid::Uuid::new_v4().to_string();
                         right_clip.source_in = right_clip.source_in.saturating_add(cut_offset);
                         right_clip.timeline_start = playhead_ns.saturating_add(hold_duration_ns);
+                        new_clips.push(left_clip);
                         new_clips.push(right_clip);
+                        track_changed = true;
+                        continue;
                     }
-                    continue;
+
+                    let mut adjusted = clip.clone();
+                    if adjusted.timeline_start >= playhead_ns {
+                        adjusted.timeline_start =
+                            adjusted.timeline_start.saturating_add(hold_duration_ns);
+                        track_changed = true;
+                    }
+                    new_clips.push(adjusted);
                 }
 
-                let mut adjusted = clip.clone();
-                if adjusted.timeline_start >= playhead_ns {
-                    adjusted.timeline_start =
-                        adjusted.timeline_start.saturating_add(hold_duration_ns);
+                if is_selected_track {
+                    new_clips.push(freeze_clip.clone());
+                    track_changed = true;
                 }
-                new_clips.push(adjusted);
+                if !track_changed {
+                    continue;
+                }
+                new_clips.sort_by_key(|c| c.timeline_start);
+                if new_clips != old_clips {
+                    changes.push(TrackClipsChange {
+                        track_id: track.id.clone(),
+                        old_clips,
+                        new_clips,
+                    });
+                }
             }
+
             if !handled_selected {
                 return false;
             }
-            new_clips.push(freeze_clip);
-            new_clips.sort_by_key(|c| c.timeline_start);
-            (old_clips, new_clips)
+            changes
         };
-        if old_clips == new_clips {
+        if changes.is_empty() {
             return false;
         }
-        let cmd = SetTrackClipsCommand {
-            track_id: track_id.clone(),
-            old_clips,
-            new_clips: std::mem::take(&mut new_clips),
+        let cmd = SetMultipleTracksClipsCommand {
+            changes: std::mem::take(&mut changes),
             label: "Create freeze frame".to_string(),
         };
         let mut proj = self.project.borrow_mut();
@@ -5781,6 +5821,118 @@ mod tests {
                 .clone()
         };
 
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn create_freeze_frame_ripples_other_tracks_and_splits_overlaps() {
+        let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0), ("B", 4_000_000_000)],
+            &[("X", 500_000_000), ("Y", 2_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let selected_track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_a)
+                .expect("selected track exists");
+            let clip_a = selected_track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == ids_a[0])
+                .expect("clip A exists");
+            clip_a.source_out = 4_000_000_000;
+        }
+        st.set_single_clip_selection(ids_a[0].clone(), track_a.clone());
+        st.playhead_ns = 1_000_000_000;
+        assert!(st.create_freeze_frame_from_selected_at_playhead(2_000_000_000));
+
+        let proj = st.project.borrow();
+        let selected_track = proj
+            .tracks
+            .iter()
+            .find(|t| t.id == track_a)
+            .expect("selected track exists");
+        let clip_b = selected_track
+            .clips
+            .iter()
+            .find(|clip| clip.id == ids_a[1])
+            .expect("clip B should exist");
+        assert_eq!(clip_b.timeline_start, 6_000_000_000);
+
+        let other_track = proj
+            .tracks
+            .iter()
+            .find(|t| t.id == track_b)
+            .expect("other track exists");
+        let x_left = other_track
+            .clips
+            .iter()
+            .find(|clip| clip.id == ids_b[0])
+            .expect("left split on other track should keep original id");
+        assert_eq!(x_left.timeline_start, 500_000_000);
+        assert_eq!(x_left.source_out.saturating_sub(x_left.source_in), 500_000_000);
+
+        let x_right = other_track
+            .clips
+            .iter()
+            .find(|clip| clip.source_path.ends_with("X.mp4") && clip.id != ids_b[0])
+            .expect("right split on other track should exist");
+        assert_eq!(x_right.timeline_start, 3_000_000_000);
+        assert_eq!(
+            x_right.source_out.saturating_sub(x_right.source_in),
+            500_000_000
+        );
+
+        let y = other_track
+            .clips
+            .iter()
+            .find(|clip| clip.id == ids_b[1])
+            .expect("clip Y should exist");
+        assert_eq!(y.timeline_start, 4_000_000_000);
+    }
+
+    #[test]
+    fn create_freeze_frame_multitrack_ripple_is_undoable() {
+        let (mut st, track_a, _track_b, ids_a, _ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0), ("B", 4_000_000_000)],
+            &[("X", 500_000_000), ("Y", 2_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let selected_track = proj
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_a)
+                .expect("selected track exists");
+            let clip_a = selected_track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == ids_a[0])
+                .expect("clip A exists");
+            clip_a.source_out = 4_000_000_000;
+        }
+        st.set_single_clip_selection(ids_a[0].clone(), track_a);
+        st.playhead_ns = 1_000_000_000;
+        let before: Vec<(String, Vec<Clip>)> = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .map(|t| (t.id.clone(), t.clips.clone()))
+                .collect()
+        };
+
+        assert!(st.create_freeze_frame_from_selected_at_playhead(2_000_000_000));
+        st.undo();
+
+        let after: Vec<(String, Vec<Clip>)> = {
+            let proj = st.project.borrow();
+            proj.tracks
+                .iter()
+                .map(|t| (t.id.clone(), t.clips.clone()))
+                .collect()
+        };
         assert_eq!(after, before);
     }
 
