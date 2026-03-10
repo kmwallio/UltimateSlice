@@ -46,6 +46,9 @@ When dragging the green/orange In/Out markers directly on the scrubber, Source M
 - Click anywhere on the scrubber to jump to that position.
 - Click and drag to scrub continuously.
 - Repeated scrubs that land on the same frame are deduplicated internally to avoid redundant decoder seeks.
+- If playback is active, scrubber drags temporarily pause playback and resume on release, with the final dragged frame always applied on release.
+- On macOS, live frame seeks during scrubber and marker drags are deferred to drag release as a stability safeguard.
+- FLUSH seeks are automatically deferred when the pipeline has an async state transition in progress (e.g. preroll), preventing a GStreamer qtdemux race condition.
 
 ## Source Playback Priority
 
@@ -106,3 +109,5 @@ During active Source Monitor playback, UltimateSlice prioritizes smooth visual m
 ## Hardware Decode Detection and Fallback
 
 When **Enable hardware acceleration** is on, the Source Monitor now checks for available VA-API decoders and prefers a hardware-fast decode path when possible. If the hardware path fails on a given clip (for example due to format negotiation/DMABuf issues), UltimateSlice automatically falls back to the software decode path for that clip and continues playback.
+
+On macOS, Source Monitor's software-filtered mode deprioritizes VideoToolbox decoder elements for stability during heavy seek/scrub interactions.

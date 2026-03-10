@@ -154,6 +154,9 @@ Tracking docs:
 - [x] Source preview proxy fallback parity: use original media until proxy file is ready, and retry once with original URI on proxy load/decode error
 - [x] Source preview seeks continuously to In/Out marker position while dragging markers on the scrubber
 - [x] Source preview drag safety: accidental self-drops are consumed as no-ops, and source playback pauses/resumes during source-clip drag operations to reduce crash-prone decode churn
+- [x] Source scrubber drag safety: playhead scrub drags pause/resume playback and force a final seek on drag release (with macOS deferring live drag seeks until release for crash resistance)
+- [x] Source preview macOS decode stability: software-filtered mode down-ranks `vtdec`/`vtdec_hw` to prefer non-VideoToolbox decode during source interactions
+- [x] Source scrubber macOS quiesce guard: re-preroll current URI before final scrub-release seek to reduce `qtdemux` crash frequency
 
 ### Timeline Improvements
 - [x] Time-mapped clip filmstrip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)

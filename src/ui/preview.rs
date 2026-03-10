@@ -189,9 +189,11 @@ pub fn build_preview(
     // in/out marker positions (within ±8 px of each marker line).
     let drag_mode: Rc<Cell<u8>> = Rc::new(Cell::new(0));
     let marker_drag_was_playing: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let playhead_drag_was_playing: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     // Throttle marker-drag seeks to keep demux/decoder churn bounded while
     // still providing continuous visual feedback.
     let last_marker_seek_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+    let last_playhead_seek_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
     {
         let scrubber_drag = GestureDrag::new();
 
@@ -202,13 +204,17 @@ pub fn build_preview(
             let drawn_width = drawn_width.clone();
             let drag_mode = drag_mode.clone();
             let marker_drag_was_playing = marker_drag_was_playing.clone();
+            let playhead_drag_was_playing = playhead_drag_was_playing.clone();
             let player = player.clone();
             let last_marker_seek_us = last_marker_seek_us.clone();
+            let last_playhead_seek_us = last_playhead_seek_us.clone();
             let scrubber_weak = scrubber.downgrade();
             move |_, x, _| {
                 let marks = source_marks.borrow();
                 let dur = marks.duration_ns;
                 if dur == 0 {
+                    marker_drag_was_playing.set(false);
+                    playhead_drag_was_playing.set(false);
                     drag_mode.set(0);
                     drop(marks);
                     seek_from_x(x);
@@ -220,6 +226,7 @@ pub fn build_preview(
                 drop(marks);
                 const HIT: f64 = 8.0;
                 if (x - in_x).abs() <= HIT {
+                    playhead_drag_was_playing.set(false);
                     let was_playing = player.borrow().state() == PlayerState::Playing;
                     marker_drag_was_playing.set(was_playing);
                     if was_playing {
@@ -231,6 +238,7 @@ pub fn build_preview(
                         a.queue_draw();
                     }
                 } else if (x - out_x).abs() <= HIT {
+                    playhead_drag_was_playing.set(false);
                     let was_playing = player.borrow().state() == PlayerState::Playing;
                     marker_drag_was_playing.set(was_playing);
                     if was_playing {
@@ -243,7 +251,13 @@ pub fn build_preview(
                     }
                 } else {
                     marker_drag_was_playing.set(false);
+                    let was_playing = player.borrow().state() == PlayerState::Playing;
+                    playhead_drag_was_playing.set(was_playing);
+                    if was_playing {
+                        let _ = player.borrow().pause();
+                    }
                     drag_mode.set(0);
+                    last_playhead_seek_us.set(0);
                     seek_from_x(x);
                 }
             }
@@ -251,18 +265,39 @@ pub fn build_preview(
 
         // drag_update: apply seek or marker update
         scrubber_drag.connect_drag_update({
-            let seek_from_x = seek_from_x.clone();
             let source_marks = source_marks.clone();
             let drawn_width = drawn_width.clone();
             let drag_mode = drag_mode.clone();
             let player = player.clone();
             let last_marker_seek_us = last_marker_seek_us.clone();
+            let last_playhead_seek_us = last_playhead_seek_us.clone();
             let scrubber_weak = scrubber.downgrade();
             move |gesture, offset_x, _| {
                 let (start_x, _) = gesture.start_point().unwrap_or((0.0, 0.0));
                 let x = start_x + offset_x;
                 match drag_mode.get() {
-                    0 => seek_from_x(x),
+                    0 => {
+                        let w = drawn_width.get().max(1.0);
+                        let mut marks = source_marks.borrow_mut();
+                        let dur = marks.duration_ns;
+                        if dur == 0 {
+                            return;
+                        }
+                        let frac = (x / w).clamp(0.0, 1.0);
+                        marks.display_pos_ns = (frac * dur as f64) as u64;
+                        let target_pos = marks.display_pos_ns;
+                        drop(marks);
+                        if !cfg!(target_os = "macos") {
+                            let now_us = glib::monotonic_time();
+                            if now_us - last_playhead_seek_us.get() >= 33_000 {
+                                last_playhead_seek_us.set(now_us);
+                                let _ = player.borrow().seek(target_pos);
+                            }
+                        }
+                        if let Some(a) = scrubber_weak.upgrade() {
+                            a.queue_draw();
+                        }
+                    }
                     mode => {
                         let w = drawn_width.get().max(1.0);
                         let frac = (x / w).clamp(0.0, 1.0);
@@ -283,10 +318,12 @@ pub fn build_preview(
                         };
                         marks.display_pos_ns = target_pos;
                         drop(marks);
-                        let now_us = glib::monotonic_time();
-                        if now_us - last_marker_seek_us.get() >= 33_000 {
-                            last_marker_seek_us.set(now_us);
-                            let _ = player.borrow().seek(target_pos);
+                        if !cfg!(target_os = "macos") {
+                            let now_us = glib::monotonic_time();
+                            if now_us - last_marker_seek_us.get() >= 33_000 {
+                                last_marker_seek_us.set(now_us);
+                                let _ = player.borrow().seek(target_pos);
+                            }
                         }
                         if let Some(a) = scrubber_weak.upgrade() {
                             a.queue_draw();
@@ -303,15 +340,20 @@ pub fn build_preview(
             let drag_mode = drag_mode.clone();
             let player = player.clone();
             let marker_drag_was_playing = marker_drag_was_playing.clone();
+            let playhead_drag_was_playing = playhead_drag_was_playing.clone();
             move |_, _, _| {
-                if drag_mode.get() != 0 {
-                    let target_pos = source_marks.borrow().display_pos_ns;
-                    let _ = player.borrow().seek(target_pos);
+                let mode = drag_mode.get();
+                let target_pos = source_marks.borrow().display_pos_ns;
+                let _ = player.borrow().seek(target_pos);
+                if mode != 0 {
                     if marker_drag_was_playing.get() {
                         let _ = player.borrow().play();
                     }
+                } else if playhead_drag_was_playing.get() {
+                    let _ = player.borrow().play();
                 }
                 marker_drag_was_playing.set(false);
+                playhead_drag_was_playing.set(false);
                 drag_mode.set(0);
             }
         });
