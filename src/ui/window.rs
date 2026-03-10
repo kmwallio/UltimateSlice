@@ -1841,10 +1841,18 @@ pub fn build_window(
                             if let Some(model_clip) =
                                 track.clips.iter().find(|c| c.id == clip_id)
                             {
+                                // Sync to video clips (embedded audio)
                                 if let Some(player_clip) =
                                     pp.clips.iter_mut().find(|c| c.id == clip_id)
                                 {
                                     player_clip.volume_keyframes =
+                                        model_clip.volume_keyframes.clone();
+                                }
+                                // Sync to audio-only clips
+                                if let Some(audio_clip) =
+                                    pp.audio_clips.iter_mut().find(|c| c.id == clip_id)
+                                {
+                                    audio_clip.volume_keyframes =
                                         model_clip.volume_keyframes.clone();
                                 }
                                 break;

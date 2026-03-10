@@ -539,7 +539,7 @@ pub struct ProgramPlayer {
     audiomixer: gst::Element,
     state: PlayerState,
     pub clips: Vec<ProgramClip>,
-    audio_clips: Vec<ProgramClip>,
+    pub audio_clips: Vec<ProgramClip>,
     /// Separate playbin for audio-only clips (music tracks etc.).
     audio_pipeline: gst::Element,
     audio_current_source: Option<AudioCurrentSource>,
