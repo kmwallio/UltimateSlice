@@ -4453,7 +4453,11 @@ fn draw_timeline(
     {
         if track_idx != target_idx {
             let target_top = track_row_top(&proj, *target_idx);
-            let target_height = proj.tracks.get(*target_idx).map(track_row_height).unwrap_or(0.0);
+            let target_height = proj
+                .tracks
+                .get(*target_idx)
+                .map(track_row_height)
+                .unwrap_or(0.0);
             let indicator_y = target_top
                 + if target_idx > track_idx {
                     target_height

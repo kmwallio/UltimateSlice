@@ -232,8 +232,10 @@ Tracking docs:
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
   - [x] Move MCP `open_fcpxml` read/parse path off the GTK main thread and trim parser attribute-allocation overhead
   - [x] Reduce timeline thumbnail/waveform warm-up spikes via lower extraction concurrency and lighter thumbnail tile density
-  - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
+  - [x] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
     - [x] Frame-boundary seek deduplication: quantize paused scrub positions to frame boundaries and skip redundant pipeline work for same-frame seeks
+    - [x] Add bounded previous/current/next paused-frame cache keyed by frame position + render signature, with robust invalidation on project/render-setting changes
+    - [x] Use short-frame cache hits to tighten paused in-place seek settle budgets, reducing scrub blocking while preserving accurate decoder seeks
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
    - [x] Managed local proxy cache root (`$XDG_CACHE_HOME/ultimateslice/proxies`, fallback `/tmp/ultimateslice/proxies`) with fallback to alongside-media `UltimateSlice.cache` when local-cache transcodes fail
     - [x] Managed proxy cache lifecycle cleanup (startup stale prune for ownership-index entries older than 24h, plus project unload/app-close cleanup of managed cache files)

@@ -1380,12 +1380,7 @@ mod tests {
         project.tracks[0].locked = true;
         project.tracks[0].soloed = true;
         project.tracks[0].height_preset = crate::model::track::TrackHeightPreset::Large;
-        let mut clip = Clip::new(
-            "file:///tmp/clip.mp4",
-            1_000_000_000,
-            0,
-            ClipKind::Video,
-        );
+        let mut clip = Clip::new("file:///tmp/clip.mp4", 1_000_000_000, 0, ClipKind::Video);
         clip.color_label = crate::model::clip::ClipColorLabel::Purple;
         project.tracks[0].add_clip(clip);
 

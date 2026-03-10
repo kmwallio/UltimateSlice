@@ -43,6 +43,90 @@ pub struct ScopeFrame {
     pub height: usize,
 }
 
+#[derive(Clone)]
+struct CachedPlayheadFrame {
+    frame_pos_ns: u64,
+    signature: u64,
+    scope_seq: u64,
+    frame: ScopeFrame,
+}
+
+#[derive(Clone, Copy)]
+struct PendingShortFrameCapture {
+    frame_pos_ns: u64,
+    signature: u64,
+    min_scope_seq: u64,
+}
+
+#[derive(Default)]
+struct ShortFrameCache {
+    previous: Option<CachedPlayheadFrame>,
+    current: Option<CachedPlayheadFrame>,
+    next: Option<CachedPlayheadFrame>,
+    hits: u64,
+    misses: u64,
+    invalidations: u64,
+}
+
+impl ShortFrameCache {
+    fn lookup(&mut self, frame_pos_ns: u64, signature: u64) -> bool {
+        let hit = [
+            self.previous.as_ref(),
+            self.current.as_ref(),
+            self.next.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|entry| entry.frame_pos_ns == frame_pos_ns && entry.signature == signature);
+        let hit_found = hit.is_some();
+        let _hit_scope_seq = hit.map(|entry| entry.scope_seq);
+        if hit_found {
+            self.hits = self.hits.saturating_add(1);
+        } else {
+            self.misses = self.misses.saturating_add(1);
+        }
+        hit_found
+    }
+
+    fn clear(&mut self) -> bool {
+        let had_entries = self.previous.is_some() || self.current.is_some() || self.next.is_some();
+        self.previous = None;
+        self.current = None;
+        self.next = None;
+        if had_entries {
+            self.invalidations = self.invalidations.saturating_add(1);
+        }
+        had_entries
+    }
+
+    fn store_current(&mut self, entry: CachedPlayheadFrame) {
+        let current_key = (entry.frame_pos_ns, entry.signature);
+        let mut entries: Vec<CachedPlayheadFrame> = [
+            self.previous.take(),
+            self.current.take(),
+            self.next.take(),
+            Some(entry.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|existing| (existing.frame_pos_ns, existing.signature) != current_key)
+        .collect();
+        entries.push(entry.clone());
+        entries.sort_by_key(|existing| existing.frame_pos_ns);
+        self.current = Some(entry.clone());
+        self.previous = entries
+            .iter()
+            .filter(|existing| existing.frame_pos_ns < entry.frame_pos_ns)
+            .max_by_key(|existing| existing.frame_pos_ns)
+            .cloned();
+        self.next = entries
+            .iter()
+            .filter(|existing| existing.frame_pos_ns > entry.frame_pos_ns)
+            .min_by_key(|existing| existing.frame_pos_ns)
+            .cloned();
+    }
+}
+
 /// Calibrated videobalance output parameters (brightness, contrast,
 /// saturation, hue) computed from clip colour settings by
 /// `ProgramPlayer::compute_videobalance_params`.
@@ -548,6 +632,10 @@ pub struct ProgramPlayer {
     /// Last frame-quantized seek position (nanoseconds). When a new seek
     /// lands on the same frame, the pipeline work is skipped entirely.
     last_seeked_frame_pos: Option<u64>,
+    /// Small previous/current/next frame cache around the paused playhead.
+    short_frame_cache: ShortFrameCache,
+    /// Deferred cache capture ticket for non-blocking 3+ track playing pulses.
+    pending_short_frame_capture: Option<PendingShortFrameCapture>,
     /// Last boundary-clip signature rebuilt during playback.
     last_boundary_rebuild_clips: Vec<usize>,
     /// Wall-clock time of the last playback boundary rebuild attempt.
@@ -1030,6 +1118,8 @@ impl ProgramPlayer {
                 // Default 24 fps ≈ 41_666_666 ns per frame
                 frame_duration_ns: 1_000_000_000 / 24,
                 last_seeked_frame_pos: None,
+                short_frame_cache: ShortFrameCache::default(),
+                pending_short_frame_capture: None,
                 last_boundary_rebuild_clips: Vec::new(),
                 last_boundary_rebuild_at: None,
             },
@@ -1045,17 +1135,27 @@ impl ProgramPlayer {
     }
 
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
+        if self.proxy_enabled != enabled {
+            self.invalidate_short_frame_cache("proxy-mode-changed");
+        }
         self.proxy_enabled = enabled;
         self.prewarmed_boundary_ns = None;
     }
 
     pub fn set_preview_luts(&mut self, enabled: bool) {
+        if self.preview_luts != enabled {
+            self.invalidate_short_frame_cache("preview-luts-changed");
+        }
         self.preview_luts = enabled;
         self.prewarmed_boundary_ns = None;
     }
 
     pub fn set_proxy_scale_divisor(&mut self, divisor: u32) {
-        self.proxy_scale_divisor = divisor.max(1);
+        let new_divisor = divisor.max(1);
+        if self.proxy_scale_divisor != new_divisor {
+            self.invalidate_short_frame_cache("proxy-scale-divisor-changed");
+        }
+        self.proxy_scale_divisor = new_divisor;
     }
 
     pub fn set_experimental_preview_optimizations(&mut self, enabled: bool) {
@@ -1133,6 +1233,7 @@ impl ProgramPlayer {
         if self.proxy_paths != paths {
             self.proxy_paths = paths;
             self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("proxy-paths-updated");
         }
     }
 
@@ -1140,10 +1241,14 @@ impl ProgramPlayer {
         if self.bg_removal_paths != paths {
             self.bg_removal_paths = paths;
             self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("bg-removal-paths-updated");
         }
     }
 
     pub fn set_project_dimensions(&mut self, width: u32, height: u32) {
+        if self.project_width != width || self.project_height != height {
+            self.invalidate_short_frame_cache("project-dimensions-changed");
+        }
         self.project_width = width;
         self.project_height = height;
         self.apply_compositor_caps();
@@ -1154,7 +1259,11 @@ impl ProgramPlayer {
     pub fn set_frame_rate(&mut self, numerator: u32, denominator: u32) {
         if numerator > 0 && denominator > 0 {
             // frame_duration = 1e9 * denominator / numerator (nanoseconds)
-            self.frame_duration_ns = (1_000_000_000u64 * denominator as u64) / numerator as u64;
+            let frame_duration_ns = (1_000_000_000u64 * denominator as u64) / numerator as u64;
+            if self.frame_duration_ns != frame_duration_ns {
+                self.invalidate_short_frame_cache("frame-rate-changed");
+            }
+            self.frame_duration_ns = frame_duration_ns;
         }
     }
 
@@ -1164,6 +1273,7 @@ impl ProgramPlayer {
         if self.preview_divisor == new_divisor {
             return;
         }
+        self.invalidate_short_frame_cache("preview-quality-changed");
         self.preview_divisor = new_divisor;
         self.apply_compositor_caps();
         if !self.clips.is_empty() {
@@ -1212,6 +1322,129 @@ impl ProgramPlayer {
         )
     }
 
+    fn quantize_frame_position_ns(&self, timeline_pos_ns: u64) -> u64 {
+        if self.frame_duration_ns > 0 {
+            (timeline_pos_ns / self.frame_duration_ns) * self.frame_duration_ns
+        } else {
+            timeline_pos_ns
+        }
+    }
+
+    fn short_frame_cache_signature_for_frame(&self, frame_pos_ns: u64) -> u64 {
+        let active = self.clips_active_at(frame_pos_ns);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "short-frame-cache-v1".hash(&mut hasher);
+        self.prerender_signature_for_active(&active)
+            .hash(&mut hasher);
+        self.preview_luts.hash(&mut hasher);
+        self.frame_duration_ns.hash(&mut hasher);
+        for idx in active {
+            if let Some(c) = self.clips.get(idx) {
+                c.temperature.to_bits().hash(&mut hasher);
+                c.tint.to_bits().hash(&mut hasher);
+                c.transition_after.hash(&mut hasher);
+                c.transition_after_ns.hash(&mut hasher);
+                c.title_text.hash(&mut hasher);
+                c.title_font.hash(&mut hasher);
+                c.title_color.hash(&mut hasher);
+                c.title_x.to_bits().hash(&mut hasher);
+                c.title_y.to_bits().hash(&mut hasher);
+                c.bg_removal_enabled.hash(&mut hasher);
+                c.bg_removal_threshold.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn short_frame_cache_wait_budget_ms(&self) -> u64 {
+        if self.slots.len() >= 3 {
+            600
+        } else {
+            240
+        }
+    }
+
+    fn invalidate_short_frame_cache(&mut self, reason: &str) {
+        let had_entries = self.short_frame_cache.clear();
+        let had_pending = self.pending_short_frame_capture.take().is_some();
+        if had_entries || had_pending {
+            log::debug!(
+                "short_frame_cache: invalidated reason={} invalidations={} hits={} misses={}",
+                reason,
+                self.short_frame_cache.invalidations,
+                self.short_frame_cache.hits,
+                self.short_frame_cache.misses
+            );
+        }
+    }
+
+    fn cache_scope_frame_now(
+        &mut self,
+        frame_pos_ns: u64,
+        signature: u64,
+        min_scope_seq: u64,
+        reason: &str,
+    ) {
+        let scope_seq_now = self.scope_frame_seq.load(Ordering::Relaxed);
+        if scope_seq_now <= min_scope_seq {
+            return;
+        }
+        let Some(frame) = self.try_pull_scope_frame() else {
+            return;
+        };
+        self.short_frame_cache.store_current(CachedPlayheadFrame {
+            frame_pos_ns,
+            signature,
+            scope_seq: scope_seq_now,
+            frame,
+        });
+        log::debug!(
+            "short_frame_cache: stored frame={} reason={} scope_seq={} hits={} misses={}",
+            frame_pos_ns,
+            reason,
+            scope_seq_now,
+            self.short_frame_cache.hits,
+            self.short_frame_cache.misses
+        );
+    }
+
+    fn queue_or_store_short_frame_cache(
+        &mut self,
+        frame_pos_ns: u64,
+        signature: u64,
+        min_scope_seq: u64,
+        pending_async: bool,
+        reason: &str,
+    ) {
+        if pending_async {
+            self.pending_short_frame_capture = Some(PendingShortFrameCapture {
+                frame_pos_ns,
+                signature,
+                min_scope_seq,
+            });
+            return;
+        }
+        self.pending_short_frame_capture = None;
+        self.cache_scope_frame_now(frame_pos_ns, signature, min_scope_seq, reason);
+    }
+
+    fn consume_pending_short_frame_capture(&mut self) {
+        let Some(pending) = self.pending_short_frame_capture else {
+            return;
+        };
+        let scope_seq_now = self.scope_frame_seq.load(Ordering::Relaxed);
+        if scope_seq_now <= pending.min_scope_seq {
+            return;
+        }
+        self.pending_short_frame_capture = None;
+        self.cache_scope_frame_now(
+            pending.frame_pos_ns,
+            pending.signature,
+            pending.min_scope_seq,
+            "async-pulse-complete",
+        );
+    }
+
     /// Returns (opacity_a, opacity_b) for the two program monitor pictures.
     /// With the compositor approach all layering is internal; picture_b is unused.
     pub fn transition_opacities(&self) -> (f64, f64) {
@@ -1219,7 +1452,15 @@ impl ProgramPlayer {
     }
 
     pub fn try_pull_scope_frame(&self) -> Option<ScopeFrame> {
-        self.latest_scope_frame.lock().ok()?.clone()
+        if let Ok(frame) = self.latest_scope_frame.lock() {
+            if let Some(fresh) = frame.clone() {
+                return Some(fresh);
+            }
+        }
+        self.short_frame_cache
+            .current
+            .as_ref()
+            .map(|cached| cached.frame.clone())
     }
 
     /// Export the current Program Monitor frame at project resolution as a PPM image (P6).
@@ -1441,6 +1682,7 @@ impl ProgramPlayer {
     // ── Clip loading ───────────────────────────────────────────────────────
 
     pub fn load_clips(&mut self, mut clips: Vec<ProgramClip>) {
+        self.invalidate_short_frame_cache("project-clips-reloaded");
         clips.sort_by_key(|c| c.timeline_start_ns);
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
@@ -1505,17 +1747,14 @@ impl ProgramPlayer {
     pub fn seek(&mut self, timeline_pos_ns: u64) -> bool {
         let seek_started = Instant::now();
         let resume_playback = self.state == PlayerState::Playing;
+        self.consume_pending_short_frame_capture();
 
         // Frame-boundary deduplication: quantize to the nearest frame and
         // skip redundant pipeline work when the playhead hasn't moved to a
         // new frame.  This eliminates unnecessary decoder seeks during slow
         // timeline scrubbing where multiple pixel-level drag events land on
         // the same video frame.
-        let frame_pos = if self.frame_duration_ns > 0 {
-            (timeline_pos_ns / self.frame_duration_ns) * self.frame_duration_ns
-        } else {
-            timeline_pos_ns
-        };
+        let frame_pos = self.quantize_frame_position_ns(timeline_pos_ns);
         if !resume_playback && self.last_seeked_frame_pos == Some(frame_pos) {
             self.timeline_pos_ns = timeline_pos_ns;
             self.base_timeline_ns = timeline_pos_ns;
@@ -1534,6 +1773,24 @@ impl ProgramPlayer {
             );
             return false;
         }
+        let mut short_frame_signature = None;
+        let mut short_frame_cache_hit = false;
+        let mut arrival_wait_budget_ms = 3000;
+        let scope_seq_before_seek = self.scope_frame_seq.load(Ordering::Relaxed);
+        if !resume_playback {
+            let signature = self.short_frame_cache_signature_for_frame(frame_pos);
+            short_frame_cache_hit = self.short_frame_cache.lookup(frame_pos, signature);
+            if short_frame_cache_hit {
+                arrival_wait_budget_ms = self.short_frame_cache_wait_budget_ms();
+                log::debug!(
+                    "short_frame_cache: hit frame={} signature={} wait_budget_ms={}",
+                    frame_pos,
+                    signature,
+                    arrival_wait_budget_ms
+                );
+            }
+            short_frame_signature = Some(signature);
+        }
         let mut fast_path = false;
         // Fast path: when paused with the same clips already loaded, seek the
         // existing decoders in-place instead of tearing down and rebuilding the
@@ -1547,15 +1804,26 @@ impl ProgramPlayer {
         {
             fast_path = true;
             self.current_idx = self.clip_at(timeline_pos_ns);
-            let needs_async = self.seek_slots_in_place(timeline_pos_ns);
+            let needs_async = self.seek_slots_in_place(timeline_pos_ns, arrival_wait_budget_ms);
             self.apply_transition_effects(timeline_pos_ns);
             self.sync_audio_to(timeline_pos_ns);
+            if let Some(signature) = short_frame_signature {
+                self.queue_or_store_short_frame_cache(
+                    frame_pos,
+                    signature,
+                    scope_seq_before_seek,
+                    needs_async,
+                    "seek-fast-path",
+                );
+            }
             log::info!(
-                "seek: done timeline_pos={} fast_path={} needs_async={} slots={} elapsed_ms={}",
+                "seek: done timeline_pos={} fast_path={} needs_async={} slots={} cache_hit={} wait_budget_ms={} elapsed_ms={}",
                 timeline_pos_ns,
                 fast_path,
                 needs_async,
                 self.slots.len(),
+                short_frame_cache_hit,
+                arrival_wait_budget_ms,
                 seek_started.elapsed().as_millis()
             );
             self.last_seeked_frame_pos = Some(frame_pos);
@@ -1595,12 +1863,24 @@ impl ProgramPlayer {
         } else {
             false
         };
+        if !resume_playback {
+            if let Some(signature) = short_frame_signature {
+                self.queue_or_store_short_frame_cache(
+                    frame_pos,
+                    signature,
+                    scope_seq_before_seek,
+                    needs_async,
+                    "seek-rebuild-path",
+                );
+            }
+        }
         log::info!(
-            "seek: done timeline_pos={} fast_path={} needs_async={} slots={} elapsed_ms={}",
+            "seek: done timeline_pos={} fast_path={} needs_async={} slots={} cache_hit={} elapsed_ms={}",
             timeline_pos_ns,
             fast_path,
             needs_async,
             self.slots.len(),
+            short_frame_cache_hit,
             seek_started.elapsed().as_millis()
         );
         self.last_seeked_frame_pos = Some(frame_pos);
@@ -1611,6 +1891,7 @@ impl ProgramPlayer {
         if self.clips.is_empty() && self.audio_clips.is_empty() {
             return;
         }
+        self.pending_short_frame_capture = None;
         let pos = self.timeline_pos_ns;
         if self.slots.is_empty() {
             // When starting playback from a cold/stopped state, rebuild via the
@@ -1699,6 +1980,7 @@ impl ProgramPlayer {
     }
 
     pub fn stop(&mut self) {
+        self.invalidate_short_frame_cache("transport-stop");
         self.teardown_slots();
         self.teardown_prepreroll_sidecars();
         let _ = self.pipeline.set_state(gst::State::Ready);
@@ -1979,6 +2261,7 @@ impl ProgramPlayer {
     }
 
     pub fn poll(&mut self) -> bool {
+        self.consume_pending_short_frame_capture();
         let _eos = self.poll_bus();
         self.poll_background_prerender_results();
         if self.pending_prerender_promote && self.state == PlayerState::Playing {
@@ -3809,7 +4092,10 @@ impl ProgramPlayer {
             .is_ok()
     }
 
-    fn effective_decode_seek_flags(clip: &ProgramClip, seek_flags: gst::SeekFlags) -> gst::SeekFlags {
+    fn effective_decode_seek_flags(
+        clip: &ProgramClip,
+        seek_flags: gst::SeekFlags,
+    ) -> gst::SeekFlags {
         if clip.reverse || clip.is_freeze_frame() {
             (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
         } else {
@@ -3869,13 +4155,7 @@ impl ProgramPlayer {
         frame_duration_ns: u64,
     ) -> bool {
         for _ in 0..4 {
-            if Self::seek_slot_decoder(
-                slot,
-                clip,
-                timeline_pos_ns,
-                seek_flags,
-                frame_duration_ns,
-            ) {
+            if Self::seek_slot_decoder(slot, clip, timeline_pos_ns, seek_flags, frame_duration_ns) {
                 return true;
             }
             let _ = slot.decoder.state(gst::ClockTime::from_mseconds(200));
@@ -3992,7 +4272,7 @@ impl ProgramPlayer {
     /// Seek all currently-loaded decoder slots to `timeline_pos_ns` without
     /// rebuilding the pipeline.  Returns `true` if a non-blocking Playing pulse
     /// was started (3+ tracks); the caller must schedule `complete_playing_pulse()`.
-    fn seek_slots_in_place(&mut self, timeline_pos_ns: u64) -> bool {
+    fn seek_slots_in_place(&mut self, timeline_pos_ns: u64, arrival_wait_ms: u64) -> bool {
         // Update transition_enter_offset_ns for each slot before seeking.
         for i in 0..self.slots.len() {
             let clip_idx = self.slots[i].clip_idx;
@@ -4020,7 +4300,7 @@ impl ProgramPlayer {
         // Wait for post-seek buffers to actually arrive at the compositor.
         // Without this, the compositor produces stale (background-only) frames
         // because the decoder buffers are still in the effects/queue chain.
-        self.wait_for_compositor_arrivals(&baseline, 3000);
+        self.wait_for_compositor_arrivals(&baseline, arrival_wait_ms.max(1));
         // Reset the pipeline's start_time so running_time begins at 0 in the
         // next Playing transition.
         self.pipeline.set_start_time(gst::ClockTime::ZERO);
@@ -7826,7 +8106,10 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip_can_fully_occlude, ProgramClip, ProgramPlayer, VideoSlot};
+    use super::{
+        clip_can_fully_occlude, CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame,
+        ShortFrameCache, VideoSlot,
+    };
     use gstreamer as gst;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
@@ -7884,6 +8167,67 @@ mod tests {
             bg_removal_enabled: false,
             bg_removal_threshold: 0.5,
         }
+    }
+
+    fn make_scope_frame(seed: u8) -> ScopeFrame {
+        ScopeFrame {
+            data: vec![seed; 2 * 2 * 4],
+            width: 2,
+            height: 2,
+        }
+    }
+
+    fn cache_entry(
+        frame_pos_ns: u64,
+        signature: u64,
+        scope_seq: u64,
+        seed: u8,
+    ) -> CachedPlayheadFrame {
+        CachedPlayheadFrame {
+            frame_pos_ns,
+            signature,
+            scope_seq,
+            frame: make_scope_frame(seed),
+        }
+    }
+
+    #[test]
+    fn short_frame_cache_tracks_previous_current_next_neighbors() {
+        let mut cache = ShortFrameCache::default();
+        cache.store_current(cache_entry(100, 1, 1, 10));
+        assert_eq!(cache.previous.as_ref().map(|e| e.frame_pos_ns), None);
+        assert_eq!(cache.current.as_ref().map(|e| e.frame_pos_ns), Some(100));
+        assert_eq!(cache.next.as_ref().map(|e| e.frame_pos_ns), None);
+
+        cache.store_current(cache_entry(120, 2, 2, 11));
+        assert_eq!(cache.previous.as_ref().map(|e| e.frame_pos_ns), Some(100));
+        assert_eq!(cache.current.as_ref().map(|e| e.frame_pos_ns), Some(120));
+        assert_eq!(cache.next.as_ref().map(|e| e.frame_pos_ns), None);
+
+        cache.store_current(cache_entry(110, 3, 3, 12));
+        assert_eq!(cache.previous.as_ref().map(|e| e.frame_pos_ns), Some(100));
+        assert_eq!(cache.current.as_ref().map(|e| e.frame_pos_ns), Some(110));
+        assert_eq!(cache.next.as_ref().map(|e| e.frame_pos_ns), Some(120));
+    }
+
+    #[test]
+    fn short_frame_cache_lookup_respects_signature() {
+        let mut cache = ShortFrameCache::default();
+        cache.store_current(cache_entry(200, 5, 7, 20));
+        assert!(cache.lookup(200, 5));
+        assert!(!cache.lookup(200, 6));
+        assert_eq!(cache.hits, 1);
+        assert_eq!(cache.misses, 1);
+    }
+
+    #[test]
+    fn short_frame_cache_clear_tracks_invalidations() {
+        let mut cache = ShortFrameCache::default();
+        cache.store_current(cache_entry(250, 9, 11, 30));
+        assert!(cache.clear());
+        assert_eq!(cache.invalidations, 1);
+        assert!(!cache.clear());
+        assert_eq!(cache.invalidations, 1);
     }
 
     #[test]
