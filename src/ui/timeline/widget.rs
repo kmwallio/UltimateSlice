@@ -5101,8 +5101,9 @@ fn draw_clip(
                 cr.clip();
                 let mid = cy + ch / 2.0;
                 cr.set_line_width(1.0);
-                let vol = (clip.volume as f64).max(0.0);
-                draw_waveform_batched(cr, &peaks, vis_x0, mid, ch / 2.0 - 2.0, vol, 0.85);
+                let volumes = compute_per_pixel_volumes(clip, frac0, frac1, vis_px);
+                draw_waveform_batched(cr, &peaks, vis_x0, mid, ch / 2.0 - 2.0, &volumes, 0.85);
+                draw_volume_envelope(cr, &volumes, vis_x0, mid, ch / 2.0 - 2.0);
                 cr.restore().ok();
             }
         }
@@ -5132,8 +5133,9 @@ fn draw_clip(
                 cr.paint().ok();
                 cr.set_line_width(1.0);
                 let wave_mid = wave_y + wave_h / 2.0;
-                let vol = (clip.volume as f64).max(0.0);
-                draw_waveform_batched(cr, &peaks, vis_x0, wave_mid, wave_h / 2.0 - 1.0, vol, 0.9);
+                let volumes = compute_per_pixel_volumes(clip, frac0, frac1, vis_px);
+                draw_waveform_batched(cr, &peaks, vis_x0, wave_mid, wave_h / 2.0 - 1.0, &volumes, 0.9);
+                draw_volume_envelope(cr, &volumes, vis_x0, wave_mid, wave_h / 2.0 - 1.0);
                 cr.restore().ok();
             }
         }
@@ -5402,6 +5404,56 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
 /// Zones mirror the VU meter: green (quiet), yellow (moderate), red (loud).
 /// Draw a waveform using batched strokes grouped by color band.
 ///
+/// Build a per-pixel volume vector by evaluating volume keyframes across the
+/// visible fraction of a clip.  Falls back to the static clip volume when no
+/// keyframes are present (single multiplication, same as before).
+fn compute_per_pixel_volumes(clip: &Clip, frac0: f64, frac1: f64, vis_px: usize) -> Vec<f64> {
+    let vol = (clip.volume as f64).max(0.0);
+    if clip.volume_keyframes.is_empty() || vis_px == 0 {
+        return vec![vol; vis_px];
+    }
+    let dur_ns = clip.duration() as f64;
+    (0..vis_px)
+        .map(|i| {
+            let frac = frac0 + (i as f64 / vis_px as f64) * (frac1 - frac0);
+            let local_ns = (frac * dur_ns) as u64;
+            Clip::evaluate_keyframed_value(&clip.volume_keyframes, local_ns, vol).max(0.0)
+        })
+        .collect()
+}
+
+/// Draw a thin line tracing the volume envelope on top of the waveform.
+/// Only draws when the volume varies (i.e. keyframes exist and produce
+/// different values across the visible span).
+fn draw_volume_envelope(
+    cr: &gtk::cairo::Context,
+    volumes: &[f64],
+    cx: f64,
+    mid_y: f64,
+    half_range: f64,
+) {
+    if volumes.len() < 2 {
+        return;
+    }
+    // Skip the envelope when volume is constant (no keyframes or flat curve).
+    let first = volumes[0];
+    if volumes.iter().all(|&v| (v - first).abs() < 1e-6) {
+        return;
+    }
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.55);
+    cr.set_line_width(1.0);
+    for (i, &vol) in volumes.iter().enumerate() {
+        let x = cx + i as f64 + 0.5;
+        let y = mid_y - (vol.clamp(0.0, 1.0) * half_range);
+        if i == 0 {
+            cr.move_to(x, y);
+        } else {
+            cr.line_to(x, y);
+        }
+    }
+    cr.stroke().ok();
+}
+
 /// Instead of issuing one `stroke()` per pixel (thousands of calls), this groups
 /// consecutive lines by their color band (green / yellow / red) and draws each
 /// band as a single Cairo path.  Reduces per-clip waveform draw from O(n)
@@ -5412,7 +5464,7 @@ fn draw_waveform_batched(
     cx: f64,
     mid_y: f64,
     half_range: f64,
-    vol: f64,
+    volumes: &[f64],
     alpha: f64,
 ) {
     // Color bands: (threshold, r, g, b)
@@ -5434,6 +5486,7 @@ fn draw_waveform_batched(
     let mut red: Vec<Line> = Vec::new();
 
     for (i, &peak) in peaks.iter().enumerate() {
+        let vol = volumes.get(i).copied().unwrap_or(1.0);
         let scaled = (peak as f64 * vol).clamp(0.0, 1.0);
         let half_h = (scaled * half_range).max(1.0);
         let x = cx + i as f64 + 0.5;
