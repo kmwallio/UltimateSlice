@@ -2684,20 +2684,24 @@ pub fn build_window(
                                     if let Some(clip) =
                                         track.clips.iter_mut().find(|c| c.id == clip_id)
                                     {
-                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                        let interp = inspector_view.selected_interpolation();
+                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                             Phase1KeyframeProperty::Scale,
                                             playhead,
                                             sc,
+                                            interp,
                                         );
-                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                             Phase1KeyframeProperty::PositionX,
                                             playhead,
                                             px,
+                                            interp,
                                         );
-                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                             Phase1KeyframeProperty::PositionY,
                                             playhead,
                                             py,
+                                            interp,
                                         );
                                         proj.dirty = true;
                                         changed = true;
@@ -5983,6 +5987,7 @@ fn handle_mcp_command(
             property,
             timeline_pos_ns,
             value,
+            interpolation,
             reply,
         } => {
             let Some(property) = Phase1KeyframeProperty::parse(&property) else {
@@ -5991,6 +5996,15 @@ fn handle_mcp_command(
                     .ok();
                 return;
             };
+            let interp = interpolation
+                .as_deref()
+                .map(|s| match s {
+                    "ease_in" | "easeIn" => crate::model::clip::KeyframeInterpolation::EaseIn,
+                    "ease_out" | "easeOut" => crate::model::clip::KeyframeInterpolation::EaseOut,
+                    "ease_in_out" | "ease" | "easeInOut" => crate::model::clip::KeyframeInterpolation::EaseInOut,
+                    _ => crate::model::clip::KeyframeInterpolation::Linear,
+                })
+                .unwrap_or(crate::model::clip::KeyframeInterpolation::Linear);
             let timeline_pos_ns =
                 timeline_pos_ns.unwrap_or_else(|| prog_player.borrow().timeline_pos_ns);
             let mut found = false;
@@ -6000,10 +6014,11 @@ fn handle_mcp_command(
                 'outer: for track in proj.tracks.iter_mut() {
                     for clip in track.clips.iter_mut() {
                         if clip.id == clip_id {
-                            keyframe_time_ns = Some(clip.upsert_phase1_keyframe_at_timeline_ns(
+                            keyframe_time_ns = Some(clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                 property,
                                 timeline_pos_ns,
                                 value,
+                                interp,
                             ));
                             proj.dirty = true;
                             found = true;

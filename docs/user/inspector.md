@@ -54,9 +54,9 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 
 ### Audio keyframes (phase 1)
 
-- Use **Set Volume Keyframe** to create/update a volume keyframe at the current playhead.
+- Use **Set Volume Keyframe** to create/update a volume keyframe at the current playhead (using the selected interpolation mode).
 - Use **Remove Volume Keyframe** to remove a keyframe at the current playhead time.
-- Interpolation is currently **linear** between adjacent keyframes.
+- Interpolation mode is selected in the transform section's **Interpolation** dropdown.
 
 ---
 
@@ -78,9 +78,21 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 ### Transform keyframes (phase 1)
 
 - Transform controls include keyframe buttons for **Scale**, **Opacity**, **Position X**, and **Position Y**.
-- **Set … Keyframe** writes the current slider value at the current playhead time.
+- **Set … Keyframe** writes the current slider value at the current playhead time using the selected interpolation mode.
 - **Remove … Keyframe** removes a keyframe at that same playhead time.
-- Interpolation is currently **linear** between adjacent keyframes.
+
+### Interpolation modes
+
+The **Interpolation** dropdown selects how values transition between adjacent keyframes:
+
+| Mode | Behavior |
+|---|---|
+| **Linear** (default) | Constant rate of change |
+| **Ease In** | Slow start, accelerates toward end |
+| **Ease Out** | Fast start, decelerates toward end |
+| **Ease In/Out** | Smooth acceleration and deceleration |
+
+The selected mode applies to new keyframes created by "Set Keyframe" buttons, animation mode auto-keyframes, and MCP. When the playhead lands on an existing keyframe, the dropdown reflects that keyframe's interpolation. FCPXML round-trip preserves interpolation modes (`interp` attribute).
 
 ### Keyframe navigation
 

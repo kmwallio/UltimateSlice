@@ -660,7 +660,8 @@ fn tools_list() -> Value {
                     "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
                     "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "volume"], "description": "Animated property to keyframe." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
-                    "value": { "type": "number", "description": "Property value at this keyframe time." }
+                    "value": { "type": "number", "description": "Property value at this keyframe time." },
+                    "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." }
                 },
                 "required": ["clip_id", "property", "value"]
             }
@@ -1128,6 +1129,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             property: args["property"].as_str().unwrap_or("").to_string(),
             timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
             value: args["value"].as_f64().unwrap_or(0.0),
+            interpolation: args.get("interpolation").and_then(|v| v.as_str()).map(|s| s.to_string()),
             reply: tx,
         },
         "remove_clip_keyframe" => McpCommand::RemoveClipKeyframe {
