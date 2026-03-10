@@ -2068,13 +2068,12 @@ pub fn build_window(
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
-                inspector_view.update(&proj, clip_id.as_deref());
                 let playhead_ns = timeline_state_for_sel.borrow().playhead_ns;
+                inspector_view.update(&proj, clip_id.as_deref(), playhead_ns);
                 inspector_view.update_keyframe_indicator(&proj, playhead_ns);
                 // Sync transform overlay handles with selection state,
                 // using keyframe-interpolated values at the current playhead.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
-                    let playhead_ns = timeline_state_for_sel.borrow().playhead_ns;
                     sync_transform_overlay_to_playhead(
                         to,
                         &proj,
@@ -3613,11 +3612,9 @@ pub fn build_window(
             ) = {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
-                inspector_view.update(&proj, selected.as_deref());
-                {
-                    let playhead_ns = timeline_state.borrow().playhead_ns;
-                    inspector_view.update_keyframe_indicator(&proj, playhead_ns);
-                }
+                let playhead_ns = timeline_state.borrow().playhead_ns;
+                inspector_view.update(&proj, selected.as_deref(), playhead_ns);
+                inspector_view.update_keyframe_indicator(&proj, playhead_ns);
 
                 // Sync transform overlay: show handles when a clip is selected,
                 // using keyframe-interpolated values at the current playhead.
