@@ -2884,6 +2884,7 @@ pub fn build_window(
         let picture_b_poll = picture_b.clone();
         let transform_overlay_poll = transform_overlay_cell.clone();
         let timeline_state_poll = timeline_state.clone();
+        let inspector_view_poll = inspector_view.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -3090,6 +3091,12 @@ pub fn build_window(
                             pos_ns,
                         );
                     }
+                }
+                // Update inspector sliders to reflect keyframe-evaluated values
+                // at the new playhead position.
+                {
+                    let proj = project.borrow();
+                    inspector_view_poll.update_keyframed_sliders(&proj, pos_ns);
                 }
                 last_pos_ns_c.set(pos_ns);
             }

@@ -403,6 +403,55 @@ impl InspectorView {
             }
         }
     }
+
+    /// Lightweight update of only the 5 keyframed property sliders and keyframe
+    /// indicators.  Called when the playhead moves (scrub, nav, playback) without
+    /// a full clip re-selection.
+    pub fn update_keyframed_sliders(&self, project: &Project, playhead_ns: u64) {
+        let clip = self.selected_clip_id.borrow().clone().and_then(|id| {
+            project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == id)
+                .cloned()
+        });
+        if let Some(c) = clip {
+            *self.updating.borrow_mut() = true;
+            self.volume_slider.set_value(linear_to_db_volume(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::Volume,
+                    playhead_ns,
+                ),
+            ));
+            self.scale_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::Scale,
+                    playhead_ns,
+                ),
+            );
+            self.opacity_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::Opacity,
+                    playhead_ns,
+                ),
+            );
+            self.position_x_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::PositionX,
+                    playhead_ns,
+                ),
+            );
+            self.position_y_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::PositionY,
+                    playhead_ns,
+                ),
+            );
+            *self.updating.borrow_mut() = false;
+        }
+        self.update_keyframe_indicator(project, playhead_ns);
+    }
 }
 
 /// Build the inspector panel.
