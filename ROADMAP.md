@@ -210,6 +210,8 @@ Tracking docs:
 
 ### Keyframe Animation
 - [ ] Property keyframes with interpolation (position, scale, opacity, volume over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
+  - [x] Phase 1 foundation: linear keyframes for position/scale/opacity/volume across model, Inspector, Program Monitor preview, MCP, FCPXML round-trip, and export
+  - [ ] Additional interpolation modes (bezier/ease)
 - [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
 
 ### Program Monitor

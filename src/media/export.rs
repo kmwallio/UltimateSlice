@@ -1,4 +1,4 @@
-use crate::model::clip::{Clip, ClipKind};
+use crate::model::clip::{Clip, ClipKind, NumericKeyframe};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -238,13 +238,55 @@ pub fn export_project(
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
-        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
-        if clip.chroma_key_enabled || clip.bg_removal_enabled {
+        let has_transform_keyframes = has_transform_keyframes(clip);
+        let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
+        if has_transform_keyframes || has_opacity_keyframes {
+            let scale_expr = build_keyframed_property_expression(
+                &clip.scale_keyframes,
+                clip.scale,
+                0.1,
+                4.0,
+                "t",
+            );
+            let pos_x_expr = build_keyframed_property_expression(
+                &clip.position_x_keyframes,
+                clip.position_x,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let pos_y_expr = build_keyframed_property_expression(
+                &clip.position_y_keyframes,
+                clip.position_y,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let opacity_expr = build_keyframed_property_expression(
+                &clip.opacity_keyframes,
+                clip.opacity,
+                0.0,
+                1.0,
+                "T",
+            );
+            let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
+            filter.push_str(&format!(
+                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}\
+                 ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
+                 color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
+                 [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
+                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[pv{i}];",
+                project.frame_rate.numerator, project.frame_rate.denominator
+                , project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        } else if clip.chroma_key_enabled || clip.bg_removal_enabled {
+            let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             filter.push_str(&format!(
                 "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
+            let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             filter.push_str(&format!(
                 "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
@@ -337,13 +379,55 @@ pub fn export_project(
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let rotate_filter = build_rotation_filter(clip, true);
-        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
-        let opacity = clip.opacity.clamp(0.0, 1.0);
+        let has_transform_keyframes = has_transform_keyframes(clip);
+        let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
-        filter.push_str(&format!(
-            ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
-        ));
+        if has_transform_keyframes || has_opacity_keyframes {
+            let scale_expr = build_keyframed_property_expression(
+                &clip.scale_keyframes,
+                clip.scale,
+                0.1,
+                4.0,
+                "t",
+            );
+            let pos_x_expr = build_keyframed_property_expression(
+                &clip.position_x_keyframes,
+                clip.position_x,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let pos_y_expr = build_keyframed_property_expression(
+                &clip.position_y_keyframes,
+                clip.position_y,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let opacity_expr = build_keyframed_property_expression(
+                &clip.opacity_keyframes,
+                clip.opacity,
+                0.0,
+                1.0,
+                "T",
+            );
+            let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
+            filter.push_str(&format!(
+                ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                 ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
+                 color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
+                 [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
+                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[{ov_label}raw]"
+                , project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        } else {
+            let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
+            let opacity = clip.opacity.clamp(0.0, 1.0);
+            filter.push_str(&format!(
+                ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ));
+        }
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
         filter.push_str(&format!(
@@ -420,11 +504,11 @@ pub fn export_project(
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
-            let vol = clip.volume;
+            let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]"
+                ";[{i}:a]{areverse}{atempo}{volume_filter},{fade_filters}adelay={delay_ms}:all=1[{label}]"
             ));
             audio_labels.push(label);
         }
@@ -443,11 +527,11 @@ pub fn export_project(
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
-            let vol = clip.volume;
+            let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]"
+                ";[{in_idx}:a]{areverse}{atempo}{volume_filter},{fade_filters}adelay={delay_ms}:all=1[{label}]"
             ));
             audio_labels.push(label);
         }
@@ -459,11 +543,11 @@ pub fn export_project(
         let label = format!("aa{j}");
         let areverse = if clip.reverse { "areverse," } else { "" };
         let atempo = build_atempo(clip.speed);
-        let vol = clip.volume;
+        let volume_filter = build_volume_filter(clip);
         let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
         let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter},{fade_filters}adelay={delay_ms}:all=1[{label}]",
             audio_base + j
         ));
         audio_labels.push(label);
@@ -620,6 +704,79 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     } else {
         String::new()
     }
+}
+
+fn has_transform_keyframes(clip: &Clip) -> bool {
+    !clip.scale_keyframes.is_empty()
+        || !clip.position_x_keyframes.is_empty()
+        || !clip.position_y_keyframes.is_empty()
+}
+
+fn build_keyframed_property_expression(
+    keyframes: &[NumericKeyframe],
+    default_value: f64,
+    min_value: f64,
+    max_value: f64,
+    time_var: &str,
+) -> String {
+    let mut points: Vec<(u64, f64)> = keyframes
+        .iter()
+        .map(|kf| (kf.time_ns, kf.value.clamp(min_value, max_value)))
+        .collect();
+    points.sort_by_key(|(time_ns, _)| *time_ns);
+    let mut deduped: Vec<(u64, f64)> = Vec::with_capacity(points.len());
+    for (time_ns, value) in points {
+        if let Some(last) = deduped.last_mut() {
+            if last.0 == time_ns {
+                last.1 = value;
+                continue;
+            }
+        }
+        deduped.push((time_ns, value));
+    }
+
+    if deduped.is_empty() {
+        return format!("{:.10}", default_value.clamp(min_value, max_value));
+    }
+    if deduped.len() == 1 {
+        return format!("{:.10}", deduped[0].1);
+    }
+
+    let mut expr = format!(
+        "{:.10}",
+        deduped.last().map(|(_, v)| *v).unwrap_or(default_value)
+    );
+    for i in (1..deduped.len()).rev() {
+        let (left_ns, left_value) = deduped[i - 1];
+        let (right_ns, right_value) = deduped[i];
+        let left_s = left_ns as f64 / 1_000_000_000.0;
+        let right_s = right_ns as f64 / 1_000_000_000.0;
+        let span_s = (right_s - left_s).max(1e-9);
+        let segment_expr = format!(
+            "{left_value:.10}+({right_value:.10}-{left_value:.10})*(({time_var})-{left_s:.9})/{span_s:.9}"
+        );
+        expr = format!(
+            "if(lt({time_var},{right_s:.9}),{segment_expr},{expr})",
+            right_s = right_s
+        );
+    }
+    let (first_ns, first_value) = deduped[0];
+    let first_s = first_ns as f64 / 1_000_000_000.0;
+    format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
+}
+
+fn build_volume_filter(clip: &Clip) -> String {
+    if clip.volume_keyframes.is_empty() {
+        return format!("volume={:.4}", clip.volume.clamp(0.0, 4.0));
+    }
+    let expr = build_keyframed_property_expression(
+        &clip.volume_keyframes,
+        clip.volume as f64,
+        0.0,
+        4.0,
+        "t",
+    );
+    format!("volume='{expr}'")
 }
 
 fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
@@ -1138,12 +1295,13 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_crossfade_curve_name, build_audio_crossfade_filters, build_timing_filter,
+        audio_crossfade_curve_name, build_audio_crossfade_filters,
+        build_keyframed_property_expression, build_timing_filter, build_volume_filter,
         compute_clip_audio_fades, estimate_export_size_bytes, has_linked_audio_peer,
         parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
         ExportOptions, VideoCodec,
     };
-    use crate::model::clip::{Clip, ClipKind};
+    use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
     use crate::ui_state::CrossfadeCurve;
 
@@ -1357,5 +1515,48 @@ mod tests {
         assert!(filter.contains("trim=duration=0.040000"));
         assert!(filter.contains("tpad=stop_mode=clone:stop_duration=2.460000"));
         assert!(filter.contains("trim=duration=2.500000"));
+    }
+
+    #[test]
+    fn keyframed_expression_uses_first_value_before_first_point() {
+        let expr = build_keyframed_property_expression(
+            &[
+                NumericKeyframe {
+                    time_ns: 500_000_000,
+                    value: 0.5,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+                NumericKeyframe {
+                    time_ns: 1_000_000_000,
+                    value: 1.0,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+            ],
+            0.25,
+            0.0,
+            1.0,
+            "t",
+        );
+        assert!(expr.starts_with("if(lt(t,0.500000000),0.5000000000,"));
+    }
+
+    #[test]
+    fn volume_filter_uses_expression_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.volume = 0.8;
+        clip.volume_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.3,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.9,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let filter = build_volume_filter(&clip);
+        assert!(filter.starts_with("volume='if(lt(t,"));
     }
 }

@@ -1,4 +1,5 @@
 use crate::media::player::PlayerState;
+use crate::model::clip::{Clip as ModelClip, NumericKeyframe};
 use crate::ui_state::{CrossfadeCurve, PlaybackPriority};
 /// A "program monitor" player that composites the assembled timeline.
 ///
@@ -201,6 +202,7 @@ pub struct ProgramClip {
     pub sharpness: f64,
     /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     pub volume: f64,
+    pub volume_keyframes: Vec<NumericKeyframe>,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     #[allow(dead_code)]
     pub pan: f64,
@@ -242,12 +244,16 @@ pub struct ProgramClip {
     pub lut_path: Option<String>,
     /// Scale multiplier: 1.0 = fill frame, >1.0 = zoom in, <1.0 = shrink with black borders.
     pub scale: f64,
+    pub scale_keyframes: Vec<NumericKeyframe>,
     /// Opacity multiplier for compositing: 0.0 = transparent, 1.0 = opaque.
     pub opacity: f64,
+    pub opacity_keyframes: Vec<NumericKeyframe>,
     /// Horizontal position offset: −1.0 (left) to 1.0 (right). Default 0.0.
     pub position_x: f64,
+    pub position_x_keyframes: Vec<NumericKeyframe>,
     /// Vertical position offset: −1.0 (top) to 1.0 (bottom). Default 0.0.
     pub position_y: f64,
+    pub position_y_keyframes: Vec<NumericKeyframe>,
     /// Shadow grading: −1.0 (crush) to 1.0 (lift). Default 0.0.
     pub shadows: f64,
     /// Midtone grading: −1.0 (darken) to 1.0 (brighten). Default 0.0.
@@ -273,6 +279,52 @@ pub struct ProgramClip {
 impl ProgramClip {
     pub fn source_duration_ns(&self) -> u64 {
         self.source_out_ns.saturating_sub(self.source_in_ns)
+    }
+
+    pub fn local_timeline_position_ns(&self, timeline_pos_ns: u64) -> u64 {
+        timeline_pos_ns
+            .saturating_sub(self.timeline_start_ns)
+            .min(self.duration_ns())
+    }
+
+    pub fn scale_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.scale_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.scale,
+        )
+    }
+
+    pub fn opacity_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.opacity_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.opacity,
+        )
+    }
+
+    pub fn position_x_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.position_x_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.position_x,
+        )
+    }
+
+    pub fn position_y_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.position_y_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.position_y,
+        )
+    }
+
+    pub fn volume_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.volume_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.volume,
+        )
     }
 
     fn playback_duration_ns(&self) -> u64 {
@@ -1340,6 +1392,21 @@ impl ProgramPlayer {
         self.frame_duration_ns.hash(&mut hasher);
         for idx in active {
             if let Some(c) = self.clips.get(idx) {
+                c.scale_at_timeline_ns(frame_pos_ns)
+                    .to_bits()
+                    .hash(&mut hasher);
+                c.opacity_at_timeline_ns(frame_pos_ns)
+                    .to_bits()
+                    .hash(&mut hasher);
+                c.position_x_at_timeline_ns(frame_pos_ns)
+                    .to_bits()
+                    .hash(&mut hasher);
+                c.position_y_at_timeline_ns(frame_pos_ns)
+                    .to_bits()
+                    .hash(&mut hasher);
+                c.volume_at_timeline_ns(frame_pos_ns)
+                    .to_bits()
+                    .hash(&mut hasher);
                 c.temperature.to_bits().hash(&mut hasher);
                 c.tint.to_bits().hash(&mut hasher);
                 c.transition_after.hash(&mut hasher);
@@ -1805,6 +1872,7 @@ impl ProgramPlayer {
             fast_path = true;
             self.current_idx = self.clip_at(timeline_pos_ns);
             let needs_async = self.seek_slots_in_place(timeline_pos_ns, arrival_wait_budget_ms);
+            self.apply_keyframed_video_slot_properties(timeline_pos_ns);
             self.apply_transition_effects(timeline_pos_ns);
             self.sync_audio_to(timeline_pos_ns);
             if let Some(signature) = short_frame_signature {
@@ -1832,6 +1900,7 @@ impl ProgramPlayer {
         // Full rebuild: needed when the set of active clips has changed (e.g.
         // crossing a clip boundary), on cold start, or when resuming from playing.
         self.rebuild_pipeline_at(timeline_pos_ns);
+        self.apply_keyframed_video_slot_properties(timeline_pos_ns);
         self.apply_transition_effects(timeline_pos_ns);
         // Sync audio-only pipeline
         self.sync_audio_to(timeline_pos_ns);
@@ -1911,6 +1980,8 @@ impl ProgramPlayer {
                 self.frame_duration_ns,
             );
         }
+        self.apply_keyframed_video_slot_properties(pos);
+        self.apply_transition_effects(pos);
         let _ = self.pipeline.set_state(gst::State::Playing);
         self.sync_audio_to(pos);
         match self.audio_current_source {
@@ -2198,7 +2269,9 @@ impl ProgramPlayer {
         if self.reverse_video_ducked_clip_idx == Some(clip_idx) {
             return 0.0;
         }
-        let base = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+        let base = clip
+            .volume_at_timeline_ns(timeline_pos_ns)
+            .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
         (base * self.clip_crossfade_gain(&self.clips, clip_idx, timeline_pos_ns))
             .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN)
     }
@@ -2213,7 +2286,9 @@ impl ProgramPlayer {
                 let Some(clip) = self.audio_clips.get(idx) else {
                     return 0.0;
                 };
-                let base = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+                let base = clip
+                    .volume_at_timeline_ns(timeline_pos_ns)
+                    .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
                 (base * self.clip_crossfade_gain(&self.audio_clips, idx, timeline_pos_ns))
                     .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN)
             }
@@ -2221,7 +2296,9 @@ impl ProgramPlayer {
                 let Some(clip) = self.clips.get(idx) else {
                     return 0.0;
                 };
-                let base = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+                let base = clip
+                    .volume_at_timeline_ns(timeline_pos_ns)
+                    .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
                 (base * self.clip_crossfade_gain(&self.clips, idx, timeline_pos_ns))
                     .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN)
             }
@@ -2393,7 +2470,14 @@ impl ProgramPlayer {
                 // path first: hide departing clips, add entering clips with
                 // pad.set_offset() for running-time alignment.  Fall back to full
                 // rebuild on failure.
-                let prefer_prerender_boundary = self.background_prerender && desired.len() >= 3;
+                let prefer_prerender_boundary = self.background_prerender
+                    && desired.len() >= 3
+                    && !desired.iter().any(|&idx| {
+                        self.clips
+                            .get(idx)
+                            .map(Self::clip_has_phase1_keyframes)
+                            .unwrap_or(false)
+                    });
                 if prefer_prerender_boundary && self.realtime_preview {
                     log::info!(
                         "poll: skipping realtime boundary path at {} to allow background prerender usage",
@@ -2443,6 +2527,7 @@ impl ProgramPlayer {
         // Update current_idx to highest-priority active clip.
         self.current_idx = self.clip_at(new_pos);
 
+        self.apply_keyframed_video_slot_properties(new_pos);
         // Animate transition effects (alpha, crop) for active transition overlaps.
         self.apply_transition_effects(new_pos);
 
@@ -2954,6 +3039,14 @@ impl ProgramPlayer {
 
     // ── Private helpers ────────────────────────────────────────────────────
 
+    fn clip_has_phase1_keyframes(clip: &ProgramClip) -> bool {
+        !clip.scale_keyframes.is_empty()
+            || !clip.opacity_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
+            || !clip.volume_keyframes.is_empty()
+    }
+
     /// Return the highest-track-index clip active at this position.
     fn clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
         let exact = self
@@ -3113,6 +3206,26 @@ impl ProgramPlayer {
             .unwrap_or(0)
     }
 
+    fn apply_keyframed_video_slot_properties(&self, timeline_pos: u64) {
+        let (proc_w, proc_h) = self.preview_processing_dimensions();
+        for slot in &self.slots {
+            if slot.hidden || slot.is_prerender_slot {
+                continue;
+            }
+            let Some(clip) = self.clips.get(slot.clip_idx) else {
+                continue;
+            };
+            let scale = clip.scale_at_timeline_ns(timeline_pos);
+            let pos_x = clip.position_x_at_timeline_ns(timeline_pos);
+            let pos_y = clip.position_y_at_timeline_ns(timeline_pos);
+            if let Some(ref pad) = slot.compositor_pad {
+                let alpha = clip.opacity_at_timeline_ns(timeline_pos).clamp(0.0, 1.0);
+                pad.set_property("alpha", alpha);
+                Self::apply_zoom_to_slot(slot, pad, scale, pos_x, pos_y, proc_w, proc_h);
+            }
+        }
+    }
+
     /// Apply transition visual effects (alpha, crop) to all visible slots
     /// based on the current timeline position.
     fn apply_transition_effects(&self, timeline_pos: u64) {
@@ -3124,7 +3237,7 @@ impl ProgramPlayer {
             let clip = &self.clips[slot.clip_idx];
             let tstate = self.compute_transition_state(slot.clip_idx, timeline_pos);
             if let Some(ref pad) = slot.compositor_pad {
-                let base_alpha = clip.opacity.clamp(0.0, 1.0);
+                let base_alpha = clip.opacity_at_timeline_ns(timeline_pos).clamp(0.0, 1.0);
                 match &tstate {
                     Some(ts) => {
                         let t = ts.progress;
@@ -3409,6 +3522,15 @@ impl ProgramPlayer {
 
     fn prerender_signature_for_active(&self, active: &[usize]) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let hash_keyframes = |hasher: &mut std::collections::hash_map::DefaultHasher,
+                              kfs: &[NumericKeyframe]| {
+            kfs.len().hash(hasher);
+            for kf in kfs {
+                kf.time_ns.hash(hasher);
+                kf.value.to_bits().hash(hasher);
+                kf.interpolation.hash(hasher);
+            }
+        };
         BACKGROUND_PRERENDER_CACHE_VERSION.hash(&mut hasher);
         self.project_width.hash(&mut hasher);
         self.project_height.hash(&mut hasher);
@@ -3437,9 +3559,15 @@ impl ProgramPlayer {
                 c.flip_h.hash(&mut hasher);
                 c.flip_v.hash(&mut hasher);
                 c.scale.to_bits().hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.scale_keyframes);
                 c.position_x.to_bits().hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.position_x_keyframes);
                 c.position_y.to_bits().hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.position_y_keyframes);
                 c.opacity.to_bits().hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.opacity_keyframes);
+                c.volume.to_bits().hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.volume_keyframes);
                 c.brightness.to_bits().hash(&mut hasher);
                 c.contrast.to_bits().hash(&mut hasher);
                 c.saturation.to_bits().hash(&mut hasher);
@@ -3465,7 +3593,7 @@ impl ProgramPlayer {
         if active.iter().any(|&idx| {
             self.clips
                 .get(idx)
-                .map(|c| c.is_freeze_frame())
+                .map(|c| c.is_freeze_frame() || Self::clip_has_phase1_keyframes(c))
                 .unwrap_or(false)
         }) {
             return;
@@ -4965,6 +5093,7 @@ impl ProgramPlayer {
 
         self.current_idx = desired.last().copied();
         self.slot_queue_drop_late_active = false;
+        self.apply_keyframed_video_slot_properties(timeline_pos);
         self.apply_transition_effects(timeline_pos);
         let elapsed_ms = rebuild_started.elapsed().as_millis() as u64;
         self.record_rebuild_duration_ms(elapsed_ms);
@@ -6468,7 +6597,11 @@ impl ProgramPlayer {
             }
         };
         comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
-        comp_pad.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
+        comp_pad.set_property(
+            "alpha",
+            clip.opacity_at_timeline_ns(self.timeline_pos_ns)
+                .clamp(0.0, 1.0),
+        );
 
         // Link effects_bin → queue → compositor pad.
         let slot_queue = gst::ElementFactory::make("queue")
@@ -6696,9 +6829,9 @@ impl ProgramPlayer {
         Self::apply_zoom_to_slot(
             &slot_ref_for_transform,
             &comp_pad,
-            clip.scale,
-            clip.position_x,
-            clip.position_y,
+            clip.scale_at_timeline_ns(self.timeline_pos_ns),
+            clip.position_x_at_timeline_ns(self.timeline_pos_ns),
+            clip.position_y_at_timeline_ns(self.timeline_pos_ns),
             proc_w,
             proc_h,
         );
@@ -7238,14 +7371,18 @@ impl ProgramPlayer {
 
         // Compositor pad: opacity + zoom/position
         if let Some(ref pad) = slot.compositor_pad {
-            pad.set_property("alpha", clip.opacity.clamp(0.0, 1.0));
+            pad.set_property(
+                "alpha",
+                clip.opacity_at_timeline_ns(self.timeline_pos_ns)
+                    .clamp(0.0, 1.0),
+            );
             let (proc_w, proc_h) = self.preview_processing_dimensions();
             Self::apply_zoom_to_slot(
                 slot,
                 pad,
-                clip.scale,
-                clip.position_x,
-                clip.position_y,
+                clip.scale_at_timeline_ns(self.timeline_pos_ns),
+                clip.position_x_at_timeline_ns(self.timeline_pos_ns),
+                clip.position_y_at_timeline_ns(self.timeline_pos_ns),
                 proc_w,
                 proc_h,
             );
@@ -7367,6 +7504,14 @@ impl ProgramPlayer {
         if !self.background_prerender || active.len() < 3 {
             return false;
         }
+        if active.iter().any(|&idx| {
+            self.clips
+                .get(idx)
+                .map(Self::clip_has_phase1_keyframes)
+                .unwrap_or(false)
+        }) {
+            return false;
+        }
         self.poll_background_prerender_results();
         let signature = self.prerender_signature_for_active(active);
         let Some(segment) = self.find_prerender_segment_for(timeline_pos, signature) else {
@@ -7465,6 +7610,12 @@ impl ProgramPlayer {
             let desired = self.clips_active_at(timeline_pos);
             let bypass_continue_for_prerender = if self.background_prerender
                 && desired.len() >= 3
+                && !desired.iter().any(|&idx| {
+                    self.clips
+                        .get(idx)
+                        .map(Self::clip_has_phase1_keyframes)
+                        .unwrap_or(false)
+                })
                 && !self.slots.iter().any(|s| s.is_prerender_slot)
             {
                 let signature = self.prerender_signature_for_active(&desired);
@@ -8092,7 +8243,9 @@ impl ProgramPlayer {
 
 fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
     clip.opacity >= 0.999
+        && clip.opacity_keyframes.is_empty()
         && clip.scale >= 1.0
+        && clip.scale_keyframes.is_empty()
         && clip.crop_left == 0
         && clip.crop_right == 0
         && clip.crop_top == 0
@@ -8100,6 +8253,8 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
         && clip.rotate.rem_euclid(360) == 0
         && !clip.flip_h
         && !clip.flip_v
+        && clip.position_x_keyframes.is_empty()
+        && clip.position_y_keyframes.is_empty()
         && clip.position_x.abs() < 0.000_001
         && clip.position_y.abs() < 0.000_001
 }
@@ -8110,6 +8265,7 @@ mod tests {
         clip_can_fully_occlude, CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame,
         ShortFrameCache, VideoSlot,
     };
+    use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
     use gstreamer as gst;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
@@ -8129,6 +8285,7 @@ mod tests {
             denoise: 0.0,
             sharpness: 0.0,
             volume: 1.0,
+            volume_keyframes: Vec::new(),
             pan: 0.0,
             crop_left: 0,
             crop_right: 0,
@@ -8153,9 +8310,13 @@ mod tests {
             transition_after_ns: 0,
             lut_path: None,
             scale: 1.0,
+            scale_keyframes: Vec::new(),
             opacity: 1.0,
+            opacity_keyframes: Vec::new(),
             position_x: 0.0,
+            position_x_keyframes: Vec::new(),
             position_y: 0.0,
+            position_y_keyframes: Vec::new(),
             shadows: 0.0,
             midtones: 0.0,
             highlights: 0.0,
@@ -8251,6 +8412,99 @@ mod tests {
         clip.rotate = 0;
         clip.flip_h = true;
         assert!(!clip_can_fully_occlude(&clip));
+    }
+
+    #[test]
+    fn clip_with_keyframed_position_cannot_occlude() {
+        let mut clip = make_clip();
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        assert!(!clip_can_fully_occlude(&clip));
+    }
+
+    #[test]
+    fn program_clip_keyframed_volume_uses_clip_timeline_space() {
+        let mut clip = make_clip();
+        clip.timeline_start_ns = 2_000_000_000;
+        clip.volume_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let vol = clip.volume_at_timeline_ns(2_500_000_000);
+        assert!((vol - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn three_keyframe_position_x_interpolates_all_segments() {
+        // Matches project.uspxml C0378 clip: offset=8s, duration=6.25s,
+        // 3 position_x keyframes at 0.618s, 2.130s, 4.709s local time.
+        let mut clip = make_clip();
+        clip.source_in_ns = 0;
+        clip.source_out_ns = 6_250_000_000;
+        clip.timeline_start_ns = 8_000_000_000;
+        clip.position_x = 0.0;
+        clip.position_x_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 617_642_015,
+                value: -0.82,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 2_129_974_732,
+                value: -0.82,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 4_709_284_968,
+                value: 0.67,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+
+        // Before first keyframe: hold first keyframe value
+        let v = clip.position_x_at_timeline_ns(8_000_000_000); // local=0
+        assert!((v - (-0.82)).abs() < 1e-6, "before first kf: {v}");
+
+        // At first keyframe
+        let v = clip.position_x_at_timeline_ns(8_617_642_015); // local=0.618s
+        assert!((v - (-0.82)).abs() < 1e-6, "at kf1: {v}");
+
+        // Between kf1 and kf2 (same value, should stay at -0.82)
+        let v = clip.position_x_at_timeline_ns(9_500_000_000); // local=1.5s
+        assert!((v - (-0.82)).abs() < 1e-6, "between kf1-kf2: {v}");
+
+        // Between kf2 and kf3 (should interpolate -0.82 → 0.67)
+        let mid_local = (2_129_974_732 + 4_709_284_968) / 2; // ~3.42s
+        let v = clip.position_x_at_timeline_ns(8_000_000_000 + mid_local);
+        let expected = (-0.82 + 0.67) / 2.0;
+        assert!(
+            (v - expected).abs() < 0.01,
+            "midpoint kf2-kf3: got {v}, expected ~{expected}"
+        );
+
+        // At third keyframe
+        let v = clip.position_x_at_timeline_ns(8_000_000_000 + 4_709_284_968);
+        assert!((v - 0.67).abs() < 1e-6, "at kf3: {v}");
+
+        // After last keyframe: hold last value
+        let v = clip.position_x_at_timeline_ns(14_000_000_000); // local=6s
+        assert!((v - 0.67).abs() < 1e-6, "after kf3: {v}");
     }
 
     #[test]

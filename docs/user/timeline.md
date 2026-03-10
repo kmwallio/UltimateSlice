@@ -264,6 +264,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
+- Clips with phase-1 keyframes show color-coded keyframe ticks on the clip body (Scale, Opacity, Position X, Position Y, Volume) so animation timing is visible directly in the timeline.
 - Clips can use semantic color labels (set in the Inspector) for quick visual categorization.
 - Selected clips have a yellow highlight border.
 - Adjacent join-safe through-edits (same source with contiguous source/timeline ranges, no boundary transition, and compatible clip metadata/effects) are marked with a subtle dotted line at the cut on the track row.

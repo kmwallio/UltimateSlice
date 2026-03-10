@@ -652,6 +652,33 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_keyframe",
+            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, volume) for a clip at a timeline position.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "volume"], "description": "Animated property to keyframe." },
+                    "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
+                    "value": { "type": "number", "description": "Property value at this keyframe time." }
+                },
+                "required": ["clip_id", "property", "value"]
+            }
+        },
+        {
+            "name": "remove_clip_keyframe",
+            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, volume) at a timeline position for a clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "volume"], "description": "Animated property keyframe lane." },
+                    "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." }
+                },
+                "required": ["clip_id", "property"]
+            }
+        },
+        {
             "name": "create_project",
             "description": "Create a new empty project, discarding the current one. Resets the timeline to a blank state.",
             "inputSchema": {
@@ -1094,6 +1121,19 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "set_clip_opacity" => McpCommand::SetClipOpacity {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             opacity: args["opacity"].as_f64().unwrap_or(1.0),
+            reply: tx,
+        },
+        "set_clip_keyframe" => McpCommand::SetClipKeyframe {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            property: args["property"].as_str().unwrap_or("").to_string(),
+            timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
+            value: args["value"].as_f64().unwrap_or(0.0),
+            reply: tx,
+        },
+        "remove_clip_keyframe" => McpCommand::RemoveClipKeyframe {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            property: args["property"].as_str().unwrap_or("").to_string(),
+            timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
             reply: tx,
         },
 

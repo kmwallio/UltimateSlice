@@ -127,6 +127,15 @@ Clips with a speed multiplier are exported correctly:
 
 For reversed clips, export applies `reverse`/`areverse` before speed scaling so both video and audio are rendered backward.
 
+## Keyframed Properties (Phase 1)
+
+Export now evaluates phase-1 clip keyframes with **linear interpolation**:
+
+- **Video:** `scale`, `position_x`, `position_y`, and `opacity`
+- **Audio:** `volume`
+
+Keyframes are evaluated in clip-local timeline time and rendered directly into ffmpeg filter chains so exported animation follows the same keyframe timing model used by Program Monitor preview.
+
 ## Freeze-Frame Clips
 
 - Freeze-frame clips export as video-only holds: ffmpeg samples the resolved freeze source frame and clones it for the resolved hold duration.

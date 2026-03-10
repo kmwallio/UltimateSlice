@@ -213,6 +213,19 @@ pub enum McpCommand {
         opacity: f64,
         reply: SyncSender<Value>,
     },
+    SetClipKeyframe {
+        clip_id: String,
+        property: String,
+        timeline_pos_ns: Option<u64>,
+        value: f64,
+        reply: SyncSender<Value>,
+    },
+    RemoveClipKeyframe {
+        clip_id: String,
+        property: String,
+        timeline_pos_ns: Option<u64>,
+        reply: SyncSender<Value>,
+    },
     SlipClip {
         clip_id: String,
         delta_ns: i64,

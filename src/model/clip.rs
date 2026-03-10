@@ -29,6 +29,54 @@ impl Default for ClipColorLabel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyframeInterpolation {
+    #[default]
+    Linear,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NumericKeyframe {
+    pub time_ns: u64,
+    pub value: f64,
+    #[serde(default)]
+    pub interpolation: KeyframeInterpolation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase1KeyframeProperty {
+    PositionX,
+    PositionY,
+    Scale,
+    Opacity,
+    Volume,
+}
+
+impl Phase1KeyframeProperty {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PositionX => "position_x",
+            Self::PositionY => "position_y",
+            Self::Scale => "scale",
+            Self::Opacity => "opacity",
+            Self::Volume => "volume",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "position_x" | "position-x" => Some(Self::PositionX),
+            "position_y" | "position-y" => Some(Self::PositionY),
+            "scale" => Some(Self::Scale),
+            "opacity" => Some(Self::Opacity),
+            "volume" => Some(Self::Volume),
+            _ => None,
+        }
+    }
+}
+
 fn default_contrast() -> f32 {
     1.0
 }
@@ -118,6 +166,9 @@ pub struct Clip {
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Optional volume keyframes over clip-local timeline.
+    #[serde(default)]
+    pub volume_keyframes: Vec<NumericKeyframe>,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     #[serde(default)]
     pub pan: f32,
@@ -165,16 +216,28 @@ pub struct Clip {
     /// 0.5 = half-size with black borders. Range 0.1–4.0, default 1.0.
     #[serde(default = "default_scale")]
     pub scale: f64,
+    /// Optional scale keyframes over clip-local timeline.
+    #[serde(default)]
+    pub scale_keyframes: Vec<NumericKeyframe>,
     /// Clip opacity for compositing: 0.0 = fully transparent, 1.0 = fully opaque.
     #[serde(default = "default_opacity")]
     pub opacity: f64,
+    /// Optional opacity keyframes over clip-local timeline.
+    #[serde(default)]
+    pub opacity_keyframes: Vec<NumericKeyframe>,
     /// Horizontal position offset: −1.0 (clip anchored to left edge) to 1.0 (right edge).
     /// Meaningful when scale ≠ 1.0. Default 0.0 (centered).
     #[serde(default)]
     pub position_x: f64,
+    /// Optional horizontal position keyframes over clip-local timeline.
+    #[serde(default)]
+    pub position_x_keyframes: Vec<NumericKeyframe>,
     /// Vertical position offset: −1.0 (top edge) to 1.0 (bottom edge). Default 0.0 (centered).
     #[serde(default)]
     pub position_y: f64,
+    /// Optional vertical position keyframes over clip-local timeline.
+    #[serde(default)]
+    pub position_y_keyframes: Vec<NumericKeyframe>,
     /// Shadow grading: −1.0 (crush shadows) to 1.0 (lift shadows). Default 0.0.
     #[serde(default)]
     pub shadows: f32,
@@ -279,6 +342,7 @@ impl Clip {
             denoise: 0.0,
             sharpness: 0.0,
             volume: 1.0,
+            volume_keyframes: Vec::new(),
             pan: 0.0,
             speed: 1.0,
             crop_left: 0,
@@ -297,9 +361,13 @@ impl Clip {
             transition_after_ns: 0,
             lut_path: None,
             scale: 1.0,
+            scale_keyframes: Vec::new(),
             opacity: 1.0,
+            opacity_keyframes: Vec::new(),
             position_x: 0.0,
+            position_x_keyframes: Vec::new(),
             position_y: 0.0,
+            position_y_keyframes: Vec::new(),
             shadows: 0.0,
             midtones: 0.0,
             highlights: 0.0,
@@ -328,6 +396,135 @@ impl Clip {
     /// Raw source material duration (source_out − source_in), unaffected by speed.
     pub fn source_duration(&self) -> u64 {
         self.source_out.saturating_sub(self.source_in)
+    }
+
+    pub fn evaluate_keyframed_value(
+        keyframes: &[NumericKeyframe],
+        local_timeline_ns: u64,
+        default_value: f64,
+    ) -> f64 {
+        if keyframes.is_empty() {
+            return default_value;
+        }
+        let mut sorted: Vec<&NumericKeyframe> = keyframes.iter().collect();
+        sorted.sort_by_key(|kf| kf.time_ns);
+        let first = sorted[0];
+        if local_timeline_ns < first.time_ns {
+            return first.value;
+        }
+        let mut prev = first;
+        for next in sorted.iter().skip(1) {
+            if local_timeline_ns < next.time_ns {
+                let span = next.time_ns.saturating_sub(prev.time_ns);
+                if span == 0 {
+                    return next.value;
+                }
+                let t = (local_timeline_ns.saturating_sub(prev.time_ns)) as f64 / span as f64;
+                return prev.value + (next.value - prev.value) * t;
+            }
+            prev = next;
+        }
+        prev.value
+    }
+
+    pub fn local_timeline_position_ns(&self, timeline_pos_ns: u64) -> u64 {
+        timeline_pos_ns
+            .saturating_sub(self.timeline_start)
+            .min(self.duration())
+    }
+
+    pub fn keyframes_for_phase1_property(
+        &self,
+        property: Phase1KeyframeProperty,
+    ) -> &[NumericKeyframe] {
+        match property {
+            Phase1KeyframeProperty::PositionX => &self.position_x_keyframes,
+            Phase1KeyframeProperty::PositionY => &self.position_y_keyframes,
+            Phase1KeyframeProperty::Scale => &self.scale_keyframes,
+            Phase1KeyframeProperty::Opacity => &self.opacity_keyframes,
+            Phase1KeyframeProperty::Volume => &self.volume_keyframes,
+        }
+    }
+
+    pub fn keyframes_for_phase1_property_mut(
+        &mut self,
+        property: Phase1KeyframeProperty,
+    ) -> &mut Vec<NumericKeyframe> {
+        match property {
+            Phase1KeyframeProperty::PositionX => &mut self.position_x_keyframes,
+            Phase1KeyframeProperty::PositionY => &mut self.position_y_keyframes,
+            Phase1KeyframeProperty::Scale => &mut self.scale_keyframes,
+            Phase1KeyframeProperty::Opacity => &mut self.opacity_keyframes,
+            Phase1KeyframeProperty::Volume => &mut self.volume_keyframes,
+        }
+    }
+
+    pub fn default_value_for_phase1_property(&self, property: Phase1KeyframeProperty) -> f64 {
+        match property {
+            Phase1KeyframeProperty::PositionX => self.position_x,
+            Phase1KeyframeProperty::PositionY => self.position_y,
+            Phase1KeyframeProperty::Scale => self.scale,
+            Phase1KeyframeProperty::Opacity => self.opacity,
+            Phase1KeyframeProperty::Volume => self.volume as f64,
+        }
+    }
+
+    pub fn clamp_phase1_property_value(property: Phase1KeyframeProperty, value: f64) -> f64 {
+        match property {
+            Phase1KeyframeProperty::PositionX | Phase1KeyframeProperty::PositionY => {
+                value.clamp(-1.0, 1.0)
+            }
+            Phase1KeyframeProperty::Scale => value.clamp(0.1, 4.0),
+            Phase1KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
+            Phase1KeyframeProperty::Volume => value.clamp(0.0, 4.0),
+        }
+    }
+
+    pub fn value_for_phase1_property_at_timeline_ns(
+        &self,
+        property: Phase1KeyframeProperty,
+        timeline_pos_ns: u64,
+    ) -> f64 {
+        Self::evaluate_keyframed_value(
+            self.keyframes_for_phase1_property(property),
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.default_value_for_phase1_property(property),
+        )
+    }
+
+    pub fn upsert_phase1_keyframe_at_timeline_ns(
+        &mut self,
+        property: Phase1KeyframeProperty,
+        timeline_pos_ns: u64,
+        value: f64,
+    ) -> u64 {
+        let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        let clamped_value = Self::clamp_phase1_property_value(property, value);
+        let keyframes = self.keyframes_for_phase1_property_mut(property);
+        if let Some(existing) = keyframes.iter_mut().find(|kf| kf.time_ns == local_time_ns) {
+            existing.value = clamped_value;
+            existing.interpolation = KeyframeInterpolation::Linear;
+        } else {
+            keyframes.push(NumericKeyframe {
+                time_ns: local_time_ns,
+                value: clamped_value,
+                interpolation: KeyframeInterpolation::Linear,
+            });
+            keyframes.sort_by_key(|kf| kf.time_ns);
+        }
+        local_time_ns
+    }
+
+    pub fn remove_phase1_keyframe_at_timeline_ns(
+        &mut self,
+        property: Phase1KeyframeProperty,
+        timeline_pos_ns: u64,
+    ) -> bool {
+        let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        let keyframes = self.keyframes_for_phase1_property_mut(property);
+        let before = keyframes.len();
+        keyframes.retain(|kf| kf.time_ns != local_time_ns);
+        keyframes.len() != before
     }
 
     pub fn source_timecode_start_ns(&self) -> Option<u64> {
@@ -417,6 +614,7 @@ mod tests {
         assert_eq!(clip.saturation, 1.0);
         assert_eq!(clip.color_label, ClipColorLabel::None);
         assert_eq!(clip.volume, 1.0);
+        assert!(clip.volume_keyframes.is_empty());
         assert_eq!(clip.speed, 1.0);
         assert!(!clip.reverse);
         assert!(!clip.chroma_key_enabled);
@@ -424,7 +622,11 @@ mod tests {
         assert!((clip.chroma_key_tolerance - 0.3).abs() < f32::EPSILON);
         assert!((clip.chroma_key_softness - 0.1).abs() < f32::EPSILON);
         assert_eq!(clip.scale, 1.0);
+        assert!(clip.scale_keyframes.is_empty());
         assert_eq!(clip.opacity, 1.0);
+        assert!(clip.opacity_keyframes.is_empty());
+        assert!(clip.position_x_keyframes.is_empty());
+        assert!(clip.position_y_keyframes.is_empty());
         assert!(!clip.flip_h);
         assert!(!clip.flip_v);
         assert!(!clip.freeze_frame);
@@ -600,6 +802,102 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_keyframed_value_linear() {
+        let keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let v = Clip::evaluate_keyframed_value(&keyframes, 500_000_000, 9.0);
+        assert!((v - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_evaluate_keyframed_value_clamps_before_after_range() {
+        let keyframes = vec![
+            NumericKeyframe {
+                time_ns: 100,
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 300,
+                value: 6.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        assert!((Clip::evaluate_keyframed_value(&keyframes, 50, 9.0) - 2.0).abs() < 1e-9);
+        assert!((Clip::evaluate_keyframed_value(&keyframes, 500, 9.0) - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_evaluate_keyframed_value_duplicate_time_last_wins() {
+        let keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 0,
+                value: 3.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 10,
+                value: 5.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        assert!((Clip::evaluate_keyframed_value(&keyframes, 0, 0.0) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_keyframed_accessors_use_clip_timeline_space() {
+        let mut clip = make_test_clip(10_000_000_000, 2_000_000_000);
+        clip.position_x_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let local_ns = 2_500_000_000_u64.saturating_sub(clip.timeline_start);
+        let v =
+            Clip::evaluate_keyframed_value(&clip.position_x_keyframes, local_ns, clip.position_x);
+        assert!((v - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_upsert_phase1_keyframe_overwrites_at_same_time() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.upsert_phase1_keyframe_at_timeline_ns(Phase1KeyframeProperty::Opacity, 2, 0.25);
+        clip.upsert_phase1_keyframe_at_timeline_ns(Phase1KeyframeProperty::Opacity, 2, 0.8);
+        assert_eq!(clip.opacity_keyframes.len(), 1);
+        assert!((clip.opacity_keyframes[0].value - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_remove_phase1_keyframe_at_timeline_time() {
+        let mut clip = make_test_clip(10_000_000_000, 1_000);
+        clip.upsert_phase1_keyframe_at_timeline_ns(Phase1KeyframeProperty::Scale, 1_250, 2.0);
+        assert!(clip.remove_phase1_keyframe_at_timeline_ns(Phase1KeyframeProperty::Scale, 1_250));
+        assert!(clip.scale_keyframes.is_empty());
+    }
+
+    #[test]
     fn test_clip_deserialize_backwards_compatible_freeze_frame_defaults() {
         let json = r#"{
             "id":"clip-1",
@@ -615,5 +913,10 @@ mod tests {
         assert_eq!(clip.freeze_frame_source_ns, None);
         assert_eq!(clip.freeze_frame_hold_duration_ns, None);
         assert_eq!(clip.color_label, ClipColorLabel::None);
+        assert!(clip.scale_keyframes.is_empty());
+        assert!(clip.opacity_keyframes.is_empty());
+        assert!(clip.position_x_keyframes.is_empty());
+        assert!(clip.position_y_keyframes.is_empty());
+        assert!(clip.volume_keyframes.is_empty());
     }
 }

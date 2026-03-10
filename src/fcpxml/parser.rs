@@ -1,10 +1,12 @@
-use crate::model::clip::{Clip, ClipColorLabel, ClipKind};
+use crate::model::clip::{Clip, ClipColorLabel, ClipKind, NumericKeyframe};
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
 use anyhow::{anyhow, bail, Result};
+use quick_xml::escape::unescape;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use quick_xml::Writer;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
@@ -64,7 +66,8 @@ pub fn parse_fcpxml(xml: &str) -> Result<Project> {
 
 /// Parse an FCPXML string into a `Project` with source file path context.
 pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<Project> {
-    let mut reader = Reader::from_str(xml);
+    let sanitized_xml = sanitize_unescaped_keyframe_attr_json(xml);
+    let mut reader = Reader::from_str(sanitized_xml.as_ref());
     reader.config_mut().trim_text(true);
 
     let mut assets: HashMap<String, Asset> = HashMap::new();
@@ -752,6 +755,10 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:volume") {
                 clip.volume = v.parse().unwrap_or(1.0);
             }
+            if let Some(v) = attrs.get("us:volume-keyframes") {
+                clip.volume_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:pan") {
                 clip.pan = v.parse().unwrap_or(0.0);
             }
@@ -779,14 +786,30 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:scale") {
                 clip.scale = v.parse().unwrap_or(1.0);
             }
+            if let Some(v) = attrs.get("us:scale-keyframes") {
+                clip.scale_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:opacity") {
                 clip.opacity = v.parse().unwrap_or(1.0);
+            }
+            if let Some(v) = attrs.get("us:opacity-keyframes") {
+                clip.opacity_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:position-x") {
                 clip.position_x = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:position-x-keyframes") {
+                clip.position_x_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:position-y") {
                 clip.position_y = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:position-y-keyframes") {
+                clip.position_y_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:title-text") {
                 clip.title_text = v.clone();
@@ -1076,6 +1099,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:denoise"
             | "us:sharpness"
             | "us:volume"
+            | "us:volume-keyframes"
             | "us:pan"
             | "us:crop-left"
             | "us:crop-right"
@@ -1085,9 +1109,13 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:flip-h"
             | "us:flip-v"
             | "us:scale"
+            | "us:scale-keyframes"
             | "us:opacity"
+            | "us:opacity-keyframes"
             | "us:position-x"
+            | "us:position-x-keyframes"
             | "us:position-y"
+            | "us:position-y-keyframes"
             | "us:title-text"
             | "us:title-font"
             | "us:title-color"
@@ -1507,10 +1535,70 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
     for attr in attrs {
         let attr = attr?;
         let key = std::str::from_utf8(attr.key.as_ref())?.to_string();
-        let value = std::str::from_utf8(attr.value.as_ref())?.to_string();
+        let raw_value = std::str::from_utf8(attr.value.as_ref())?;
+        let value = unescape(raw_value)?.into_owned();
         map.insert(key, value);
     }
     Ok(map)
+}
+
+fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
+    const KEYFRAME_ATTR_PREFIXES: [&str; 5] = [
+        "us:scale-keyframes=\"",
+        "us:opacity-keyframes=\"",
+        "us:position-x-keyframes=\"",
+        "us:position-y-keyframes=\"",
+        "us:volume-keyframes=\"",
+    ];
+
+    let mut cursor = 0usize;
+    let mut changed = false;
+    let mut out = String::new();
+
+    while cursor < xml.len() {
+        let remainder = &xml[cursor..];
+        let next = KEYFRAME_ATTR_PREFIXES
+            .iter()
+            .filter_map(|prefix| remainder.find(prefix).map(|idx| (cursor + idx, *prefix)))
+            .min_by_key(|(idx, _)| *idx);
+
+        let Some((attr_start, attr_prefix)) = next else {
+            break;
+        };
+
+        let value_start = attr_start + attr_prefix.len();
+        out.push_str(&xml[cursor..value_start]);
+
+        let Some(rel_end) = xml[value_start..].find("]\"") else {
+            cursor = value_start;
+            break;
+        };
+
+        let value_end = value_start + rel_end;
+        let value = &xml[value_start..=value_end];
+
+        if value.contains('\"') {
+            changed = true;
+            for ch in value.chars() {
+                if ch == '\"' {
+                    out.push_str("&quot;");
+                } else {
+                    out.push(ch);
+                }
+            }
+        } else {
+            out.push_str(value);
+        }
+
+        cursor = value_end + 1;
+    }
+
+    if !changed {
+        return Cow::Borrowed(xml);
+    }
+
+    out.push_str(&xml[cursor..]);
+    Cow::Owned(out)
 }
 
 /// Parse an FCPXML time string like "48/24s" or "48048/24000s" into nanoseconds
@@ -1766,6 +1854,11 @@ mod tests {
                         name="footage" us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
                         us:brightness="0.5" us:contrast="1.2" us:saturation="0.8"
                         us:opacity="0.9" us:speed="2.0"
+                        us:scale-keyframes='[{"time_ns":0,"value":1.0,"interpolation":"linear"},{"time_ns":1000000000,"value":1.5,"interpolation":"linear"}]'
+                        us:opacity-keyframes='[{"time_ns":0,"value":1.0,"interpolation":"linear"},{"time_ns":500000000,"value":0.4,"interpolation":"linear"}]'
+                        us:position-x-keyframes='[{"time_ns":0,"value":-0.5,"interpolation":"linear"},{"time_ns":1000000000,"value":0.5,"interpolation":"linear"}]'
+                        us:position-y-keyframes='[{"time_ns":0,"value":0.2,"interpolation":"linear"},{"time_ns":1000000000,"value":-0.2,"interpolation":"linear"}]'
+                        us:volume-keyframes='[{"time_ns":0,"value":1.0,"interpolation":"linear"},{"time_ns":1000000000,"value":0.6,"interpolation":"linear"}]'
                         us:freeze-frame="true" us:freeze-source-ns="1200000000"
                         us:freeze-hold-duration-ns="3000000000"/>
           </spine>
@@ -1782,9 +1875,74 @@ mod tests {
         assert!((clip.saturation - 0.8).abs() < 1e-5);
         assert!((clip.opacity - 0.9).abs() < 1e-5);
         assert!((clip.speed - 2.0).abs() < 1e-5);
+        assert_eq!(clip.scale_keyframes.len(), 2);
+        assert_eq!(clip.opacity_keyframes.len(), 2);
+        assert_eq!(clip.position_x_keyframes.len(), 2);
+        assert_eq!(clip.position_y_keyframes.len(), 2);
+        assert_eq!(clip.volume_keyframes.len(), 2);
         assert!(clip.freeze_frame);
         assert_eq!(clip.freeze_frame_source_ns, Some(1_200_000_000));
         assert_eq!(clip.freeze_frame_hold_duration_ns, Some(3_000_000_000));
+    }
+
+    #[test]
+    fn test_parse_fcpxml_escaped_keyframe_json_attrs() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="EscapedKeyframes">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s"
+                        name="footage" us:track-idx="0" us:track-kind="video"
+                        us:track-name="Video 1" us:position-x-keyframes="[{&quot;time_ns&quot;:617642015,&quot;value&quot;:-0.8200659196027513,&quot;interpolation&quot;:&quot;linear&quot;},{&quot;time_ns&quot;:2129974732,&quot;value&quot;:-0.8200659196027513,&quot;interpolation&quot;:&quot;linear&quot;},{&quot;time_ns&quot;:4709284968,&quot;value&quot;:0.67,&quot;interpolation&quot;:&quot;linear&quot;}]"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.position_x_keyframes.len(), 3);
+        assert!((clip.position_x_keyframes[0].value - (-0.8200659196027513)).abs() < 1e-9);
+        assert!((clip.position_x_keyframes[2].value - 0.67).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_recovers_unescaped_keyframe_json_attrs() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="UnescapedKeyframes">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s"
+                        name="footage" us:track-idx="0" us:track-kind="video"
+                        us:track-name="Video 1" us:position-x-keyframes="[{"time_ns":617642015,"value":-0.8200659196027513,"interpolation":"linear"},{"time_ns":2129974732,"value":-0.8200659196027513,"interpolation":"linear"},{"time_ns":4709284968,"value":0.67,"interpolation":"linear"}]"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.position_x_keyframes.len(), 3);
+        assert_eq!(clip.position_x_keyframes[0].time_ns, 617_642_015);
+        assert_eq!(clip.position_x_keyframes[2].time_ns, 4_709_284_968);
     }
 
     #[test]

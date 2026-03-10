@@ -156,6 +156,14 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
             asset_clip.push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
             asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
+            let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.volume_keyframes).ok()
+            };
+            if let Some(value) = volume_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:volume-keyframes", value));
+            }
             asset_clip.push_attribute(("us:pan", clip.pan.to_string().as_str()));
             asset_clip.push_attribute(("us:crop-left", clip.crop_left.to_string().as_str()));
             asset_clip.push_attribute(("us:crop-right", clip.crop_right.to_string().as_str()));
@@ -165,9 +173,41 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
             asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
             asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
+            let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.scale_keyframes).ok()
+            };
+            if let Some(value) = scale_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:scale-keyframes", value));
+            }
             asset_clip.push_attribute(("us:opacity", clip.opacity.to_string().as_str()));
+            let opacity_keyframes_json = if clip.opacity_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.opacity_keyframes).ok()
+            };
+            if let Some(value) = opacity_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:opacity-keyframes", value));
+            }
             asset_clip.push_attribute(("us:position-x", clip.position_x.to_string().as_str()));
+            let position_x_keyframes_json = if clip.position_x_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.position_x_keyframes).ok()
+            };
+            if let Some(value) = position_x_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:position-x-keyframes", value));
+            }
             asset_clip.push_attribute(("us:position-y", clip.position_y.to_string().as_str()));
+            let position_y_keyframes_json = if clip.position_y_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.position_y_keyframes).ok()
+            };
+            if let Some(value) = position_y_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:position-y-keyframes", value));
+            }
             asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));
             asset_clip.push_attribute(("us:title-font", clip.title_font.as_str()));
             asset_clip.push_attribute((
@@ -489,9 +529,64 @@ fn patch_asset_clip_block_transform(
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
+        ("us:opacity", clip.opacity.to_string()),
         ("us:rotate", clip.rotate.to_string()),
     ] {
         let next = replace_or_insert_attr(&updated_start, attr, &value)?;
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    let keyframe_attrs: [(&str, Option<String>); 5] = [
+        (
+            "us:scale-keyframes",
+            if clip.scale_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.scale_keyframes).ok()
+            },
+        ),
+        (
+            "us:opacity-keyframes",
+            if clip.opacity_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.opacity_keyframes).ok()
+            },
+        ),
+        (
+            "us:position-x-keyframes",
+            if clip.position_x_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.position_x_keyframes).ok()
+            },
+        ),
+        (
+            "us:position-y-keyframes",
+            if clip.position_y_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.position_y_keyframes).ok()
+            },
+        ),
+        (
+            "us:volume-keyframes",
+            if clip.volume_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.volume_keyframes).ok()
+            },
+        ),
+    ];
+    for (attr, value) in keyframe_attrs {
+        let next = if let Some(v) = value {
+            replace_or_insert_attr(&updated_start, attr, &v)?
+        } else {
+            remove_attr(&updated_start, attr)
+        };
         if next != updated_start {
             changed = true;
         }
@@ -813,6 +908,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:denoise"
             | "us:sharpness"
             | "us:volume"
+            | "us:volume-keyframes"
             | "us:pan"
             | "us:crop-left"
             | "us:crop-right"
@@ -822,9 +918,13 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:flip-h"
             | "us:flip-v"
             | "us:scale"
+            | "us:scale-keyframes"
             | "us:opacity"
+            | "us:opacity-keyframes"
             | "us:position-x"
+            | "us:position-x-keyframes"
             | "us:position-y"
+            | "us:position-y-keyframes"
             | "us:title-text"
             | "us:title-font"
             | "us:title-color"
@@ -1108,6 +1208,38 @@ mod tests {
         clip.scale = 1.75;
         clip.position_x = 0.25;
         clip.position_y = -0.5;
+        clip.scale_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.75,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+        ];
+        clip.opacity_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 250_000_000,
+            value: 0.5,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.position_x_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 500_000_000,
+            value: 0.25,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.position_y_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 500_000_000,
+            value: -0.5,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.volume_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 0,
+            value: 0.8,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
@@ -1118,6 +1250,11 @@ mod tests {
         assert!(written.contains("<metadata key=\"com.example.unknown\" value=\"keep-meta\""));
         assert!(written.contains("us:scale=\"1.75\""));
         assert!(written.contains("us:position-x=\"0.25\""));
+        assert!(written.contains("us:scale-keyframes="));
+        assert!(written.contains("us:opacity-keyframes="));
+        assert!(written.contains("us:position-x-keyframes="));
+        assert!(written.contains("us:position-y-keyframes="));
+        assert!(written.contains("us:volume-keyframes="));
         assert!(written.contains("us:position-y=\"-0.5\""));
         assert!(written.contains("adjust-transform position=\"-16.666666"));
         assert!(written.contains(" scale=\"1.75 1.75\" rotation=\"0\""));

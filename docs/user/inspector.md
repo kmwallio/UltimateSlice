@@ -52,6 +52,12 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
 
+### Audio keyframes (phase 1)
+
+- Use **Set Volume Keyframe** to create/update a volume keyframe at the current playhead.
+- Use **Remove Volume Keyframe** to remove a keyframe at the current playhead time.
+- Interpolation is currently **linear** between adjacent keyframes.
+
 ---
 
 ## Video Transform
@@ -68,6 +74,13 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Rotate** | Dial/knob + numeric angle (−180° → 180°) | Arbitrary-angle rotation |
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
+
+### Transform keyframes (phase 1)
+
+- Transform controls include keyframe buttons for **Scale**, **Opacity**, **Position X**, and **Position Y**.
+- **Set … Keyframe** writes the current slider value at the current playhead time.
+- **Remove … Keyframe** removes a keyframe at that same playhead time.
+- Interpolation is currently **linear** between adjacent keyframes.
 
 Program Monitor overlay integration:
 - Drag **corner handles** to scale (hold **Shift** for constrained scaling).
@@ -144,6 +157,7 @@ Place the chroma-keyed clip on an upper video track with the background on a low
 ## Notes
 
 - All Inspector values are **persisted in the FCPXML** project file.
+- Phase-1 keyframes are persisted via UltimateSlice vendor attributes (`us:scale-keyframes`, `us:opacity-keyframes`, `us:position-x-keyframes`, `us:position-y-keyframes`, `us:volume-keyframes`).
 - Transform fields (scale/position/rotation), opacity, and crop are now also mapped to standard FCPXML adjustment elements (`adjust-transform`, `adjust-compositing`, `adjust-crop`/`crop-rect`) for improved interoperability.
 - Clip volume now also imports from standard FCPXML `adjust-volume@amount` (including dB values such as `-6dB` and `-96dB`) and is converted to Inspector linear volume.
 - There is no keyboard shortcut to focus the Inspector; use mouse/Tab navigation.

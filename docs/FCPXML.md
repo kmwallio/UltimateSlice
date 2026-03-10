@@ -201,7 +201,7 @@ Unlike most graphics engines where `(0,0)` is the top-left, FCPXML uses the **ce
 *   **`<adjust-crop>`**: Trims the edges of the video.
 *   **`<adjust-blend>`**: Controls opacity and compositing blend mode.
     *   **`amount`**: Opacity from `0.0` (transparent) to `1.0` (opaque). Default: `1.0`.
-    *   **`mode`**: Blend mode (e.g., `Subtract`, `Multiply`). If omitted, uses normal compositing.
+    *   **`mode`**: Blend mode as an **integer value**. If omitted, uses normal compositing (0). Common values: `0` (Normal), `2` (Subtract), `4` (Multiply), `10` (Screen), `14` (Overlay). See the Blend Mode Reference table below for the full list.
 
 ### **Audio Attributes**
 *   **`amount` (Volume)**: Measured in decibels (dB). `0dB` is the original volume. `-inf` is muted.
@@ -220,13 +220,62 @@ Unlike most graphics engines where `(0,0)` is the top-left, FCPXML uses the **ce
     *   **`active`**: Whether this role is actively playing (`1` or `0`).
 
 ### **Timing & Keyframes**
-Keyframes within an adjustment tag use the `time` attribute, which is a rational number. However, the "effective" frame they land on is determined by the `frameDuration` of the element's format.
+Keyframes define how a parameter (like Opacity, Position, or an Effect value) changes over time. In FCPXML, these are organized under the `<keyframeAnimation>` container, usually as a child of a `<param>` element.
 
-Each `<keyframe>` element also supports:
-*   **`interp`**: Interpolation mode — `linear` | `ease` | `easeIn` | `easeOut`. Default: `linear`.
-*   **`curve`**: Curve shape — `linear` | `smooth`. Default: `smooth`.
+#### **The Animation Structure**
+*   **`<keyframeAnimation>`**: The container for a sequence of keyframes.
+*   **`<keyframe>`**: A specific point in time with a value and interpolation rules.
+    *   **`time`**: Rational number (e.g., `100/2400s`). This time is **relative to the start of the element** (the clip), not the absolute timeline.
+    *   **`value`**: The parameter value at that specific time.
+    *   **`interp`**: Temporal interpolation for the segment *following* this keyframe.
+        *   `linear` (default): Constant rate of change.
+        *   `ease`: Smooth acceleration and deceleration.
+        *   `easeIn`: Smooth acceleration (slow start, fast end).
+        *   `easeOut`: Smooth deceleration (fast start, slow end).
+    *   **`curve`**: High-level velocity profile preset: `linear` or `smooth` (default: `smooth`).
 
-### **Transformation Math (Developer Guide)**
+#### **Temporal vs. Spatial Interpolation**
+FCP distinguishes between how a value changes *over time* (Temporal) and how a point moves *through space* (Spatial).
+
+**1. Temporal Keyframes (Scalar)**
+Used for single-value parameters like Opacity, Scale, or Volume.
+```xml
+<param name="Opacity" value="100">
+    <keyframeAnimation>
+        <!-- Fade in over 2 seconds -->
+        <keyframe time="0s" value="0" interp="easeIn"/>
+        <keyframe time="2s" value="100"/>
+    </keyframeAnimation>
+</param>
+```
+
+**2. Point-Value Keyframes (Position & Anchor)**
+Used for multi-dimensional parameters like `position` and `anchor`. These use the same `<keyframe>` element, but the `value` attribute contains space-separated coordinates.
+*   **Value Format**: `value="x y"` (expressed in height-percentages relative to format center).
+*   **Interpolation**: Uses the same `interp` and `curve` attributes as scalar keyframes. The `curve="smooth"` preset provides natural-looking motion between points.
+
+```xml
+<param name="position" value="0 0">
+    <keyframeAnimation>
+        <!-- Linear movement from left to right -->
+        <keyframe time="0s" value="-50 0" interp="linear"/>
+        <keyframe time="5s" value="50 0"/>
+    </keyframeAnimation>
+</param>
+```
+
+```xml
+<param name="position" value="0 0">
+    <keyframeAnimation>
+        <!-- Smooth eased movement -->
+        <keyframe time="0s" value="-50 -25" interp="ease" curve="smooth"/>
+        <keyframe time="3s" value="0 25" interp="ease" curve="smooth"/>
+        <keyframe time="5s" value="50 -25"/>
+    </keyframeAnimation>
+</param>
+```
+
+#### **Transformation Math (Developer Guide)**
 
 > **Note:** The unit system for `position` and `anchor` is not explicitly defined as pixels in the DTD. The **percentage of frame height** interpretation below is the industry standard (e.g., as used by tools like FCP.cafe and various translation layers) to ensure scaling remains proportional if a timeline's resolution is changed.
 
@@ -280,6 +329,35 @@ When a source asset (e.g., 4K) doesn't match the timeline (e.g., 1080p), calcula
         </keyframeAnimation>
     </param>
 </adjust-blend>
+```
+
+### **Blend Mode Reference**
+The `mode` attribute on `<adjust-blend>` takes an integer value. Gaps in the numbering correspond to category separators in the FCP UI.
+
+| Integer | Blend Mode | Integer | Blend Mode |
+|---------|------------|---------|------------|
+| `0` | Normal | `17` | Vivid Light |
+| `2` | Subtract | `18` | Linear Light |
+| `3` | Darken | `19` | Pin Light |
+| `4` | Multiply | `20` | Hard Mix |
+| `5` | Color Burn | `22` | Difference |
+| `6` | Linear Burn | `23` | Exclusion |
+| `8` | Add | `25` | Stencil Alpha |
+| `9` | Lighten | `26` | Stencil Luma |
+| `10` | Screen | `27` | Silhouette Alpha |
+| `11` | Color Dodge | `28` | Silhouette Luma |
+| `12` | Linear Dodge | `29` | Behind |
+| `14` | Overlay | `31` | Alpha Add |
+| `15` | Soft Light | `32` | Premultiplied Mix |
+| `16` | Hard Light | | |
+
+### **Developer Example: Blend Modes**
+```xml
+<!-- Multiply blend at 75% opacity -->
+<adjust-blend amount="0.75" mode="4"/>
+
+<!-- Screen blend at full opacity -->
+<adjust-blend amount="1.0" mode="10"/>
 ```
 
 ---
@@ -340,7 +418,7 @@ If you are writing code to parse FCPXML, follow these steps:
 
 ### **Root & Organizational Tags**
 *   **`<fcpxml>`**: The root element.
-    *   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`, `1.14`).
+    *   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`).
 *   **`<library>`**: Represents an FCP library.
     *   **`location`**: The file URL to the library on disk.
 *   **`<event>`**: A container for clips and projects.
@@ -384,8 +462,8 @@ If you are writing code to parse FCPXML, follow these steps:
 *   **`<clip>`**: A generic clip element (distinct from `<asset-clip>`).
     *   Supports `format`, `audioStart` / `audioDuration` (for split edits), `tcStart` / `tcFormat`.
     *   Can contain nested spines, captions, markers, and filters.
-*   **`<video>`**: A video-only clip referencing an asset.
-    *   **`ref`**: Reference to an `<asset>` ID.
+*   **`<video>`**: A video-only clip referencing an asset or an effect (generator).
+    *   **`ref`**: Reference to an `<asset>` ID or `<effect>` ID (for generators — see Section 11).
     *   **`srcID`**: Source identifier within the asset.
     *   **`role`**: Video role assignment.
     *   Can contain params, filters, and markers.
@@ -414,7 +492,12 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`offset`**: Position on the timeline.
     *   **`duration`**: Length of the transition.
     *   Contains optional `<filter-video>`, `<filter-audio>`, markers, and metadata.
-*   **`<title>`**: A text overlay generator.
+*   **`<title>`**: A text overlay generator referencing an `<effect>` resource.
+    *   **`ref`**: Reference to an `<effect>` ID (e.g., Basic Title, Custom Title).
+    *   **`role`**: Typically `titles.titles-1`.
+    *   Standard clip attributes (`offset`, `duration`, `lane`, `enabled`).
+    *   Contains `<param>*`, `<text>*`, `<text-style-def>*`, `<note>?`, adjustments, filters, markers.
+    *   See Section 11 for full title/text documentation.
 *   **`<caption>`**: A closed caption element.
     *   **`role`**: Caption role assignment.
     *   Standard clip attributes (`offset`, `duration`, etc.).
@@ -441,11 +524,12 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`tracking`**: IDREF linking to an object tracker.
 *   **`<adjust-blend>`**: Opacity and compositing blend mode.
     *   **`amount`**: Opacity from `0.0` to `1.0` (default: `1.0`).
-    *   **`mode`**: Blend mode (e.g., `Subtract`, `Multiply`). Omit for normal compositing.
+    *   **`mode`**: Blend mode as an integer (e.g., `2` for Subtract, `4` for Multiply). Omit for normal compositing. See the Blend Mode Reference table in Section 5.
 *   **`<adjust-conform>`**: Resolution scaling rules.
     *   **`type`**: `fit`, `fill`, or `none`.
 *   **`<adjust-crop>`**: Trims the edges of the video.
-    *   **`mode`**: Crop mode (`trim`, `crop`, `pan`).
+    *   **`mode`**: Crop mode (`trim`, `crop`, `pan`). See Section 14 for detailed mode documentation.
+    *   **`enabled`**: `0` or `1` (default: `1`).
 *   **`<adjust-volume>`**: Audio level controls.
     *   **`amount`**: Volume in dB.
 *   **`<filter-video>` / `<filter-audio>`**: Usage tags for effects.
@@ -472,3 +556,861 @@ If you are writing code to parse FCPXML, follow these steps:
 *   **`<conform-rate>`**: Frame rate conforming.
     *   **`scaleEnabled`**: `0` | `1`.
     *   **`srcFrameRate`**: Source frame rate to conform from.
+
+---
+
+## 9. Comprehensive FCPXML Example
+This complete example demonstrates how resources, timelines, multicam clips, keyframes, and roles interact in a production-ready file.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.11">
+    <resources>
+        <!-- 1. Format: Defines 1080p 24fps canvas -->
+        <format id="r1" name="FFVideoFormat1080p24" frameDuration="100/2400s" width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>
+        
+        <!-- 2. Assets: Physical media files -->
+        <asset id="r2" name="Interview_CamA" src="file:///media/camera_a.mov" start="0s" duration="3600s" hasVideo="1" hasAudio="1"/>
+        <asset id="r3" name="Interview_CamB" src="file:///media/camera_b.mov" start="0s" duration="3600s" hasVideo="1" hasAudio="1"/>
+        <asset id="r4" name="External_Audio" src="file:///media/audio_rec.wav" start="0s" duration="3600s" hasVideo="0" hasAudio="1"/>
+        
+        <!-- 3. Multicam Resource: Groups Cam A and Cam B -->
+        <media id="r5" name="Interview Multicam">
+            <multicam>
+                <mc-angle name="Camera A" angleID="cam1">
+                    <asset-clip ref="r2" offset="0s" duration="3600s" role="dialogue.dialogue-1"/>
+                </mc-angle>
+                <mc-angle name="Camera B" angleID="cam2">
+                    <asset-clip ref="r3" offset="0s" duration="3600s" role="dialogue.dialogue-2"/>
+                </mc-angle>
+            </multicam>
+        </media>
+        
+        <!-- 4. Effects: Referenced by filters later -->
+        <effect id="r8" name="Color Board" uid=".../Video Filters/Color/Color Board"/>
+    </resources>
+    
+    <library location="file:///Users/dev/Movies/MyProject.fcpproject/">
+        <event name="Main Event">
+            <project name="Final Export Timeline">
+                <sequence format="r1" tcStart="3600s" tcFormat="NDF">
+                    <spine>
+                        <!-- 5. Asset Clip with Animation (Keyframes) -->
+                        <asset-clip ref="r2" offset="3600s" name="Intro Shot" start="10s" duration="5s">
+                            <!-- Position Keyframes: Smooth eased movement across the frame -->
+                            <adjust-transform>
+                                <param name="position" value="0 0">
+                                    <keyframeAnimation>
+                                        <keyframe time="0s" value="-50 0" interp="ease" curve="smooth"/>
+                                        <keyframe time="5s" value="50 0"/>
+                                    </keyframeAnimation>
+                                </param>
+                            </adjust-transform>
+                            
+                            <!-- Temporal Keyframes: Simple Opacity Fade -->
+                            <adjust-blend amount="1.0">
+                                <param name="amount">
+                                    <keyframeAnimation>
+                                        <keyframe time="4s" value="1.0" interp="easeIn"/>
+                                        <keyframe time="5s" value="0.0"/>
+                                    </keyframeAnimation>
+                                </param>
+                            </adjust-blend>
+                            
+                            <!-- Markers & Metadata -->
+                            <marker start="2s" value="Great expression here"/>
+                            <chapter-marker start="0s" value="Start of Film" posterOffset="0s"/>
+                            
+                            <!-- 6. Connected Storyline: Attached to the Intro Shot -->
+                            <spine lane="1" offset="2s">
+                                <asset-clip ref="r3" offset="0s" duration="2s" role="video.b-roll"/>
+                            </spine>
+                        </asset-clip>
+                        
+                        <!-- 7. Multicam Clip: Switching angles mid-segment -->
+                        <mc-clip ref="r5" offset="3605s" duration="10s" videoAngleID="cam1" audioAngleID="cam1">
+                            <mc-source angleID="cam2" usage="video" start="5s" duration="5s"/>
+                        </mc-clip>
+                        
+                        <!-- 8. Synchronized Clip: Combining Camera Video with External Audio -->
+                        <sync-clip format="r1" offset="3615s" duration="5s">
+                            <sync-source sourceID="storyline">
+                                <asset-clip ref="r2" offset="0s" duration="5s"/>
+                            </sync-source>
+                            <sync-source sourceID="connected">
+                                <asset-clip ref="r4" offset="0s" duration="5s" role="dialogue.external"/>
+                            </sync-source>
+                        </sync-clip>
+                        
+                        <!-- 9. Audition: Trying out two different shots -->
+                        <audition offset="3620s">
+                            <asset-clip ref="r2" duration="2s" name="Option 1 (Pick)"/>
+                            <asset-clip ref="r3" duration="2s" name="Option 2"/>
+                        </audition>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </library>
+</fcpxml>
+```
+
+---
+
+## 10. Implementation Edge Cases & Gotchas
+
+This section documents practical pitfalls, default behaviors, and edge cases that developers commonly encounter when building FCPXML parsers or generators.
+
+### 10.1 Rational Time Arithmetic Edge Cases
+
+#### `0s` vs `0/1s` vs `0/30000s`
+All three represent zero, but parsers must handle both formats:
+*   **Whole-number shorthand**: FCP reduces fractions to whole seconds when possible (e.g., `5s` instead of `5000/1000s`). Zero is written as `0s`.
+*   **Explicit rational form**: `0/1s` or `0/30000s` are equivalent to `0s`. Your parser must accept both `N/Ds` and `Ns` forms.
+*   **Gotcha**: Do not assume the denominator carries frame rate information. `0/30000s` is still just zero -- the denominator does not imply 29.97fps context. The frame rate comes from the `<format>` element's `frameDuration`.
+
+**Parser pattern**: Parse time strings with a regex like `^(-?\d+)(?:/(\d+))?s$`. If the denominator group is absent, treat it as `1`.
+
+#### Negative Time Values
+Negative values are valid in FCPXML. The CommandPost time library includes a `unm()` (unary minus) function for negation. Negative times appear in practice for:
+*   **`tcStart`**: Some timelines start before 00:00:00:00.
+*   **Connected clip offsets**: A connected clip can be positioned before the start of its parent clip, resulting in a negative offset relative to the parent.
+
+#### Frame Boundary Alignment
+All time values in a spine **must** land on a frame boundary of the sequence's format. If `frameDuration="100/2400s"` (24fps), then every `offset`, `start`, and `duration` must be an exact multiple of `100/2400s`. FCP will reject imports with the error **"The item is not on an edit frame boundary"** if values are not frame-aligned. When performing arithmetic, always snap results to the nearest frame boundary.
+
+#### tcStart Interaction with Offsets
+The `tcStart` on a `<sequence>` defines the timeline's timecode origin. Clips in the primary spine use `offset` values in the same coordinate space:
+*   If `tcStart="3600s"` (01:00:00:00), the first clip's offset is typically `3600s`, **not** `0s`.
+*   **Formula**: `TimelineTimecode = offset - tcStart + displayTimecodeStart`
+*   **Gotcha for multicam**: Multicam clips use `tcStart` instead of `offset` for their internal timeline origin, and the implicit `start` value within a multicam is `0`.
+
+### 10.2 Lane Numbering & Rendering Order
+
+#### How Lanes Work
+The `lane` attribute positions elements vertically relative to their parent container:
+*   **`lane` omitted or `0`**: The element is **contained within** its parent (i.e., part of the primary storyline or the spine it belongs to). Elements in the spine at lane 0 are the base layer.
+*   **Positive lanes** (`1`, `2`, `3`, ...): Connected clips **above** the primary storyline. Higher numbers are rendered on top of lower numbers. Video connected clips default to positive lanes.
+*   **Negative lanes** (`-1`, `-2`, `-3`, ...): Connected clips **below** the primary storyline. Audio-only connected clips typically use negative lanes. Negative lane numbers are also used internally for audio channel component mapping (e.g., `lane="-1"` for component 2, `lane="-2"` for component 3).
+
+#### Z-Order (Rendering/Compositing Order)
+*   **Within a spine**: Elements are rendered in document order (first child is "bottom," last child is "top" if they overlap temporally). However, in the primary storyline, clips do not overlap -- they are sequential.
+*   **Connected clips**: Higher lane numbers render on top. A clip at `lane="2"` composites over `lane="1"`, which composites over `lane="0"` (the primary storyline).
+*   **Same lane**: If two connected clips share the same lane and overlap in time, document order determines stacking (later in the XML = on top).
+
+#### Connected Clips and Gaps
+Connected clips attach to a specific point on their parent clip via the `offset` attribute. The offset is relative to the **parent clip's local timeline** (the parent's `start` value defines the origin):
+*   If a parent clip in the spine is moved, all its connected clips move with it.
+*   **Gaps interact with connected clips**: A `<gap>` in the primary storyline can have connected clips. If you delete a gap, its connected clips are orphaned and will be removed on reimport.
+*   Connected clips cannot exist independently -- they must be children of a clip or gap in the primary storyline.
+
+### 10.3 The `enabled` Attribute
+
+#### Which Elements Support It
+The `enabled` attribute (type: `0` | `1`, default: `1`) appears on:
+*   **All clip types**: `<clip>`, `<asset-clip>`, `<ref-clip>`, `<sync-clip>`, `<mc-clip>`, `<video>`, `<audio>`, `<title>`, `<gap>`
+*   **Filters/Effects**: `<filter-video>`, `<filter-audio>`, `<filter-video-mask>`
+*   **Audio channel configuration**: `<audio-channel-source>`, `<audio-role-source>`
+
+#### What `enabled="0"` Means
+*   **On a clip**: The clip is **disabled** -- it is visually and audibly skipped during playback. It still occupies its timeline position (it is not removed from the edit), but produces no output. Think of it as "muted + hidden" while preserving the edit structure.
+*   **On a filter** (`<filter-video>` or `<filter-audio>`): The effect is bypassed. The clip renders as if the effect does not exist, but the effect's parameters are preserved.
+*   **On `<audio-channel-source>`**: That specific audio channel mapping is muted. For example, disabling `srcCh="1"` silences channel 1 while leaving other channels active.
+*   **On `<filter-video-mask>`**: The mask shape and its associated filter are bypassed.
+
+#### The `active` Attribute (Distinct from `enabled`)
+`<audio-channel-source>` and `<audio-role-source>` also have an `active` attribute (default: `1`). While `enabled` controls whether the element participates in output, `active` controls whether it is actively processing. Both default to `1`.
+
+### 10.4 Split Edits (J/L Cuts)
+
+#### How `audioStart` and `audioDuration` Work
+Split edits allow the audio and video portions of a clip to have different in/out points. The attributes appear on composite A/V clip types: `<clip>`, `<asset-clip>`, `<ref-clip>`, `<sync-clip>`, and `<mc-clip>`.
+
+*   **When omitted** (the common case): Audio and video share the same `start` and `duration`. No split edit exists.
+*   **When present**: `audioStart` and `audioDuration` define an independent time range for the audio portion. The video portion continues to use the clip's `start` and `duration`.
+
+#### Concrete Examples
+
+**L-Cut** (audio extends beyond the video cut point):
+```xml
+<!-- Video: 5s of footage. Audio: starts at the same point but extends 2s longer -->
+<asset-clip ref="r2" offset="3600s" start="10s" duration="5s"
+            audioStart="10s" audioDuration="7s"/>
+```
+The video plays from 10s-15s of the source, but audio plays from 10s-17s, overlapping into the next clip's video.
+
+**J-Cut** (audio starts before the video):
+```xml
+<!-- Video: 5s of footage starting at 10s. Audio: starts 2s earlier -->
+<asset-clip ref="r2" offset="3600s" start="10s" duration="5s"
+            audioStart="8s" audioDuration="7s"/>
+```
+The audio begins at 8s of the source (2s before the video cut-in), creating the characteristic "hear before you see" effect.
+
+**Key rules**:
+*   `audioStart` and `audioDuration` must always appear together -- you cannot specify one without the other.
+*   The audio range can extend before or after the video range, but the clip's `offset` and visual `duration` in the timeline remain unchanged.
+*   The audio range defined by `audioStart`/`audioDuration` is in the **source media's** time coordinate space, just like `start`.
+
+### 10.5 Transition Overlap Model
+
+#### How Transitions Work in the Spine
+A `<transition>` element sits **between** two adjacent clips in a `<spine>` and overlaps both of them. From the DTD documentation:
+
+> A `transition` element defines an effect that overlaps two adjacent story elements.
+
+```xml
+<spine>
+    <asset-clip ref="r2" offset="0s" duration="5s"/>
+    <transition duration="2s"/>
+    <asset-clip ref="r3" offset="3s" duration="5s"/>
+</spine>
+```
+
+#### The Duration-Sharing Model
+The transition's `duration` is **shared** between the two adjacent clips:
+*   The **outgoing clip** (left) contributes media from its tail -- the transition overlaps the **last N seconds** of this clip.
+*   The **incoming clip** (right) contributes media from its head -- the transition overlaps the **first N seconds** of this clip.
+*   The full transition duration overlaps both clips. In the example above, the 2s transition overlaps the last 2s of clip A and the first 2s of clip B.
+
+#### Impact on Timeline Offsets
+*   The transition **does not add** to the total timeline duration. The clips must have sufficient media handles (extra source media beyond their visible in/out points) to provide frames for the overlap.
+*   The **offset of the incoming clip** is pulled earlier by the transition duration. In the example above, clip B's offset is `3s` (not `5s`), because the 2s transition causes 2s of overlap.
+*   **Formula**: `IncomingClipOffset = OutgoingClipOffset + OutgoingClipDuration - TransitionDuration`
+*   The transition's own `offset` attribute, when present, matches the point where the outgoing clip ends minus the transition duration (i.e., where the overlap begins).
+
+#### Edge Cases
+*   Transitions can only exist inside a `<spine>` -- they cannot be applied to connected clips directly.
+*   A transition between a clip and a `<gap>` is valid (it fades to/from black).
+*   The transition element can contain optional `<filter-video>` and `<filter-audio>` children that define the actual effect (e.g., cross dissolve, wipe).
+
+### 10.6 Audio Panning
+
+#### The `<adjust-panner>` Element
+Audio panning is controlled by the `<adjust-panner>` element, which is part of the intrinsic audio parameters (`%intrinsic-params-audio%`). It appears as a child of clip elements alongside `<adjust-volume>`.
+
+```xml
+<adjust-panner mode="stereo" amount="-50"/>
+```
+
+#### Attributes
+*   **`mode`**: Panning mode (e.g., `"stereo"` for stereo left/right panning). Implied (optional).
+*   **`amount`**: Pan position. Default: `"0"` (center). Range: `-100` (full left) to `100` (full right) for stereo.
+*   **`original_decoded_mix`**, **`ambient_direct_mix`**: For surround sound decoding.
+*   **`surround_width`**, **`left_right_mix`**, **`front_back_mix`**: Surround positioning controls.
+*   **`LFE_balance`**: Low Frequency Effects channel balance.
+*   **`rotation`**, **`stereo_spread`**: Additional surround spatialization.
+*   **`attenuate_collapse_mix`**, **`center_balance`**: Surround downmix behavior.
+
+#### Keyframed Panning
+`<adjust-panner>` can contain `<param>` children for keyframing any of its values over time, just like other adjustment elements.
+
+### 10.7 Retiming Edge Cases
+
+#### Freeze Frames
+A freeze frame holds a single source frame while timeline time advances. In `<timeMap>` terms, two `<timept>` entries with **the same `value`** but different `time` values create a hold:
+```xml
+<timeMap>
+    <!-- Normal playback to 2s -->
+    <timept time="0s" value="0s" interp="linear"/>
+    <timept time="2s" value="2s" interp="linear"/>
+    <!-- Freeze at source frame 2s for 3 seconds of timeline time -->
+    <timept time="5s" value="2s" interp="linear"/>
+    <!-- Resume normal playback -->
+    <timept time="8s" value="5s" interp="linear"/>
+</timeMap>
+```
+Between `time="2s"` and `time="5s"`, the source value stays at `2s` -- the same frame is displayed for 3 seconds.
+
+#### Reverse Playback
+Reverse playback occurs when the `value` (source time) **decreases** while `time` (timeline time) increases:
+```xml
+<timeMap>
+    <timept time="0s" value="5s" interp="linear"/>
+    <timept time="5s" value="0s" interp="linear"/>
+</timeMap>
+```
+This plays 5 seconds of source media in reverse over 5 seconds of timeline time.
+
+#### Variable Speed with Optical Flow
+The `frameSampling` attribute on `<timeMap>` controls interpolation quality:
+*   **`floor`** (default): Nearest frame, no interpolation. Fastest but choppy for slow motion.
+*   **`nearest-neighbor`**: Similar to floor but with slightly different rounding.
+*   **`frame-blending`**: Cross-dissolves between frames. Moderate quality.
+*   **`optical-flow-classic`**: Motion-estimation based interpolation. High quality.
+*   **`optical-flow`**: Improved optical flow algorithm. Highest quality.
+*   **`optical-flow-frc`** (v1.11+): Frame Rate Conversion optimized optical flow.
+
+#### Speed Ramp Easing
+The `<timept>` element supports easing via `inTime` and `outTime` attributes, which control the smoothness of speed transitions at each keyframe. The `interp` attribute determines the curve type:
+*   **`smooth2`** (default): Bezier-like smooth interpolation.
+*   **`linear`**: Constant speed between points.
+*   **`smooth`**: Legacy smooth interpolation.
+
+**Gotcha**: Programmatically setting `inTime`/`outTime` values (e.g., `inTime="0.5" outTime="0.5"`) may not produce visible easing unless the values match what FCP's UI would generate. The exact easing behavior with these attributes is partially undocumented.
+
+#### The timeMap Time Coordinate Space
+The `time` attribute in `<timept>` is relative to the **clip's local timeline** (starting from 0 or the clip's `start` value). The `value` attribute maps to the **source media time**. The speed at any point is the slope of the time-to-value curve: `speed = delta(value) / delta(time)`.
+
+### 10.8 Default Values Reference
+
+A complete reference of important attribute defaults that parsers must assume when attributes are omitted.
+
+| Attribute | Default | Notes |
+|-----------|---------|-------|
+| `offset` | `0s` | Position in parent timeline. Omitted = start of parent. |
+| `start` | `#IMPLIED` (no DTD default) | When omitted, behavior is context-dependent. For `asset-clip`, FCP typically uses the asset's `start` value from the resource. For clips in a spine, treated as `0s`. Parsers should default to `0s` if not specified and no asset reference provides one. |
+| `duration` | `#REQUIRED` on most clips | Must be specified on `<clip>`, `<gap>`, `<transition>`. Is `#IMPLIED` (optional) on `<asset-clip>` -- when omitted, uses the asset's full duration. |
+| `lane` | `0` (implied) | `0` = contained in parent. Positive = above, negative = below. |
+| `enabled` | `1` | Element is active by default. |
+| `active` | `1` | Audio channel/role source is active by default. |
+| `tcStart` | `#IMPLIED` | No default; when omitted, typically `0s` or inherited from parent sequence. |
+| `tcFormat` | `#IMPLIED` | No default; when omitted, inherited from parent sequence or assumed NDF. |
+| `srcEnable` | `"all"` | On `<ref-clip>`, `<asset-clip>`, `<mc-clip>`: enables both audio and video. |
+| `audioStart` | `#IMPLIED` | When omitted, audio uses the same `start` as video (no split edit). |
+| `audioDuration` | `#IMPLIED` | When omitted, audio uses the same `duration` as video (no split edit). |
+| `interp` (timept) | `"smooth2"` | Default interpolation for speed mapping points. |
+| `interp` (keyframe) | `"linear"` | Default interpolation for animation keyframes. |
+| `frameSampling` | `"floor"` | Default frame sampling for retiming. |
+| `preservesPitch` | `1` | Audio pitch is preserved during speed changes by default. |
+| `amount` (adjust-blend) | `1.0` | Full opacity by default. |
+| `amount` (adjust-panner) | `0` | Center pan by default. |
+| `mode` (adjust-blend) | Omitted = Normal (`0`) | Normal compositing when not specified. |
+| `inverted` (filter-video-mask) | `0` | Mask is not inverted by default. |
+| `useAudioSubroles` (ref-clip) | `0` | Audio subroles are not used by default. |
+
+### 10.9 Additional Gotchas
+
+#### Frame Rate Conforming
+When a clip's native frame rate differs from the sequence (e.g., 25fps clip in a 24fps timeline), a `<conform-rate>` element appears within the clip's timing parameters. The exact frame-by-frame mapping during conforming involves rounding that is not fully documented by Apple. Be cautious with frame-accurate timecode calculations across mixed frame rates.
+
+#### Version Compatibility
+*   FCPXML v1.3 renamed `<filter>` to `<filter-video>` and `<filter-audio>`.
+*   FCPXML v1.3 replaced `<timeMap>` with `<conformRate>`, but later versions restored `<timeMap>`.
+*   FCP 10.2 opens v1.5 but cannot open v1.6 (from FCP 10.3).
+*   Always check the `version` attribute on `<fcpxml>` before parsing.
+
+#### File Path Encoding
+Asset `src` URLs use standard percent-encoding. Spaces become `%20`. Always use proper URL encoding/decoding when reading or writing the `src` attribute (e.g., `file:///Users/dev/My%20Project/clip.mov`).
+
+#### Unicode in Markers
+Marker `value` attributes can contain Unicode characters. Ensure your XML parser handles UTF-8 encoding correctly, and when writing FCPXML, use proper XML character escaping.
+
+#### DTD Validation
+FCPXML documents can be validated against the DTD bundled with Final Cut Pro:
+```bash
+xmllint --dtdvalid "/Applications/Final Cut Pro.app/Contents/Frameworks/Flexo.framework/Resources/FCPXMLv1_11.dtd" "/path/to/file.fcpxml"
+```
+This is the most reliable way to catch structural errors before importing into FCP.
+
+#### The "Asset [nil]" Error
+If FCP reports "Asset [nil] has no valid media" on import, the XML is malformed -- typically a missing or invalid `ref` attribute pointing to a nonexistent resource ID. Always validate that every `ref` in your timeline elements maps to a valid `id` in `<resources>`.
+
+---
+
+## 11. Titles, Text & Generators
+
+### Titles
+A `<title>` element is a text overlay that references an `<effect>` resource (such as "Basic Title" or "Custom Title"). Titles are effect-backed generators with styled text content.
+
+#### **Title Structure**
+```xml
+<resources>
+    <format id="r1" frameDuration="100/2400s" width="1920" height="1080"/>
+    <effect id="r10" name="Basic Title" uid=".../Titles/Build In-Out/Basic Title"/>
+</resources>
+
+<title ref="r10" name="Welcome" offset="3600s" duration="5s" role="titles.titles-1">
+    <!-- Generator parameters (position, alignment, etc.) -->
+    <param name="Position" key="9999/999166631/999166633/1/100/101" value="0 -200"/>
+    <param name="Alignment" key="9999/999166631/999166633/2/354/999169573/401" value="1 (Center)"/>
+
+    <!-- The visible text content -->
+    <text>
+        <text-style ref="ts1">Hello World</text-style>
+    </text>
+
+    <!-- Style definition referenced by text-style -->
+    <text-style-def id="ts1">
+        <text-style font="Helvetica" fontSize="72" fontColor="1 1 1 1"
+                    bold="1" alignment="center"/>
+    </text-style-def>
+</title>
+```
+
+#### **Text Elements**
+
+*   **`<text>`**: Contains the visible text content as a mix of raw text and `<text-style>` elements.
+    *   **`display-style`**: `pop-on` | `paint-on` | `roll-up` (for caption-style display).
+    *   **`roll-up-height`**: Height for roll-up display.
+    *   **`position`**: Text position override.
+    *   **`placement`**: `left` | `right` | `top` | `bottom`.
+    *   **`alignment`**: `left` | `center` | `right`.
+
+*   **`<text-style-def>`**: Defines a reusable set of text style attributes, referenced by `<text-style>` elements via `ref`.
+    *   **`id`**: Unique ID (required).
+    *   **`name`**: Display name.
+    *   Contains exactly one `<text-style>` child that defines the style properties.
+
+*   **`<text-style>`**: Applies formatting to a run of text. Can appear inside `<text>` (wrapping text content) or inside `<text-style-def>` (defining the style).
+    *   **`ref`**: IDREF pointing to a `<text-style-def>` — applies that style to the wrapped text.
+    *   **`font`**: Font family name (e.g., `"Helvetica"`).
+    *   **`fontSize`**: Size in points (e.g., `"72"`).
+    *   **`fontFace`**: Font face variant (e.g., `"Bold"`).
+    *   **`fontColor`**: RGBA color as `"R G B A"` (e.g., `"1 1 1 1"` for white).
+    *   **`backgroundColor`**: Background color as `"R G B A"`.
+    *   **`bold`** / **`italic`** / **`underline`**: `0` or `1`.
+    *   **`strokeColor`**: Outline color as `"R G B A"`.
+    *   **`strokeWidth`**: Outline width.
+    *   **`baseline`** / **`baselineOffset`**: Vertical text offset.
+    *   **`shadowColor`** / **`shadowOffset`** / **`shadowBlurRadius`**: Drop shadow properties.
+    *   **`kerning`**: Character spacing.
+    *   **`alignment`**: `left` | `center` | `right` | `justified`.
+    *   **`lineSpacing`**: Line height adjustment.
+    *   **`tabStops`**: Tab stop positions.
+
+#### **Developer Example: Multi-Style Title**
+*A title with two different text styles applied to different words.*
+
+```xml
+<title ref="r10" name="Styled Title" offset="3600s" duration="5s">
+    <text>
+        <text-style ref="ts1">Breaking </text-style>
+        <text-style ref="ts2">News</text-style>
+    </text>
+    <text-style-def id="ts1">
+        <text-style font="Helvetica" fontSize="48" fontColor="1 1 1 1"/>
+    </text-style-def>
+    <text-style-def id="ts2">
+        <text-style font="Helvetica" fontSize="48" fontColor="1 0 0 1"
+                    bold="1" italic="1"/>
+    </text-style-def>
+</title>
+```
+
+### Generators
+Generators (solid colors, backgrounds, shapes, etc.) are **not a separate element type** in FCPXML. They use the `<video>` element with a `ref` pointing to an `<effect>` resource that has a generator `uid`.
+
+#### **Developer Example: Solid Color Generator**
+```xml
+<resources>
+    <effect id="r20" name="Custom" uid=".../Generators/Solid/Custom"/>
+</resources>
+
+<!-- In the timeline -->
+<video ref="r20" name="Red Background" offset="3600s" duration="10s">
+    <param name="Color" key="9999/1/100/101" value="1 0 0"/>
+</video>
+```
+
+The `<video>` element's `ref` attribute accepts either an `<asset>` ID (for media clips) or an `<effect>` ID (for generators). The DTD uses `ref IDREF #REQUIRED`, which allows referencing either resource type.
+
+#### **How to Distinguish Generators from Media Clips**
+When parsing a `<video>` element, look up its `ref` in the resource dictionary:
+*   If it points to an `<asset>` → it's a media clip.
+*   If it points to an `<effect>` → it's a generator.
+*   Similarly, `<title>` always references an `<effect>` — titles are specialized generators with text content.
+
+---
+
+## 12. The `param` Element & Effect Parameters
+
+The `<param>` element is the universal mechanism for setting and animating values on effects, generators, titles, and adjustments. Understanding its attributes is essential for working with any FCPXML effect.
+
+### **DTD Definition**
+```
+<!ELEMENT param (fadeIn?, fadeOut?, keyframeAnimation?, param*)>
+<!ATTLIST param name CDATA #REQUIRED>
+<!ATTLIST param key CDATA #IMPLIED>
+<!ATTLIST param value CDATA #IMPLIED>
+<!ATTLIST param auxValue CDATA #IMPLIED>
+<!ATTLIST param enabled (0 | 1) "1">
+```
+
+### **Attributes**
+
+*   **`name`** (required): Human-readable parameter name (e.g., `"Position"`, `"Opacity"`, `"Color"`). **Warning**: This value may be localized. A French-language FCP export might use `"Position"` → `"Position"` (same) but `"Amount"` → `"Quantité"`. Do not rely on `name` for programmatic identification — use `key` instead.
+
+*   **`key`** (optional): Language-independent constant identifier. Uses a slash-delimited numeric path format (e.g., `"9999/999166631/999166633/1/100/101"`). If `key` is absent, `name` is used for identification. **Always prefer `key` over `name` when both are present.**
+
+*   **`value`** (optional): The parameter value. The format depends on the parameter type:
+    *   **Scalar**: A single number (e.g., `"100"`, `"0.75"`).
+    *   **Point**: Space-separated coordinates (e.g., `"0 0"`, `"-50 25"`).
+    *   **Color**: Space-separated RGBA (e.g., `"0.5 0.2 0.8 1.0"`).
+    *   **Enumeration**: Integer with optional label (e.g., `"1 (Center)"`, `"2 (Right)"`). Parsers should extract only the integer.
+
+*   **`auxValue`** (optional): Secondary value for two-value parameters. Rare — used by specific effects.
+
+*   **`enabled`** (`0` | `1`, default: `1`): Whether the parameter is active.
+
+### **Children**
+
+*   **`<fadeIn>`**: Automatic fade-in applied to the parameter.
+    *   **`type`**: `linear` | `easeIn` | `easeOut` | `easeInOut`.
+    *   **`duration`**: Length of the fade.
+*   **`<fadeOut>`**: Automatic fade-out (same attributes as `fadeIn`).
+*   **`<keyframeAnimation>`**: Contains `<keyframe>` elements for animated values (see Section 5).
+*   **`<param>*`**: Nested params for hierarchical parameter groups.
+
+### **Nested Parameters**
+Some effects expose compound parameters. The parent `<param>` acts as a group container, and nested `<param>` elements represent individual sub-controls:
+
+```xml
+<!-- Color Board effect with nested parameter groups -->
+<filter-video ref="r8" name="Color Board">
+    <param name="Color" key="colorBoard/color">
+        <param name="Global Amount" key="colorBoard/color/global/amount" value="0"/>
+        <param name="Highlights Color" key="colorBoard/color/highlights/color" value="0.1 -0.05"/>
+        <param name="Midtones Color" key="colorBoard/color/midtones/color" value="0 0"/>
+        <param name="Shadows Color" key="colorBoard/color/shadows/color" value="-0.1 0.05"/>
+    </param>
+</filter-video>
+```
+
+### **Value Priority**
+When a parameter has multiple sources, priority is (highest to lowest):
+1.  **Keyframe value** at the current time (from `<keyframeAnimation>`).
+2.  **`<param>` element's `value` attribute** (static value).
+3.  **Adjustment element's attribute** (e.g., `position` on `<adjust-transform>`).
+
+### **Developer Example: Finding the Right `key`**
+The easiest way to discover the `key` for a specific parameter is:
+1.  Create a timeline in FCP with the desired effect.
+2.  Set the parameter to a recognizable value.
+3.  Export as FCPXML (`File > Export XML`).
+4.  Search the exported XML for your value — the surrounding `<param>` will show the `key`.
+
+---
+
+## 13. Color Processing & HDR
+
+### Library-Level Color Processing
+The `colorProcessing` attribute on `<library>` controls how the entire library handles color:
+
+*   **`standard`**: Standard Dynamic Range (SDR), Rec. 709 color space.
+*   **`wide`**: Wide Color Gamut, Rec. 2020 color space (no HDR).
+*   **`wide-hdr`**: Wide Color Gamut with High Dynamic Range (Rec. 2020 PQ or HLG).
+
+```xml
+<library location="file:///path/to/Library.fcpbundle/" colorProcessing="wide-hdr">
+    ...
+</library>
+```
+
+### Format Color Space
+The `colorSpace` attribute on `<format>` defines the render color space for that format:
+
+*   `"1-1-1 (Rec. 709)"` — Standard HD color space.
+*   `"Rec. 2020"` — Wide gamut SDR.
+*   `"Rec. 2020 PQ"` — HDR with Perceptual Quantizer (HDR10/Dolby Vision).
+*   `"Rec. 2020 HLG"` — HDR with Hybrid Log-Gamma (broadcast HDR).
+
+### Asset Color Space Override
+The `colorSpaceOverride` attribute on `<asset>` allows overriding the auto-detected color space of source media. This is useful when FCP misidentifies a clip's color space:
+
+```xml
+<asset id="r2" name="LOG Footage" src="file:///media/clip.mov"
+       start="0s" duration="100s" hasVideo="1" hasAudio="1"
+       colorSpaceOverride="Rec. 2020 HLG"/>
+```
+
+### Color Conforming (`<adjust-colorConform>`)
+Introduced in FCPXML v1.11, this element handles automatic tone mapping when mixing HDR and SDR content in the same timeline.
+
+*   **`enabled`**: `0` or `1` (default: `1`).
+*   **`autoOrManual`**: `automatic` | `manual` (default: `automatic`).
+*   **`conformType`**: The conversion applied:
+    *   `conformNone` (default) — No conversion.
+    *   `conformAuto` — FCP chooses automatically.
+    *   `conformHLGtoSDR` / `conformPQtoSDR` — HDR to SDR tone mapping.
+    *   `conformHLGtoPQ` / `conformPQtoHLG` — Cross-HDR format conversion.
+    *   `conformSDRtoHLG75` / `conformSDRtoHLG100` / `conformSDRtoPQ` — SDR to HDR uplift.
+*   **`peakNitsOfPQSource`**: Peak brightness of PQ source in nits (required).
+*   **`peakNitsOfSDRToPQSource`**: Peak brightness for SDR-to-PQ mapping (required).
+
+#### **Developer Example: HDR Timeline with SDR Clip**
+```xml
+<resources>
+    <format id="r1" frameDuration="100/2400s" width="3840" height="2160"
+            colorSpace="Rec. 2020 HLG"/>
+    <asset id="r2" name="SDR Interview" src="file:///media/interview.mov"
+           start="0s" duration="60s" hasVideo="1" hasAudio="1"/>
+</resources>
+
+<sequence format="r1" duration="60s">
+    <spine>
+        <asset-clip ref="r2" offset="0s" duration="60s">
+            <!-- Uplift SDR content to HLG for the HDR timeline -->
+            <adjust-colorConform conformType="conformSDRtoHLG100"
+                                 peakNitsOfPQSource="1000"
+                                 peakNitsOfSDRToPQSource="203"/>
+        </asset-clip>
+    </spine>
+</sequence>
+```
+
+---
+
+## 14. Crop Modes & Ken Burns Effect
+
+The `<adjust-crop>` element supports three distinct modes, each with its own child elements.
+
+### **Mode: `trim`**
+Simple edge trimming. Uses a `<trim-rect>` child with inset values.
+
+```xml
+<adjust-crop mode="trim" enabled="1">
+    <trim-rect left="0.1" top="0.05" right="0.1" bottom="0.05"/>
+</adjust-crop>
+```
+
+*   **`<trim-rect>`**: Defines inset amounts from each edge.
+    *   **`left`** / **`top`** / **`right`** / **`bottom`**: Fractional inset values (0.0 = no trim, 1.0 = fully trimmed). Default: `0` for all.
+*   Trim mode does **not** support keyframing — the crop is static.
+
+### **Mode: `crop`**
+Allows keyframed cropping via `<crop-rect>` with nested `<param>` elements.
+
+```xml
+<adjust-crop mode="crop" enabled="1">
+    <crop-rect left="0.1" top="0.1" right="0.1" bottom="0.1">
+        <param name="left">
+            <keyframeAnimation>
+                <keyframe time="0s" value="0.1"/>
+                <keyframe time="5s" value="0.3"/>
+            </keyframeAnimation>
+        </param>
+    </crop-rect>
+</adjust-crop>
+```
+
+*   **`<crop-rect>`**: Same attributes as `<trim-rect>`, but supports `<param>` children for animation.
+
+### **Mode: `pan` (Ken Burns Effect)**
+Animates between a start and end crop rectangle, creating a pan-and-zoom effect commonly used for still images.
+
+```xml
+<adjust-crop mode="pan" enabled="1">
+    <!-- Start rectangle (what you see at the beginning) -->
+    <pan-rect left="0" top="0" right="0.5" bottom="0.5"/>
+    <!-- End rectangle (what you see at the end) -->
+    <pan-rect left="0.3" top="0.2" right="0.2" bottom="0.3"/>
+</adjust-crop>
+```
+
+*   **`<pan-rect>`**: Defines a crop rectangle for one end of the animation.
+    *   **`left`** / **`top`** / **`right`** / **`bottom`**: Fractional inset values (default: `0`).
+*   The **first** `<pan-rect>` child is the start state.
+*   The **second** `<pan-rect>` child is the end state.
+*   FCP interpolates between them over the clip's duration.
+*   `<pan-rect>` does **not** support `<param>` children — the animation is implicit between the two rectangles.
+
+### **Still Images & Photos**
+Still images are handled as regular `<asset>` / `<asset-clip>` elements with `hasVideo="1" hasAudio="0"`. Key differences:
+*   The `duration` on the timeline `<asset-clip>` controls how long the photo is displayed (any duration is valid since there's no intrinsic playback length).
+*   Ken Burns (`mode="pan"`) is the most common adjustment for photos.
+*   `<adjust-conform>` with `type="fit"` or `type="fill"` controls how the image fits the frame when aspect ratios differ.
+
+---
+
+## 15. Object Tracking, Stabilization & Additional Adjustments
+
+### Object Tracking
+
+Object tracking (introduced in FCPXML v1.10 / FCP 10.6) allows effects and transforms to follow a tracked object's motion automatically.
+
+#### **Elements**
+
+*   **`<object-tracker>`**: Container for tracking shapes. Appears as a child of clip elements alongside other adjustments.
+    *   Children: one or more `<tracking-shape>` elements.
+
+*   **`<tracking-shape>`**: Defines a single tracked region.
+    *   **`id`** (required): Unique ID, referenced by `tracking` attributes on other elements.
+    *   **`name`**: Display name (e.g., `"Face"`, `"Car"`).
+    *   **`offsetEnabled`**: `0` | `1` (default: `0`). Whether offset tracking is enabled.
+    *   **`analysisMethod`**: `automatic` (default) | `combined` | `machineLearning` | `pointCloud`.
+    *   **`dataLocator`**: IDREF referencing tracking data stored externally (used in `.fcpxmld` bundles).
+    *   This is an **empty element** (no children).
+
+#### **Linking Tracking to Transforms**
+The `tracking` attribute on `<adjust-transform>` (and `<mask-shape>`) accepts an IDREF pointing to a `<tracking-shape>`:
+
+```xml
+<asset-clip ref="r2" offset="3600s" duration="10s">
+    <!-- Define the tracker -->
+    <object-tracker>
+        <tracking-shape id="track1" name="Face" analysisMethod="machineLearning"/>
+    </object-tracker>
+
+    <!-- Link transform to the tracked object -->
+    <adjust-transform position="0 10" tracking="track1"/>
+</asset-clip>
+```
+
+When `tracking` is set, the transform follows the tracked object's motion, and the `position` value acts as an offset from the tracked position.
+
+### Stabilization
+
+#### **`<adjust-stabilization>`**
+Controls video stabilization. Part of the intrinsic video parameters.
+
+*   **`enabled`**: `0` | `1` (default: `1`).
+*   **`type`**: The stabilization algorithm:
+    *   `automatic` (default) — FCP chooses the best method.
+    *   `inertiaCam` — Smooths camera movement while preserving general direction (handheld shots with intentional movement).
+    *   `smoothCam` — Aggressive stabilization for tripod-like stillness.
+
+```xml
+<asset-clip ref="r2" offset="3600s" duration="10s">
+    <adjust-stabilization type="inertiaCam" enabled="1"/>
+</asset-clip>
+```
+
+#### **`<adjust-rollingShutter>`**
+Corrects rolling shutter distortion (jello effect) from CMOS sensors.
+
+*   **`enabled`**: `0` | `1` (default: `1`).
+*   **`amount`**: Correction strength: `none` (default) | `low` | `medium` | `high` | `extraHigh`.
+
+```xml
+<asset-clip ref="r2" offset="3600s" duration="10s">
+    <adjust-rollingShutter amount="medium" enabled="1"/>
+</asset-clip>
+```
+
+### Additional Adjustment Elements
+
+These elements exist in the DTD but are less commonly encountered. Included here for completeness.
+
+#### **Video Adjustments**
+
+*   **`<adjust-360-transform>`**: Spatial transformations for 360° video.
+    *   Controls pan, tilt, roll, and field of view for spherical video.
+    *   Contains `<param>` children for keyframing.
+
+*   **`<adjust-reorient>`**: Reorients the horizon in 360° video.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   Contains `<param>` children.
+
+*   **`<adjust-orientation>`**: Adjusts the viewing orientation for 360° video.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   Contains `<param>` children.
+
+*   **`<adjust-cinematic>`** (v1.11+): Controls Cinematic Mode focus editing for iPhone footage.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   Contains `<param>` children for focus adjustments.
+
+*   **`<adjust-stereo-3D>`** (v1.13+): Controls spatial video (stereoscopic 3D) properties.
+    *   Related attributes on `<asset>`: `stereoscopic`, `heroEye`, `stereoscopicOverride`, `heroEyeOverride`.
+
+*   **`<adjust-corners>`**: Four-corner pin distortion (perspective transforms).
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   Contains `<param>` children for each corner position.
+
+#### **Audio Adjustments**
+
+*   **`<adjust-loudness>`**: Automatic loudness correction.
+    *   **`amount`**: Target loudness level.
+    *   **`uniformity`**: Loudness uniformity setting.
+
+*   **`<adjust-noiseReduction>`**: Background noise removal.
+    *   **`amount`**: Reduction strength.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+
+*   **`<adjust-humReduction>`**: Removes electrical hum (50/60 Hz).
+    *   **`frequency`**: The hum frequency to target.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+
+*   **`<adjust-EQ>`**: Parametric equalizer.
+    *   **`mode`**: EQ preset mode.
+    *   Contains `<param>` children for band-specific adjustments.
+
+*   **`<adjust-matchEQ>`**: Matches the EQ profile of one clip to another.
+
+*   **`<adjust-voiceIsolation>`** (v1.11+): AI-powered voice isolation that separates speech from background noise.
+    *   **`amount`**: Isolation strength.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+
+*   **`<mute>`**: Mutes the element's audio output entirely.
+
+#### **Masking**
+
+*   **`<filter-video-mask>`**: Applies a video filter through a mask shape.
+    *   **`ref`**: Reference to an `<effect>` ID.
+    *   **`inverted`**: `0` (default) | `1`. Whether the mask is inverted.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+
+*   **`<mask-shape>`**: Defines a shape mask.
+    *   **`tracking`**: IDREF linking to an `<object-tracker>` for tracked masks.
+
+*   **`<mask-isolation>`** (v1.8+): Isolation mask for color-based selections.
+
+---
+
+## 16. Version History & Compatibility
+
+### FCPXML Version to Final Cut Pro Mapping
+
+| FCPXML Version | FCP Version | Key Changes |
+|---|---|---|
+| 1.7 | FCP 10.4 | Closed captions (`<caption>`, CEA-608, iTT) |
+| 1.8 | FCP 10.4.4 | `<mask-isolation>`, shape/effect mask values via XML |
+| 1.9 | FCP 10.5.x | Updates to existing elements |
+| 1.10 | FCP 10.6 | `.fcpxmld` bundle format, `<object-tracker>`, `<tracking-shape>`, `tracking` attribute |
+| 1.11 | FCP 10.6.6 | `<adjust-colorConform>`, `<adjust-cinematic>`, `<live-drawing>`, `<adjust-voiceIsolation>`, `optical-flow-frc` frame sampling |
+| 1.12 | FCP 10.8 | `nameOverride` attribute on filters, additional metadata features |
+| 1.13 | FCP 11.0 | `<adjust-stereo-3D>`, spatial video attributes (`stereoscopic`, `heroEye`), `<hidden-clip-marker>`, 90/100/120fps conform rates |
+| 1.14 | FCP 12.0 | Transcript Search, Visual Search, Beat Detection |
+
+### Breaking Changes & Migration Notes
+
+*   **v1.3**: Renamed `<filter>` to `<filter-video>` and `<filter-audio>`. Replaced `<timeMap>` with `<conformRate>` (later versions restored `<timeMap>`).
+*   **v1.5 → v1.6**: Not backward-compatible. FCP 10.2 opens v1.5 but cannot open v1.6 (from FCP 10.3).
+*   **v1.10**: Introduced the `.fcpxmld` bundle format — a directory containing the XML file plus external tracking data files. Single-file `.fcpxml` is still supported.
+
+### Parser Recommendations
+1.  Always check the `version` attribute on the `<fcpxml>` root element before parsing.
+2.  Gracefully handle unknown elements and attributes from newer versions — skip them rather than failing.
+3.  FCP can export older versions (e.g., FCP 11 can export as v1.13, v1.12, or v1.11). If you only support a specific version, instruct users to export in that version.
+4.  When generating FCPXML, target the **oldest version** that supports the features you need, for maximum compatibility.
+
+### DTD Validation
+The DTD files are bundled with Final Cut Pro. Validate before import:
+```bash
+xmllint --dtdvalid "/Applications/Final Cut Pro.app/Contents/Frameworks/Flexo.framework/Resources/FCPXMLv1_11.dtd" "/path/to/file.fcpxml"
+```
+
+DTD files are also available on GitHub for reference (e.g., in the CommandPost and cutlass repositories).
+
+---
+
+## 17. Import Options
+
+The `<import-options>` element appears as an optional first child of `<fcpxml>`, before `<resources>`. It controls how FCP processes the file during import.
+
+### **Structure**
+```xml
+<fcpxml version="1.11">
+    <import-options>
+        <option key="copy assets" value="1"/>
+        <option key="assign audio role" value="dialogue"/>
+    </import-options>
+    <resources>
+        ...
+    </resources>
+    ...
+</fcpxml>
+```
+
+### **Elements**
+
+*   **`<import-options>`**: Container for import option key-value pairs.
+    *   Children: zero or more `<option>` elements.
+
+*   **`<option>`**: A single import option.
+    *   **`key`** (required): The option identifier.
+    *   **`value`** (required): The option value.
+
+### **Important Note**
+FCPXML is an **interchange/import** format, not an export-configuration format. There are no elements for controlling export settings, share destinations, or render settings. Export configuration is handled by FCP's share destinations system or the Compressor application. The `renderFormat` attribute on `<sequence>` specifies the codec used for preview render files within FCP's library, but does **not** control export format.

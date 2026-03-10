@@ -1,4 +1,4 @@
-use crate::model::clip::ClipColorLabel;
+use crate::model::clip::{ClipColorLabel, Phase1KeyframeProperty};
 use crate::model::project::Project;
 use gdk4;
 use gio;
@@ -314,6 +314,7 @@ pub fn build_inspector(
     on_chroma_key_changed: impl Fn() + 'static,
     on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
     on_bg_removal_changed: impl Fn() + 'static,
+    current_playhead_ns: impl Fn() -> u64 + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(260);
@@ -581,6 +582,12 @@ pub fn build_inspector(
     volume_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0 dB"));
     volume_slider.add_mark(VOLUME_DB_MAX, gtk4::PositionType::Bottom, Some("+12 dB"));
     audio_inner.append(&volume_slider);
+    let volume_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let volume_set_keyframe_btn = Button::with_label("Set Volume Keyframe");
+    let volume_remove_keyframe_btn = Button::with_label("Remove Volume Keyframe");
+    volume_keyframe_row.append(&volume_set_keyframe_btn);
+    volume_keyframe_row.append(&volume_remove_keyframe_btn);
+    audio_inner.append(&volume_keyframe_row);
 
     row_label(&audio_inner, "Pan");
     let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
@@ -612,6 +619,12 @@ pub fn build_inspector(
     scale_slider.set_hexpand(true);
     scale_slider.set_tooltip_text(Some("Scale: <1 = shrink with black borders, >1 = zoom in"));
     transform_inner.append(&scale_slider);
+    let scale_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let scale_set_keyframe_btn = Button::with_label("Set Scale Keyframe");
+    let scale_remove_keyframe_btn = Button::with_label("Remove Scale Keyframe");
+    scale_keyframe_row.append(&scale_set_keyframe_btn);
+    scale_keyframe_row.append(&scale_remove_keyframe_btn);
+    transform_inner.append(&scale_keyframe_row);
 
     row_label(&transform_inner, "Opacity");
     let opacity_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
@@ -623,6 +636,12 @@ pub fn build_inspector(
     opacity_slider.set_hexpand(true);
     opacity_slider.set_tooltip_text(Some("Clip opacity for compositing"));
     transform_inner.append(&opacity_slider);
+    let opacity_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let opacity_set_keyframe_btn = Button::with_label("Set Opacity Keyframe");
+    let opacity_remove_keyframe_btn = Button::with_label("Remove Opacity Keyframe");
+    opacity_keyframe_row.append(&opacity_set_keyframe_btn);
+    opacity_keyframe_row.append(&opacity_remove_keyframe_btn);
+    transform_inner.append(&opacity_keyframe_row);
 
     row_label(&transform_inner, "Position X");
     let position_x_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
@@ -637,6 +656,12 @@ pub fn build_inspector(
         "Horizontal position: −1 = left, 0 = center, +1 = right",
     ));
     transform_inner.append(&position_x_slider);
+    let position_x_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let position_x_set_keyframe_btn = Button::with_label("Set Position X Keyframe");
+    let position_x_remove_keyframe_btn = Button::with_label("Remove Position X Keyframe");
+    position_x_keyframe_row.append(&position_x_set_keyframe_btn);
+    position_x_keyframe_row.append(&position_x_remove_keyframe_btn);
+    transform_inner.append(&position_x_keyframe_row);
 
     row_label(&transform_inner, "Position Y");
     let position_y_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
@@ -650,6 +675,12 @@ pub fn build_inspector(
     position_y_slider
         .set_tooltip_text(Some("Vertical position: −1 = top, 0 = center, +1 = bottom"));
     transform_inner.append(&position_y_slider);
+    let position_y_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let position_y_set_keyframe_btn = Button::with_label("Set Position Y Keyframe");
+    let position_y_remove_keyframe_btn = Button::with_label("Remove Position Y Keyframe");
+    position_y_keyframe_row.append(&position_y_set_keyframe_btn);
+    position_y_keyframe_row.append(&position_y_remove_keyframe_btn);
+    transform_inner.append(&position_y_keyframe_row);
 
     row_label(&transform_inner, "Crop Left");
     let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
@@ -832,7 +863,7 @@ pub fn build_inspector(
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
-    let on_clip_changed = Rc::new(on_clip_changed);
+    let on_clip_changed: Rc<dyn Fn()> = Rc::new(on_clip_changed);
     let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)> =
         Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
@@ -846,6 +877,7 @@ pub fn build_inspector(
     let on_chroma_key_changed: Rc<dyn Fn()> = Rc::new(on_chroma_key_changed);
     let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_chroma_key_slider_changed);
     let on_bg_removal_changed: Rc<dyn Fn()> = Rc::new(on_bg_removal_changed);
+    let current_playhead_ns: Rc<dyn Fn() -> u64> = Rc::new(current_playhead_ns);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -1601,6 +1633,161 @@ pub fn build_inspector(
         });
         let _ = pos_y_s2;
     }
+
+    fn connect_phase1_keyframe_buttons(
+        set_btn: &Button,
+        remove_btn: &Button,
+        property: Phase1KeyframeProperty,
+        project: Rc<RefCell<Project>>,
+        selected_clip_id: Rc<RefCell<Option<String>>>,
+        updating: Rc<RefCell<bool>>,
+        current_playhead_ns: Rc<dyn Fn() -> u64>,
+        on_clip_changed: Rc<dyn Fn()>,
+        value_provider: Rc<dyn Fn() -> f64>,
+    ) {
+        set_btn.connect_clicked({
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let updating = updating.clone();
+            let current_playhead_ns = current_playhead_ns.clone();
+            let on_clip_changed = on_clip_changed.clone();
+            let value_provider = value_provider.clone();
+            move |_| {
+                if *updating.borrow() {
+                    return;
+                }
+                let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                    return;
+                };
+                let timeline_pos_ns = current_playhead_ns();
+                let value = value_provider();
+                let mut changed = false;
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                            clip.upsert_phase1_keyframe_at_timeline_ns(
+                                property,
+                                timeline_pos_ns,
+                                value,
+                            );
+                            proj.dirty = true;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+                if changed {
+                    on_clip_changed();
+                }
+            }
+        });
+
+        remove_btn.connect_clicked({
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let updating = updating.clone();
+            let current_playhead_ns = current_playhead_ns.clone();
+            let on_clip_changed = on_clip_changed.clone();
+            move |_| {
+                if *updating.borrow() {
+                    return;
+                }
+                let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                    return;
+                };
+                let timeline_pos_ns = current_playhead_ns();
+                let mut removed = false;
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                            removed = clip
+                                .remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
+                            if removed {
+                                proj.dirty = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if removed {
+                    on_clip_changed();
+                }
+            }
+        });
+    }
+
+    connect_phase1_keyframe_buttons(
+        &scale_set_keyframe_btn,
+        &scale_remove_keyframe_btn,
+        Phase1KeyframeProperty::Scale,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let scale_slider = scale_slider.clone();
+            move || scale_slider.value()
+        }),
+    );
+    connect_phase1_keyframe_buttons(
+        &opacity_set_keyframe_btn,
+        &opacity_remove_keyframe_btn,
+        Phase1KeyframeProperty::Opacity,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let opacity_slider = opacity_slider.clone();
+            move || opacity_slider.value().clamp(0.0, 1.0)
+        }),
+    );
+    connect_phase1_keyframe_buttons(
+        &position_x_set_keyframe_btn,
+        &position_x_remove_keyframe_btn,
+        Phase1KeyframeProperty::PositionX,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let position_x_slider = position_x_slider.clone();
+            move || position_x_slider.value()
+        }),
+    );
+    connect_phase1_keyframe_buttons(
+        &position_y_set_keyframe_btn,
+        &position_y_remove_keyframe_btn,
+        Phase1KeyframeProperty::PositionY,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let position_y_slider = position_y_slider.clone();
+            move || position_y_slider.value()
+        }),
+    );
+    connect_phase1_keyframe_buttons(
+        &volume_set_keyframe_btn,
+        &volume_remove_keyframe_btn,
+        Phase1KeyframeProperty::Volume,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let volume_slider = volume_slider.clone();
+            move || db_to_linear_volume(volume_slider.value())
+        }),
+    );
 
     // Title entry and position sliders
     {

@@ -1,6 +1,6 @@
 use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
-use crate::model::clip::{Clip, ClipKind};
+use crate::model::clip::{Clip, ClipKind, Phase1KeyframeProperty};
 use crate::model::media_library::MediaItem;
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
@@ -36,6 +36,58 @@ fn flash_window_status_title(
             }
         }
     });
+}
+
+/// Evaluate a clip's keyframe-interpolated transform at a given playhead position.
+/// Returns `(scale, position_x, position_y)` accounting for any phase-1 keyframes.
+fn evaluate_clip_transform_at(clip: &Clip, playhead_ns: u64) -> (f64, f64, f64) {
+    let local_ns = clip.local_timeline_position_ns(playhead_ns);
+    let scale = Clip::evaluate_keyframed_value(&clip.scale_keyframes, local_ns, clip.scale);
+    let pos_x =
+        Clip::evaluate_keyframed_value(&clip.position_x_keyframes, local_ns, clip.position_x);
+    let pos_y =
+        Clip::evaluate_keyframed_value(&clip.position_y_keyframes, local_ns, clip.position_y);
+    (scale, pos_x, pos_y)
+}
+
+/// Update the transform overlay to reflect the keyframe-interpolated transform
+/// of the selected clip at the given playhead position.
+fn sync_transform_overlay_to_playhead(
+    transform_overlay: &crate::ui::transform_overlay::TransformOverlay,
+    project: &Project,
+    selected_clip_id: Option<&str>,
+    playhead_ns: u64,
+) {
+    match selected_clip_id {
+        Some(cid) => {
+            let clip_opt = project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == cid);
+            if let Some(c) = clip_opt {
+                if c.kind != ClipKind::Audio {
+                    let (scale, pos_x, pos_y) = evaluate_clip_transform_at(c, playhead_ns);
+                    transform_overlay.set_transform(scale, pos_x, pos_y);
+                    transform_overlay.set_rotation(c.rotate);
+                    transform_overlay.set_crop(
+                        c.crop_left,
+                        c.crop_right,
+                        c.crop_top,
+                        c.crop_bottom,
+                    );
+                    transform_overlay.set_clip_selected(true);
+                } else {
+                    transform_overlay.set_clip_selected(false);
+                }
+            } else {
+                transform_overlay.set_clip_selected(false);
+            }
+        }
+        None => {
+            transform_overlay.set_clip_selected(false);
+        }
+    }
 }
 
 fn seek_playhead_and_notify(
@@ -1974,6 +2026,10 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        {
+            let timeline_state = timeline_state.clone();
+            move || timeline_state.borrow().playhead_ns
+        },
     );
 
     // Set initial model availability on the inspector so the bg-removal
@@ -1992,42 +2048,21 @@ pub fn build_window(
         let inspector_view = inspector_view.clone();
         let project = project.clone();
         let transform_overlay_cell = transform_overlay_cell.clone();
+        let timeline_state_for_sel = timeline_state.clone();
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
                 inspector_view.update(&proj, clip_id.as_deref());
-                // Sync transform overlay handles with selection state.
+                // Sync transform overlay handles with selection state,
+                // using keyframe-interpolated values at the current playhead.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
-                    match clip_id {
-                        Some(ref cid) => {
-                            let clip_opt = proj
-                                .tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .find(|c| &c.id == cid);
-                            if let Some(c) = clip_opt {
-                                let is_visual = c.kind != ClipKind::Audio;
-                                if is_visual {
-                                    to.set_transform(c.scale, c.position_x, c.position_y);
-                                    to.set_rotation(c.rotate);
-                                    to.set_crop(
-                                        c.crop_left,
-                                        c.crop_right,
-                                        c.crop_top,
-                                        c.crop_bottom,
-                                    );
-                                    to.set_clip_selected(true);
-                                } else {
-                                    to.set_clip_selected(false);
-                                }
-                            } else {
-                                to.set_clip_selected(false);
-                            }
-                        }
-                        None => {
-                            to.set_clip_selected(false);
-                        }
-                    }
+                    let playhead_ns = timeline_state_for_sel.borrow().playhead_ns;
+                    sync_transform_overlay_to_playhead(
+                        to,
+                        &proj,
+                        clip_id.as_deref(),
+                        playhead_ns,
+                    );
                 }
             }));
     }
@@ -2762,6 +2797,8 @@ pub fn build_window(
         let last_proxy_refresh_us_c = last_proxy_refresh_us.clone();
         let picture_a_poll = picture_a.clone();
         let picture_b_poll = picture_b.clone();
+        let transform_overlay_poll = transform_overlay_cell.clone();
+        let timeline_state_poll = timeline_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -2954,6 +2991,20 @@ pub fn build_window(
                         w.queue_draw();
                     }
                     last_draw_ns_c.set(pos_ns);
+                }
+                // Update transform overlay handles to reflect keyframe-interpolated
+                // position at the new playhead time.
+                if let Some(ref to) = *transform_overlay_poll.borrow() {
+                    let selected = timeline_state_poll.borrow().selected_clip_id.clone();
+                    if selected.is_some() {
+                        let proj = project.borrow();
+                        sync_transform_overlay_to_playhead(
+                            to,
+                            &proj,
+                            selected.as_deref(),
+                            pos_ns,
+                        );
+                    }
                 }
                 last_pos_ns_c.set(pos_ns);
             }
@@ -3497,37 +3548,21 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 inspector_view.update(&proj, selected.as_deref());
 
-                // Sync transform overlay: show handles when a clip is selected
+                // Sync transform overlay: show handles when a clip is selected,
+                // using keyframe-interpolated values at the current playhead.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
                     to.set_project_dimensions(proj.width, proj.height);
                     // Keep canvas frame aspect ratio in sync with project dimensions.
                     if proj.height > 0 {
                         prog_canvas_frame.set_ratio(proj.width as f32 / proj.height as f32);
                     }
-                    if let Some(ref cid) = selected {
-                        let clip_opt = proj
-                            .tracks
-                            .iter()
-                            .flat_map(|t| t.clips.iter())
-                            .find(|c| &c.id == cid);
-                        if let Some(c) = clip_opt {
-                            // Don't show transform handles for audio-only clips — they
-                            // have no visual representation on the canvas.
-                            let is_visual = c.kind != ClipKind::Audio;
-                            if is_visual {
-                                to.set_transform(c.scale, c.position_x, c.position_y);
-                                to.set_rotation(c.rotate);
-                                to.set_crop(c.crop_left, c.crop_right, c.crop_top, c.crop_bottom);
-                                to.set_clip_selected(true);
-                            } else {
-                                to.set_clip_selected(false);
-                            }
-                        } else {
-                            to.set_clip_selected(false);
-                        }
-                    } else {
-                        to.set_clip_selected(false);
-                    }
+                    let playhead_ns = timeline_state.borrow().playhead_ns;
+                    sync_transform_overlay_to_playhead(
+                        to,
+                        &proj,
+                        selected.as_deref(),
+                        playhead_ns,
+                    );
                 }
 
                 let suppress_embedded_audio_ids: HashSet<String> = proj
@@ -3567,6 +3602,7 @@ pub fn build_window(
                             denoise: c.denoise as f64,
                             sharpness: c.sharpness as f64,
                             volume: c.volume as f64,
+                            volume_keyframes: c.volume_keyframes.clone(),
                             pan: c.pan as f64,
                             crop_left: c.crop_left,
                             crop_right: c.crop_right,
@@ -3591,9 +3627,13 @@ pub fn build_window(
                             transition_after_ns: c.transition_after_ns,
                             lut_path: c.lut_path.clone(),
                             scale: c.scale,
+                            scale_keyframes: c.scale_keyframes.clone(),
                             opacity: c.opacity,
+                            opacity_keyframes: c.opacity_keyframes.clone(),
                             position_x: c.position_x,
+                            position_x_keyframes: c.position_x_keyframes.clone(),
                             position_y: c.position_y,
+                            position_y_keyframes: c.position_y_keyframes.clone(),
                             shadows: c.shadows as f64,
                             midtones: c.midtones as f64,
                             highlights: c.highlights as f64,
@@ -4587,7 +4627,17 @@ fn handle_mcp_command(
                             "shadows":          c.shadows,
                             "midtones":         c.midtones,
                             "highlights":       c.highlights,
+                            "volume":           c.volume,
+                            "pan":              c.pan,
+                            "scale":            c.scale,
                             "opacity":          c.opacity,
+                            "position_x":       c.position_x,
+                            "position_y":       c.position_y,
+                            "scale_keyframes":      c.scale_keyframes,
+                            "opacity_keyframes":    c.opacity_keyframes,
+                            "position_x_keyframes": c.position_x_keyframes,
+                            "position_y_keyframes": c.position_y_keyframes,
+                            "volume_keyframes":     c.volume_keyframes,
                             "bg_removal_enabled":   c.bg_removal_enabled,
                             "bg_removal_threshold": c.bg_removal_threshold,
                         })
@@ -5767,6 +5817,100 @@ fn handle_mcp_command(
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipKeyframe {
+            clip_id,
+            property,
+            timeline_pos_ns,
+            value,
+            reply,
+        } => {
+            let Some(property) = Phase1KeyframeProperty::parse(&property) else {
+                reply
+                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume"}))
+                    .ok();
+                return;
+            };
+            let timeline_pos_ns =
+                timeline_pos_ns.unwrap_or_else(|| prog_player.borrow().timeline_pos_ns);
+            let mut found = false;
+            let mut keyframe_time_ns = None;
+            {
+                let mut proj = project.borrow_mut();
+                'outer: for track in proj.tracks.iter_mut() {
+                    for clip in track.clips.iter_mut() {
+                        if clip.id == clip_id {
+                            keyframe_time_ns = Some(clip.upsert_phase1_keyframe_at_timeline_ns(
+                                property,
+                                timeline_pos_ns,
+                                value,
+                            ));
+                            proj.dirty = true;
+                            found = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            reply
+                .send(json!({
+                    "success": found,
+                    "clip_id": clip_id,
+                    "property": property.as_str(),
+                    "timeline_pos_ns": timeline_pos_ns,
+                    "clip_local_time_ns": keyframe_time_ns
+                }))
+                .ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::RemoveClipKeyframe {
+            clip_id,
+            property,
+            timeline_pos_ns,
+            reply,
+        } => {
+            let Some(property) = Phase1KeyframeProperty::parse(&property) else {
+                reply
+                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume"}))
+                    .ok();
+                return;
+            };
+            let timeline_pos_ns =
+                timeline_pos_ns.unwrap_or_else(|| prog_player.borrow().timeline_pos_ns);
+            let mut found = false;
+            let mut removed = false;
+            {
+                let mut proj = project.borrow_mut();
+                'outer: for track in proj.tracks.iter_mut() {
+                    for clip in track.clips.iter_mut() {
+                        if clip.id == clip_id {
+                            removed = clip
+                                .remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
+                            if removed {
+                                proj.dirty = true;
+                            }
+                            found = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            reply
+                .send(json!({
+                    "success": found && removed,
+                    "clip_id": clip_id,
+                    "property": property.as_str(),
+                    "timeline_pos_ns": timeline_pos_ns,
+                    "removed": removed
+                }))
+                .ok();
+            if found && removed {
                 on_project_changed();
             }
         }

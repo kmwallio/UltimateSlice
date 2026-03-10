@@ -62,6 +62,22 @@ Useful playback-tuning toggles:
 
 `set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
 
+## Keyframe MCP examples
+
+Set a scale keyframe on a clip at an absolute timeline time:
+
+```bash
+python3 tools/mcp_call.py set_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000,"value":1.35}'
+```
+
+Remove the keyframe for that property at the same timeline time:
+
+```bash
+python3 tools/mcp_call.py remove_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000}'
+```
+
+Use `list_clips` to discover `clip_id` values and inspect phase-1 keyframe arrays (`scale_keyframes`, `opacity_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `volume_keyframes`).
+
 ## `.mcp.json` server entry
 
 This repository includes a Python socket entry:

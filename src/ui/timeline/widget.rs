@@ -5095,6 +5095,8 @@ fn draw_clip(
         cr.stroke().ok();
     }
 
+    draw_clip_keyframe_markers(cr, clip, cx, cy, cw, ch, view_width, is_selected);
+
     if cw > 30.0 {
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.set_font_size(11.0);
@@ -5178,6 +5180,102 @@ fn draw_clip(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClipKeyframeMarkerGeometry {
+    x: f64,
+    row: usize,
+    color: (f64, f64, f64),
+}
+
+fn clip_keyframe_marker_geometry(
+    clip: &Clip,
+    cx: f64,
+    cw: f64,
+    view_left: f64,
+    view_right: f64,
+) -> Vec<ClipKeyframeMarkerGeometry> {
+    let duration_ns = clip.duration();
+    if duration_ns == 0 || cw <= 2.0 {
+        return Vec::new();
+    }
+    let properties: [(&[crate::model::clip::NumericKeyframe], (f64, f64, f64)); 5] = [
+        (&clip.scale_keyframes, (1.0, 0.83, 0.30)),
+        (&clip.opacity_keyframes, (0.94, 0.94, 0.94)),
+        (&clip.position_x_keyframes, (0.45, 0.90, 1.0)),
+        (&clip.position_y_keyframes, (0.82, 0.62, 1.0)),
+        (&clip.volume_keyframes, (0.55, 1.0, 0.62)),
+    ];
+
+    let mut markers = Vec::new();
+    for (row, (keyframes, color)) in properties.iter().enumerate() {
+        if keyframes.is_empty() {
+            continue;
+        }
+        let mut seen_times = HashSet::new();
+        for kf in *keyframes {
+            let local_time_ns = kf.time_ns.min(duration_ns);
+            if !seen_times.insert(local_time_ns) {
+                continue;
+            }
+            let frac = local_time_ns as f64 / duration_ns as f64;
+            let x = cx + frac * cw;
+            if x >= view_left && x <= view_right {
+                markers.push(ClipKeyframeMarkerGeometry {
+                    x,
+                    row,
+                    color: *color,
+                });
+            }
+        }
+    }
+    markers
+}
+
+fn draw_clip_keyframe_markers(
+    cr: &gtk::cairo::Context,
+    clip: &Clip,
+    cx: f64,
+    cy: f64,
+    cw: f64,
+    ch: f64,
+    view_width: f64,
+    is_selected: bool,
+) {
+    if cw <= 10.0 || ch <= 10.0 {
+        return;
+    }
+    let markers = clip_keyframe_marker_geometry(clip, cx, cw, TRACK_LABEL_WIDTH, view_width);
+    if markers.is_empty() {
+        return;
+    }
+
+    let marker_h = (ch * 0.16).clamp(3.0, 6.0);
+    let row_pitch = 2.6;
+    let base_y = cy + 3.0;
+    let alpha = if is_selected { 0.95 } else { 0.72 };
+
+    cr.save().ok();
+    rounded_rect(
+        cr,
+        cx + 1.0,
+        cy + 1.0,
+        (cw - 2.0).max(1.0),
+        (ch - 2.0).max(1.0),
+        3.0,
+    );
+    cr.clip();
+    for marker in markers {
+        let marker_y = base_y + marker.row as f64 * row_pitch;
+        if marker_y + marker_h > cy + ch - 1.0 {
+            continue;
+        }
+        cr.set_source_rgba(marker.color.0, marker.color.1, marker.color.2, alpha);
+        cr.rectangle(marker.x - 1.0, marker_y, 2.0, marker_h);
+        cr.fill().ok();
+    }
+    cr.restore().ok();
 }
 
 fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
@@ -5468,7 +5566,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::clip::{Clip, ClipKind};
+    use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
@@ -6794,5 +6892,73 @@ mod tests {
             TRACK_LABEL_WIDTH + 400.0,
         );
         assert!(indicators.is_empty());
+    }
+
+    #[test]
+    fn clip_keyframe_marker_geometry_maps_keyframe_times_to_clip_pixels() {
+        let mut clip = Clip::new("clip.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.scale_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        clip.volume_keyframes = vec![NumericKeyframe {
+            time_ns: 500_000_000,
+            value: 0.8,
+            interpolation: KeyframeInterpolation::Linear,
+        }];
+
+        let markers = clip_keyframe_marker_geometry(&clip, 200.0, 300.0, TRACK_LABEL_WIDTH, 800.0);
+        let scale_row_markers: Vec<_> =
+            markers.iter().filter(|m| m.row == 0).map(|m| m.x).collect();
+        let volume_row_markers: Vec<_> =
+            markers.iter().filter(|m| m.row == 4).map(|m| m.x).collect();
+
+        assert_eq!(scale_row_markers.len(), 3);
+        assert!((scale_row_markers[0] - 200.0).abs() < 0.001);
+        assert!((scale_row_markers[1] - 350.0).abs() < 0.001);
+        assert!((scale_row_markers[2] - 500.0).abs() < 0.001);
+        assert_eq!(volume_row_markers.len(), 1);
+        assert!((volume_row_markers[0] - 275.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn clip_keyframe_marker_geometry_clamps_and_filters_offscreen_markers() {
+        let mut clip = Clip::new("clip.mov", 1_000_000_000, 0, ClipKind::Video);
+        clip.opacity_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 200_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+
+        let markers = clip_keyframe_marker_geometry(
+            &clip,
+            TRACK_LABEL_WIDTH + 10.0,
+            100.0,
+            TRACK_LABEL_WIDTH + 50.0,
+            TRACK_LABEL_WIDTH + 110.0,
+        );
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].row, 1);
+        assert!((markers[0].x - (TRACK_LABEL_WIDTH + 110.0)).abs() < 0.001);
     }
 }
