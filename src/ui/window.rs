@@ -1847,6 +1847,7 @@ pub fn build_window(
                                 {
                                     player_clip.volume_keyframes =
                                         model_clip.volume_keyframes.clone();
+                                    player_clip.pan_keyframes = model_clip.pan_keyframes.clone();
                                 }
                                 // Sync to audio-only clips
                                 if let Some(audio_clip) =
@@ -1854,6 +1855,7 @@ pub fn build_window(
                                 {
                                     audio_clip.volume_keyframes =
                                         model_clip.volume_keyframes.clone();
+                                    audio_clip.pan_keyframes = model_clip.pan_keyframes.clone();
                                 }
                                 break;
                             }
@@ -3704,6 +3706,7 @@ pub fn build_window(
                             volume: c.volume as f64,
                             volume_keyframes: c.volume_keyframes.clone(),
                             pan: c.pan as f64,
+                            pan_keyframes: c.pan_keyframes.clone(),
                             crop_left: c.crop_left,
                             crop_right: c.crop_right,
                             crop_top: c.crop_top,

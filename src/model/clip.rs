@@ -149,6 +149,7 @@ pub enum Phase1KeyframeProperty {
     Scale,
     Opacity,
     Volume,
+    Pan,
 }
 
 impl Phase1KeyframeProperty {
@@ -159,6 +160,7 @@ impl Phase1KeyframeProperty {
             Self::Scale => "scale",
             Self::Opacity => "opacity",
             Self::Volume => "volume",
+            Self::Pan => "pan",
         }
     }
 
@@ -169,6 +171,7 @@ impl Phase1KeyframeProperty {
             "scale" => Some(Self::Scale),
             "opacity" => Some(Self::Opacity),
             "volume" => Some(Self::Volume),
+            "pan" => Some(Self::Pan),
             _ => None,
         }
     }
@@ -269,6 +272,9 @@ pub struct Clip {
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     #[serde(default)]
     pub pan: f32,
+    /// Optional pan keyframes over clip-local timeline.
+    #[serde(default)]
+    pub pan_keyframes: Vec<NumericKeyframe>,
     /// Playback speed multiplier: 0.25 (slow) to 4.0 (fast), default 1.0.
     /// Values > 1.0 speed up (clip takes less time on timeline); < 1.0 slow down.
     #[serde(default = "default_speed")]
@@ -441,6 +447,7 @@ impl Clip {
             volume: 1.0,
             volume_keyframes: Vec::new(),
             pan: 0.0,
+            pan_keyframes: Vec::new(),
             speed: 1.0,
             crop_left: 0,
             crop_right: 0,
@@ -541,6 +548,7 @@ impl Clip {
             Phase1KeyframeProperty::Scale => &self.scale_keyframes,
             Phase1KeyframeProperty::Opacity => &self.opacity_keyframes,
             Phase1KeyframeProperty::Volume => &self.volume_keyframes,
+            Phase1KeyframeProperty::Pan => &self.pan_keyframes,
         }
     }
 
@@ -554,6 +562,7 @@ impl Clip {
             Phase1KeyframeProperty::Scale => &mut self.scale_keyframes,
             Phase1KeyframeProperty::Opacity => &mut self.opacity_keyframes,
             Phase1KeyframeProperty::Volume => &mut self.volume_keyframes,
+            Phase1KeyframeProperty::Pan => &mut self.pan_keyframes,
         }
     }
 
@@ -564,6 +573,7 @@ impl Clip {
             Phase1KeyframeProperty::Scale => self.scale,
             Phase1KeyframeProperty::Opacity => self.opacity,
             Phase1KeyframeProperty::Volume => self.volume as f64,
+            Phase1KeyframeProperty::Pan => self.pan as f64,
         }
     }
 
@@ -575,6 +585,7 @@ impl Clip {
             Phase1KeyframeProperty::Scale => value.clamp(0.1, 4.0),
             Phase1KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
             Phase1KeyframeProperty::Volume => value.clamp(0.0, 4.0),
+            Phase1KeyframeProperty::Pan => value.clamp(-1.0, 1.0),
         }
     }
 
@@ -649,6 +660,7 @@ impl Clip {
             .chain(&self.position_x_keyframes)
             .chain(&self.position_y_keyframes)
             .chain(&self.volume_keyframes)
+            .chain(&self.pan_keyframes)
             .map(|kf| kf.time_ns)
             .collect();
         times.sort_unstable();
@@ -1108,6 +1120,7 @@ mod tests {
         assert!(clip.position_x_keyframes.is_empty());
         assert!(clip.position_y_keyframes.is_empty());
         assert!(clip.volume_keyframes.is_empty());
+        assert!(clip.pan_keyframes.is_empty());
     }
 
     #[test]
@@ -1189,6 +1202,40 @@ mod tests {
         // has_keyframe_at_local_ns_for_property
         assert!(clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000, 100));
         assert!(!clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Scale, 500_000_000, 100));
+    }
+
+    #[test]
+    fn test_pan_phase1_clamp_and_eval() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.pan = 0.0;
+        clip.pan_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -2.0, // clamp to -1.0
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 2.0, // clamp to 1.0
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let local = 500_000_000;
+        let v = Clip::evaluate_keyframed_value(
+            &clip.pan_keyframes,
+            local,
+            clip.default_value_for_phase1_property(Phase1KeyframeProperty::Pan),
+        );
+        // evaluate_keyframed_value uses raw values; clamp happens on upsert, so validate clamp helper too.
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Pan, -2.0),
+            -1.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Pan, 2.0),
+            1.0
+        );
+        assert!(v.is_finite());
     }
 
     #[test]

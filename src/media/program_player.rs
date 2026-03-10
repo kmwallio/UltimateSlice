@@ -204,8 +204,8 @@ pub struct ProgramClip {
     pub volume: f64,
     pub volume_keyframes: Vec<NumericKeyframe>,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
-    #[allow(dead_code)]
     pub pan: f64,
+    pub pan_keyframes: Vec<NumericKeyframe>,
     /// Crop pixels (left, right, top, bottom)
     pub crop_left: i32,
     pub crop_right: i32,
@@ -325,6 +325,15 @@ impl ProgramClip {
             self.local_timeline_position_ns(timeline_pos_ns),
             self.volume,
         )
+    }
+
+    pub fn pan_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.pan_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.pan,
+        )
+        .clamp(-1.0, 1.0)
     }
 
     fn playback_duration_ns(&self) -> u64 {
@@ -585,6 +594,8 @@ pub struct ProgramPlayer {
     /// with PulseAudio/PipeWire flat-volume behaviour and inadvertently change
     /// the main pipeline's audio level.
     audio_volume_element: Option<gst::Element>,
+    /// GStreamer `audiopanorama` element on the audio-only pipeline for panning.
+    audio_panorama_element: Option<gst::Element>,
     pub audio_peak_db: [f64; 2],
     pub audio_track_peak_db: Vec<[f64; 2]>,
     jkl_rate: f64,
@@ -1056,26 +1067,45 @@ impl ProgramPlayer {
         // interface, which under PulseAudio/PipeWire flat-volume mode can also
         // affect the main compositor pipeline's audio level.
         let audio_volume_element = gst::ElementFactory::make("volume").build().ok();
-        match (&audio_volume_element, &level_element_audio) {
-            (Some(vol), Some(lv)) => {
+        let audio_panorama_element = gst::ElementFactory::make("audiopanorama").build().ok();
+        if let Some(ref pan) = audio_panorama_element {
+            pan.set_property("panorama", 0.0_f64);
+        }
+        let mut audio_filters: Vec<gst::Element> = Vec::new();
+        if let Some(ref vol) = audio_volume_element {
+            audio_filters.push(vol.clone());
+        }
+        if let Some(ref pan) = audio_panorama_element {
+            audio_filters.push(pan.clone());
+        }
+        if let Some(ref lv) = level_element_audio {
+            audio_filters.push(lv.clone());
+        }
+        match audio_filters.len() {
+            0 => {}
+            1 => {
+                audio_pipeline.set_property("audio-filter", &audio_filters[0]);
+            }
+            _ => {
                 let bin = gst::Bin::builder().name("audio-filter-bin").build();
-                bin.add_many([vol, lv]).unwrap();
-                vol.link(lv).unwrap();
-                let sink_pad = vol.static_pad("sink").unwrap();
-                let src_pad = lv.static_pad("src").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
-                    .unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
-                    .unwrap();
-                audio_pipeline.set_property("audio-filter", &bin.upcast::<gst::Element>());
+                for elem in &audio_filters {
+                    bin.add(elem).unwrap();
+                }
+                for pair in audio_filters.windows(2) {
+                    pair[0].link(&pair[1]).unwrap();
+                }
+                if let (Some(first), Some(last)) = (audio_filters.first(), audio_filters.last()) {
+                    if let (Some(sink_pad), Some(src_pad)) =
+                        (first.static_pad("sink"), last.static_pad("src"))
+                    {
+                        bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                            .unwrap();
+                        bin.add_pad(&gst::GhostPad::with_target(&src_pad).unwrap())
+                            .unwrap();
+                        audio_pipeline.set_property("audio-filter", &bin.upcast::<gst::Element>());
+                    }
+                }
             }
-            (Some(vol), None) => {
-                audio_pipeline.set_property("audio-filter", vol);
-            }
-            (None, Some(lv)) => {
-                audio_pipeline.set_property("audio-filter", lv);
-            }
-            _ => {}
         }
 
         // Dummy second paintable (API compat — window.rs expects two).
@@ -1126,6 +1156,7 @@ impl ProgramPlayer {
                 level_element,
                 level_element_audio,
                 audio_volume_element,
+                audio_panorama_element,
                 audio_peak_db: [-60.0, -60.0],
                 audio_track_peak_db: Vec::new(),
                 jkl_rate: 0.0,
@@ -2305,11 +2336,32 @@ impl ProgramPlayer {
         }
     }
 
+    fn effective_audio_source_pan(&self, source: AudioCurrentSource, timeline_pos_ns: u64) -> f64 {
+        match source {
+            AudioCurrentSource::AudioClip(idx) => self
+                .audio_clips
+                .get(idx)
+                .map(|clip| clip.pan_at_timeline_ns(timeline_pos_ns))
+                .unwrap_or(0.0),
+            AudioCurrentSource::ReverseVideoClip(idx) => self
+                .clips
+                .get(idx)
+                .map(|clip| clip.pan_at_timeline_ns(timeline_pos_ns))
+                .unwrap_or(0.0),
+        }
+    }
+
     fn set_audio_pipeline_volume(&self, volume: f64) {
         if let Some(ref vol_elem) = self.audio_volume_element {
             vol_elem.set_property("volume", volume);
         } else {
             self.audio_pipeline.set_property("volume", volume);
+        }
+    }
+
+    fn set_audio_pipeline_pan(&self, pan: f64) {
+        if let Some(ref pan_elem) = self.audio_panorama_element {
+            pan_elem.set_property("panorama", pan.clamp(-1.0, 1.0));
         }
     }
 
@@ -2334,6 +2386,8 @@ impl ProgramPlayer {
         if let Some(source) = self.audio_current_source {
             let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
             self.set_audio_pipeline_volume(volume);
+            let pan = self.effective_audio_source_pan(source, timeline_pos_ns);
+            self.set_audio_pipeline_pan(pan);
         }
     }
 
@@ -2706,20 +2760,23 @@ impl ProgramPlayer {
     }
 
     #[allow(dead_code)]
-    pub fn update_current_audio(&mut self, volume: f64, _pan: f64) {
+    pub fn update_current_audio(&mut self, volume: f64, pan: f64) {
         if let Some(idx) = self.current_idx {
             if let Some(clip) = self.clips.get_mut(idx) {
                 clip.volume = volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+                clip.pan = pan.clamp(-1.0, 1.0);
             }
         }
         self.sync_preview_audio_levels(self.timeline_pos_ns);
     }
 
-    pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, _pan: f64) {
+    pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, pan: f64) {
         let volume = volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
+        let pan = pan.clamp(-1.0, 1.0);
         // Check video clips first (use audiomixer pad on compositor pipeline).
         if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
             self.clips[i].volume = volume;
+            self.clips[i].pan = pan;
             self.apply_main_audio_slot_volumes(self.timeline_pos_ns);
             return;
         }
@@ -2727,12 +2784,16 @@ impl ProgramPlayer {
         // update the dedicated volume element (avoids playbin StreamVolume crosstalk).
         if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
             self.audio_clips[i].volume = volume;
+            self.audio_clips[i].pan = pan;
             if self.audio_current_source == Some(AudioCurrentSource::AudioClip(i)) {
                 let effective = self.effective_audio_source_volume(
                     AudioCurrentSource::AudioClip(i),
                     self.timeline_pos_ns,
                 );
                 self.set_audio_pipeline_volume(effective);
+                let effective_pan =
+                    self.effective_audio_source_pan(AudioCurrentSource::AudioClip(i), self.timeline_pos_ns);
+                self.set_audio_pipeline_pan(effective_pan);
             }
         }
     }
@@ -8141,7 +8202,9 @@ impl ProgramPlayer {
         let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
         let vol =
             self.effective_audio_source_volume(AudioCurrentSource::AudioClip(idx), timeline_pos_ns);
+        let pan = self.effective_audio_source_pan(AudioCurrentSource::AudioClip(idx), timeline_pos_ns);
         self.set_audio_pipeline_volume(vol);
+        self.set_audio_pipeline_pan(pan);
         if self.audio_current_source == Some(AudioCurrentSource::AudioClip(idx)) {
             let _ = self.audio_pipeline.seek(
                 clip.seek_rate(),
@@ -8191,7 +8254,12 @@ impl ProgramPlayer {
             AudioCurrentSource::ReverseVideoClip(idx),
             timeline_pos_ns,
         );
+        let pan = self.effective_audio_source_pan(
+            AudioCurrentSource::ReverseVideoClip(idx),
+            timeline_pos_ns,
+        );
         self.set_audio_pipeline_volume(vol);
+        self.set_audio_pipeline_pan(pan);
         if self.audio_current_source == Some(AudioCurrentSource::ReverseVideoClip(idx)) {
             let _ = self.audio_pipeline.seek(
                 clip.seek_rate(),
@@ -8316,6 +8384,7 @@ mod tests {
             volume: 1.0,
             volume_keyframes: Vec::new(),
             pan: 0.0,
+            pan_keyframes: Vec::new(),
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
