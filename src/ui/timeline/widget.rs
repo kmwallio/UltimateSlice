@@ -1825,15 +1825,16 @@ impl TimelineState {
             if duration_ns == 0 || cw <= 10.0 || ch <= 10.0 {
                 continue;
             }
-            let marker_h = (ch * 0.16).clamp(3.0, 6.0);
-            let row_pitch = 2.6;
+            let marker_h = (ch * 0.22).clamp(4.0, 8.0);
+            let row_pitch = 3.4;
             let base_y = cy + 3.0;
-            let all_kfs: [(&[crate::model::clip::NumericKeyframe], usize); 5] = [
+            let all_kfs: [(&[crate::model::clip::NumericKeyframe], usize); 6] = [
                 (&clip.scale_keyframes, 0),
                 (&clip.opacity_keyframes, 1),
                 (&clip.position_x_keyframes, 2),
                 (&clip.position_y_keyframes, 3),
                 (&clip.volume_keyframes, 4),
+                (&clip.pan_keyframes, 5),
             ];
             for (keyframes, row) in &all_kfs {
                 let marker_y = base_y + *row as f64 * row_pitch;
@@ -1846,11 +1847,7 @@ impl TimelineState {
                     let marker_x = cx + frac * cw;
                     if (x - marker_x).abs() <= hit_tolerance {
                         let timeline_ns = clip.timeline_start.saturating_add(local_time_ns);
-                        return Some((
-                            clip.id.clone(),
-                            track.id.clone(),
-                            timeline_ns,
-                        ));
+                        return Some((clip.id.clone(), track.id.clone(), timeline_ns));
                     }
                 }
             }
@@ -5134,7 +5131,15 @@ fn draw_clip(
                 cr.set_line_width(1.0);
                 let wave_mid = wave_y + wave_h / 2.0;
                 let volumes = compute_per_pixel_volumes(clip, frac0, frac1, vis_px);
-                draw_waveform_batched(cr, &peaks, vis_x0, wave_mid, wave_h / 2.0 - 1.0, &volumes, 0.9);
+                draw_waveform_batched(
+                    cr,
+                    &peaks,
+                    vis_x0,
+                    wave_mid,
+                    wave_h / 2.0 - 1.0,
+                    &volumes,
+                    0.9,
+                );
                 draw_volume_envelope(cr, &volumes, vis_x0, wave_mid, wave_h / 2.0 - 1.0);
                 cr.restore().ok();
             }
@@ -5284,12 +5289,13 @@ fn clip_keyframe_marker_geometry(
     if duration_ns == 0 || cw <= 2.0 {
         return Vec::new();
     }
-    let properties: [(&[crate::model::clip::NumericKeyframe], (f64, f64, f64)); 5] = [
+    let properties: [(&[crate::model::clip::NumericKeyframe], (f64, f64, f64)); 6] = [
         (&clip.scale_keyframes, (1.0, 0.83, 0.30)),
         (&clip.opacity_keyframes, (0.94, 0.94, 0.94)),
         (&clip.position_x_keyframes, (0.45, 0.90, 1.0)),
         (&clip.position_y_keyframes, (0.82, 0.62, 1.0)),
         (&clip.volume_keyframes, (0.55, 1.0, 0.62)),
+        (&clip.pan_keyframes, (1.0, 0.66, 0.36)),
     ];
 
     let mut markers = Vec::new();
@@ -5335,10 +5341,10 @@ fn draw_clip_keyframe_markers(
         return;
     }
 
-    let marker_h = (ch * 0.16).clamp(3.0, 6.0);
-    let row_pitch = 2.6;
+    let marker_h = (ch * 0.22).clamp(4.0, 8.0);
+    let row_pitch = 3.4;
     let base_y = cy + 3.0;
-    let alpha = if is_selected { 0.95 } else { 0.72 };
+    let alpha = if is_selected { 1.0 } else { 0.9 };
 
     cr.save().ok();
     rounded_rect(
@@ -5356,8 +5362,12 @@ fn draw_clip_keyframe_markers(
             continue;
         }
         cr.set_source_rgba(marker.color.0, marker.color.1, marker.color.2, alpha);
-        cr.rectangle(marker.x - 1.0, marker_y, 2.0, marker_h);
+        cr.rectangle(marker.x - 1.5, marker_y, 3.0, marker_h);
         cr.fill().ok();
+        cr.set_source_rgba(0.05, 0.05, 0.05, 0.45);
+        cr.set_line_width(0.8);
+        cr.rectangle(marker.x - 1.5, marker_y, 3.0, marker_h);
+        cr.stroke().ok();
     }
     cr.restore().ok();
 }

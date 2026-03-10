@@ -206,6 +206,11 @@ pub struct ProgramClip {
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     pub pan: f64,
     pub pan_keyframes: Vec<NumericKeyframe>,
+    pub rotate_keyframes: Vec<NumericKeyframe>,
+    pub crop_left_keyframes: Vec<NumericKeyframe>,
+    pub crop_right_keyframes: Vec<NumericKeyframe>,
+    pub crop_top_keyframes: Vec<NumericKeyframe>,
+    pub crop_bottom_keyframes: Vec<NumericKeyframe>,
     /// Crop pixels (left, right, top, bottom)
     pub crop_left: i32,
     pub crop_right: i32,
@@ -334,6 +339,56 @@ impl ProgramClip {
             self.pan,
         )
         .clamp(-1.0, 1.0)
+    }
+
+    pub fn rotate_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
+        ModelClip::evaluate_keyframed_value(
+            &self.rotate_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.rotate as f64,
+        )
+        .round()
+        .clamp(-180.0, 180.0) as i32
+    }
+
+    pub fn crop_left_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
+        ModelClip::evaluate_keyframed_value(
+            &self.crop_left_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.crop_left as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32
+    }
+
+    pub fn crop_right_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
+        ModelClip::evaluate_keyframed_value(
+            &self.crop_right_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.crop_right as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32
+    }
+
+    pub fn crop_top_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
+        ModelClip::evaluate_keyframed_value(
+            &self.crop_top_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.crop_top as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32
+    }
+
+    pub fn crop_bottom_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
+        ModelClip::evaluate_keyframed_value(
+            &self.crop_bottom_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.crop_bottom as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32
     }
 
     fn playback_duration_ns(&self) -> u64 {
@@ -1071,7 +1126,7 @@ impl ProgramPlayer {
         let audio_volume_element = gst::ElementFactory::make("volume").build().ok();
         let audio_panorama_element = gst::ElementFactory::make("audiopanorama").build().ok();
         if let Some(ref pan) = audio_panorama_element {
-            pan.set_property("panorama", 0.0_f64);
+            pan.set_property("panorama", 0.0_f32);
         }
         let mut audio_filters: Vec<gst::Element> = Vec::new();
         if let Some(ref vol) = audio_volume_element {
@@ -2373,7 +2428,7 @@ impl ProgramPlayer {
 
     fn set_audio_pipeline_pan(&self, pan: f64) {
         if let Some(ref pan_elem) = self.audio_panorama_element {
-            pan_elem.set_property("panorama", pan.clamp(-1.0, 1.0));
+            pan_elem.set_property("panorama", pan.clamp(-1.0, 1.0) as f32);
         }
     }
 
@@ -2396,7 +2451,7 @@ impl ProgramPlayer {
                 } else {
                     self.effective_main_clip_pan(slot.clip_idx, timeline_pos_ns)
                 };
-                pan_elem.set_property("panorama", pan);
+                pan_elem.set_property("panorama", pan as f32);
             }
         }
     }
@@ -2811,8 +2866,10 @@ impl ProgramPlayer {
                     self.timeline_pos_ns,
                 );
                 self.set_audio_pipeline_volume(effective);
-                let effective_pan =
-                    self.effective_audio_source_pan(AudioCurrentSource::AudioClip(i), self.timeline_pos_ns);
+                let effective_pan = self.effective_audio_source_pan(
+                    AudioCurrentSource::AudioClip(i),
+                    self.timeline_pos_ns,
+                );
                 self.set_audio_pipeline_pan(effective_pan);
             }
         }
@@ -3299,6 +3356,21 @@ impl ProgramPlayer {
             let scale = clip.scale_at_timeline_ns(timeline_pos);
             let pos_x = clip.position_x_at_timeline_ns(timeline_pos);
             let pos_y = clip.position_y_at_timeline_ns(timeline_pos);
+            let crop_left = clip.crop_left_at_timeline_ns(timeline_pos);
+            let crop_right = clip.crop_right_at_timeline_ns(timeline_pos);
+            let crop_top = clip.crop_top_at_timeline_ns(timeline_pos);
+            let crop_bottom = clip.crop_bottom_at_timeline_ns(timeline_pos);
+            let rotate = clip.rotate_at_timeline_ns(timeline_pos);
+            Self::apply_transform_to_slot(
+                slot,
+                crop_left,
+                crop_right,
+                crop_top,
+                crop_bottom,
+                rotate,
+                clip.flip_h,
+                clip.flip_v,
+            );
             if let Some(ref pad) = slot.compositor_pad {
                 let alpha = clip.opacity_at_timeline_ns(timeline_pos).clamp(0.0, 1.0);
                 pad.set_property("alpha", alpha);
@@ -3363,10 +3435,10 @@ impl ProgramPlayer {
                     let t = ts.progress;
                     let crop_px = ((1.0 - t) * proc_w as f64).round() as i32;
                     if let Some(ref vc) = slot.videocrop {
-                        let user_cl = clip.crop_left.max(0);
-                        let user_cr = clip.crop_right.max(0);
-                        let user_ct = clip.crop_top.max(0);
-                        let user_cb = clip.crop_bottom.max(0);
+                        let user_cl = clip.crop_left_at_timeline_ns(timeline_pos).max(0);
+                        let user_cr = clip.crop_right_at_timeline_ns(timeline_pos).max(0);
+                        let user_ct = clip.crop_top_at_timeline_ns(timeline_pos).max(0);
+                        let user_cb = clip.crop_bottom_at_timeline_ns(timeline_pos).max(0);
                         if ts.kind == "wipe_right" {
                             // Reveal from left to right: crop the right side.
                             vc.set_property("left", user_cl);
@@ -3383,10 +3455,10 @@ impl ProgramPlayer {
                     }
                     // Re-pad with transparent borders to maintain frame dimensions.
                     if let Some(ref vb) = slot.videobox_crop_alpha {
-                        let user_cl = clip.crop_left.max(0);
-                        let user_cr = clip.crop_right.max(0);
-                        let user_ct = clip.crop_top.max(0);
-                        let user_cb = clip.crop_bottom.max(0);
+                        let user_cl = clip.crop_left_at_timeline_ns(timeline_pos).max(0);
+                        let user_cr = clip.crop_right_at_timeline_ns(timeline_pos).max(0);
+                        let user_ct = clip.crop_top_at_timeline_ns(timeline_pos).max(0);
+                        let user_cb = clip.crop_bottom_at_timeline_ns(timeline_pos).max(0);
                         if ts.kind == "wipe_right" {
                             vb.set_property("left", -user_cl);
                             vb.set_property("right", -(user_cr + crop_px));
@@ -3633,10 +3705,15 @@ impl ProgramPlayer {
                 c.freeze_frame_source_ns.hash(&mut hasher);
                 c.freeze_frame_hold_duration_ns.hash(&mut hasher);
                 c.crop_left.hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.crop_left_keyframes);
                 c.crop_right.hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.crop_right_keyframes);
                 c.crop_top.hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.crop_top_keyframes);
                 c.crop_bottom.hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.crop_bottom_keyframes);
                 c.rotate.hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.rotate_keyframes);
                 c.flip_h.hash(&mut hasher);
                 c.flip_v.hash(&mut hasher);
                 c.scale.to_bits().hash(&mut hasher);
@@ -5886,7 +5963,7 @@ impl ProgramPlayer {
                         if self.pipeline.add(pano).is_ok() {
                             pano.set_property(
                                 "panorama",
-                                self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns),
+                                self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns) as f32,
                             );
                             if let (Some(ac_src), Some(pano_sink)) =
                                 (ac.static_pad("src"), pano.static_pad("sink"))
@@ -6133,7 +6210,7 @@ impl ProgramPlayer {
                 let mut link_src = ac.static_pad("src");
                 if let Some(ref pano) = audio_panorama {
                     if self.pipeline.add(pano).is_ok() {
-                        pano.set_property("panorama", 0.0_f64);
+                        pano.set_property("panorama", 0.0_f32);
                         if let (Some(ac_src), Some(pano_sink)) =
                             (ac.static_pad("src"), pano.static_pad("sink"))
                         {
@@ -6808,7 +6885,7 @@ impl ProgramPlayer {
                         if self.pipeline.add(pano).is_ok() {
                             pano.set_property(
                                 "panorama",
-                                self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns),
+                                self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns) as f32,
                             );
                             if let (Some(ac_src), Some(pano_sink)) =
                                 (ac.static_pad("src"), pano.static_pad("sink"))
@@ -6944,9 +7021,7 @@ impl ProgramPlayer {
             // reading from a released IOSurface, which causes SIGSEGV in
             // unpack_NV12 via gst_parallelized_task_runner_run.
             #[cfg(target_os = "macos")]
-            if factory_name == "videoconvertscale"
-                && child.find_property("n-threads").is_some()
-            {
+            if factory_name == "videoconvertscale" && child.find_property("n-threads").is_some() {
                 child.set_property("n-threads", 1u32);
             }
             None
@@ -7542,11 +7617,11 @@ impl ProgramPlayer {
         // Crop, rotate, flip
         Self::apply_transform_to_slot(
             slot,
-            clip.crop_left,
-            clip.crop_right,
-            clip.crop_top,
-            clip.crop_bottom,
-            clip.rotate,
+            clip.crop_left_at_timeline_ns(self.timeline_pos_ns),
+            clip.crop_right_at_timeline_ns(self.timeline_pos_ns),
+            clip.crop_top_at_timeline_ns(self.timeline_pos_ns),
+            clip.crop_bottom_at_timeline_ns(self.timeline_pos_ns),
+            clip.rotate_at_timeline_ns(self.timeline_pos_ns),
             clip.flip_h,
             clip.flip_v,
         );
@@ -8304,7 +8379,8 @@ impl ProgramPlayer {
         let source_seek_ns = clip.source_pos_ns(timeline_pos_ns);
         let vol =
             self.effective_audio_source_volume(AudioCurrentSource::AudioClip(idx), timeline_pos_ns);
-        let pan = self.effective_audio_source_pan(AudioCurrentSource::AudioClip(idx), timeline_pos_ns);
+        let pan =
+            self.effective_audio_source_pan(AudioCurrentSource::AudioClip(idx), timeline_pos_ns);
         self.set_audio_pipeline_volume(vol);
         self.set_audio_pipeline_pan(pan);
         if self.audio_current_source == Some(AudioCurrentSource::AudioClip(idx)) {
@@ -8356,10 +8432,8 @@ impl ProgramPlayer {
             AudioCurrentSource::ReverseVideoClip(idx),
             timeline_pos_ns,
         );
-        let pan = self.effective_audio_source_pan(
-            AudioCurrentSource::ReverseVideoClip(idx),
-            timeline_pos_ns,
-        );
+        let pan = self
+            .effective_audio_source_pan(AudioCurrentSource::ReverseVideoClip(idx), timeline_pos_ns);
         self.set_audio_pipeline_volume(vol);
         self.set_audio_pipeline_pan(pan);
         if self.audio_current_source == Some(AudioCurrentSource::ReverseVideoClip(idx)) {
@@ -8449,7 +8523,12 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
         && clip.crop_right == 0
         && clip.crop_top == 0
         && clip.crop_bottom == 0
+        && clip.crop_left_keyframes.is_empty()
+        && clip.crop_right_keyframes.is_empty()
+        && clip.crop_top_keyframes.is_empty()
+        && clip.crop_bottom_keyframes.is_empty()
         && clip.rotate.rem_euclid(360) == 0
+        && clip.rotate_keyframes.is_empty()
         && !clip.flip_h
         && !clip.flip_v
         && clip.position_x_keyframes.is_empty()
@@ -8487,6 +8566,11 @@ mod tests {
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
+            rotate_keyframes: Vec::new(),
+            crop_left_keyframes: Vec::new(),
+            crop_right_keyframes: Vec::new(),
+            crop_top_keyframes: Vec::new(),
+            crop_bottom_keyframes: Vec::new(),
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,

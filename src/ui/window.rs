@@ -39,15 +39,48 @@ fn flash_window_status_title(
 }
 
 /// Evaluate a clip's keyframe-interpolated transform at a given playhead position.
-/// Returns `(scale, position_x, position_y)` accounting for any phase-1 keyframes.
-fn evaluate_clip_transform_at(clip: &Clip, playhead_ns: u64) -> (f64, f64, f64) {
-    let local_ns = clip.local_timeline_position_ns(playhead_ns);
-    let scale = Clip::evaluate_keyframed_value(&clip.scale_keyframes, local_ns, clip.scale);
-    let pos_x =
-        Clip::evaluate_keyframed_value(&clip.position_x_keyframes, local_ns, clip.position_x);
-    let pos_y =
-        Clip::evaluate_keyframed_value(&clip.position_y_keyframes, local_ns, clip.position_y);
-    (scale, pos_x, pos_y)
+/// Returns `(scale, position_x, position_y, rotate, crop_left, crop_right, crop_top, crop_bottom)`
+/// accounting for keyframes on those properties.
+fn evaluate_clip_transform_at(
+    clip: &Clip,
+    playhead_ns: u64,
+) -> (f64, f64, f64, i32, i32, i32, i32, i32) {
+    let scale =
+        clip.value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::Scale, playhead_ns);
+    let pos_x = clip
+        .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::PositionX, playhead_ns);
+    let pos_y = clip
+        .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::PositionY, playhead_ns);
+    let rotate = clip
+        .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::Rotate, playhead_ns)
+        .round()
+        .clamp(-180.0, 180.0) as i32;
+    let crop_left = clip
+        .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropLeft, playhead_ns)
+        .round()
+        .clamp(0.0, 500.0) as i32;
+    let crop_right = clip
+        .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropRight, playhead_ns)
+        .round()
+        .clamp(0.0, 500.0) as i32;
+    let crop_top = clip
+        .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropTop, playhead_ns)
+        .round()
+        .clamp(0.0, 500.0) as i32;
+    let crop_bottom = clip
+        .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropBottom, playhead_ns)
+        .round()
+        .clamp(0.0, 500.0) as i32;
+    (
+        scale,
+        pos_x,
+        pos_y,
+        rotate,
+        crop_left,
+        crop_right,
+        crop_top,
+        crop_bottom,
+    )
 }
 
 /// Update the transform overlay to reflect the keyframe-interpolated transform
@@ -67,15 +100,11 @@ fn sync_transform_overlay_to_playhead(
                 .find(|c| c.id == cid);
             if let Some(c) = clip_opt {
                 if c.kind != ClipKind::Audio {
-                    let (scale, pos_x, pos_y) = evaluate_clip_transform_at(c, playhead_ns);
+                    let (scale, pos_x, pos_y, rotate, cl, cr, ct, cb) =
+                        evaluate_clip_transform_at(c, playhead_ns);
                     transform_overlay.set_transform(scale, pos_x, pos_y);
-                    transform_overlay.set_rotation(c.rotate);
-                    transform_overlay.set_crop(
-                        c.crop_left,
-                        c.crop_right,
-                        c.crop_top,
-                        c.crop_bottom,
-                    );
+                    transform_overlay.set_rotation(rotate);
+                    transform_overlay.set_crop(cl, cr, ct, cb);
                     transform_overlay.set_clip_selected(true);
                 } else {
                     transform_overlay.set_clip_selected(false);
@@ -1838,9 +1867,7 @@ pub fn build_window(
                     {
                         let proj = project.borrow();
                         for track in &proj.tracks {
-                            if let Some(model_clip) =
-                                track.clips.iter().find(|c| c.id == clip_id)
-                            {
+                            if let Some(model_clip) = track.clips.iter().find(|c| c.id == clip_id) {
                                 // Sync to video clips (embedded audio)
                                 if let Some(player_clip) =
                                     pp.clips.iter_mut().find(|c| c.id == clip_id)
@@ -2117,12 +2144,7 @@ pub fn build_window(
                 // Sync transform overlay handles with selection state,
                 // using keyframe-interpolated values at the current playhead.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
-                    sync_transform_overlay_to_playhead(
-                        to,
-                        &proj,
-                        clip_id.as_deref(),
-                        playhead_ns,
-                    );
+                    sync_transform_overlay_to_playhead(to, &proj, clip_id.as_deref(), playhead_ns);
                 }
             }));
     }
@@ -3085,12 +3107,7 @@ pub fn build_window(
                     let selected = timeline_state_poll.borrow().selected_clip_id.clone();
                     if selected.is_some() {
                         let proj = project.borrow();
-                        sync_transform_overlay_to_playhead(
-                            to,
-                            &proj,
-                            selected.as_deref(),
-                            pos_ns,
-                        );
+                        sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), pos_ns);
                     }
                 }
                 // Update inspector sliders to reflect keyframe-evaluated values
@@ -3477,8 +3494,7 @@ pub fn build_window(
         let project = project.clone();
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
-        let source_original_uri_for_proxy_fallback =
-            source_original_uri_for_proxy_fallback.clone();
+        let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
             preview_widget.set_visible(true);
@@ -3508,9 +3524,11 @@ pub fn build_window(
                     *fallback_uri = Some(original_uri.clone());
                 }
                 if source_proxy_enabled && !source_info.is_audio_only {
-                    proxy_cache
-                        .borrow_mut()
-                        .request(&path, proxy_scale_for_mode(&proxy_mode), None);
+                    proxy_cache.borrow_mut().request(
+                        &path,
+                        proxy_scale_for_mode(&proxy_mode),
+                        None,
+                    );
                 }
                 let load_uri = {
                     let cache = proxy_cache.borrow();
@@ -3548,8 +3566,7 @@ pub fn build_window(
         let clip_name_label = clip_name_label.clone();
         let source_marks = source_marks.clone();
         let player = player.clone();
-        let source_original_uri_for_proxy_fallback =
-            source_original_uri_for_proxy_fallback.clone();
+        let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
         Rc::new(move || {
             clear_media_selection();
             preview_widget.set_visible(false);
@@ -3659,12 +3676,7 @@ pub fn build_window(
                         prog_canvas_frame.set_ratio(proj.width as f32 / proj.height as f32);
                     }
                     let playhead_ns = timeline_state.borrow().playhead_ns;
-                    sync_transform_overlay_to_playhead(
-                        to,
-                        &proj,
-                        selected.as_deref(),
-                        playhead_ns,
-                    );
+                    sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), playhead_ns);
                 }
 
                 let suppress_embedded_audio_ids: HashSet<String> = proj
@@ -3708,10 +3720,15 @@ pub fn build_window(
                             pan: c.pan as f64,
                             pan_keyframes: c.pan_keyframes.clone(),
                             crop_left: c.crop_left,
+                            crop_left_keyframes: c.crop_left_keyframes.clone(),
                             crop_right: c.crop_right,
+                            crop_right_keyframes: c.crop_right_keyframes.clone(),
                             crop_top: c.crop_top,
+                            crop_top_keyframes: c.crop_top_keyframes.clone(),
                             crop_bottom: c.crop_bottom,
+                            crop_bottom_keyframes: c.crop_bottom_keyframes.clone(),
                             rotate: c.rotate,
+                            rotate_keyframes: c.rotate_keyframes.clone(),
                             flip_h: c.flip_h,
                             flip_v: c.flip_v,
                             title_text: c.title_text.clone(),
@@ -4820,6 +4837,12 @@ fn handle_mcp_command(
                             "position_x_keyframes": c.position_x_keyframes,
                             "position_y_keyframes": c.position_y_keyframes,
                             "volume_keyframes":     c.volume_keyframes,
+                            "pan_keyframes":        c.pan_keyframes,
+                            "rotate_keyframes":     c.rotate_keyframes,
+                            "crop_left_keyframes":  c.crop_left_keyframes,
+                            "crop_right_keyframes": c.crop_right_keyframes,
+                            "crop_top_keyframes":   c.crop_top_keyframes,
+                            "crop_bottom_keyframes": c.crop_bottom_keyframes,
                             "bg_removal_enabled":   c.bg_removal_enabled,
                             "bg_removal_threshold": c.bg_removal_threshold,
                         })
@@ -6013,7 +6036,7 @@ fn handle_mcp_command(
         } => {
             let Some(property) = Phase1KeyframeProperty::parse(&property) else {
                 reply
-                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume"}))
+                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom"}))
                     .ok();
                 return;
             };
@@ -6022,7 +6045,9 @@ fn handle_mcp_command(
                 .map(|s| match s {
                     "ease_in" | "easeIn" => crate::model::clip::KeyframeInterpolation::EaseIn,
                     "ease_out" | "easeOut" => crate::model::clip::KeyframeInterpolation::EaseOut,
-                    "ease_in_out" | "ease" | "easeInOut" => crate::model::clip::KeyframeInterpolation::EaseInOut,
+                    "ease_in_out" | "ease" | "easeInOut" => {
+                        crate::model::clip::KeyframeInterpolation::EaseInOut
+                    }
                     _ => crate::model::clip::KeyframeInterpolation::Linear,
                 })
                 .unwrap_or(crate::model::clip::KeyframeInterpolation::Linear);
@@ -6035,12 +6060,13 @@ fn handle_mcp_command(
                 'outer: for track in proj.tracks.iter_mut() {
                     for clip in track.clips.iter_mut() {
                         if clip.id == clip_id {
-                            keyframe_time_ns = Some(clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                property,
-                                timeline_pos_ns,
-                                value,
-                                interp,
-                            ));
+                            keyframe_time_ns =
+                                Some(clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                    property,
+                                    timeline_pos_ns,
+                                    value,
+                                    interp,
+                                ));
                             proj.dirty = true;
                             found = true;
                             break 'outer;
@@ -6070,7 +6096,7 @@ fn handle_mcp_command(
         } => {
             let Some(property) = Phase1KeyframeProperty::parse(&property) else {
                 reply
-                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume"}))
+                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom"}))
                     .ok();
                 return;
             };

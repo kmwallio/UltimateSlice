@@ -368,7 +368,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `take_screenshot` | Capture a PNG screenshot of the full application window (GTK snapshot + GSK CairoRenderer); saved to CWD as `ultimateslice-screenshot-<epoch>.png` |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
-| `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`volume`) at an absolute timeline position |
+| `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`) at an absolute timeline position |
 | `remove_clip_keyframe` | Remove a phase-1 keyframe for a property at an absolute timeline position |
 | `set_clip_chroma_key` | Set chroma key (green/blue screen) params on a clip by id |
 | `set_project_title` | Rename the project |

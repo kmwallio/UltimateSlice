@@ -653,12 +653,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_keyframe",
-            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, volume) for a clip at a timeline position.",
+            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom) for a clip at a timeline position.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
-                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "volume"], "description": "Animated property to keyframe." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "volume", "pan", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property to keyframe." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
                     "value": { "type": "number", "description": "Property value at this keyframe time." },
                     "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." }
@@ -668,12 +668,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "remove_clip_keyframe",
-            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, volume) at a timeline position for a clip.",
+            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom) at a timeline position for a clip.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
-                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "volume"], "description": "Animated property keyframe lane." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "volume", "pan", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property keyframe lane." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." }
                 },
                 "required": ["clip_id", "property"]
@@ -1129,7 +1129,10 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             property: args["property"].as_str().unwrap_or("").to_string(),
             timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
             value: args["value"].as_f64().unwrap_or(0.0),
-            interpolation: args.get("interpolation").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            interpolation: args
+                .get("interpolation")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             reply: tx,
         },
         "remove_clip_keyframe" => McpCommand::RemoveClipKeyframe {

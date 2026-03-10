@@ -51,12 +51,8 @@ impl KeyframeInterpolation {
     }
 
     /// All variants in display order.
-    pub const ALL: [KeyframeInterpolation; 4] = [
-        Self::Linear,
-        Self::EaseIn,
-        Self::EaseOut,
-        Self::EaseInOut,
-    ];
+    pub const ALL: [KeyframeInterpolation; 4] =
+        [Self::Linear, Self::EaseIn, Self::EaseOut, Self::EaseInOut];
 
     /// Parse from FCPXML `interp` attribute value.
     pub fn from_fcpxml(s: &str) -> Self {
@@ -150,6 +146,11 @@ pub enum Phase1KeyframeProperty {
     Opacity,
     Volume,
     Pan,
+    Rotate,
+    CropLeft,
+    CropRight,
+    CropTop,
+    CropBottom,
 }
 
 impl Phase1KeyframeProperty {
@@ -161,6 +162,11 @@ impl Phase1KeyframeProperty {
             Self::Opacity => "opacity",
             Self::Volume => "volume",
             Self::Pan => "pan",
+            Self::Rotate => "rotate",
+            Self::CropLeft => "crop_left",
+            Self::CropRight => "crop_right",
+            Self::CropTop => "crop_top",
+            Self::CropBottom => "crop_bottom",
         }
     }
 
@@ -172,6 +178,11 @@ impl Phase1KeyframeProperty {
             "opacity" => Some(Self::Opacity),
             "volume" => Some(Self::Volume),
             "pan" => Some(Self::Pan),
+            "rotate" => Some(Self::Rotate),
+            "crop_left" | "crop-left" => Some(Self::CropLeft),
+            "crop_right" | "crop-right" => Some(Self::CropRight),
+            "crop_top" | "crop-top" => Some(Self::CropTop),
+            "crop_bottom" | "crop-bottom" => Some(Self::CropBottom),
             _ => None,
         }
     }
@@ -275,6 +286,18 @@ pub struct Clip {
     /// Optional pan keyframes over clip-local timeline.
     #[serde(default)]
     pub pan_keyframes: Vec<NumericKeyframe>,
+    /// Optional rotation keyframes over clip-local timeline.
+    #[serde(default)]
+    pub rotate_keyframes: Vec<NumericKeyframe>,
+    /// Optional crop edge keyframes over clip-local timeline.
+    #[serde(default)]
+    pub crop_left_keyframes: Vec<NumericKeyframe>,
+    #[serde(default)]
+    pub crop_right_keyframes: Vec<NumericKeyframe>,
+    #[serde(default)]
+    pub crop_top_keyframes: Vec<NumericKeyframe>,
+    #[serde(default)]
+    pub crop_bottom_keyframes: Vec<NumericKeyframe>,
     /// Playback speed multiplier: 0.25 (slow) to 4.0 (fast), default 1.0.
     /// Values > 1.0 speed up (clip takes less time on timeline); < 1.0 slow down.
     #[serde(default = "default_speed")]
@@ -448,6 +471,11 @@ impl Clip {
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
+            rotate_keyframes: Vec::new(),
+            crop_left_keyframes: Vec::new(),
+            crop_right_keyframes: Vec::new(),
+            crop_top_keyframes: Vec::new(),
+            crop_bottom_keyframes: Vec::new(),
             speed: 1.0,
             crop_left: 0,
             crop_right: 0,
@@ -549,6 +577,11 @@ impl Clip {
             Phase1KeyframeProperty::Opacity => &self.opacity_keyframes,
             Phase1KeyframeProperty::Volume => &self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &self.pan_keyframes,
+            Phase1KeyframeProperty::Rotate => &self.rotate_keyframes,
+            Phase1KeyframeProperty::CropLeft => &self.crop_left_keyframes,
+            Phase1KeyframeProperty::CropRight => &self.crop_right_keyframes,
+            Phase1KeyframeProperty::CropTop => &self.crop_top_keyframes,
+            Phase1KeyframeProperty::CropBottom => &self.crop_bottom_keyframes,
         }
     }
 
@@ -563,6 +596,11 @@ impl Clip {
             Phase1KeyframeProperty::Opacity => &mut self.opacity_keyframes,
             Phase1KeyframeProperty::Volume => &mut self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &mut self.pan_keyframes,
+            Phase1KeyframeProperty::Rotate => &mut self.rotate_keyframes,
+            Phase1KeyframeProperty::CropLeft => &mut self.crop_left_keyframes,
+            Phase1KeyframeProperty::CropRight => &mut self.crop_right_keyframes,
+            Phase1KeyframeProperty::CropTop => &mut self.crop_top_keyframes,
+            Phase1KeyframeProperty::CropBottom => &mut self.crop_bottom_keyframes,
         }
     }
 
@@ -574,6 +612,11 @@ impl Clip {
             Phase1KeyframeProperty::Opacity => self.opacity,
             Phase1KeyframeProperty::Volume => self.volume as f64,
             Phase1KeyframeProperty::Pan => self.pan as f64,
+            Phase1KeyframeProperty::Rotate => self.rotate as f64,
+            Phase1KeyframeProperty::CropLeft => self.crop_left as f64,
+            Phase1KeyframeProperty::CropRight => self.crop_right as f64,
+            Phase1KeyframeProperty::CropTop => self.crop_top as f64,
+            Phase1KeyframeProperty::CropBottom => self.crop_bottom as f64,
         }
     }
 
@@ -586,6 +629,11 @@ impl Clip {
             Phase1KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
             Phase1KeyframeProperty::Volume => value.clamp(0.0, 4.0),
             Phase1KeyframeProperty::Pan => value.clamp(-1.0, 1.0),
+            Phase1KeyframeProperty::Rotate => value.clamp(-180.0, 180.0),
+            Phase1KeyframeProperty::CropLeft
+            | Phase1KeyframeProperty::CropRight
+            | Phase1KeyframeProperty::CropTop
+            | Phase1KeyframeProperty::CropBottom => value.clamp(0.0, 500.0),
         }
     }
 
@@ -661,6 +709,11 @@ impl Clip {
             .chain(&self.position_y_keyframes)
             .chain(&self.volume_keyframes)
             .chain(&self.pan_keyframes)
+            .chain(&self.rotate_keyframes)
+            .chain(&self.crop_left_keyframes)
+            .chain(&self.crop_right_keyframes)
+            .chain(&self.crop_top_keyframes)
+            .chain(&self.crop_bottom_keyframes)
             .map(|kf| kf.time_ns)
             .collect();
         times.sort_unstable();
@@ -685,12 +738,14 @@ impl Clip {
 
     /// Return true if any phase-1 property has a keyframe within `tolerance_ns` of `local_ns`.
     pub fn has_keyframe_at_local_ns(&self, local_ns: u64, tolerance_ns: u64) -> bool {
-        self.all_keyframe_local_times_ns()
-            .iter()
-            .any(|&t| {
-                let diff = if t >= local_ns { t - local_ns } else { local_ns - t };
-                diff <= tolerance_ns
-            })
+        self.all_keyframe_local_times_ns().iter().any(|&t| {
+            let diff = if t >= local_ns {
+                t - local_ns
+            } else {
+                local_ns - t
+            };
+            diff <= tolerance_ns
+        })
     }
 
     /// Return the next keyframe local time strictly after `local_ns` for a single property.
@@ -724,9 +779,8 @@ impl Clip {
         tolerance_ns: u64,
     ) -> bool {
         let kfs = self.keyframes_for_phase1_property(property);
-        kfs.iter().any(|kf| {
-            (kf.time_ns as i64 - local_ns as i64).unsigned_abs() <= tolerance_ns
-        })
+        kfs.iter()
+            .any(|kf| (kf.time_ns as i64 - local_ns as i64).unsigned_abs() <= tolerance_ns)
     }
 
     pub fn source_timecode_start_ns(&self) -> Option<u64> {
@@ -817,6 +871,11 @@ mod tests {
         assert_eq!(clip.color_label, ClipColorLabel::None);
         assert_eq!(clip.volume, 1.0);
         assert!(clip.volume_keyframes.is_empty());
+        assert!(clip.rotate_keyframes.is_empty());
+        assert!(clip.crop_left_keyframes.is_empty());
+        assert!(clip.crop_right_keyframes.is_empty());
+        assert!(clip.crop_top_keyframes.is_empty());
+        assert!(clip.crop_bottom_keyframes.is_empty());
         assert_eq!(clip.speed, 1.0);
         assert!(!clip.reverse);
         assert!(!clip.chroma_key_enabled);
@@ -1121,29 +1180,58 @@ mod tests {
         assert!(clip.position_y_keyframes.is_empty());
         assert!(clip.volume_keyframes.is_empty());
         assert!(clip.pan_keyframes.is_empty());
+        assert!(clip.rotate_keyframes.is_empty());
+        assert!(clip.crop_left_keyframes.is_empty());
+        assert!(clip.crop_right_keyframes.is_empty());
+        assert!(clip.crop_top_keyframes.is_empty());
+        assert!(clip.crop_bottom_keyframes.is_empty());
     }
 
     #[test]
     fn test_next_prev_keyframe_across_properties() {
         let mut clip = make_test_clip(5_000_000_000, 0);
         // Scale keyframe at 1s, opacity at 2s, position_x at 3s
-        clip.scale_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 1.5, interpolation: KeyframeInterpolation::Linear });
-        clip.opacity_keyframes.push(NumericKeyframe { time_ns: 2_000_000_000, value: 0.5, interpolation: KeyframeInterpolation::Linear });
-        clip.position_x_keyframes.push(NumericKeyframe { time_ns: 3_000_000_000, value: 0.2, interpolation: KeyframeInterpolation::Linear });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 2_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 3_000_000_000,
+            value: 0.2,
+            interpolation: KeyframeInterpolation::Linear,
+        });
 
         // next from 0 -> 1s (scale)
         assert_eq!(clip.next_keyframe_local_ns(0), Some(1_000_000_000));
         // next from 1s -> 2s (opacity)
-        assert_eq!(clip.next_keyframe_local_ns(1_000_000_000), Some(2_000_000_000));
+        assert_eq!(
+            clip.next_keyframe_local_ns(1_000_000_000),
+            Some(2_000_000_000)
+        );
         // next from 2.5s -> 3s (position_x)
-        assert_eq!(clip.next_keyframe_local_ns(2_500_000_000), Some(3_000_000_000));
+        assert_eq!(
+            clip.next_keyframe_local_ns(2_500_000_000),
+            Some(3_000_000_000)
+        );
         // next from 3s -> None
         assert_eq!(clip.next_keyframe_local_ns(3_000_000_000), None);
 
         // prev from 4s -> 3s
-        assert_eq!(clip.prev_keyframe_local_ns(4_000_000_000), Some(3_000_000_000));
+        assert_eq!(
+            clip.prev_keyframe_local_ns(4_000_000_000),
+            Some(3_000_000_000)
+        );
         // prev from 2s -> 1s
-        assert_eq!(clip.prev_keyframe_local_ns(2_000_000_000), Some(1_000_000_000));
+        assert_eq!(
+            clip.prev_keyframe_local_ns(2_000_000_000),
+            Some(1_000_000_000)
+        );
         // prev from 1s -> None
         assert_eq!(clip.prev_keyframe_local_ns(1_000_000_000), None);
         // prev from 0 -> None
@@ -1153,15 +1241,21 @@ mod tests {
     #[test]
     fn test_has_keyframe_at_local_ns_with_tolerance() {
         let mut clip = make_test_clip(5_000_000_000, 0);
-        clip.volume_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 0.8, interpolation: KeyframeInterpolation::Linear });
+        clip.volume_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.8,
+            interpolation: KeyframeInterpolation::Linear,
+        });
 
         let one_frame_24fps = 1_000_000_000 / 24; // ~41.6ms
-        // Exact match
+                                                  // Exact match
         assert!(clip.has_keyframe_at_local_ns(1_000_000_000, one_frame_24fps));
         // Within tolerance
         assert!(clip.has_keyframe_at_local_ns(1_000_000_000 + one_frame_24fps / 2, one_frame_24fps));
         // Outside tolerance
-        assert!(!clip.has_keyframe_at_local_ns(1_000_000_000 + one_frame_24fps * 2, one_frame_24fps));
+        assert!(
+            !clip.has_keyframe_at_local_ns(1_000_000_000 + one_frame_24fps * 2, one_frame_24fps)
+        );
         // No keyframes at 0
         assert!(!clip.has_keyframe_at_local_ns(0, one_frame_24fps));
     }
@@ -1170,38 +1264,97 @@ mod tests {
     fn test_next_prev_with_duplicate_times_across_properties() {
         let mut clip = make_test_clip(5_000_000_000, 0);
         // Both scale and opacity have keyframes at 1s
-        clip.scale_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 2.0, interpolation: KeyframeInterpolation::Linear });
-        clip.opacity_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 0.5, interpolation: KeyframeInterpolation::Linear });
-        clip.position_y_keyframes.push(NumericKeyframe { time_ns: 2_000_000_000, value: 0.3, interpolation: KeyframeInterpolation::Linear });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 2.0,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.position_y_keyframes.push(NumericKeyframe {
+            time_ns: 2_000_000_000,
+            value: 0.3,
+            interpolation: KeyframeInterpolation::Linear,
+        });
 
         // next from 0 -> 1s (deduplicated)
         assert_eq!(clip.next_keyframe_local_ns(0), Some(1_000_000_000));
         // next from 1s -> 2s
-        assert_eq!(clip.next_keyframe_local_ns(1_000_000_000), Some(2_000_000_000));
+        assert_eq!(
+            clip.next_keyframe_local_ns(1_000_000_000),
+            Some(2_000_000_000)
+        );
         // prev from 2s -> 1s (deduplicated)
-        assert_eq!(clip.prev_keyframe_local_ns(2_000_000_000), Some(1_000_000_000));
+        assert_eq!(
+            clip.prev_keyframe_local_ns(2_000_000_000),
+            Some(1_000_000_000)
+        );
     }
 
     #[test]
     fn test_property_specific_keyframe_navigation() {
         let mut clip = make_test_clip(5_000_000_000, 0);
-        clip.volume_keyframes.push(NumericKeyframe { time_ns: 500_000_000, value: 0.5, interpolation: KeyframeInterpolation::Linear });
-        clip.volume_keyframes.push(NumericKeyframe { time_ns: 2_000_000_000, value: 0.8, interpolation: KeyframeInterpolation::Linear });
-        clip.scale_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 1.5, interpolation: KeyframeInterpolation::Linear });
+        clip.volume_keyframes.push(NumericKeyframe {
+            time_ns: 500_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.volume_keyframes.push(NumericKeyframe {
+            time_ns: 2_000_000_000,
+            value: 0.8,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+        });
 
         // Volume nav: 0 → 500ms → 2s
-        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 0), Some(500_000_000));
-        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000), Some(2_000_000_000));
-        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000), None);
+        assert_eq!(
+            clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 0),
+            Some(500_000_000)
+        );
+        assert_eq!(
+            clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000),
+            Some(2_000_000_000)
+        );
+        assert_eq!(
+            clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000),
+            None
+        );
         // Volume prev
-        assert_eq!(clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000), Some(500_000_000));
-        assert_eq!(clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000), None);
+        assert_eq!(
+            clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000),
+            Some(500_000_000)
+        );
+        assert_eq!(
+            clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000),
+            None
+        );
         // Scale nav should NOT see volume keyframes
-        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 0), Some(1_000_000_000));
-        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 1_000_000_000), None);
+        assert_eq!(
+            clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 0),
+            Some(1_000_000_000)
+        );
+        assert_eq!(
+            clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 1_000_000_000),
+            None
+        );
         // has_keyframe_at_local_ns_for_property
-        assert!(clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000, 100));
-        assert!(!clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Scale, 500_000_000, 100));
+        assert!(clip.has_keyframe_at_local_ns_for_property(
+            Phase1KeyframeProperty::Volume,
+            500_000_000,
+            100
+        ));
+        assert!(!clip.has_keyframe_at_local_ns_for_property(
+            Phase1KeyframeProperty::Scale,
+            500_000_000,
+            100
+        ));
     }
 
     #[test]
@@ -1239,6 +1392,26 @@ mod tests {
     }
 
     #[test]
+    fn test_rotate_crop_phase1_clamp_ranges() {
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Rotate, 500.0),
+            180.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Rotate, -500.0),
+            -180.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropLeft, -10.0),
+            0.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropBottom, 999.0),
+            500.0
+        );
+    }
+
+    #[test]
     fn test_cubic_bezier_ease_boundaries() {
         // All easing curves must pass through (0,0) and (1,1)
         for interp in KeyframeInterpolation::ALL {
@@ -1257,7 +1430,14 @@ mod tests {
             for i in 1..=100 {
                 let t = i as f64 / 100.0;
                 let v = interp.ease(t);
-                assert!(v >= prev - 1e-9, "{:?} not monotonic at t={}: {} < {}", interp, t, v, prev);
+                assert!(
+                    v >= prev - 1e-9,
+                    "{:?} not monotonic at t={}: {} < {}",
+                    interp,
+                    t,
+                    v,
+                    prev
+                );
                 prev = v;
             }
         }
@@ -1281,15 +1461,27 @@ mod tests {
     fn test_ease_in_out_symmetric() {
         // EaseInOut should be roughly symmetric around (0.5, 0.5)
         let v = KeyframeInterpolation::EaseInOut.ease(0.5);
-        assert!((v - 0.5).abs() < 0.01, "EaseInOut(0.5) = {} should be ~0.5", v);
+        assert!(
+            (v - 0.5).abs() < 0.01,
+            "EaseInOut(0.5) = {} should be ~0.5",
+            v
+        );
     }
 
     #[test]
     fn test_evaluate_keyframed_value_ease_in() {
         // Two keyframes: 0→100 with EaseIn interpolation
         let kfs = vec![
-            NumericKeyframe { time_ns: 0, value: 0.0, interpolation: KeyframeInterpolation::EaseIn },
-            NumericKeyframe { time_ns: 1_000_000_000, value: 100.0, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::EaseIn,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 100.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
         ];
         // At t=0.5 (500ms), EaseIn should give a value less than 50 (slow start)
         let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
@@ -1300,8 +1492,16 @@ mod tests {
     #[test]
     fn test_evaluate_keyframed_value_ease_out() {
         let kfs = vec![
-            NumericKeyframe { time_ns: 0, value: 0.0, interpolation: KeyframeInterpolation::EaseOut },
-            NumericKeyframe { time_ns: 1_000_000_000, value: 100.0, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::EaseOut,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 100.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
         ];
         // At t=0.5, EaseOut should give a value greater than 50 (fast start)
         let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
@@ -1313,11 +1513,23 @@ mod tests {
     fn test_linear_interpolation_unchanged() {
         // Confirm linear still works as before (no regression)
         let kfs = vec![
-            NumericKeyframe { time_ns: 0, value: 0.0, interpolation: KeyframeInterpolation::Linear },
-            NumericKeyframe { time_ns: 1_000_000_000, value: 100.0, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 100.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
         ];
         let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
-        assert!((v - 50.0).abs() < 0.01, "Linear at midpoint should be 50, got {}", v);
+        assert!(
+            (v - 50.0).abs() < 0.01,
+            "Linear at midpoint should be 50, got {}",
+            v
+        );
     }
 
     #[test]

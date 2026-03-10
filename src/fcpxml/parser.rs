@@ -58,8 +58,10 @@ struct ActiveClipContext {
     has_us_rotate: bool,
     has_us_position_keyframes: bool,
     has_us_scale_keyframes: bool,
+    has_us_rotate_keyframes: bool,
     has_us_opacity_keyframes: bool,
     has_us_volume_keyframes: bool,
+    has_us_pan_keyframes: bool,
 }
 
 /// Parse an FCPXML string into a `Project`.
@@ -256,11 +258,15 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         let native = parse_adjust_transform_children(&mut reader)?;
                         if let Some(ctx) = clip_stack.last() {
                             apply_native_transform_keyframes(
-                                &native, ctx, &mut track_map,
-                                project.width, project.height,
+                                &native,
+                                ctx,
+                                &mut track_map,
+                                project.width,
+                                project.height,
                             );
                             if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
-                                clip.fcpxml_unknown_children.extend(native.unknown_fragments);
+                                clip.fcpxml_unknown_children
+                                    .extend(native.unknown_fragments);
                             }
                         }
                     }
@@ -270,11 +276,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         // Parse native opacity keyframes from children
                         let native = parse_adjust_blend_children(&mut reader)?;
                         if let Some(ctx) = clip_stack.last() {
-                            apply_native_opacity_keyframes(
-                                &native, ctx, &mut track_map,
-                            );
+                            apply_native_opacity_keyframes(&native, ctx, &mut track_map);
                             if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
-                                clip.fcpxml_unknown_children.extend(native.unknown_fragments);
+                                clip.fcpxml_unknown_children
+                                    .extend(native.unknown_fragments);
                             }
                         }
                     }
@@ -284,11 +289,22 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         // Parse native volume keyframes from children
                         let native = parse_adjust_volume_children(&mut reader)?;
                         if let Some(ctx) = clip_stack.last() {
-                            apply_native_volume_keyframes(
-                                &native, ctx, &mut track_map,
-                            );
+                            apply_native_volume_keyframes(&native, ctx, &mut track_map);
                             if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
-                                clip.fcpxml_unknown_children.extend(native.unknown_fragments);
+                                clip.fcpxml_unknown_children
+                                    .extend(native.unknown_fragments);
+                            }
+                        }
+                    }
+                    "adjust-panner" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        apply_adjust_panner(&attrs, clip_stack.last(), &mut track_map);
+                        let native = parse_adjust_panner_children(&mut reader)?;
+                        if let Some(ctx) = clip_stack.last() {
+                            apply_native_pan_keyframes(&native, ctx, &mut track_map);
+                            if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
+                                clip.fcpxml_unknown_children
+                                    .extend(native.unknown_fragments);
                             }
                         }
                     }
@@ -479,6 +495,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                     "adjust-volume" if in_spine => {
                         let attrs = parse_attrs(e)?;
                         apply_adjust_volume(&attrs, clip_stack.last(), &mut track_map);
+                    }
+                    "adjust-panner" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        apply_adjust_panner(&attrs, clip_stack.last(), &mut track_map);
                     }
                     "adjust-crop" | "crop-rect" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -797,6 +817,14 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:pan") {
                 clip.pan = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:pan-keyframes") {
+                clip.pan_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:rotate-keyframes") {
+                clip.rotate_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:crop-left") {
                 clip.crop_left = v.parse().unwrap_or(0);
             }
@@ -808,6 +836,22 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:crop-bottom") {
                 clip.crop_bottom = v.parse().unwrap_or(0);
+            }
+            if let Some(v) = attrs.get("us:crop-left-keyframes") {
+                clip.crop_left_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:crop-right-keyframes") {
+                clip.crop_right_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:crop-top-keyframes") {
+                clip.crop_top_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:crop-bottom-keyframes") {
+                clip.crop_bottom_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:rotate") {
                 clip.rotate = v.parse().unwrap_or(0);
@@ -946,8 +990,10 @@ fn parse_asset_clip(
                 has_us_position_keyframes: attrs.contains_key("us:position-x-keyframes")
                     || attrs.contains_key("us:position-y-keyframes"),
                 has_us_scale_keyframes: attrs.contains_key("us:scale-keyframes"),
+                has_us_rotate_keyframes: attrs.contains_key("us:rotate-keyframes"),
                 has_us_opacity_keyframes: attrs.contains_key("us:opacity-keyframes"),
                 has_us_volume_keyframes: attrs.contains_key("us:volume-keyframes"),
+                has_us_pan_keyframes: attrs.contains_key("us:pan-keyframes"),
             });
         }
     }
@@ -1068,6 +1114,18 @@ fn apply_adjust_volume(
     }
 }
 
+fn apply_adjust_panner(
+    attrs: &HashMap<String, String>,
+    active_ctx: Option<&ActiveClipContext>,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    if let Some(clip) = current_clip_mut(track_map, active_ctx) {
+        if let Some(pan) = attrs.get("amount").and_then(|s| parse_fcpxml_pan_amount(s)) {
+            clip.pan = pan as f32;
+        }
+    }
+}
+
 fn parse_fcpxml_volume_amount(value: &str) -> Option<f64> {
     let trimmed = value.trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -1086,6 +1144,15 @@ fn parse_fcpxml_volume_amount(value: &str) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .map(|v| v.clamp(0.0, MAX_IMPORTED_LINEAR_VOLUME))
+}
+
+fn parse_fcpxml_pan_amount(value: &str) -> Option<f64> {
+    let trimmed = value.trim();
+    if let Some(percent) = trimmed.strip_suffix('%') {
+        let p = percent.trim().parse::<f64>().ok()?;
+        return Some((p / 100.0).clamp(-1.0, 1.0));
+    }
+    trimmed.parse::<f64>().ok().map(|v| v.clamp(-1.0, 1.0))
 }
 
 fn apply_adjust_crop(
@@ -1114,17 +1181,17 @@ fn apply_adjust_crop(
 struct NativeKeyframeParams {
     position_keyframes: Vec<(u64, f64, f64, KeyframeInterpolation)>, // (time_ns, fcpxml_x, fcpxml_y, interp)
     scale_keyframes: Vec<NumericKeyframe>,
+    rotation_keyframes: Vec<NumericKeyframe>,
     opacity_keyframes: Vec<NumericKeyframe>,
     volume_keyframes: Vec<NumericKeyframe>,
+    pan_keyframes: Vec<NumericKeyframe>,
     unknown_fragments: Vec<String>,
 }
 
 /// Parse children of an `<adjust-transform>` Start element until its matching End.
 /// Extracts `<param name="position">` and `<param name="Scale">` keyframes;
 /// collects other children as unknown fragments for round-trip preservation.
-fn parse_adjust_transform_children(
-    reader: &mut Reader<&[u8]>,
-) -> Result<NativeKeyframeParams> {
+fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyframeParams> {
     let mut result = NativeKeyframeParams::default();
     let mut buf = Vec::new();
     let mut depth = 1usize;
@@ -1162,6 +1229,17 @@ fn parse_adjust_transform_children(
                                 });
                             }
                         }
+                    } else if param_name_lower == "rotation" {
+                        let kfs = parse_keyframe_animation_children(reader)?;
+                        for (time_ns, val_str, interp) in &kfs {
+                            if let Ok(r) = val_str.parse::<f64>() {
+                                result.rotation_keyframes.push(NumericKeyframe {
+                                    time_ns: *time_ns,
+                                    value: r,
+                                    interpolation: *interp,
+                                });
+                            }
+                        }
                     } else {
                         // Unknown param — collect as fragment
                         let fragment = collect_unknown_start_fragment_from_attrs(reader, e)?;
@@ -1193,9 +1271,7 @@ fn parse_adjust_transform_children(
 
 /// Parse children of an `<adjust-blend>` or `<adjust-compositing>` Start element.
 /// Extracts `<param name="amount">` keyframes for opacity.
-fn parse_adjust_blend_children(
-    reader: &mut Reader<&[u8]>,
-) -> Result<NativeKeyframeParams> {
+fn parse_adjust_blend_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyframeParams> {
     let mut result = NativeKeyframeParams::default();
     let mut buf = Vec::new();
     let mut depth = 1usize;
@@ -1250,9 +1326,7 @@ fn parse_adjust_blend_children(
 
 /// Parse children of an `<adjust-volume>` Start element.
 /// Extracts `<param name="amount">` keyframes for volume (dB values).
-fn parse_adjust_volume_children(
-    reader: &mut Reader<&[u8]>,
-) -> Result<NativeKeyframeParams> {
+fn parse_adjust_volume_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyframeParams> {
     let mut result = NativeKeyframeParams::default();
     let mut buf = Vec::new();
     let mut depth = 1usize;
@@ -1298,6 +1372,61 @@ fn parse_adjust_volume_children(
                 depth = depth.saturating_sub(1);
             }
             Event::Eof => bail!("Unexpected EOF inside <adjust-volume>"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(result)
+}
+
+/// Parse children of an `<adjust-panner>` Start element.
+/// Extracts `<param name="amount">` keyframes for pan values (-1..1).
+fn parse_adjust_panner_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyframeParams> {
+    let mut result = NativeKeyframeParams::default();
+    let mut buf = Vec::new();
+    let mut depth = 1usize;
+
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "param" && depth == 1 {
+                    let attrs = parse_attrs(e)?;
+                    let param_name = attrs.get("name").cloned().unwrap_or_default();
+                    let param_name_lower = param_name.to_ascii_lowercase();
+                    if param_name_lower == "amount" || param_name_lower == "pan" {
+                        let kfs = parse_keyframe_animation_children(reader)?;
+                        for (time_ns, val_str, interp) in &kfs {
+                            if let Some(pan) = parse_fcpxml_pan_amount(val_str) {
+                                result.pan_keyframes.push(NumericKeyframe {
+                                    time_ns: *time_ns,
+                                    value: pan,
+                                    interpolation: *interp,
+                                });
+                            }
+                        }
+                    } else {
+                        let fragment = collect_unknown_start_fragment_from_attrs(reader, e)?;
+                        result.unknown_fragments.push(fragment);
+                    }
+                } else {
+                    depth += 1;
+                    let fragment = collect_remaining_start_fragment(reader, e, depth)?;
+                    depth = 1;
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::Empty(ref e) => {
+                if depth == 1 {
+                    let fragment = collect_unknown_empty_fragment(e)?;
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::End(ref _e) => {
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => bail!("Unexpected EOF inside <adjust-panner>"),
             _ => {}
         }
         buf.clear();
@@ -1411,6 +1540,10 @@ fn apply_native_transform_keyframes(
     if !ctx.has_us_scale_keyframes && !params.scale_keyframes.is_empty() {
         clip.scale_keyframes = params.scale_keyframes.clone();
     }
+    // Rotation keyframes: only if no us:rotate-keyframes
+    if !ctx.has_us_rotate_keyframes && !params.rotation_keyframes.is_empty() {
+        clip.rotate_keyframes = params.rotation_keyframes.clone();
+    }
 }
 
 /// Apply native opacity keyframes from adjust-blend/adjust-compositing.
@@ -1438,6 +1571,19 @@ fn apply_native_volume_keyframes(
     }
     if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
         clip.volume_keyframes = params.volume_keyframes.clone();
+    }
+}
+
+fn apply_native_pan_keyframes(
+    params: &NativeKeyframeParams,
+    ctx: &ActiveClipContext,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    if ctx.has_us_pan_keyframes || params.pan_keyframes.is_empty() {
+        return;
+    }
+    if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
+        clip.pan_keyframes = params.pan_keyframes.clone();
     }
 }
 
@@ -1526,10 +1672,16 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:volume"
             | "us:volume-keyframes"
             | "us:pan"
+            | "us:pan-keyframes"
+            | "us:rotate-keyframes"
             | "us:crop-left"
             | "us:crop-right"
             | "us:crop-top"
             | "us:crop-bottom"
+            | "us:crop-left-keyframes"
+            | "us:crop-right-keyframes"
+            | "us:crop-top-keyframes"
+            | "us:crop-bottom-keyframes"
             | "us:rotate"
             | "us:flip-h"
             | "us:flip-v"
@@ -1968,12 +2120,18 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
 }
 
 fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
-    const KEYFRAME_ATTR_PREFIXES: [&str; 5] = [
+    const KEYFRAME_ATTR_PREFIXES: [&str; 11] = [
         "us:scale-keyframes=\"",
         "us:opacity-keyframes=\"",
         "us:position-x-keyframes=\"",
         "us:position-y-keyframes=\"",
         "us:volume-keyframes=\"",
+        "us:pan-keyframes=\"",
+        "us:rotate-keyframes=\"",
+        "us:crop-left-keyframes=\"",
+        "us:crop-right-keyframes=\"",
+        "us:crop-top-keyframes=\"",
+        "us:crop-bottom-keyframes=\"",
     ];
 
     let mut cursor = 0usize;
@@ -3174,8 +3332,16 @@ mod tests {
         let project = parse_fcpxml(xml).expect("parse should succeed");
         let clip = &project.video_tracks().next().unwrap().clips[0];
 
-        assert_eq!(clip.position_x_keyframes.len(), 2, "expected 2 position_x keyframes");
-        assert_eq!(clip.position_y_keyframes.len(), 2, "expected 2 position_y keyframes");
+        assert_eq!(
+            clip.position_x_keyframes.len(),
+            2,
+            "expected 2 position_x keyframes"
+        );
+        assert_eq!(
+            clip.position_y_keyframes.len(),
+            2,
+            "expected 2 position_y keyframes"
+        );
 
         // First keyframe at t=0s: FCPXML position (-50, 0)
         assert_eq!(clip.position_x_keyframes[0].time_ns, 0);
@@ -3225,7 +3391,11 @@ mod tests {
         let project = parse_fcpxml(xml).expect("parse should succeed");
         let clip = &project.video_tracks().next().unwrap().clips[0];
 
-        assert_eq!(clip.opacity_keyframes.len(), 2, "expected 2 opacity keyframes");
+        assert_eq!(
+            clip.opacity_keyframes.len(),
+            2,
+            "expected 2 opacity keyframes"
+        );
         assert_eq!(clip.opacity_keyframes[0].time_ns, 0);
         assert!((clip.opacity_keyframes[0].value - 1.0).abs() < 0.001);
         assert_eq!(clip.opacity_keyframes[1].time_ns, 2_000_000_000);
@@ -3262,13 +3432,159 @@ mod tests {
         let track = project.tracks.iter().find(|t| !t.clips.is_empty()).unwrap();
         let clip = &track.clips[0];
 
-        assert_eq!(clip.volume_keyframes.len(), 2, "expected 2 volume keyframes");
+        assert_eq!(
+            clip.volume_keyframes.len(),
+            2,
+            "expected 2 volume keyframes"
+        );
         assert_eq!(clip.volume_keyframes[0].time_ns, 0);
         // 0dB = 1.0 linear
         assert!((clip.volume_keyframes[0].value - 1.0).abs() < 0.01);
         assert_eq!(clip.volume_keyframes[1].time_ns, 3_000_000_000);
         // -96dB = 0.0 linear (silence)
         assert!((clip.volume_keyframes[1].value - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_native_fcp_pan_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s" hasAudio="1"/>
+  </resources>
+  <project name="FCP Pan">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-panner amount="0.0">
+            <param name="amount">
+              <keyframeAnimation>
+                <keyframe time="0s" value="-1.0"/>
+                <keyframe time="3s" value="1.0"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-panner>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let track = project.tracks.iter().find(|t| !t.clips.is_empty()).unwrap();
+        let clip = &track.clips[0];
+        assert_eq!(clip.pan_keyframes.len(), 2, "expected 2 pan keyframes");
+        assert_eq!(clip.pan_keyframes[0].time_ns, 0);
+        assert!((clip.pan_keyframes[0].value + 1.0).abs() < 0.001);
+        assert_eq!(clip.pan_keyframes[1].time_ns, 3_000_000_000);
+        assert!((clip.pan_keyframes[1].value - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_native_fcp_rotation_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="FCP Rotation">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform position="0 0" scale="1 1" rotation="0">
+            <param name="rotation" value="0">
+              <keyframeAnimation>
+                <keyframe time="0s" value="-45" interp="linear"/>
+                <keyframe time="3s" value="90" interp="easeInOut"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-transform>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(
+            clip.rotate_keyframes.len(),
+            2,
+            "expected 2 rotate keyframes"
+        );
+        assert_eq!(clip.rotate_keyframes[0].time_ns, 0);
+        assert!((clip.rotate_keyframes[0].value - (-45.0)).abs() < 0.001);
+        assert_eq!(clip.rotate_keyframes[1].time_ns, 3_000_000_000);
+        assert!((clip.rotate_keyframes[1].value - 90.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_vendor_pan_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="http://ultimateslice.io/ns">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="Vendor Pan">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s"
+          us:pan-keyframes="[{&quot;time_ns&quot;:0,&quot;value&quot;:-0.25,&quot;interpolation&quot;:&quot;linear&quot;},{&quot;time_ns&quot;:2000000000,&quot;value&quot;:0.75,&quot;interpolation&quot;:&quot;ease_in_out&quot;}]">
+          <adjust-panner amount="0.0">
+            <param name="amount">
+              <keyframeAnimation>
+                <keyframe time="0s" value="-1.0"/>
+                <keyframe time="5s" value="1.0"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-panner>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.pan_keyframes.len(), 2);
+        assert_eq!(clip.pan_keyframes[0].time_ns, 0);
+        assert!((clip.pan_keyframes[0].value + 0.25).abs() < 0.001);
+        assert_eq!(clip.pan_keyframes[1].time_ns, 2_000_000_000);
+        assert!((clip.pan_keyframes[1].value - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_vendor_rotate_crop_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="http://ultimateslice.io/ns">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="Vendor RotateCrop">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s"
+          us:rotate-keyframes="[{&quot;time_ns&quot;:0,&quot;value&quot;:0.0,&quot;interpolation&quot;:&quot;linear&quot;},{&quot;time_ns&quot;:2000000000,&quot;value&quot;:45.0,&quot;interpolation&quot;:&quot;ease_in_out&quot;}]"
+          us:crop-left-keyframes="[{&quot;time_ns&quot;:0,&quot;value&quot;:0.0,&quot;interpolation&quot;:&quot;linear&quot;},{&quot;time_ns&quot;:2000000000,&quot;value&quot;:120.0,&quot;interpolation&quot;:&quot;linear&quot;}]"
+          us:crop-bottom-keyframes="[{&quot;time_ns&quot;:0,&quot;value&quot;:0.0,&quot;interpolation&quot;:&quot;linear&quot;},{&quot;time_ns&quot;:2000000000,&quot;value&quot;:80.0,&quot;interpolation&quot;:&quot;linear&quot;}]"/>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.rotate_keyframes.len(), 2);
+        assert_eq!(clip.crop_left_keyframes.len(), 2);
+        assert_eq!(clip.crop_bottom_keyframes.len(), 2);
+        assert_eq!(clip.rotate_keyframes[1].time_ns, 2_000_000_000);
+        assert!((clip.rotate_keyframes[1].value - 45.0).abs() < 0.001);
+        assert!((clip.crop_left_keyframes[1].value - 120.0).abs() < 0.001);
+        assert!((clip.crop_bottom_keyframes[1].value - 80.0).abs() < 0.001);
     }
 
     #[test]

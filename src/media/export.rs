@@ -507,9 +507,13 @@ pub fn export_project(
             let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
+            let pre_pan = format!("{label}_prepan");
+            let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{volume_filter},{fade_filters}adelay={delay_ms}:all=1[{label}]"
+                ";[{i}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
             ));
+            append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+            filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
             audio_labels.push(label);
         }
     }
@@ -530,9 +534,13 @@ pub fn export_project(
             let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
+            let pre_pan = format!("{label}_prepan");
+            let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{volume_filter},{fade_filters}adelay={delay_ms}:all=1[{label}]"
+                ";[{in_idx}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
             ));
+            append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+            filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
             audio_labels.push(label);
         }
     }
@@ -546,10 +554,14 @@ pub fn export_project(
         let volume_filter = build_volume_filter(clip);
         let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
         let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
+        let pre_pan = format!("{label}_prepan");
+        let post_pan = format!("{label}_panned");
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter},{fade_filters}adelay={delay_ms}:all=1[{label}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
+        append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+        filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
         audio_labels.push(label);
     }
 
@@ -710,6 +722,11 @@ fn has_transform_keyframes(clip: &Clip) -> bool {
     !clip.scale_keyframes.is_empty()
         || !clip.position_x_keyframes.is_empty()
         || !clip.position_y_keyframes.is_empty()
+        || !clip.rotate_keyframes.is_empty()
+        || !clip.crop_left_keyframes.is_empty()
+        || !clip.crop_right_keyframes.is_empty()
+        || !clip.crop_top_keyframes.is_empty()
+        || !clip.crop_bottom_keyframes.is_empty()
 }
 
 fn build_keyframed_property_expression(
@@ -761,13 +778,12 @@ fn build_keyframed_property_expression(
             KeyframeInterpolation::Linear => t_expr.clone(),
             KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
             KeyframeInterpolation::EaseOut => format!("(1-pow(1-({t_expr}),2))"),
-            KeyframeInterpolation::EaseInOut => format!(
-                "if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)"
-            ),
+            KeyframeInterpolation::EaseInOut => {
+                format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
+            }
         };
-        let segment_expr = format!(
-            "{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}"
-        );
+        let segment_expr =
+            format!("{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}");
         expr = format!(
             "if(lt({time_var},{right_s:.9}),{segment_expr},{expr})",
             right_s = right_s
@@ -791,6 +807,48 @@ fn build_volume_filter(clip: &Clip) -> String {
     );
     // Keyframed volume expressions depend on `t`, so force per-frame evaluation.
     format!("volume='{expr}':eval=frame")
+}
+
+fn build_pan_expression(clip: &Clip) -> String {
+    if clip.pan_keyframes.is_empty() {
+        format!("{:.10}", clip.pan.clamp(-1.0, 1.0))
+    } else {
+        build_keyframed_property_expression(&clip.pan_keyframes, clip.pan as f64, -1.0, 1.0, "t")
+    }
+}
+
+fn append_pan_filter_chain(
+    filter: &mut String,
+    clip: &Clip,
+    input_label: &str,
+    output_label: &str,
+    label_prefix: &str,
+) {
+    if clip.pan.abs() <= f32::EPSILON && clip.pan_keyframes.is_empty() {
+        filter.push_str(&format!(";[{input_label}]anull[{output_label}]"));
+        return;
+    }
+
+    let pan_expr = build_pan_expression(clip);
+    let left_gain_expr = format!("if(gt({pan_expr},0),1-({pan_expr}),1)");
+    let right_gain_expr = format!("if(lt({pan_expr},0),1+({pan_expr}),1)");
+    let left_label = format!("{label_prefix}_pan_l");
+    let right_label = format!("{label_prefix}_pan_r");
+    let left_scaled_label = format!("{label_prefix}_pan_lv");
+    let right_scaled_label = format!("{label_prefix}_pan_rv");
+
+    filter.push_str(&format!(
+        ";[{input_label}]aformat=channel_layouts=stereo,channelsplit=channel_layout=stereo[{left_label}][{right_label}]"
+    ));
+    filter.push_str(&format!(
+        ";[{left_label}]volume='{left_gain_expr}':eval=frame[{left_scaled_label}]"
+    ));
+    filter.push_str(&format!(
+        ";[{right_label}]volume='{right_gain_expr}':eval=frame[{right_scaled_label}]"
+    ));
+    filter.push_str(&format!(
+        ";[{left_scaled_label}][{right_scaled_label}]amerge=inputs=2,aformat=channel_layouts=stereo[{output_label}]"
+    ));
 }
 
 fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
@@ -921,6 +979,45 @@ fn build_crop_filter(
     out_h: u32,
     transparent_pad: bool,
 ) -> String {
+    let has_crop_keyframes = !clip.crop_left_keyframes.is_empty()
+        || !clip.crop_right_keyframes.is_empty()
+        || !clip.crop_top_keyframes.is_empty()
+        || !clip.crop_bottom_keyframes.is_empty();
+    if has_crop_keyframes {
+        let cl_expr = build_keyframed_property_expression(
+            &clip.crop_left_keyframes,
+            clip.crop_left as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        let cr_expr = build_keyframed_property_expression(
+            &clip.crop_right_keyframes,
+            clip.crop_right as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        let ct_expr = build_keyframed_property_expression(
+            &clip.crop_top_keyframes,
+            clip.crop_top as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        let cb_expr = build_keyframed_property_expression(
+            &clip.crop_bottom_keyframes,
+            clip.crop_bottom as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        // Dynamic crop via alpha masking (per-frame expressions). This avoids relying on
+        // crop filter `eval=frame` support while matching preview semantics.
+        return format!(
+            ",geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='if(between(X,({cl_expr}),{out_w}-({cr_expr})-1)*between(Y,({ct_expr}),{out_h}-({cb_expr})-1),alpha(X,Y),0)'"
+        );
+    }
     let cl = clip.crop_left.max(0) as u32;
     let cr = clip.crop_right.max(0) as u32;
     let ct = clip.crop_top.max(0) as u32;
@@ -940,6 +1037,17 @@ fn build_crop_filter(
 
 /// Build a rotation filter for arbitrary-angle clip rotation.
 fn build_rotation_filter(clip: &crate::model::clip::Clip, transparent_pad: bool) -> String {
+    if !clip.rotate_keyframes.is_empty() {
+        let fill = if transparent_pad { "black@0" } else { "black" };
+        let angle_expr = build_keyframed_property_expression(
+            &clip.rotate_keyframes,
+            clip.rotate as f64,
+            -180.0,
+            180.0,
+            "t",
+        );
+        return format!(",rotate='({angle_expr})*PI/180':fillcolor={fill}");
+    }
     let rot = clip.rotate;
     if rot == 0 {
         return String::new();
@@ -1309,9 +1417,10 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_crossfade_curve_name, build_audio_crossfade_filters,
-        build_keyframed_property_expression, build_timing_filter, build_volume_filter,
-        compute_clip_audio_fades, estimate_export_size_bytes, has_linked_audio_peer,
+        append_pan_filter_chain, audio_crossfade_curve_name, build_audio_crossfade_filters,
+        build_crop_filter, build_keyframed_property_expression, build_pan_expression,
+        build_rotation_filter, build_timing_filter, build_volume_filter, compute_clip_audio_fades,
+        estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
         parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
         ExportOptions, VideoCodec,
     };
@@ -1581,5 +1690,118 @@ mod tests {
         clip.volume = 1.25;
         let filter = build_volume_filter(&clip);
         assert_eq!(filter, "volume=1.2500");
+    }
+
+    #[test]
+    fn pan_expression_uses_keyframes_when_present() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.pan = 0.0;
+        clip.pan_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let expr = build_pan_expression(&clip);
+        assert!(expr.starts_with("if(lt(t,"));
+    }
+
+    #[test]
+    fn append_pan_filter_chain_uses_anull_for_center_pan_without_keyframes() {
+        let clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        let mut graph = String::new();
+        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        assert_eq!(graph, ";[in]anull[out]");
+    }
+
+    #[test]
+    fn append_pan_filter_chain_emits_dynamic_channel_gains_for_keyframed_pan() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.pan_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let mut graph = String::new();
+        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        assert!(graph.contains("channelsplit=channel_layout=stereo"));
+        assert!(graph.contains("volume='if(gt("));
+        assert!(graph.contains("':eval=frame"));
+        assert!(graph.contains("amerge=inputs=2"));
+    }
+
+    #[test]
+    fn has_transform_keyframes_includes_rotate_and_crop_lanes() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        assert!(!has_transform_keyframes(&clip));
+        clip.rotate_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 20.0,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        assert!(has_transform_keyframes(&clip));
+
+        clip.rotate_keyframes.clear();
+        clip.crop_left_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 42.0,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        assert!(has_transform_keyframes(&clip));
+    }
+
+    #[test]
+    fn build_rotation_filter_uses_expression_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.rotate = 0;
+        clip.rotate_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -45.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 45.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_rotation_filter(&clip, false);
+        assert!(f.contains("rotate='("));
+        assert!(f.contains("*PI/180'"));
+    }
+
+    #[test]
+    fn build_crop_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.crop_left_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 100.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_crop_filter(&clip, 1920, 1080, false);
+        assert!(f.contains(",geq=lum='lum(X,Y)'"));
+        assert!(f.contains("alpha(X,Y)"));
+        assert!(f.contains("between(X,("));
     }
 }

@@ -54,15 +54,15 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 
 ### Audio keyframes (phase 1)
 
-- Use **Set Volume Keyframe** to create/update a volume keyframe at the current playhead (using the selected interpolation mode).
-- Use **Remove Volume Keyframe** to remove a keyframe at the current playhead time.
+- Use **Set Volume Keyframe** / **Remove Volume Keyframe** for the volume lane.
+- Use **Set Pan Keyframe** / **Remove Pan Keyframe** for the pan lane.
 - Interpolation mode is selected in the transform section's **Interpolation** dropdown.
 
 ### Audio keyframe navigation
 
-- **◀ Prev KF / Next KF ▶** buttons navigate between volume keyframes only (unlike the transform navigation which covers all properties).
-- **◆ Vol KF** indicator shows when the playhead is on a volume keyframe.
-- **⏺ Record Keyframes** toggle in the audio section is synced with the transform section toggle — activating either enables animation mode for both sections. When active, volume slider changes auto-create volume keyframes at the playhead position.
+- **◀ Prev KF / Next KF ▶** buttons navigate between audio keyframes (volume and pan).
+- **◆ Aud KF** indicator shows when the playhead is on an audio keyframe.
+- **⏺ Record Keyframes** toggle in the audio section is synced with the transform section toggle — activating either enables animation mode for both sections. When active, volume and pan slider changes auto-create keyframes at the playhead position.
 
 ---
 
@@ -86,6 +86,7 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 - Transform controls include keyframe buttons for **Scale**, **Opacity**, **Position X**, and **Position Y**.
 - **Set … Keyframe** writes the current slider value at the current playhead time using the selected interpolation mode.
 - **Remove … Keyframe** removes a keyframe at that same playhead time.
+- `rotate` and `crop_*` keyframe lanes are authorable via MCP (`set_clip_keyframe` / `remove_clip_keyframe`), respected by Program Monitor preview, applied on export, and persisted in project FCPXML.
 
 ### Interpolation modes
 
@@ -111,7 +112,7 @@ The selected mode applies to new keyframes created by "Set Keyframe" buttons, an
 
 - The **⏺ Record Keyframes** toggle button (or **Shift+K**) activates animation mode.
 - When active, transform overlay drags automatically create/update **Scale**, **Position X**, and **Position Y** keyframes at the current playhead position when the drag ends.
-- Inspector slider changes (Scale, Opacity, Position X/Y, Volume) also auto-create keyframes.
+- Inspector slider changes (Scale, Opacity, Position X/Y, Volume, Pan) also auto-create keyframes.
 - When inactive (default), drags and slider changes modify the clip's static values without creating keyframes.
 
 Program Monitor overlay integration:
@@ -189,7 +190,7 @@ Place the chroma-keyed clip on an upper video track with the background on a low
 ## Notes
 
 - All Inspector values are **persisted in the FCPXML** project file.
-- Phase-1 keyframes are persisted via UltimateSlice vendor attributes (`us:scale-keyframes`, `us:opacity-keyframes`, `us:position-x-keyframes`, `us:position-y-keyframes`, `us:volume-keyframes`).
+- Phase-1 keyframes are persisted via UltimateSlice vendor attributes (`us:scale-keyframes`, `us:opacity-keyframes`, `us:position-x-keyframes`, `us:position-y-keyframes`, `us:volume-keyframes`, `us:pan-keyframes`, `us:rotate-keyframes`, `us:crop-left-keyframes`, `us:crop-right-keyframes`, `us:crop-top-keyframes`, `us:crop-bottom-keyframes`).
 - Transform fields (scale/position/rotation), opacity, and crop are now also mapped to standard FCPXML adjustment elements (`adjust-transform`, `adjust-compositing`, `adjust-crop`/`crop-rect`) for improved interoperability.
 - Clip volume now also imports from standard FCPXML `adjust-volume@amount` (including dB values such as `-6dB` and `-96dB`) and is converted to Inspector linear volume.
 - There is no keyboard shortcut to focus the Inspector; use mouse/Tab navigation.
