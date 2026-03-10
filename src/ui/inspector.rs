@@ -1,3 +1,4 @@
+use crate::model::clip::ClipColorLabel;
 use crate::model::project::Project;
 use gdk4;
 use gio;
@@ -39,6 +40,7 @@ pub struct InspectorView {
     pub pos_value: Label,
     /// Which clip is currently shown (kept in sync by update())
     pub selected_clip_id: Rc<RefCell<Option<String>>>,
+    pub clip_color_label_combo: gtk4::DropDown,
     // Color correction sliders
     pub brightness_slider: Scale,
     pub contrast_slider: Scale,
@@ -152,6 +154,8 @@ impl InspectorView {
                         .and_then(|n| n.to_str())
                         .unwrap_or(&c.source_path),
                 );
+                self.clip_color_label_combo
+                    .set_selected(clip_color_label_index(c.color_label));
                 self.in_value.set_text(&ns_to_timecode(c.source_in));
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
@@ -232,6 +236,8 @@ impl InspectorView {
             }
             None => {
                 self.name_entry.set_text("");
+                self.clip_color_label_combo
+                    .set_selected(clip_color_label_index(ClipColorLabel::None));
                 for l in [
                     &self.path_value,
                     &self.in_value,
@@ -341,6 +347,15 @@ pub fn build_inspector(
     let name_entry = Entry::new();
     name_entry.set_placeholder_text(Some("Clip name"));
     content_box.append(&name_entry);
+
+    row_label(&content_box, "Clip Color Label");
+    let clip_color_label_combo = gtk4::DropDown::from_strings(&[
+        "None", "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Magenta",
+    ]);
+    clip_color_label_combo.set_selected(clip_color_label_index(ClipColorLabel::None));
+    clip_color_label_combo.set_halign(gtk4::Align::Start);
+    clip_color_label_combo.set_hexpand(true);
+    content_box.append(&clip_color_label_combo);
 
     // Source path (read-only)
     row_label(&content_box, "Source");
@@ -948,6 +963,33 @@ pub fn build_inspector(
     wire_color_slider!(highlights_slider, |clip, v| clip.highlights = v);
 
     // Wire audio sliders
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        clip_color_label_combo.connect_selected_notify(move |combo| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let color_label = clip_color_label_from_index(combo.selected());
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.color_label = color_label;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_clip_changed();
+            }
+        });
+    }
+
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
@@ -2032,6 +2074,7 @@ pub fn build_inspector(
         dur_value,
         pos_value,
         selected_clip_id,
+        clip_color_label_combo,
         brightness_slider,
         contrast_slider,
         saturation_slider,
@@ -2110,6 +2153,34 @@ fn value_label(text: &str) -> Label {
     let l = Label::new(Some(text));
     l.set_halign(gtk4::Align::Start);
     l
+}
+
+fn clip_color_label_index(label: ClipColorLabel) -> u32 {
+    match label {
+        ClipColorLabel::None => 0,
+        ClipColorLabel::Red => 1,
+        ClipColorLabel::Orange => 2,
+        ClipColorLabel::Yellow => 3,
+        ClipColorLabel::Green => 4,
+        ClipColorLabel::Teal => 5,
+        ClipColorLabel::Blue => 6,
+        ClipColorLabel::Purple => 7,
+        ClipColorLabel::Magenta => 8,
+    }
+}
+
+fn clip_color_label_from_index(index: u32) -> ClipColorLabel {
+    match index {
+        1 => ClipColorLabel::Red,
+        2 => ClipColorLabel::Orange,
+        3 => ClipColorLabel::Yellow,
+        4 => ClipColorLabel::Green,
+        5 => ClipColorLabel::Teal,
+        6 => ClipColorLabel::Blue,
+        7 => ClipColorLabel::Purple,
+        8 => ClipColorLabel::Magenta,
+        _ => ClipColorLabel::None,
+    }
 }
 
 fn ns_to_timecode(ns: u64) -> String {

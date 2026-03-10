@@ -32,6 +32,11 @@ pub enum McpCommand {
         solo: bool,
         reply: SyncSender<Value>,
     },
+    SetTrackHeightPreset {
+        track_id: String,
+        height_preset: String,
+        reply: SyncSender<Value>,
+    },
     CloseSourcePreview {
         reply: SyncSender<Value>,
     },
@@ -107,6 +112,11 @@ pub enum McpCommand {
         shadows: f64,
         midtones: f64,
         highlights: f64,
+        reply: SyncSender<Value>,
+    },
+    SetClipColorLabel {
+        clip_id: String,
+        color_label: String,
         reply: SyncSender<Value>,
     },
     SetClipChromaKey {

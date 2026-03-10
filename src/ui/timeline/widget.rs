@@ -17,6 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 const TRACK_HEIGHT: f64 = 60.0;
+const TRACK_HEIGHT_SMALL: f64 = 44.0;
+const TRACK_HEIGHT_LARGE: f64 = 84.0;
 const TRACK_LABEL_WIDTH: f64 = 110.0;
 const TRACK_LABEL_METER_WIDTH: f64 = 18.0;
 const TRACK_LABEL_SOLO_BADGE_WIDTH: f64 = 16.0;
@@ -26,6 +28,43 @@ const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
 const NS_PER_SECOND: f64 = 1_000_000_000.0;
 /// Pixels from clip edge that activate trim mode
 const TRIM_HANDLE_PX: f64 = 10.0;
+
+fn track_row_height(track: &crate::model::track::Track) -> f64 {
+    match track.height_preset {
+        crate::model::track::TrackHeightPreset::Small => TRACK_HEIGHT_SMALL,
+        crate::model::track::TrackHeightPreset::Medium => TRACK_HEIGHT,
+        crate::model::track::TrackHeightPreset::Large => TRACK_HEIGHT_LARGE,
+    }
+}
+
+fn track_row_top(project: &crate::model::project::Project, track_idx: usize) -> f64 {
+    RULER_HEIGHT
+        + project
+            .tracks
+            .iter()
+            .take(track_idx)
+            .map(track_row_height)
+            .sum::<f64>()
+}
+
+fn timeline_content_height(project: &crate::model::project::Project) -> f64 {
+    RULER_HEIGHT + project.tracks.iter().map(track_row_height).sum::<f64>()
+}
+
+fn track_index_at_y_in_project(project: &crate::model::project::Project, y: f64) -> Option<usize> {
+    if y <= RULER_HEIGHT {
+        return None;
+    }
+    let mut row_top = RULER_HEIGHT;
+    for (idx, track) in project.tracks.iter().enumerate() {
+        let row_bottom = row_top + track_row_height(track);
+        if y < row_bottom {
+            return Some(idx);
+        }
+        row_top = row_bottom;
+    }
+    None
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveTool {
@@ -223,20 +262,14 @@ impl TimelineState {
     }
 
     fn track_index_at_y(&self, y: f64) -> Option<usize> {
-        if y <= RULER_HEIGHT {
-            return None;
-        }
-        let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
-        if track_idx < self.project.borrow().tracks.len() {
-            Some(track_idx)
-        } else {
-            None
-        }
+        let project = self.project.borrow();
+        track_index_at_y_in_project(&project, y)
     }
 
     fn solo_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
         let track_idx = self.track_index_at_y(y)?;
-        let row_y = RULER_HEIGHT + track_idx as f64 * TRACK_HEIGHT;
+        let project = self.project.borrow();
+        let row_y = track_row_top(&project, track_idx);
         let badge_x = track_label_solo_badge_x(self.show_track_audio_levels);
         let badge_y = row_y + 6.0;
         if x >= badge_x
@@ -270,6 +303,24 @@ impl TimelineState {
             return false;
         };
         track.soloed = !track.soloed;
+        proj.dirty = true;
+        true
+    }
+
+    fn set_track_height_preset_by_index(
+        &mut self,
+        track_idx: usize,
+        preset: crate::model::track::TrackHeightPreset,
+    ) -> bool {
+        let mut proj = self.project.borrow_mut();
+        let Some(track) = proj.tracks.get_mut(track_idx) else {
+            return false;
+        };
+        if track.height_preset == preset {
+            return false;
+        }
+        track.height_preset = preset;
+        self.selected_track_id = Some(track.id.clone());
         proj.dirty = true;
         true
     }
@@ -1674,9 +1725,9 @@ impl TimelineState {
         let proj = self.project.borrow();
         let mut hits = Vec::new();
         for (track_idx, track) in proj.tracks.iter().enumerate() {
-            let track_y = RULER_HEIGHT + track_idx as f64 * TRACK_HEIGHT;
+            let track_y = track_row_top(&proj, track_idx);
             let clip_top = track_y + 2.0;
-            let clip_bottom = clip_top + TRACK_HEIGHT - 4.0;
+            let clip_bottom = clip_top + track_row_height(track) - 4.0;
             if clip_bottom < top || clip_top > bottom {
                 continue;
             }
@@ -1751,11 +1802,7 @@ impl TimelineState {
     /// Find which clip and track are at a given (x, y) coordinate.
     /// Also returns whether x is near the in-edge or out-edge (for trimming).
     fn hit_test(&self, x: f64, y: f64) -> Option<HitResult> {
-        let track_idx = if y > RULER_HEIGHT {
-            ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
-        } else {
-            return None;
-        };
+        let track_idx = self.track_index_at_y(y)?;
 
         let proj = self.project.borrow();
         let track = proj.tracks.get(track_idx)?;
@@ -2042,7 +2089,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     let area = DrawingArea::new();
     area.set_vexpand(false);
     area.set_hexpand(true);
-    area.set_content_height((RULER_HEIGHT + TRACK_HEIGHT * 4.0) as i32);
+    let initial_content_height = {
+        let st = state.borrow();
+        let proj = st.project.borrow();
+        timeline_content_height(&proj).ceil() as i32
+    };
+    area.set_content_height(initial_content_height.max(1));
     area.set_focusable(true);
 
     let thumb_cache = Rc::new(RefCell::new(
@@ -2093,6 +2145,28 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     clip_context_box.append(&btn_align_grouped);
     clip_context_box.append(&btn_sync_audio);
     clip_context_pop.set_child(Some(&clip_context_box));
+
+    let track_context_pop = gtk::Popover::new();
+    track_context_pop.set_parent(&area);
+    track_context_pop.set_autohide(true);
+    let track_context_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    track_context_box.set_margin_start(4);
+    track_context_box.set_margin_end(4);
+    track_context_box.set_margin_top(4);
+    track_context_box.set_margin_bottom(4);
+    let btn_track_height_small = gtk::Button::with_label("Track Height: Small");
+    let btn_track_height_medium = gtk::Button::with_label("Track Height: Medium");
+    let btn_track_height_large = gtk::Button::with_label("Track Height: Large");
+    for btn in [
+        &btn_track_height_small,
+        &btn_track_height_medium,
+        &btn_track_height_large,
+    ] {
+        btn.add_css_class("flat");
+        track_context_box.append(btn);
+    }
+    track_context_pop.set_child(Some(&track_context_box));
+    let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
     {
         let state = state.clone();
@@ -2225,17 +2299,67 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         });
     }
 
+    for (btn, preset) in [
+        (
+            btn_track_height_small.clone(),
+            crate::model::track::TrackHeightPreset::Small,
+        ),
+        (
+            btn_track_height_medium.clone(),
+            crate::model::track::TrackHeightPreset::Medium,
+        ),
+        (
+            btn_track_height_large.clone(),
+            crate::model::track::TrackHeightPreset::Large,
+        ),
+    ] {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        btn.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            let mut st = state.borrow_mut();
+            let changed = track_idx
+                .map(|idx| st.set_track_height_preset_by_index(idx, preset))
+                .unwrap_or(false);
+            let proj_cb = if changed {
+                st.on_project_changed.clone()
+            } else {
+                None
+            };
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+            }
+        });
+    }
+
     // Drawing
     {
         let state = state.clone();
         let thumb_cache = thumb_cache.clone();
         let wave_cache = wave_cache.clone();
-        area.set_draw_func(move |_area, cr, width, height| {
+        area.set_draw_func(move |area, cr, width, height| {
             let mut tcache = thumb_cache.borrow_mut();
             tcache.poll();
             let mut wcache = wave_cache.borrow_mut();
             wcache.poll();
-            draw_timeline(cr, width, height, &state.borrow(), &mut tcache, &mut wcache);
+            let st = state.borrow();
+            let content_height = {
+                let proj = st.project.borrow();
+                timeline_content_height(&proj).ceil() as i32
+            };
+            area.set_content_height(content_height.max(1));
+            draw_timeline(cr, width, height, &st, &mut tcache, &mut wcache);
         });
     }
 
@@ -2274,11 +2398,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let state = state.clone();
         let area_weak = area.downgrade();
         let clip_context_pop = clip_context_pop.clone();
+        let track_context_pop = track_context_pop.clone();
+        let track_context_track_idx = track_context_track_idx.clone();
         let btn_join_through_edit = btn_join_through_edit.clone();
         let btn_freeze_frame = btn_freeze_frame.clone();
         let btn_link_selected = btn_link_selected.clone();
         let btn_unlink_selected = btn_unlink_selected.clone();
         let btn_align_grouped = btn_align_grouped.clone();
+        let btn_track_height_small = btn_track_height_small.clone();
+        let btn_track_height_medium = btn_track_height_medium.clone();
+        let btn_track_height_large = btn_track_height_large.clone();
         click.connect_pressed(move |gesture, _n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() {
@@ -2291,6 +2420,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let button = gesture.current_button();
             let mut st = state.borrow_mut();
             clip_context_pop.popdown();
+            track_context_pop.popdown();
 
             if y < RULER_HEIGHT {
                 if button == 3 {
@@ -2329,11 +2459,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         // Razor cut at click position on the clicked track
                         let ns = st.x_to_ns(x);
                         st.playhead_ns = ns;
-                        let track_idx = if y > RULER_HEIGHT {
-                            Some(((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize)
-                        } else {
-                            None
-                        };
+                        let track_idx = st.track_index_at_y(y);
                         let seek_cb = st.on_seek.clone();
                         st.razor_cut_at_playhead_on_track(track_idx);
                         let proj_cb = st.on_project_changed.clone();
@@ -2388,17 +2514,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 if !shift && !ctrl_or_meta {
                                     st.clear_clip_selection();
                                     // Click on empty track area still selects the track
-                                    if y > RULER_HEIGHT {
-                                        let track_idx =
-                                            ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
-                                        let tid = {
-                                            let proj = st.project.borrow();
-                                            proj.tracks.get(track_idx).map(|t| t.id.clone())
-                                        };
-                                        st.selected_track_id = tid;
-                                    } else {
-                                        st.selected_track_id = None;
-                                    }
+                                    let tid = {
+                                        let proj = st.project.borrow();
+                                        st.track_index_at_y(y)
+                                            .and_then(|track_idx| proj.tracks.get(track_idx))
+                                            .map(|t| t.id.clone())
+                                    };
+                                    st.selected_track_id = tid;
                                 } else {
                                 }
                             }
@@ -2415,11 +2537,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 }
             } else if button == 3 {
                 // Right-click on transition marker → remove transition.
-                let track_idx = if y > RULER_HEIGHT {
-                    ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
-                } else {
-                    usize::MAX
-                };
+                let track_idx = st.track_index_at_y(y).unwrap_or(usize::MAX);
                 let ns = st.x_to_ns(x);
                 let threshold_ns = ((12.0 / st.pixels_per_second) * NS_PER_SECOND as f64) as u64;
                 let transition_hit = {
@@ -2472,35 +2590,70 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         cb();
                     }
                 } else {
-                    // Right-click clip → keep current selection if already selected, otherwise
-                    // select just the clicked clip before showing clip actions.
-                    let hit = st.hit_test(x, y);
                     let mut show_context_menu = false;
-                    if let Some(h) = hit {
-                        st.prepare_clip_context_menu_selection(&h.clip_id, &h.track_id);
-                        let actionability = st.clip_context_menu_actionability();
-                        if apply_clip_context_menu_actionability(
-                            &btn_join_through_edit,
-                            &btn_freeze_frame,
-                            &btn_link_selected,
-                            &btn_unlink_selected,
-                            &btn_align_grouped,
-                            &btn_sync_audio,
-                            actionability,
-                        ) {
-                            clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-                                x as i32, y as i32, 1, 1,
-                            )));
-                            show_context_menu = true;
+                    let mut show_track_context_menu = false;
+                    let mut sel_cb: Option<Rc<dyn Fn(Option<String>)>> = None;
+                    let mut new_sel: Option<String> = None;
+
+                    if x < TRACK_LABEL_WIDTH && st.solo_badge_hit_track_index(x, y).is_none() {
+                        if let Some(track_idx) = st.track_index_at_y(y) {
+                            let selected = {
+                                let proj = st.project.borrow();
+                                proj.tracks
+                                    .get(track_idx)
+                                    .map(|track| (track.id.clone(), track.height_preset))
+                            };
+                            if let Some((track_id, preset)) = selected {
+                                st.selected_track_id = Some(track_id);
+                                *track_context_track_idx.borrow_mut() = Some(track_idx);
+                                btn_track_height_small.set_sensitive(
+                                    preset != crate::model::track::TrackHeightPreset::Small,
+                                );
+                                btn_track_height_medium.set_sensitive(
+                                    preset != crate::model::track::TrackHeightPreset::Medium,
+                                );
+                                btn_track_height_large.set_sensitive(
+                                    preset != crate::model::track::TrackHeightPreset::Large,
+                                );
+                                track_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                                    x as i32, y as i32, 1, 1,
+                                )));
+                                show_track_context_menu = true;
+                            }
                         }
+                    } else {
+                        // Right-click clip → keep current selection if already selected, otherwise
+                        // select just the clicked clip before showing clip actions.
+                        let hit = st.hit_test(x, y);
+                        if let Some(h) = hit {
+                            st.prepare_clip_context_menu_selection(&h.clip_id, &h.track_id);
+                            let actionability = st.clip_context_menu_actionability();
+                            if apply_clip_context_menu_actionability(
+                                &btn_join_through_edit,
+                                &btn_freeze_frame,
+                                &btn_link_selected,
+                                &btn_unlink_selected,
+                                &btn_align_grouped,
+                                &btn_sync_audio,
+                                actionability,
+                            ) {
+                                clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                                    x as i32, y as i32, 1, 1,
+                                )));
+                                show_context_menu = true;
+                            }
+                        }
+                        sel_cb = st.on_clip_selected.clone();
+                        new_sel = st.selected_clip_id.clone();
                     }
-                    let sel_cb = st.on_clip_selected.clone();
-                    let new_sel = st.selected_clip_id.clone();
+
                     drop(st);
                     if let Some(cb) = sel_cb {
                         cb(new_sel);
                     }
-                    if show_context_menu {
+                    if show_track_context_menu {
+                        track_context_pop.popup();
+                    } else if show_context_menu {
                         clip_context_pop.popup();
                     }
                 }
@@ -2700,9 +2853,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     && st.solo_badge_hit_track_index(x, y).is_none()
                 {
                     // Drag started in track label area → track reorder
-                    let track_idx = ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
-                    let track_count = st.project.borrow().tracks.len();
-                    if track_idx < track_count {
+                    if let Some(track_idx) = st.track_index_at_y(y) {
                         st.drag_op = DragOp::ReorderTrack {
                             track_idx,
                             target_idx: track_idx,
@@ -2844,11 +2995,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         } else {
                             // ── Determine target track from y position ──────────
-                            let target_track_idx = if current_y > RULER_HEIGHT {
-                                ((current_y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
-                            } else {
-                                0
-                            };
+                            let target_track_idx = st.track_index_at_y(current_y).unwrap_or(0);
                             let (target_track_id, same_kind) = {
                                 let proj = st.project.borrow();
                                 let cur_kind = proj
@@ -3292,13 +3439,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         }
                     }
                     DragOp::ReorderTrack { track_idx: _, .. } => {
-                        let new_target = if current_y > RULER_HEIGHT {
-                            let idx = ((current_y - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
-                            let count = st.project.borrow().tracks.len();
-                            idx.min(count.saturating_sub(1))
-                        } else {
-                            0
-                        };
+                        let new_target = st.track_index_at_y(current_y).unwrap_or(0);
                         if let DragOp::ReorderTrack {
                             ref mut target_idx, ..
                         } = st.drag_op
@@ -4082,11 +4223,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let area_weak = area_weak.clone();
             drop_target.connect_motion(move |_target, x, y| {
                 let mut st = state.borrow_mut();
-                let track_idx = if y > RULER_HEIGHT {
-                    ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
-                } else {
-                    usize::MAX
-                };
+                let track_idx = st.track_index_at_y(y).unwrap_or(usize::MAX);
                 let tns = st.x_to_ns(x);
                 let threshold_ns = ((12.0 / st.pixels_per_second) * NS_PER_SECOND as f64) as u64;
                 let pair = {
@@ -4135,11 +4272,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             };
             if let Some(transition_kind) = payload.strip_prefix("transition:") {
                 let mut st = state.borrow_mut();
-                let track_idx = if y > RULER_HEIGHT {
-                    ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
-                } else {
-                    0
-                };
+                let track_idx = st.track_index_at_y(y).unwrap_or(0);
                 let tns = st.x_to_ns(x);
                 let threshold_ns = ((12.0 / st.pixels_per_second) * NS_PER_SECOND as f64) as u64;
                 let candidate = {
@@ -4202,11 +4335,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
                 let (track_idx, timeline_start_ns) = {
                     let st = state.borrow();
-                    let track_row_idx = if y > RULER_HEIGHT {
-                        ((y - RULER_HEIGHT) / TRACK_HEIGHT) as usize
-                    } else {
-                        0
-                    };
+                    let track_row_idx = st.track_index_at_y(y).unwrap_or(0);
                     let tns = st.x_to_ns(x);
                     (track_row_idx, tns)
                 };
@@ -4251,12 +4380,14 @@ fn draw_timeline(
     let grouped_peer_highlight_ids = st.grouped_peer_highlight_ids();
     let linked_peer_highlight_ids = st.linked_peer_highlight_ids();
     let proj = st.project.borrow();
+    let mut y = RULER_HEIGHT;
     for (i, track) in proj.tracks.iter().enumerate() {
-        let y = RULER_HEIGHT + i as f64 * TRACK_HEIGHT;
+        let track_height = track_row_height(track);
         draw_track_row(
             cr,
             w,
             y,
+            track_height,
             i,
             track,
             st,
@@ -4265,6 +4396,7 @@ fn draw_timeline(
             cache,
             wcache,
         );
+        y += track_height;
     }
 
     // Playhead (clipped to content area so it doesn't overdraw track labels)
@@ -4320,10 +4452,11 @@ fn draw_timeline(
     } = &st.drag_op
     {
         if track_idx != target_idx {
-            let indicator_y = RULER_HEIGHT
-                + *target_idx as f64 * TRACK_HEIGHT
+            let target_top = track_row_top(&proj, *target_idx);
+            let target_height = proj.tracks.get(*target_idx).map(track_row_height).unwrap_or(0.0);
+            let indicator_y = target_top
                 + if target_idx > track_idx {
-                    TRACK_HEIGHT
+                    target_height
                 } else {
                     0.0
                 };
@@ -4490,6 +4623,7 @@ fn draw_track_row(
     cr: &gtk::cairo::Context,
     width: f64,
     y: f64,
+    track_height: f64,
     track_idx: usize,
     track: &crate::model::track::Track,
     st: &TimelineState,
@@ -4507,7 +4641,7 @@ fn draw_track_row(
         TRACK_LABEL_WIDTH,
         y,
         width - TRACK_LABEL_WIDTH,
-        TRACK_HEIGHT,
+        track_height,
     );
     cr.fill().ok();
 
@@ -4517,6 +4651,7 @@ fn draw_track_row(
             cr,
             width,
             y,
+            track_height,
             clip,
             track,
             st,
@@ -4529,7 +4664,7 @@ fn draw_track_row(
 
     draw_through_edit_boundary_indicators(
         cr,
-        &through_edit_indicator_geometry_for_track(track, st, y, width),
+        &through_edit_indicator_geometry_for_track(track, st, y, track_height, width),
     );
 
     // Draw transition markers (clip -> next clip) after clip bodies.
@@ -4538,7 +4673,7 @@ fn draw_track_row(
             let ex = st.ns_to_x(clip.timeline_end());
             let marker_w = 10.0;
             cr.set_source_rgba(0.85, 0.85, 1.0, 0.75);
-            cr.rectangle(ex - marker_w / 2.0, y + 4.0, marker_w, TRACK_HEIGHT - 8.0);
+            cr.rectangle(ex - marker_w / 2.0, y + 4.0, marker_w, track_height - 8.0);
             cr.fill().ok();
         }
     }
@@ -4550,19 +4685,19 @@ fn draw_track_row(
     } else {
         cr.set_source_rgb(0.22, 0.22, 0.25);
     }
-    cr.rectangle(0.0, y, TRACK_LABEL_WIDTH, TRACK_HEIGHT);
+    cr.rectangle(0.0, y, TRACK_LABEL_WIDTH, track_height);
     cr.fill().ok();
 
     // Active track accent bar
     if is_active {
         cr.set_source_rgb(0.3, 0.55, 0.95);
-        cr.rectangle(0.0, y, 3.0, TRACK_HEIGHT);
+        cr.rectangle(0.0, y, 3.0, track_height);
         cr.fill().ok();
     }
 
     cr.set_source_rgb(0.8, 0.8, 0.8);
     cr.set_font_size(11.0);
-    let _ = cr.move_to(6.0, y + TRACK_HEIGHT / 2.0 + 4.0);
+    let _ = cr.move_to(6.0, y + track_height / 2.0 + 4.0);
     let _ = cr.show_text(&track.label);
 
     let solo_x = track_label_solo_badge_x(st.show_track_audio_levels);
@@ -4587,7 +4722,7 @@ fn draw_track_row(
     if st.show_track_audio_levels {
         let meter_x = TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - 6.0;
         let meter_y = y + 8.0;
-        let meter_h = TRACK_HEIGHT - 16.0;
+        let meter_h = track_height - 16.0;
         let [left_db, right_db] = st
             .track_audio_peak_db
             .get(track_idx)
@@ -4606,8 +4741,8 @@ fn draw_track_row(
 
     cr.set_source_rgb(0.1, 0.1, 0.12);
     cr.set_line_width(1.0);
-    cr.move_to(0.0, y + TRACK_HEIGHT);
-    cr.line_to(width, y + TRACK_HEIGHT);
+    cr.move_to(0.0, y + track_height);
+    cr.line_to(width, y + track_height);
     cr.stroke().ok();
 }
 
@@ -4622,10 +4757,11 @@ fn through_edit_indicator_geometry_for_track(
     track: &crate::model::track::Track,
     st: &TimelineState,
     track_y: f64,
+    track_height: f64,
     view_width: f64,
 ) -> Vec<ThroughEditIndicatorGeometry> {
     let y_top = track_y + 5.0;
-    let y_bottom = track_y + TRACK_HEIGHT - 5.0;
+    let y_bottom = track_y + track_height - 5.0;
     detect_track_through_edit_boundaries(track)
         .into_iter()
         .filter(|boundary| {
@@ -4736,6 +4872,7 @@ fn draw_clip(
     cr: &gtk::cairo::Context,
     view_width: f64,
     track_y: f64,
+    track_height: f64,
     clip: &crate::model::clip::Clip,
     track: &crate::model::track::Track,
     st: &TimelineState,
@@ -4747,7 +4884,7 @@ fn draw_clip(
     let cx = st.ns_to_x(clip.timeline_start);
     let cw = (clip.duration() as f64 / NS_PER_SECOND) * st.pixels_per_second;
     let cy = track_y + 2.0;
-    let ch = TRACK_HEIGHT - 4.0;
+    let ch = track_height - 4.0;
 
     if cx + cw < TRACK_LABEL_WIDTH || cx > view_width {
         return;
@@ -4762,10 +4899,7 @@ fn draw_clip(
         .map(|(l, r)| clip.id == *l || clip.id == *r)
         .unwrap_or(false);
 
-    let (r, g, b) = match track.kind {
-        TrackKind::Video => (0.17, 0.47, 0.85),
-        TrackKind::Audio => (0.18, 0.65, 0.45),
-    };
+    let (r, g, b) = clip_fill_color(clip, track.kind);
     cr.set_source_rgb(r, g, b);
     rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
     cr.fill().ok();
@@ -5039,6 +5173,23 @@ fn draw_clip(
                 let _ = cr.show_text(badge);
             }
         }
+    }
+}
+
+fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
+    match clip.color_label {
+        crate::model::clip::ClipColorLabel::None => match track_kind {
+            TrackKind::Video => (0.17, 0.47, 0.85),
+            TrackKind::Audio => (0.18, 0.65, 0.45),
+        },
+        crate::model::clip::ClipColorLabel::Red => (0.78, 0.27, 0.27),
+        crate::model::clip::ClipColorLabel::Orange => (0.83, 0.49, 0.20),
+        crate::model::clip::ClipColorLabel::Yellow => (0.78, 0.68, 0.20),
+        crate::model::clip::ClipColorLabel::Green => (0.28, 0.66, 0.33),
+        crate::model::clip::ClipColorLabel::Teal => (0.20, 0.63, 0.60),
+        crate::model::clip::ClipColorLabel::Blue => (0.22, 0.48, 0.85),
+        crate::model::clip::ClipColorLabel::Purple => (0.53, 0.38, 0.80),
+        crate::model::clip::ClipColorLabel::Magenta => (0.78, 0.35, 0.68),
     }
 }
 
@@ -6499,6 +6650,7 @@ mod tests {
                 .expect("through-edit track should exist")
                 .clone()
         };
+        let track_height = track_row_height(&track);
 
         st.pixels_per_second = 100.0;
         st.scroll_offset = 0.0;
@@ -6506,18 +6658,20 @@ mod tests {
             &track,
             &st,
             RULER_HEIGHT,
+            track_height,
             TRACK_LABEL_WIDTH + 400.0,
         );
         assert_eq!(base.len(), 1);
         assert!((base[0].x - (TRACK_LABEL_WIDTH + 100.0)).abs() < 0.001);
         assert_eq!(base[0].y_top, RULER_HEIGHT + 5.0);
-        assert_eq!(base[0].y_bottom, RULER_HEIGHT + TRACK_HEIGHT - 5.0);
+        assert_eq!(base[0].y_bottom, RULER_HEIGHT + track_height - 5.0);
 
         st.pixels_per_second = 200.0;
         let zoomed = through_edit_indicator_geometry_for_track(
             &track,
             &st,
             RULER_HEIGHT,
+            track_height,
             TRACK_LABEL_WIDTH + 400.0,
         );
         assert!((zoomed[0].x - (TRACK_LABEL_WIDTH + 200.0)).abs() < 0.001);
@@ -6527,6 +6681,7 @@ mod tests {
             &track,
             &st,
             RULER_HEIGHT,
+            track_height,
             TRACK_LABEL_WIDTH + 400.0,
         );
         assert!((panned[0].x - (TRACK_LABEL_WIDTH + 125.0)).abs() < 0.001);
@@ -6534,13 +6689,14 @@ mod tests {
         let reordered_row = through_edit_indicator_geometry_for_track(
             &track,
             &st,
-            RULER_HEIGHT + TRACK_HEIGHT,
+            RULER_HEIGHT + track_height,
+            track_height,
             TRACK_LABEL_WIDTH + 400.0,
         );
-        assert_eq!(reordered_row[0].y_top, RULER_HEIGHT + TRACK_HEIGHT + 5.0);
+        assert_eq!(reordered_row[0].y_top, RULER_HEIGHT + track_height + 5.0);
         assert_eq!(
             reordered_row[0].y_bottom,
-            RULER_HEIGHT + 2.0 * TRACK_HEIGHT - 5.0
+            RULER_HEIGHT + 2.0 * track_height - 5.0
         );
     }
 
@@ -6560,6 +6716,7 @@ mod tests {
             &track,
             &st,
             RULER_HEIGHT,
+            track_row_height(&track),
             TRACK_LABEL_WIDTH + 90.0,
         );
         assert!(hidden_by_width.is_empty());
@@ -6570,6 +6727,7 @@ mod tests {
             &track,
             &st_scrolled,
             RULER_HEIGHT,
+            track_row_height(&track),
             TRACK_LABEL_WIDTH + 500.0,
         );
         assert!(hidden_by_scroll.is_empty());
@@ -6592,6 +6750,7 @@ mod tests {
             &track,
             &st,
             RULER_HEIGHT,
+            track_row_height(&track),
             TRACK_LABEL_WIDTH + 400.0,
         );
         assert!(indicators.is_empty());
@@ -6627,6 +6786,7 @@ mod tests {
             &track,
             &st,
             RULER_HEIGHT,
+            track_row_height(&track),
             TRACK_LABEL_WIDTH + 400.0,
         );
         assert!(indicators.is_empty());

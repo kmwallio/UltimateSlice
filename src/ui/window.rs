@@ -4535,6 +4535,11 @@ fn handle_mcp_command(
                         "muted":      t.muted,
                         "locked":     t.locked,
                         "soloed":     t.soloed,
+                        "height_preset": match t.height_preset {
+                            crate::model::track::TrackHeightPreset::Small => "small",
+                            crate::model::track::TrackHeightPreset::Medium => "medium",
+                            crate::model::track::TrackHeightPreset::Large => "large",
+                        },
                     })
                 })
                 .collect();
@@ -4563,6 +4568,17 @@ fn handle_mcp_command(
                             "source_in_ns":     c.source_in,
                             "source_out_ns":    c.source_out,
                             "duration_ns":      c.duration(),
+                            "color_label":      match c.color_label {
+                                crate::model::clip::ClipColorLabel::None => "none",
+                                crate::model::clip::ClipColorLabel::Red => "red",
+                                crate::model::clip::ClipColorLabel::Orange => "orange",
+                                crate::model::clip::ClipColorLabel::Yellow => "yellow",
+                                crate::model::clip::ClipColorLabel::Green => "green",
+                                crate::model::clip::ClipColorLabel::Teal => "teal",
+                                crate::model::clip::ClipColorLabel::Blue => "blue",
+                                crate::model::clip::ClipColorLabel::Purple => "purple",
+                                crate::model::clip::ClipColorLabel::Magenta => "magenta",
+                            },
                             "brightness":       c.brightness,
                             "contrast":         c.contrast,
                             "saturation":       c.saturation,
@@ -4626,6 +4642,46 @@ fn handle_mcp_command(
                 Ok(()) => {
                     reply
                         .send(json!({"success": true, "track_id": track_id, "soloed": solo}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetTrackHeightPreset {
+            track_id,
+            height_preset,
+            reply,
+        } => {
+            let parsed = match height_preset.as_str() {
+                "small" => Some(crate::model::track::TrackHeightPreset::Small),
+                "medium" => Some(crate::model::track::TrackHeightPreset::Medium),
+                "large" => Some(crate::model::track::TrackHeightPreset::Large),
+                _ => None,
+            };
+            let Some(parsed) = parsed else {
+                reply
+                    .send(json!({"success": false, "error": "height_preset must be one of: small, medium, large"}))
+                    .ok();
+                return;
+            };
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    track.height_preset = parsed;
+                    proj.dirty = true;
+                    Ok(())
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "height_preset": height_preset}))
                         .ok();
                     on_project_changed();
                 }
@@ -5518,6 +5574,50 @@ fn handle_mcp_command(
             }
             drop(proj);
             reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipColorLabel {
+            clip_id,
+            color_label,
+            reply,
+        } => {
+            let parsed = match color_label.as_str() {
+                "none" => Some(crate::model::clip::ClipColorLabel::None),
+                "red" => Some(crate::model::clip::ClipColorLabel::Red),
+                "orange" => Some(crate::model::clip::ClipColorLabel::Orange),
+                "yellow" => Some(crate::model::clip::ClipColorLabel::Yellow),
+                "green" => Some(crate::model::clip::ClipColorLabel::Green),
+                "teal" => Some(crate::model::clip::ClipColorLabel::Teal),
+                "blue" => Some(crate::model::clip::ClipColorLabel::Blue),
+                "purple" => Some(crate::model::clip::ClipColorLabel::Purple),
+                "magenta" => Some(crate::model::clip::ClipColorLabel::Magenta),
+                _ => None,
+            };
+            let Some(parsed) = parsed else {
+                reply
+                    .send(json!({"success": false, "error": "color_label must be one of: none, red, orange, yellow, green, teal, blue, purple, magenta"}))
+                    .ok();
+                return;
+            };
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.color_label = parsed;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply
+                .send(json!({"success": found, "clip_id": clip_id, "color_label": color_label}))
+                .ok();
             if found {
                 on_project_changed();
             }

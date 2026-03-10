@@ -124,6 +124,28 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:track-muted", track.muted.to_string().as_str()));
             asset_clip.push_attribute(("us:track-locked", track.locked.to_string().as_str()));
             asset_clip.push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
+            asset_clip.push_attribute((
+                "us:track-height",
+                match track.height_preset {
+                    crate::model::track::TrackHeightPreset::Small => "small",
+                    crate::model::track::TrackHeightPreset::Medium => "medium",
+                    crate::model::track::TrackHeightPreset::Large => "large",
+                },
+            ));
+            asset_clip.push_attribute((
+                "us:color-label",
+                match clip.color_label {
+                    crate::model::clip::ClipColorLabel::None => "none",
+                    crate::model::clip::ClipColorLabel::Red => "red",
+                    crate::model::clip::ClipColorLabel::Orange => "orange",
+                    crate::model::clip::ClipColorLabel::Yellow => "yellow",
+                    crate::model::clip::ClipColorLabel::Green => "green",
+                    crate::model::clip::ClipColorLabel::Teal => "teal",
+                    crate::model::clip::ClipColorLabel::Blue => "blue",
+                    crate::model::clip::ClipColorLabel::Purple => "purple",
+                    crate::model::clip::ClipColorLabel::Magenta => "magenta",
+                },
+            ));
             // Store color/effects as custom vendor attributes (us: prefix).
             // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
             asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
@@ -783,6 +805,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:track-muted"
             | "us:track-locked"
             | "us:track-soloed"
+            | "us:track-height"
+            | "us:color-label"
             | "us:brightness"
             | "us:contrast"
             | "us:saturation"
@@ -1355,17 +1379,22 @@ mod tests {
         project.tracks[0].muted = true;
         project.tracks[0].locked = true;
         project.tracks[0].soloed = true;
-        project.tracks[0].add_clip(Clip::new(
+        project.tracks[0].height_preset = crate::model::track::TrackHeightPreset::Large;
+        let mut clip = Clip::new(
             "file:///tmp/clip.mp4",
             1_000_000_000,
             0,
             ClipKind::Video,
-        ));
+        );
+        clip.color_label = crate::model::clip::ClipColorLabel::Purple;
+        project.tracks[0].add_clip(clip);
 
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(xml.contains("us:track-muted=\"true\""));
         assert!(xml.contains("us:track-locked=\"true\""));
         assert!(xml.contains("us:track-soloed=\"true\""));
+        assert!(xml.contains("us:track-height=\"large\""));
+        assert!(xml.contains("us:color-label=\"purple\""));
     }
 
     #[test]

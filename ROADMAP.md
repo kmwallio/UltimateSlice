@@ -198,7 +198,7 @@ Tracking docs:
   - [x] Join-back edit action
 - [x] Right-click clip context menu now shows only currently actionable clip operations (hides unavailable actions)
 - [x] Select clips forward/backward from playhead for bulk operations
-- [ ] Clip display options / adjustable per-track height, clip color labels
+- [x] Clip display options / adjustable per-track height, clip color labels
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export

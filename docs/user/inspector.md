@@ -11,6 +11,7 @@ Select a clip in the timeline to populate the Inspector. All changes apply immed
 | Field | Description |
 |---|---|
 | **Name** | Editable label for the clip; click **Apply Name** to commit |
+| **Clip Color Label** | Semantic timeline color tag (`None`, `Red`, `Orange`, `Yellow`, `Green`, `Teal`, `Blue`, `Purple`, `Magenta`) |
 | **File** | Source filename |
 | **In** | Source In-point |
 | **Out** | Source Out-point |

@@ -1,6 +1,6 @@
-use crate::model::clip::{Clip, ClipKind};
+use crate::model::clip::{Clip, ClipColorLabel, ClipKind};
 use crate::model::project::{FrameRate, Project};
-use crate::model::track::Track;
+use crate::model::track::{Track, TrackHeightPreset};
 use anyhow::{anyhow, bail, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -665,6 +665,11 @@ fn parse_asset_clip(
                 .get("us:track-soloed")
                 .and_then(|s| s.parse::<bool>().ok())
                 .unwrap_or(false);
+            let track_height_preset = match attrs.get("us:track-height").map(|s| s.as_str()) {
+                Some("small") => TrackHeightPreset::Small,
+                Some("large") => TrackHeightPreset::Large,
+                _ => TrackHeightPreset::Medium,
+            };
             let track_key = (if clip_kind == ClipKind::Audio { 1 } else { 0 }, track_idx);
 
             // Get or create the target track
@@ -677,6 +682,7 @@ fn parse_asset_clip(
                 track.muted = track_muted;
                 track.locked = track_locked;
                 track.soloed = track_soloed;
+                track.height_preset = track_height_preset;
                 track
             });
             if attrs.contains_key("us:track-muted") {
@@ -687,6 +693,9 @@ fn parse_asset_clip(
             }
             if attrs.contains_key("us:track-soloed") {
                 track.soloed = track_soloed;
+            }
+            if attrs.contains_key("us:track-height") {
+                track.height_preset = track_height_preset;
             }
 
             let resolved_source_path =
@@ -714,6 +723,19 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:saturation") {
                 clip.saturation = v.parse().unwrap_or(1.0);
+            }
+            if let Some(v) = attrs.get("us:color-label") {
+                clip.color_label = match v.as_str() {
+                    "red" => ClipColorLabel::Red,
+                    "orange" => ClipColorLabel::Orange,
+                    "yellow" => ClipColorLabel::Yellow,
+                    "green" => ClipColorLabel::Green,
+                    "teal" => ClipColorLabel::Teal,
+                    "blue" => ClipColorLabel::Blue,
+                    "purple" => ClipColorLabel::Purple,
+                    "magenta" => ClipColorLabel::Magenta,
+                    _ => ClipColorLabel::None,
+                };
             }
             if let Some(v) = attrs.get("us:temperature") {
                 clip.temperature = v.parse().unwrap_or(6500.0);
@@ -1046,6 +1068,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-muted"
             | "us:track-locked"
             | "us:track-soloed"
+            | "us:track-height"
+            | "us:color-label"
             | "us:brightness"
             | "us:contrast"
             | "us:saturation"
@@ -2516,7 +2540,8 @@ mod tests {
       <spine>
         <asset-clip ref="a1" offset="0s" start="0s" duration="1s"
           us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
-          us:track-muted="true" us:track-locked="true" us:track-soloed="true"/>
+          us:track-muted="true" us:track-locked="true" us:track-soloed="true"
+          us:track-height="large" us:color-label="purple"/>
       </spine>
     </sequence>
   </project>
@@ -2530,5 +2555,10 @@ mod tests {
         assert!(track.muted);
         assert!(track.locked);
         assert!(track.soloed);
+        assert_eq!(track.height_preset, TrackHeightPreset::Large);
+        assert_eq!(
+            track.clips[0].color_label,
+            crate::model::clip::ClipColorLabel::Purple
+        );
     }
 }

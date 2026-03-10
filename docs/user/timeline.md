@@ -225,6 +225,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Remove Track** removes the currently active (highlighted) track, or the last track if none is selected. At least one track is always kept.
 - **Reorder tracks** by dragging a track's label vertically; a blue indicator line shows the drop target. Release to confirm.
 - **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a blue accent bar on its label. The active track is used as the target for the Append button and the Remove Track button.
+- **Track height presets** — right-click a track header and choose **Track Height: Small / Medium / Large** to resize that track row independently.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Muting an audio track excludes it from both preview and export.
 - **Solo track** — click the **S** badge on a track header (or press **S** with that track active) to solo it. When one or more tracks are soloed, only soloed non-muted tracks are active for Program Monitor playback and export.
@@ -263,6 +264,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
+- Clips can use semantic color labels (set in the Inspector) for quick visual categorization.
 - Selected clips have a yellow highlight border.
 - Adjacent join-safe through-edits (same source with contiguous source/timeline ranges, no boundary transition, and compatible clip metadata/effects) are marked with a subtle dotted line at the cut on the track row.
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.

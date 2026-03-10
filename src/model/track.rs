@@ -8,6 +8,20 @@ pub enum TrackKind {
     Audio,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackHeightPreset {
+    Small,
+    Medium,
+    Large,
+}
+
+impl Default for TrackHeightPreset {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
 /// A single horizontal lane in the timeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
@@ -19,6 +33,8 @@ pub struct Track {
     pub locked: bool,
     #[serde(default)]
     pub soloed: bool,
+    #[serde(default)]
+    pub height_preset: TrackHeightPreset,
 }
 
 impl Track {
@@ -31,6 +47,7 @@ impl Track {
             muted: false,
             locked: false,
             soloed: false,
+            height_preset: TrackHeightPreset::Medium,
         }
     }
 
@@ -43,6 +60,7 @@ impl Track {
             muted: false,
             locked: false,
             soloed: false,
+            height_preset: TrackHeightPreset::Medium,
         }
     }
 
@@ -106,6 +124,7 @@ mod tests {
         assert!(!track.muted);
         assert!(!track.locked);
         assert!(!track.soloed);
+        assert_eq!(track.height_preset, TrackHeightPreset::Medium);
     }
 
     #[test]
@@ -114,6 +133,22 @@ mod tests {
         assert_eq!(track.label, "A1");
         assert_eq!(track.kind, TrackKind::Audio);
         assert!(!track.soloed);
+        assert_eq!(track.height_preset, TrackHeightPreset::Medium);
+    }
+
+    #[test]
+    fn test_track_deserialize_backwards_compatible_height_default() {
+        let json = r#"{
+            "id":"track-1",
+            "kind":"Video",
+            "label":"V1",
+            "clips":[],
+            "muted":false,
+            "locked":false,
+            "soloed":false
+        }"#;
+        let track: Track = serde_json::from_str(json).expect("track should deserialize");
+        assert_eq!(track.height_preset, TrackHeightPreset::Medium);
     }
 
     #[test]

@@ -9,6 +9,26 @@ pub enum ClipKind {
     Image,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipColorLabel {
+    None,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Magenta,
+}
+
+impl Default for ClipColorLabel {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 fn default_contrast() -> f32 {
     1.0
 }
@@ -71,6 +91,9 @@ pub struct Clip {
     /// Human-readable label (defaults to filename)
     pub label: String,
     pub kind: ClipKind,
+    /// Semantic clip color label used for timeline tinting.
+    #[serde(default)]
+    pub color_label: ClipColorLabel,
     /// Brightness adjustment: -1.0 (darkest) to 1.0 (brightest), default 0.0
     #[serde(default)]
     pub brightness: f32,
@@ -247,6 +270,7 @@ impl Clip {
             timeline_start,
             label,
             kind,
+            color_label: ClipColorLabel::None,
             brightness: 0.0,
             contrast: 1.0,
             saturation: 1.0,
@@ -391,6 +415,7 @@ mod tests {
         assert_eq!(clip.brightness, 0.0);
         assert_eq!(clip.contrast, 1.0);
         assert_eq!(clip.saturation, 1.0);
+        assert_eq!(clip.color_label, ClipColorLabel::None);
         assert_eq!(clip.volume, 1.0);
         assert_eq!(clip.speed, 1.0);
         assert!(!clip.reverse);
@@ -589,5 +614,6 @@ mod tests {
         assert!(!clip.freeze_frame);
         assert_eq!(clip.freeze_frame_source_ns, None);
         assert_eq!(clip.freeze_frame_hold_duration_ns, None);
+        assert_eq!(clip.color_label, ClipColorLabel::None);
     }
 }

@@ -179,12 +179,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_tracks",
-            "description": "List all tracks in the project with index/id/kind, clip count, and muted/locked/soloed state flags.",
+            "description": "List all tracks in the project with index/id/kind, clip count, muted/locked/soloed flags, and track height preset.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "list_clips",
-            "description": "List every clip on the timeline across all tracks.",
+            "description": "List every clip on the timeline across all tracks, including color label and timing/effect metadata.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -218,6 +218,18 @@ fn tools_list() -> Value {
                     "solo": { "type": "boolean", "description": "Whether the target track should be soloed." }
                 },
                 "required": ["track_id", "solo"]
+            }
+        },
+        {
+            "name": "set_track_height_preset",
+            "description": "Set timeline display height preset for a track by id ('small', 'medium', or 'large').",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "height_preset": { "type": "string", "enum": ["small", "medium", "large"], "description": "Track display height preset." }
+                },
+                "required": ["track_id", "height_preset"]
             }
         },
         {
@@ -415,6 +427,18 @@ fn tools_list() -> Value {
                     "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." }
                 },
                 "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_clip_color_label",
+            "description": "Set semantic timeline color label for a clip by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "color_label": { "type": "string", "enum": ["none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "magenta"], "description": "Clip color label." }
+                },
+                "required": ["clip_id", "color_label"]
             }
         },
         {
@@ -836,6 +860,14 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             solo: args["solo"].as_bool().unwrap_or(false),
             reply: tx,
         },
+        "set_track_height_preset" => McpCommand::SetTrackHeightPreset {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            height_preset: args["height_preset"]
+                .as_str()
+                .unwrap_or("medium")
+                .to_string(),
+            reply: tx,
+        },
         "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
         "get_preferences" => McpCommand::GetPreferences { reply: tx },
         "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
@@ -947,6 +979,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             shadows: args["shadows"].as_f64().unwrap_or(0.0),
             midtones: args["midtones"].as_f64().unwrap_or(0.0),
             highlights: args["highlights"].as_f64().unwrap_or(0.0),
+            reply: tx,
+        },
+        "set_clip_color_label" => McpCommand::SetClipColorLabel {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            color_label: args["color_label"].as_str().unwrap_or("none").to_string(),
             reply: tx,
         },
 
