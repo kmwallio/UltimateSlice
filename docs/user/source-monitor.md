@@ -57,6 +57,8 @@ Source seek behavior can be tuned in **Preferences → Playback → Source monit
 
 After setting In/Out points, click **Append to Timeline** to add the marked range to the timeline. The button auto-detects whether the source is audio-only or contains video.
 
+Dragging directly from the Source Monitor video display also exports the current source selection to timeline drop targets. Accidental drops back onto the Source Monitor itself are ignored as a no-op.
+
 - Audio-only sources append to a matching audio track.
 - Sources with video only append to a matching video track.
 - For sources with both video and audio, **Source Monitor A/V auto-link** is configurable:
