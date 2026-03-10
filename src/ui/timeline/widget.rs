@@ -942,7 +942,8 @@ impl TimelineState {
                             let mut right_clip = clip.clone();
                             right_clip.id = uuid::Uuid::new_v4().to_string();
                             right_clip.source_in = right_clip.source_in.saturating_add(cut_offset);
-                            right_clip.timeline_start = playhead_ns.saturating_add(hold_duration_ns);
+                            right_clip.timeline_start =
+                                playhead_ns.saturating_add(hold_duration_ns);
                             new_clips.push(right_clip);
                         }
                         continue;
@@ -5271,6 +5272,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Ctrl+Shift+L", "Unlink selected clips"),
         ("Ctrl+Shift+→", "Select clips forward from playhead"),
         ("Ctrl+Shift+←", "Select clips backward from playhead"),
+        ("Ctrl+J", "Go to timecode (jump playhead)"),
         ("Scroll", "Zoom timeline (vertical scroll)"),
         ("Scroll (H)", "Pan timeline (horizontal scroll)"),
         ("? / /", "Show this help"),
@@ -5961,7 +5963,10 @@ mod tests {
             .find(|clip| clip.id == ids_b[0])
             .expect("left split on other track should keep original id");
         assert_eq!(x_left.timeline_start, 500_000_000);
-        assert_eq!(x_left.source_out.saturating_sub(x_left.source_in), 500_000_000);
+        assert_eq!(
+            x_left.source_out.saturating_sub(x_left.source_in),
+            500_000_000
+        );
 
         let x_right = other_track
             .clips

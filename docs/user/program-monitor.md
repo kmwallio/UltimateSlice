@@ -26,6 +26,7 @@ or outside the export frame.
 |---|---|
 | Video display | Renders the assembled sequence at the playhead position |
 | Timecode label | Current timeline position |
+| Go To button | Opens a timecode entry dialog (`HH:MM:SS:FF`) and jumps playhead |
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
 | Safe Areas toggle | Shows/hides action-safe (90%) and title-safe (80%) guides |
@@ -42,6 +43,7 @@ or outside the export frame.
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause (when timeline has focus) |
+| `Ctrl+J` | Open Go To Timecode dialog |
 | `←` / `→` / `↑` / `↓` | Nudge selected clip position in transform overlay (0.01) |
 | `Shift + Arrow` | Coarse nudge selected clip position (0.1) |
 | `+` / `-` | Increase / decrease selected clip scale in transform overlay |
@@ -102,6 +104,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 ## Seeking
 
 - Click on the **ruler** in the timeline to seek the program monitor to that position.
+- Use **Go To** in the Program Monitor header (or **Ctrl+J**) to jump directly to a timecode in `HH:MM:SS:FF` format.
 - The program monitor seeks to the correct source position within the appropriate clip, accounting for clip speed.
 - When scrubbing within the same clip, the existing decoder is seeked in-place (no pipeline rebuild) so the monitor shows the frame at the exact playhead position without a black-screen or first-frame flash.
 - When the playhead crosses a clip boundary (different clips become active), the pipeline is briefly rebuilt for the new set of active clips.

@@ -15,6 +15,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 | Action | How |
 |---|---|
 | Seek | Click on the ruler or left-drag in the ruler |
+| Jump to exact timecode | `Ctrl+J` then enter `HH:MM:SS:FF` |
 | Zoom in/out | Scroll the mouse wheel vertically |
 | Pan left/right | Scroll the mouse wheel horizontally |
 | Pan ruler view | Middle/right-drag in the ruler |
@@ -188,6 +189,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
 | `Ctrl+Shift+→` | Select clips forward from playhead |
 | `Ctrl+Shift+←` | Select clips backward from playhead |
+| `Ctrl+J` | Go to timecode (jump playhead) |
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |

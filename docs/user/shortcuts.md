@@ -12,6 +12,7 @@
 | `Ctrl+O` | Open project XML (`.uspxml` / `.fcpxml`) |
 | `Ctrl+S` | Save project XML (default `.uspxml`) |
 | `Ctrl+,` | Open Preferences |
+| `Ctrl+J` | Go to timecode (jump playhead) |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 

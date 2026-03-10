@@ -5,6 +5,7 @@ use crate::model::media_library::MediaItem;
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 use crate::recent;
+use crate::ui::timecode;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
 use crate::ui::{inspector, media_browser, preferences, preview, program_monitor, toolbar};
 use crate::undo::TrackClipsChange;
@@ -35,6 +36,117 @@ fn flash_window_status_title(
             }
         }
     });
+}
+
+fn seek_playhead_and_notify(
+    timeline_state: &Rc<RefCell<TimelineState>>,
+    timeline_panel_cell: &Rc<RefCell<Option<gtk::Widget>>>,
+    timeline_pos_ns: u64,
+) {
+    let seek_cb = {
+        let mut st = timeline_state.borrow_mut();
+        st.playhead_ns = timeline_pos_ns;
+        st.on_seek.clone()
+    };
+    if let Some(cb) = seek_cb {
+        cb(timeline_pos_ns);
+    }
+    if let Some(ref w) = *timeline_panel_cell.borrow() {
+        w.queue_draw();
+    }
+}
+
+#[allow(deprecated)]
+fn present_go_to_timecode_dialog(
+    window: &gtk::ApplicationWindow,
+    project: &Rc<RefCell<Project>>,
+    timeline_state: &Rc<RefCell<TimelineState>>,
+    timeline_panel_cell: &Rc<RefCell<Option<gtk::Widget>>>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Go to Timecode")
+        .transient_for(window)
+        .modal(true)
+        .default_width(360)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Go", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
+    let content = dialog.content_area();
+    let hint = gtk::Label::new(Some("Format: HH:MM:SS:FF (or MM:SS:FF)"));
+    hint.set_halign(gtk::Align::Start);
+    hint.add_css_class("dim-label");
+    content.append(&hint);
+
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some("00:00:00:00"));
+    entry.set_activates_default(true);
+    {
+        let fr = project.borrow().frame_rate.clone();
+        let current = timeline_state.borrow().playhead_ns;
+        entry.set_text(&timecode::format_ns_as_timecode(current, &fr));
+    }
+    content.append(&entry);
+
+    let error_label = gtk::Label::new(None);
+    error_label.set_halign(gtk::Align::Start);
+    error_label.set_wrap(true);
+    error_label.add_css_class("error");
+    error_label.set_visible(false);
+    content.append(&error_label);
+
+    entry.connect_changed({
+        let error_label = error_label.clone();
+        move |_| {
+            error_label.set_visible(false);
+        }
+    });
+
+    let entry_for_response = entry.clone();
+    dialog.connect_response({
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
+        let error_label = error_label.clone();
+        let window = window.clone();
+        move |d, resp| {
+            if resp != gtk::ResponseType::Accept {
+                d.close();
+                return;
+            }
+            let input = entry_for_response.text().to_string();
+            let (frame_rate, duration) = {
+                let proj = project.borrow();
+                (proj.frame_rate.clone(), proj.duration())
+            };
+            match timecode::parse_timecode_to_ns(&input, &frame_rate) {
+                Ok(parsed_ns) => {
+                    let target_ns = parsed_ns.min(duration);
+                    seek_playhead_and_notify(&timeline_state, &timeline_panel_cell, target_ns);
+                    if parsed_ns > duration {
+                        flash_window_status_title(
+                            &window,
+                            &project,
+                            "Timecode past project end; jumped to end",
+                        );
+                    } else {
+                        let tc = timecode::format_ns_as_timecode(target_ns, &frame_rate);
+                        flash_window_status_title(&window, &project, &format!("Jumped to {tc}"));
+                    }
+                    d.close();
+                }
+                Err(err) => {
+                    error_label.set_text(&err);
+                    error_label.set_visible(true);
+                }
+            }
+        }
+    });
+
+    dialog.present();
+    entry.grab_focus();
+    entry.select_region(0, -1);
 }
 
 fn lookup_source_timecode_base_ns(
@@ -2014,6 +2126,18 @@ pub fn build_window(
             });
         })
     };
+    let on_go_to_timecode: Rc<dyn Fn()> = {
+        let window_weak = window_weak.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
+        Rc::new(move || {
+            let Some(win) = window_weak.upgrade() else {
+                return;
+            };
+            present_go_to_timecode_dialog(&win, &project, &timeline_state, &timeline_panel_cell);
+        })
+    };
     let header = toolbar::build_toolbar(
         project.clone(),
         library.clone(),
@@ -2545,6 +2669,10 @@ pub fn build_window(
                 let cb = on_toggle_popout.clone();
                 move || cb()
             },
+            {
+                let cb = on_go_to_timecode.clone();
+                move || cb()
+            },
             Some(to.drawing_area.clone()),
             monitor_state.borrow().show_safe_areas,
             {
@@ -2812,7 +2940,8 @@ pub fn build_window(
                 speed_lbl.set_visible(true);
             }
             if pos_ns != last_pos_ns_c.get() {
-                pos_label.set_text(&program_monitor::format_timecode(pos_ns));
+                let frame_rate = { project.borrow().frame_rate.clone() };
+                pos_label.set_text(&program_monitor::format_timecode(pos_ns, &frame_rate));
                 ts.borrow_mut().playhead_ns = pos_ns;
                 let should_draw = if !playing {
                     true
@@ -4231,6 +4360,28 @@ pub fn build_window(
             } else {
                 on_overwrite();
             }
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Ctrl+J: Go to timecode ────────────────────────────────
+    {
+        let on_go_to_timecode = on_go_to_timecode.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !mods.contains(ModifierType::CONTROL_MASK) || (key != Key::j && key != Key::J) {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            on_go_to_timecode();
             glib::Propagation::Stop
         });
         window.add_controller(key_ctrl);

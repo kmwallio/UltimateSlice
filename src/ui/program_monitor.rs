@@ -1,4 +1,6 @@
 use crate::media::program_player::ProgramPlayer;
+use crate::model::project::FrameRate;
+use crate::ui::timecode;
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, AspectFrame, Box as GBox, Button, DrawingArea, EventControllerScroll,
@@ -40,6 +42,7 @@ pub fn build_program_monitor(
     on_stop: impl Fn() + 'static,
     on_play_pause: impl Fn() + 'static,
     on_toggle_popout: impl Fn() + 'static,
+    on_go_to_timecode: impl Fn() + 'static,
     transform_overlay_da: Option<DrawingArea>,
     initial_show_safe_areas: bool,
     on_safe_area_changed: impl Fn(bool) + 'static,
@@ -81,9 +84,14 @@ pub fn build_program_monitor(
     speed_label.set_visible(false);
     title_bar.append(&speed_label);
 
-    let pos_label = Label::new(Some("00:00:00;00"));
+    let pos_label = Label::new(Some("00:00:00:00"));
     pos_label.add_css_class("timecode");
     title_bar.append(&pos_label);
+
+    let btn_go_to = Button::with_label("Go To");
+    btn_go_to.set_tooltip_text(Some("Jump playhead to a timecode"));
+    btn_go_to.connect_clicked(move |_| on_go_to_timecode());
+    title_bar.append(&btn_go_to);
 
     let btn_popout = Button::with_label("Pop Out / Dock");
     btn_popout.connect_clicked(move |_| on_toggle_popout());
@@ -523,12 +531,6 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
     (da, peak_cell)
 }
 
-pub fn format_timecode(ns: u64) -> String {
-    let total_frames = ns / (1_000_000_000 / 30);
-    let frames = total_frames % 30;
-    let secs = ns / 1_000_000_000;
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = secs / 3600;
-    format!("{h:02}:{m:02}:{s:02};{frames:02}")
+pub fn format_timecode(ns: u64, frame_rate: &FrameRate) -> String {
+    timecode::format_ns_as_timecode(ns, frame_rate)
 }
