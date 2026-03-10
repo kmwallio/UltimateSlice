@@ -789,7 +789,8 @@ fn build_volume_filter(clip: &Clip) -> String {
         4.0,
         "t",
     );
-    format!("volume='{expr}'")
+    // Keyframed volume expressions depend on `t`, so force per-frame evaluation.
+    format!("volume='{expr}':eval=frame")
 }
 
 fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
@@ -1571,5 +1572,14 @@ mod tests {
         ];
         let filter = build_volume_filter(&clip);
         assert!(filter.starts_with("volume='if(lt(t,"));
+        assert!(filter.ends_with("':eval=frame"));
+    }
+
+    #[test]
+    fn volume_filter_uses_constant_when_not_keyframed() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.volume = 1.25;
+        let filter = build_volume_filter(&clip);
+        assert_eq!(filter, "volume=1.2500");
     }
 }
