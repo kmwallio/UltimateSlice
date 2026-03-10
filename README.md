@@ -55,11 +55,35 @@ See `docs/ARCHITECTURE.md` for the full layout and design notes. Highlights:
 
 ## Requirements
 
-- Rust (edition 2021)
+- Rust (edition 2021, via `rustup`)
 - GTK4 development libraries
 - GStreamer + plugins for playback and export
+- `ffmpeg` on `$PATH` (for export)
 
-On Linux, install GTK4 and GStreamer via your distribution packages.
+**Linux (Ubuntu/Debian):**
+
+```bash
+sudo apt install \
+  libgtk-4-dev \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-libav \
+  ffmpeg
+```
+
+**macOS ([Homebrew](https://brew.sh)):**
+
+```bash
+brew install gtk4 gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav ffmpeg
+```
+
+Then add to your shell profile so cargo can locate the libraries:
+
+```bash
+export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig"
+```
 
 ## Recommended System Specs
 

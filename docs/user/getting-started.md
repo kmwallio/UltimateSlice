@@ -2,12 +2,12 @@
 
 ## Requirements
 
-- **Linux** (GTK4 + GStreamer stack)
 - **Rust** (stable, via `rustup`)
-- **GStreamer** plugins: `gstreamer`, `gstreamer-plugins-base`, `gstreamer-plugins-good`, `gstreamer-plugins-bad`
+- **GTK4** development libraries
+- **GStreamer** plugins: core, base, good, bad, libav
 - **ffmpeg** (for export — must be on `$PATH`)
 
-Install dependencies on Ubuntu/Debian:
+### Linux (Ubuntu / Debian)
 
 ```bash
 sudo apt install \
@@ -19,6 +19,28 @@ sudo apt install \
   gstreamer1.0-libav \
   ffmpeg
 ```
+
+### macOS (Homebrew)
+
+Install [Homebrew](https://brew.sh) if you haven't already, then:
+
+```bash
+brew install gtk4 \
+  gstreamer \
+  gst-plugins-base \
+  gst-plugins-good \
+  gst-plugins-bad \
+  gst-libav \
+  ffmpeg
+```
+
+After installing, tell `cargo` where to find the pkg-config metadata. Add the following to your shell profile (e.g. `~/.zshrc`):
+
+```bash
+export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig"
+```
+
+Then reload your shell (`source ~/.zshrc`) before running `cargo build`.
 
 ## Building & Running
 

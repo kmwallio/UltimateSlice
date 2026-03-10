@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## Unreleased
 
 ### Added
+- **macOS build instructions**: Added Homebrew (`brew install`) dependency setup for GTK4, GStreamer, and FFmpeg in `README.md` and `docs/user/getting-started.md`, including the required `PKG_CONFIG_PATH` export for Apple Silicon and Intel Macs.
 - **AI background removal**: Offline background removal using ONNX Runtime inference (MODNet segmentation model). Enable per-clip in the Inspector's "Background Removal" section. Processes video frames through a neural network to produce an alpha-channel WebM (VP9 alpha) file. Both preview and export use the pre-processed result for exact visual match. Controlled via Inspector checkbox + threshold slider, FCPXML persistence, and MCP `set_clip_bg_removal` tool.
 - **Export presets + MCP preset automation**: The Export dialog now supports named preset workflows (save-as, update, delete, and recall). Presets persist in local UI state and can also be automated via MCP (`list_export_presets`, `save_export_preset`, `delete_export_preset`, `export_with_preset`) for repeatable renders. New installs (and older UI-state files missing `export_presets`) now start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, and **WebM VP9 1080p**.
 - **Go to timecode navigation**: Added Program Monitor **Go To** control and global `Ctrl+J` shortcut to jump the playhead via `HH:MM:SS:FF` (or `MM:SS:FF`) input, with frame-rate-aware parsing/formatting and project-end clamping feedback.
