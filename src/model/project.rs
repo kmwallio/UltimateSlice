@@ -70,6 +70,13 @@ impl FrameRate {
     pub fn as_f64(&self) -> f64 {
         self.numerator as f64 / self.denominator as f64
     }
+
+    pub fn frame_duration_ns(&self) -> u64 {
+        if self.numerator == 0 {
+            return 41_666_667; // fallback ~24fps
+        }
+        ((self.denominator as u64) * 1_000_000_000) / (self.numerator as u64)
+    }
 }
 
 /// The top-level project, containing all tracks and sequence settings

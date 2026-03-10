@@ -1799,6 +1799,65 @@ impl TimelineState {
         }
     }
 
+    /// Hit-test keyframe markers on clip bodies.
+    /// Returns (clip_id, track_id, timeline_ns) if a marker was clicked.
+    fn hit_test_keyframe_marker(&self, x: f64, y: f64) -> Option<(String, String, u64)> {
+        let track_idx = self.track_index_at_y(y)?;
+        let proj = self.project.borrow();
+        let track = proj.tracks.get(track_idx)?;
+        let mut row_top = RULER_HEIGHT;
+        for (i, t) in proj.tracks.iter().enumerate() {
+            if i == track_idx {
+                break;
+            }
+            row_top += track_row_height(t);
+        }
+        let ch = track_row_height(track);
+        let cy = row_top;
+        let hit_tolerance = 4.0; // px tolerance for x
+        for clip in &track.clips {
+            let cx = self.ns_to_x(clip.timeline_start);
+            let cw = (clip.duration() as f64 / NS_PER_SECOND) * self.pixels_per_second;
+            if x < cx || x > cx + cw {
+                continue;
+            }
+            let duration_ns = clip.duration();
+            if duration_ns == 0 || cw <= 10.0 || ch <= 10.0 {
+                continue;
+            }
+            let marker_h = (ch * 0.16).clamp(3.0, 6.0);
+            let row_pitch = 2.6;
+            let base_y = cy + 3.0;
+            let all_kfs: [(&[crate::model::clip::NumericKeyframe], usize); 5] = [
+                (&clip.scale_keyframes, 0),
+                (&clip.opacity_keyframes, 1),
+                (&clip.position_x_keyframes, 2),
+                (&clip.position_y_keyframes, 3),
+                (&clip.volume_keyframes, 4),
+            ];
+            for (keyframes, row) in &all_kfs {
+                let marker_y = base_y + *row as f64 * row_pitch;
+                if y < marker_y || y > marker_y + marker_h {
+                    continue;
+                }
+                for kf in *keyframes {
+                    let local_time_ns = kf.time_ns.min(duration_ns);
+                    let frac = local_time_ns as f64 / duration_ns as f64;
+                    let marker_x = cx + frac * cw;
+                    if (x - marker_x).abs() <= hit_tolerance {
+                        let timeline_ns = clip.timeline_start.saturating_add(local_time_ns);
+                        return Some((
+                            clip.id.clone(),
+                            track.id.clone(),
+                            timeline_ns,
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Find which clip and track are at a given (x, y) coordinate.
     /// Also returns whether x is near the in-edge or out-edge (for trimming).
     fn hit_test(&self, x: f64, y: f64) -> Option<HitResult> {
@@ -2500,6 +2559,29 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                             || mods.contains(gtk::gdk::ModifierType::META_MASK);
                         // Select clip
+                        // First, check if a keyframe marker was clicked
+                        if let Some((kf_clip_id, kf_track_id, kf_timeline_ns)) =
+                            st.hit_test_keyframe_marker(x, y)
+                        {
+                            st.select_clip_with_modifiers(
+                                &kf_clip_id,
+                                &kf_track_id,
+                                shift,
+                                ctrl_or_meta,
+                            );
+                            st.playhead_ns = kf_timeline_ns;
+                            let seek_cb = st.on_seek.clone();
+                            let sel_cb = st.on_clip_selected.clone();
+                            let new_sel = st.selected_clip_id.clone();
+                            drop(st);
+                            if let Some(cb) = seek_cb {
+                                cb(kf_timeline_ns);
+                            }
+                            if let Some(cb) = sel_cb {
+                                cb(new_sel);
+                            }
+                            return;
+                        }
                         let hit = st.hit_test(x, y);
                         match hit {
                             Some(h) => {

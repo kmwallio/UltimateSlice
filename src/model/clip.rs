@@ -527,6 +527,47 @@ impl Clip {
         keyframes.len() != before
     }
 
+    /// Collect all unique keyframe times across every phase-1 property, sorted.
+    fn all_keyframe_local_times_ns(&self) -> Vec<u64> {
+        let mut times: Vec<u64> = self
+            .scale_keyframes
+            .iter()
+            .chain(&self.opacity_keyframes)
+            .chain(&self.position_x_keyframes)
+            .chain(&self.position_y_keyframes)
+            .chain(&self.volume_keyframes)
+            .map(|kf| kf.time_ns)
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        times
+    }
+
+    /// Return the next keyframe local time strictly after `local_ns`, across all properties.
+    pub fn next_keyframe_local_ns(&self, local_ns: u64) -> Option<u64> {
+        self.all_keyframe_local_times_ns()
+            .into_iter()
+            .find(|&t| t > local_ns)
+    }
+
+    /// Return the previous keyframe local time strictly before `local_ns`, across all properties.
+    pub fn prev_keyframe_local_ns(&self, local_ns: u64) -> Option<u64> {
+        self.all_keyframe_local_times_ns()
+            .into_iter()
+            .rev()
+            .find(|&t| t < local_ns)
+    }
+
+    /// Return true if any phase-1 property has a keyframe within `tolerance_ns` of `local_ns`.
+    pub fn has_keyframe_at_local_ns(&self, local_ns: u64, tolerance_ns: u64) -> bool {
+        self.all_keyframe_local_times_ns()
+            .iter()
+            .any(|&t| {
+                let diff = if t >= local_ns { t - local_ns } else { local_ns - t };
+                diff <= tolerance_ns
+            })
+    }
+
     pub fn source_timecode_start_ns(&self) -> Option<u64> {
         self.source_timecode_base_ns
             .map(|base| base.saturating_add(self.source_in))
@@ -918,5 +959,64 @@ mod tests {
         assert!(clip.position_x_keyframes.is_empty());
         assert!(clip.position_y_keyframes.is_empty());
         assert!(clip.volume_keyframes.is_empty());
+    }
+
+    #[test]
+    fn test_next_prev_keyframe_across_properties() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        // Scale keyframe at 1s, opacity at 2s, position_x at 3s
+        clip.scale_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 1.5, interpolation: KeyframeInterpolation::Linear });
+        clip.opacity_keyframes.push(NumericKeyframe { time_ns: 2_000_000_000, value: 0.5, interpolation: KeyframeInterpolation::Linear });
+        clip.position_x_keyframes.push(NumericKeyframe { time_ns: 3_000_000_000, value: 0.2, interpolation: KeyframeInterpolation::Linear });
+
+        // next from 0 -> 1s (scale)
+        assert_eq!(clip.next_keyframe_local_ns(0), Some(1_000_000_000));
+        // next from 1s -> 2s (opacity)
+        assert_eq!(clip.next_keyframe_local_ns(1_000_000_000), Some(2_000_000_000));
+        // next from 2.5s -> 3s (position_x)
+        assert_eq!(clip.next_keyframe_local_ns(2_500_000_000), Some(3_000_000_000));
+        // next from 3s -> None
+        assert_eq!(clip.next_keyframe_local_ns(3_000_000_000), None);
+
+        // prev from 4s -> 3s
+        assert_eq!(clip.prev_keyframe_local_ns(4_000_000_000), Some(3_000_000_000));
+        // prev from 2s -> 1s
+        assert_eq!(clip.prev_keyframe_local_ns(2_000_000_000), Some(1_000_000_000));
+        // prev from 1s -> None
+        assert_eq!(clip.prev_keyframe_local_ns(1_000_000_000), None);
+        // prev from 0 -> None
+        assert_eq!(clip.prev_keyframe_local_ns(0), None);
+    }
+
+    #[test]
+    fn test_has_keyframe_at_local_ns_with_tolerance() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.volume_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 0.8, interpolation: KeyframeInterpolation::Linear });
+
+        let one_frame_24fps = 1_000_000_000 / 24; // ~41.6ms
+        // Exact match
+        assert!(clip.has_keyframe_at_local_ns(1_000_000_000, one_frame_24fps));
+        // Within tolerance
+        assert!(clip.has_keyframe_at_local_ns(1_000_000_000 + one_frame_24fps / 2, one_frame_24fps));
+        // Outside tolerance
+        assert!(!clip.has_keyframe_at_local_ns(1_000_000_000 + one_frame_24fps * 2, one_frame_24fps));
+        // No keyframes at 0
+        assert!(!clip.has_keyframe_at_local_ns(0, one_frame_24fps));
+    }
+
+    #[test]
+    fn test_next_prev_with_duplicate_times_across_properties() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        // Both scale and opacity have keyframes at 1s
+        clip.scale_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 2.0, interpolation: KeyframeInterpolation::Linear });
+        clip.opacity_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 0.5, interpolation: KeyframeInterpolation::Linear });
+        clip.position_y_keyframes.push(NumericKeyframe { time_ns: 2_000_000_000, value: 0.3, interpolation: KeyframeInterpolation::Linear });
+
+        // next from 0 -> 1s (deduplicated)
+        assert_eq!(clip.next_keyframe_local_ns(0), Some(1_000_000_000));
+        // next from 1s -> 2s
+        assert_eq!(clip.next_keyframe_local_ns(1_000_000_000), Some(2_000_000_000));
+        // prev from 2s -> 1s (deduplicated)
+        assert_eq!(clip.prev_keyframe_local_ns(2_000_000_000), Some(1_000_000_000));
     }
 }

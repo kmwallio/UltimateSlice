@@ -2030,6 +2030,22 @@ pub fn build_window(
             let timeline_state = timeline_state.clone();
             move || timeline_state.borrow().playhead_ns
         },
+        // on_seek_to: navigate the playhead from the inspector (keyframe navigation)
+        {
+            let timeline_state = timeline_state.clone();
+            let timeline_panel_cell = timeline_panel_cell.clone();
+            let prog_player = prog_player.clone();
+            move |ns: u64| {
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    st.playhead_ns = ns;
+                }
+                prog_player.borrow_mut().seek(ns);
+                if let Some(ref w) = *timeline_panel_cell.borrow() {
+                    w.queue_draw();
+                }
+            }
+        },
     );
 
     // Set initial model availability on the inspector so the bg-removal
@@ -2053,6 +2069,8 @@ pub fn build_window(
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
                 inspector_view.update(&proj, clip_id.as_deref());
+                let playhead_ns = timeline_state_for_sel.borrow().playhead_ns;
+                inspector_view.update_keyframe_indicator(&proj, playhead_ns);
                 // Sync transform overlay handles with selection state,
                 // using keyframe-interpolated values at the current playhead.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
@@ -2644,9 +2662,54 @@ pub fn build_window(
             {
                 // on_drag_end: exit live transform mode and do a final reseek
                 // so the composited frame accurately reflects the last state.
+                // If animation mode is active, auto-upsert keyframes.
                 let prog_player = prog_player.clone();
+                let inspector_view = inspector_view.clone();
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
                 move || {
                     prog_player.borrow_mut().exit_transform_live_mode();
+                    if inspector_view.animation_mode.get() {
+                        let playhead = timeline_state.borrow().playhead_ns;
+                        let clip_id = timeline_state.borrow().selected_clip_id.clone();
+                        if let Some(clip_id) = clip_id {
+                            let sc = inspector_view.scale_slider.value();
+                            let px = inspector_view.position_x_slider.value();
+                            let py = inspector_view.position_y_slider.value();
+                            let mut changed = false;
+                            {
+                                let mut proj = project.borrow_mut();
+                                for track in &mut proj.tracks {
+                                    if let Some(clip) =
+                                        track.clips.iter_mut().find(|c| c.id == clip_id)
+                                    {
+                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                            Phase1KeyframeProperty::Scale,
+                                            playhead,
+                                            sc,
+                                        );
+                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                            Phase1KeyframeProperty::PositionX,
+                                            playhead,
+                                            px,
+                                        );
+                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                            Phase1KeyframeProperty::PositionY,
+                                            playhead,
+                                            py,
+                                        );
+                                        proj.dirty = true;
+                                        changed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if changed {
+                                on_project_changed();
+                            }
+                        }
+                    }
                 }
             },
         ));
@@ -3547,6 +3610,10 @@ pub fn build_window(
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 inspector_view.update(&proj, selected.as_deref());
+                {
+                    let playhead_ns = timeline_state.borrow().playhead_ns;
+                    inspector_view.update_keyframe_indicator(&proj, playhead_ns);
+                }
 
                 // Sync transform overlay: show handles when a clip is selected,
                 // using keyframe-interpolated values at the current playhead.
@@ -4438,6 +4505,96 @@ pub fn build_window(
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Alt+Left/Right: keyframe navigation ───────────────────
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let inspector_view = inspector_view.clone();
+        let prog_player = prog_player.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !mods.contains(ModifierType::ALT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            if key != Key::Left && key != Key::Right {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let (clip_id, playhead) = {
+                let st = timeline_state.borrow();
+                (st.selected_clip_id.clone(), st.playhead_ns)
+            };
+            let Some(clip_id) = clip_id else {
+                return glib::Propagation::Proceed;
+            };
+            let proj = project.borrow();
+            let target = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .and_then(|clip| {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    let local_target = if key == Key::Left {
+                        clip.prev_keyframe_local_ns(local)
+                    } else {
+                        clip.next_keyframe_local_ns(local)
+                    };
+                    local_target.map(|lt| clip.timeline_start.saturating_add(lt))
+                });
+            drop(proj);
+            if let Some(ns) = target {
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    st.playhead_ns = ns;
+                }
+                prog_player.borrow_mut().seek(ns);
+                let proj = project.borrow();
+                inspector_view.update_keyframe_indicator(&proj, ns);
+                if let Some(ref w) = *timeline_panel_cell.borrow() {
+                    w.queue_draw();
+                }
+            }
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Shift+K: toggle animation mode ────────────────────────
+    {
+        let inspector_view = inspector_view.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !mods.contains(ModifierType::SHIFT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            if key != Key::K && key != Key::k {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let new_state = !inspector_view.animation_mode.get();
+            inspector_view.animation_mode.set(new_state);
+            inspector_view.animation_mode_btn.set_active(new_state);
+            glib::Propagation::Stop
         });
         window.add_controller(key_ctrl);
     }

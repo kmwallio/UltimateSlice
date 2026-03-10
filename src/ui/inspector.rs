@@ -106,6 +106,10 @@ pub struct InspectorView {
     pub bg_removal_threshold_slider: Scale,
     /// Set to `true` when the ONNX model is present; controls section visibility.
     pub bg_removal_model_available: Cell<bool>,
+    // Keyframe navigation and animation mode
+    pub keyframe_indicator_label: Label,
+    pub animation_mode: Rc<Cell<bool>>,
+    pub animation_mode_btn: gtk4::ToggleButton,
 }
 
 impl InspectorView {
@@ -290,6 +294,32 @@ impl InspectorView {
         }
         *self.updating.borrow_mut() = false;
     }
+
+    /// Update the keyframe indicator label based on the playhead position.
+    pub fn update_keyframe_indicator(&self, project: &Project, playhead_ns: u64) {
+        let clip = self.selected_clip_id.borrow().clone().and_then(|id| {
+            project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == id)
+                .cloned()
+        });
+        match clip {
+            Some(c) => {
+                let local = c.local_timeline_position_ns(playhead_ns);
+                let tolerance = project.frame_rate.frame_duration_ns() / 2;
+                if c.has_keyframe_at_local_ns(local, tolerance) {
+                    self.keyframe_indicator_label.set_text("◆ Keyframe");
+                } else {
+                    self.keyframe_indicator_label.set_text("");
+                }
+            }
+            None => {
+                self.keyframe_indicator_label.set_text("");
+            }
+        }
+    }
 }
 
 /// Build the inspector panel.
@@ -315,6 +345,7 @@ pub fn build_inspector(
     on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
     on_bg_removal_changed: impl Fn() + 'static,
     current_playhead_ns: impl Fn() -> u64 + 'static,
+    on_seek_to: impl Fn(u64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(260);
@@ -608,6 +639,31 @@ pub fn build_inspector(
     let transform_inner = GBox::new(Orientation::Vertical, 8);
     transform_expander.set_child(Some(&transform_inner));
 
+    // ── Keyframe navigation + animation mode ──
+    let keyframe_nav_row = GBox::new(Orientation::Horizontal, 4);
+    let prev_keyframe_btn = Button::with_label("◀ Prev KF");
+    prev_keyframe_btn.set_tooltip_text(Some("Jump to previous keyframe (Alt+Left)"));
+    let next_keyframe_btn = Button::with_label("Next KF ▶");
+    next_keyframe_btn.set_tooltip_text(Some("Jump to next keyframe (Alt+Right)"));
+    let keyframe_indicator_label = Label::new(None);
+    keyframe_indicator_label.add_css_class("dim-label");
+    keyframe_indicator_label.set_hexpand(true);
+    keyframe_indicator_label.set_halign(gtk4::Align::Center);
+    keyframe_nav_row.append(&prev_keyframe_btn);
+    keyframe_nav_row.append(&keyframe_indicator_label);
+    keyframe_nav_row.append(&next_keyframe_btn);
+    transform_inner.append(&keyframe_nav_row);
+
+    let animation_mode = Rc::new(Cell::new(false));
+    let animation_mode_btn = gtk4::ToggleButton::with_label("⏺ Record Keyframes");
+    animation_mode_btn.set_tooltip_text(Some(
+        "When active, transform drags and slider changes auto-create keyframes (Shift+K)",
+    ));
+    animation_mode_btn.set_active(false);
+    transform_inner.append(&animation_mode_btn);
+
+    transform_inner.append(&Separator::new(Orientation::Horizontal));
+
     row_label(&transform_inner, "Scale");
     let scale_slider = Scale::with_range(Orientation::Horizontal, 0.1, 4.0, 0.05);
     scale_slider.set_value(1.0);
@@ -878,6 +934,7 @@ pub fn build_inspector(
     let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_chroma_key_slider_changed);
     let on_bg_removal_changed: Rc<dyn Fn()> = Rc::new(on_bg_removal_changed);
     let current_playhead_ns: Rc<dyn Fn() -> u64> = Rc::new(current_playhead_ns);
+    let on_seek_to: Rc<dyn Fn(u64)> = Rc::new(on_seek_to);
 
     // Apply name button — triggers full on_project_changed
     {
@@ -1028,6 +1085,9 @@ pub fn build_inspector(
         let updating = updating.clone();
         let on_audio_changed = on_audio_changed.clone();
         let pan_slider_cb = pan_slider.clone();
+        let animation_mode = animation_mode.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_clip_changed = on_clip_changed.clone();
         volume_slider.connect_value_changed(move |s| {
             if *updating.borrow() {
                 return;
@@ -1040,12 +1100,23 @@ pub fn build_inspector(
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                             clip.volume = linear_vol;
+                            if animation_mode.get() {
+                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                                    Phase1KeyframeProperty::Volume,
+                                    current_playhead_ns(),
+                                    linear_vol as f64,
+                                );
+                            }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
+                if animation_mode.get() {
+                    on_clip_changed();
+                } else {
+                    on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
+                }
             }
         });
     }
@@ -1457,6 +1528,9 @@ pub fn build_inspector(
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
         let scale_s2 = scale_slider.clone();
+        let animation_mode = animation_mode.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_clip_changed = on_clip_changed.clone();
         scale_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1469,30 +1543,41 @@ pub fn build_inspector(
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                             clip.scale = sc;
+                            if animation_mode.get() {
+                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                                    Phase1KeyframeProperty::Scale,
+                                    current_playhead_ns(),
+                                    sc,
+                                );
+                            }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                let cl = crop_left_s.value() as i32;
-                let cr = crop_right_s.value() as i32;
-                let ct = crop_top_s.value() as i32;
-                let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_s.value().round() as i32;
-                let fh = flip_h_b.is_active();
-                let fv = flip_v_b.is_active();
-                on_transform_changed(
-                    cl,
-                    cr,
-                    ct,
-                    cb,
-                    rot,
-                    fh,
-                    fv,
-                    sc,
-                    pos_x_s.value(),
-                    pos_y_s.value(),
-                );
+                if animation_mode.get() {
+                    on_clip_changed();
+                } else {
+                    let cl = crop_left_s.value() as i32;
+                    let cr = crop_right_s.value() as i32;
+                    let ct = crop_top_s.value() as i32;
+                    let cb = crop_bottom_s.value() as i32;
+                    let rot = rotate_s.value().round() as i32;
+                    let fh = flip_h_b.is_active();
+                    let fv = flip_v_b.is_active();
+                    on_transform_changed(
+                        cl,
+                        cr,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        sc,
+                        pos_x_s.value(),
+                        pos_y_s.value(),
+                    );
+                }
             }
         });
         let _ = scale_s2; // silence unused warning
@@ -1502,6 +1587,9 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_opacity_changed = on_opacity_changed.clone();
+        let animation_mode = animation_mode.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_clip_changed = on_clip_changed.clone();
         opacity_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1514,12 +1602,23 @@ pub fn build_inspector(
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                             clip.opacity = opacity;
+                            if animation_mode.get() {
+                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                                    Phase1KeyframeProperty::Opacity,
+                                    current_playhead_ns(),
+                                    opacity,
+                                );
+                            }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                on_opacity_changed(opacity);
+                if animation_mode.get() {
+                    on_clip_changed();
+                } else {
+                    on_opacity_changed(opacity);
+                }
             }
         });
     }
@@ -1538,6 +1637,9 @@ pub fn build_inspector(
         let scale_s = scale_slider.clone();
         let pos_y_s = position_y_slider.clone();
         let pos_x_s2 = position_x_slider.clone();
+        let animation_mode = animation_mode.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_clip_changed = on_clip_changed.clone();
         position_x_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1550,30 +1652,41 @@ pub fn build_inspector(
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                             clip.position_x = px;
+                            if animation_mode.get() {
+                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                                    Phase1KeyframeProperty::PositionX,
+                                    current_playhead_ns(),
+                                    px,
+                                );
+                            }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                let cl = crop_left_s.value() as i32;
-                let cr = crop_right_s.value() as i32;
-                let ct = crop_top_s.value() as i32;
-                let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_s.value().round() as i32;
-                let fh = flip_h_b.is_active();
-                let fv = flip_v_b.is_active();
-                on_transform_changed(
-                    cl,
-                    cr,
-                    ct,
-                    cb,
-                    rot,
-                    fh,
-                    fv,
-                    scale_s.value(),
-                    px,
-                    pos_y_s.value(),
-                );
+                if animation_mode.get() {
+                    on_clip_changed();
+                } else {
+                    let cl = crop_left_s.value() as i32;
+                    let cr = crop_right_s.value() as i32;
+                    let ct = crop_top_s.value() as i32;
+                    let cb = crop_bottom_s.value() as i32;
+                    let rot = rotate_s.value().round() as i32;
+                    let fh = flip_h_b.is_active();
+                    let fv = flip_v_b.is_active();
+                    on_transform_changed(
+                        cl,
+                        cr,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        scale_s.value(),
+                        px,
+                        pos_y_s.value(),
+                    );
+                }
             }
         });
         let _ = pos_x_s2;
@@ -1593,6 +1706,9 @@ pub fn build_inspector(
         let scale_s = scale_slider.clone();
         let pos_x_s = position_x_slider.clone();
         let pos_y_s2 = position_y_slider.clone();
+        let animation_mode = animation_mode.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_clip_changed = on_clip_changed.clone();
         position_y_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1605,30 +1721,41 @@ pub fn build_inspector(
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                             clip.position_y = py;
+                            if animation_mode.get() {
+                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                                    Phase1KeyframeProperty::PositionY,
+                                    current_playhead_ns(),
+                                    py,
+                                );
+                            }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                let cl = crop_left_s.value() as i32;
-                let cr = crop_right_s.value() as i32;
-                let ct = crop_top_s.value() as i32;
-                let cb = crop_bottom_s.value() as i32;
-                let rot = rotate_s.value().round() as i32;
-                let fh = flip_h_b.is_active();
-                let fv = flip_v_b.is_active();
-                on_transform_changed(
-                    cl,
-                    cr,
-                    ct,
-                    cb,
-                    rot,
-                    fh,
-                    fv,
-                    scale_s.value(),
-                    pos_x_s.value(),
-                    py,
-                );
+                if animation_mode.get() {
+                    on_clip_changed();
+                } else {
+                    let cl = crop_left_s.value() as i32;
+                    let cr = crop_right_s.value() as i32;
+                    let ct = crop_top_s.value() as i32;
+                    let cb = crop_bottom_s.value() as i32;
+                    let rot = rotate_s.value().round() as i32;
+                    let fh = flip_h_b.is_active();
+                    let fv = flip_v_b.is_active();
+                    on_transform_changed(
+                        cl,
+                        cr,
+                        ct,
+                        cb,
+                        rot,
+                        fh,
+                        fv,
+                        scale_s.value(),
+                        pos_x_s.value(),
+                        py,
+                    );
+                }
             }
         });
         let _ = pos_y_s2;
@@ -1788,6 +1915,58 @@ pub fn build_inspector(
             move || db_to_linear_volume(volume_slider.value())
         }),
     );
+
+    // ── Keyframe navigation button wiring ──
+    prev_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else { return };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(prev_local) = clip.prev_keyframe_local_ns(local) {
+                        let timeline_ns = clip.timeline_start.saturating_add(prev_local);
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    next_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else { return };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(next_local) = clip.next_keyframe_local_ns(local) {
+                        let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    // ── Animation mode toggle wiring ──
+    animation_mode_btn.connect_toggled({
+        let animation_mode = animation_mode.clone();
+        move |btn| {
+            animation_mode.set(btn.is_active());
+        }
+    });
 
     // Title entry and position sliders
     {
@@ -2314,6 +2493,9 @@ pub fn build_inspector(
         bg_removal_enable,
         bg_removal_threshold_slider,
         bg_removal_model_available: Cell::new(false),
+        keyframe_indicator_label,
+        animation_mode,
+        animation_mode_btn,
     });
 
     (vbox, view)

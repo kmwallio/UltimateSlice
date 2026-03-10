@@ -212,6 +212,8 @@ Tracking docs:
 - [ ] Property keyframes with interpolation (position, scale, opacity, volume over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
   - [x] Phase 1 foundation: linear keyframes for position/scale/opacity/volume across model, Inspector, Program Monitor preview, MCP, FCPXML round-trip, and export
   - [x] Native FCPXML keyframe interop: parser reads FCP `<param>/<keyframeAnimation>/<keyframe>` elements; writer emits them alongside vendor attrs for bidirectional exchange with Final Cut Pro
+  - [x] Keyframe navigation (◀/▶ buttons, `Alt+Left`/`Alt+Right` shortcuts, timeline marker click-to-seek, ◆ indicator)
+  - [x] Animation mode: "Record Keyframes" toggle (`Shift+K`) auto-creates keyframes on transform drags and slider changes
   - [ ] Additional interpolation modes (bezier/ease)
 - [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
 

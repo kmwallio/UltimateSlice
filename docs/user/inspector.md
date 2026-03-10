@@ -82,6 +82,20 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 - **Remove … Keyframe** removes a keyframe at that same playhead time.
 - Interpolation is currently **linear** between adjacent keyframes.
 
+### Keyframe navigation
+
+- **◀ Prev KF / Next KF ▶** buttons jump the playhead to the previous/next keyframe across all properties of the selected clip.
+- **◆ Keyframe** indicator shows when the playhead is exactly on (within half a frame of) a keyframe.
+- Keyboard shortcuts: **Alt+Left** / **Alt+Right** to navigate between keyframes.
+- Click a keyframe tick on the timeline clip body to select the clip and seek the playhead to that keyframe.
+
+### Animation mode (Record Keyframes)
+
+- The **⏺ Record Keyframes** toggle button (or **Shift+K**) activates animation mode.
+- When active, transform overlay drags automatically create/update **Scale**, **Position X**, and **Position Y** keyframes at the current playhead position when the drag ends.
+- Inspector slider changes (Scale, Opacity, Position X/Y, Volume) also auto-create keyframes.
+- When inactive (default), drags and slider changes modify the clip's static values without creating keyframes.
+
 Program Monitor overlay integration:
 - Drag **corner handles** to scale (hold **Shift** for constrained scaling).
 - Drag the **orange rotation handle** above the clip box to set rotation angle.
