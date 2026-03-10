@@ -58,6 +58,12 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 - Use **Remove Volume Keyframe** to remove a keyframe at the current playhead time.
 - Interpolation mode is selected in the transform section's **Interpolation** dropdown.
 
+### Audio keyframe navigation
+
+- **◀ Prev KF / Next KF ▶** buttons navigate between volume keyframes only (unlike the transform navigation which covers all properties).
+- **◆ Vol KF** indicator shows when the playhead is on a volume keyframe.
+- **⏺ Record Keyframes** toggle in the audio section is synced with the transform section toggle — activating either enables animation mode for both sections. When active, volume slider changes auto-create volume keyframes at the playhead position.
+
 ---
 
 ## Video Transform

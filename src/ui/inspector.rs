@@ -120,6 +120,9 @@ pub struct InspectorView {
     pub animation_mode: Rc<Cell<bool>>,
     pub animation_mode_btn: gtk4::ToggleButton,
     pub interp_dropdown: gtk4::DropDown,
+    // Audio keyframe navigation
+    pub audio_keyframe_indicator_label: Label,
+    pub audio_animation_mode_btn: gtk4::ToggleButton,
 }
 
 impl InspectorView {
@@ -356,9 +359,21 @@ impl InspectorView {
                 } else {
                     self.keyframe_indicator_label.set_text("");
                 }
+                // Audio (volume) keyframe indicator
+                if c.has_keyframe_at_local_ns_for_property(
+                    Phase1KeyframeProperty::Volume,
+                    local,
+                    tolerance,
+                ) {
+                    self.audio_keyframe_indicator_label
+                        .set_text("◆ Vol KF");
+                } else {
+                    self.audio_keyframe_indicator_label.set_text("");
+                }
             }
             None => {
                 self.keyframe_indicator_label.set_text("");
+                self.audio_keyframe_indicator_label.set_text("");
             }
         }
     }
@@ -661,6 +676,28 @@ pub fn build_inspector(
     volume_keyframe_row.append(&volume_set_keyframe_btn);
     volume_keyframe_row.append(&volume_remove_keyframe_btn);
     audio_inner.append(&volume_keyframe_row);
+
+    // ── Audio keyframe navigation + animation mode ──
+    let audio_keyframe_nav_row = GBox::new(Orientation::Horizontal, 4);
+    let audio_prev_keyframe_btn = Button::with_label("◀ Prev KF");
+    audio_prev_keyframe_btn.set_tooltip_text(Some("Jump to previous volume keyframe"));
+    let audio_next_keyframe_btn = Button::with_label("Next KF ▶");
+    audio_next_keyframe_btn.set_tooltip_text(Some("Jump to next volume keyframe"));
+    let audio_keyframe_indicator_label = Label::new(None);
+    audio_keyframe_indicator_label.add_css_class("dim-label");
+    audio_keyframe_indicator_label.set_hexpand(true);
+    audio_keyframe_indicator_label.set_halign(gtk4::Align::Center);
+    audio_keyframe_nav_row.append(&audio_prev_keyframe_btn);
+    audio_keyframe_nav_row.append(&audio_keyframe_indicator_label);
+    audio_keyframe_nav_row.append(&audio_next_keyframe_btn);
+    audio_inner.append(&audio_keyframe_nav_row);
+
+    let audio_animation_mode_btn = gtk4::ToggleButton::with_label("⏺ Record Keyframes");
+    audio_animation_mode_btn.set_tooltip_text(Some(
+        "When active, volume slider changes auto-create keyframes (Shift+K)",
+    ));
+    audio_animation_mode_btn.set_active(false);
+    audio_inner.append(&audio_animation_mode_btn);
 
     row_label(&audio_inner, "Pan");
     let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
@@ -2049,11 +2086,75 @@ pub fn build_inspector(
         }
     });
 
-    // ── Animation mode toggle wiring ──
+    // ── Animation mode toggle wiring (synced between transform + audio sections) ──
     animation_mode_btn.connect_toggled({
         let animation_mode = animation_mode.clone();
+        let audio_btn = audio_animation_mode_btn.clone();
         move |btn| {
             animation_mode.set(btn.is_active());
+            if audio_btn.is_active() != btn.is_active() {
+                audio_btn.set_active(btn.is_active());
+            }
+        }
+    });
+    audio_animation_mode_btn.connect_toggled({
+        let animation_mode = animation_mode.clone();
+        let transform_btn = animation_mode_btn.clone();
+        move |btn| {
+            animation_mode.set(btn.is_active());
+            if transform_btn.is_active() != btn.is_active() {
+                transform_btn.set_active(btn.is_active());
+            }
+        }
+    });
+
+    // ── Audio (volume) keyframe navigation ──
+    audio_prev_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else { return };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(prev_local) = clip.prev_keyframe_local_ns_for_property(
+                        Phase1KeyframeProperty::Volume,
+                        local,
+                    ) {
+                        let timeline_ns = clip.timeline_start.saturating_add(prev_local);
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    audio_next_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else { return };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(next_local) = clip.next_keyframe_local_ns_for_property(
+                        Phase1KeyframeProperty::Volume,
+                        local,
+                    ) {
+                        let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
         }
     });
 
@@ -2586,6 +2687,8 @@ pub fn build_inspector(
         animation_mode,
         animation_mode_btn,
         interp_dropdown,
+        audio_keyframe_indicator_label,
+        audio_animation_mode_btn,
     });
 
     (vbox, view)

@@ -681,6 +681,42 @@ impl Clip {
             })
     }
 
+    /// Return the next keyframe local time strictly after `local_ns` for a single property.
+    pub fn next_keyframe_local_ns_for_property(
+        &self,
+        property: Phase1KeyframeProperty,
+        local_ns: u64,
+    ) -> Option<u64> {
+        let kfs = self.keyframes_for_phase1_property(property);
+        kfs.iter().map(|kf| kf.time_ns).find(|&t| t > local_ns)
+    }
+
+    /// Return the previous keyframe local time strictly before `local_ns` for a single property.
+    pub fn prev_keyframe_local_ns_for_property(
+        &self,
+        property: Phase1KeyframeProperty,
+        local_ns: u64,
+    ) -> Option<u64> {
+        let kfs = self.keyframes_for_phase1_property(property);
+        kfs.iter()
+            .map(|kf| kf.time_ns)
+            .rev()
+            .find(|&t| t < local_ns)
+    }
+
+    /// Return true if a specific property has a keyframe within `tolerance_ns` of `local_ns`.
+    pub fn has_keyframe_at_local_ns_for_property(
+        &self,
+        property: Phase1KeyframeProperty,
+        local_ns: u64,
+        tolerance_ns: u64,
+    ) -> bool {
+        let kfs = self.keyframes_for_phase1_property(property);
+        kfs.iter().any(|kf| {
+            (kf.time_ns as i64 - local_ns as i64).unsigned_abs() <= tolerance_ns
+        })
+    }
+
     pub fn source_timecode_start_ns(&self) -> Option<u64> {
         self.source_timecode_base_ns
             .map(|base| base.saturating_add(self.source_in))
@@ -1131,6 +1167,28 @@ mod tests {
         assert_eq!(clip.next_keyframe_local_ns(1_000_000_000), Some(2_000_000_000));
         // prev from 2s -> 1s (deduplicated)
         assert_eq!(clip.prev_keyframe_local_ns(2_000_000_000), Some(1_000_000_000));
+    }
+
+    #[test]
+    fn test_property_specific_keyframe_navigation() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.volume_keyframes.push(NumericKeyframe { time_ns: 500_000_000, value: 0.5, interpolation: KeyframeInterpolation::Linear });
+        clip.volume_keyframes.push(NumericKeyframe { time_ns: 2_000_000_000, value: 0.8, interpolation: KeyframeInterpolation::Linear });
+        clip.scale_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 1.5, interpolation: KeyframeInterpolation::Linear });
+
+        // Volume nav: 0 → 500ms → 2s
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 0), Some(500_000_000));
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000), Some(2_000_000_000));
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000), None);
+        // Volume prev
+        assert_eq!(clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000), Some(500_000_000));
+        assert_eq!(clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000), None);
+        // Scale nav should NOT see volume keyframes
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 0), Some(1_000_000_000));
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 1_000_000_000), None);
+        // has_keyframe_at_local_ns_for_property
+        assert!(clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000, 100));
+        assert!(!clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Scale, 500_000_000, 100));
     }
 
     #[test]
