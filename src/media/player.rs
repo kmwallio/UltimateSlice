@@ -147,6 +147,14 @@ impl Player {
             let prescale = gst::ElementFactory::make("videoconvertscale")
                 .build()
                 .expect("videoconvertscale must be available");
+            // On macOS, vtdec (VideoToolbox) outputs IOSurface-backed NV12 buffers.
+            // The parallelized task runner in videoconvertscale reads them on worker
+            // threads after the backing memory may be released → SIGSEGV in
+            // unpack_NV12.  Force single-threaded conversion to avoid this.
+            #[cfg(target_os = "macos")]
+            if prescale.find_property("n-threads").is_some() {
+                prescale.set_property("n-threads", 1u32);
+            }
             let prescale_caps = gst::ElementFactory::make("capsfilter")
                 .property(
                     "caps",
@@ -210,6 +218,22 @@ impl Player {
             software_video_filter_field = Some(bin_element.clone());
             pipeline.set_property("video-filter", &bin_element);
         }
+
+        // On macOS, playbin's internal decodebin may also auto-create
+        // videoconvertscale elements (e.g., colour-space conversion after vtdec).
+        // Intercept them and force n-threads=1 for the same IOSurface reason.
+        #[cfg(target_os = "macos")]
+        pipeline.connect("deep-element-added", false, |args| {
+            let child = args[2].get::<gst::Element>().ok()?;
+            let factory_name = child
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
+            if factory_name == "videoconvertscale" && child.find_property("n-threads").is_some() {
+                child.set_property("n-threads", 1u32);
+            }
+            None
+        });
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let hardware_acceleration_enabled = Arc::new(Mutex::new(hardware_acceleration_enabled));
@@ -405,6 +429,10 @@ impl Player {
 
     pub fn state(&self) -> PlayerState {
         self.state.lock().unwrap().clone()
+    }
+
+    pub fn current_uri(&self) -> Option<String> {
+        self.current_uri.lock().unwrap().clone()
     }
 
     pub fn set_hardware_acceleration(&self, enabled: bool) -> Result<()> {

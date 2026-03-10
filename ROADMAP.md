@@ -51,7 +51,7 @@ Tracking docs:
 - [x] Play/Pause (Space), Stop transport buttons
 - [x] Timecode label (`position / duration`)
 - [x] Playback-only drop-late smoothness policy for source monitor (aggressive while playing, conservative while paused/stopped)
-- [x] Adaptive source-proxy scale when proxy mode is Off (Quarter for small source monitor sizes, Half for larger)
+- [x] Strict source preview behavior when proxy mode is Off (always load original media; no proxy requests)
 - [x] Adaptive VA-API source decode mode (hardware-first when available and enabled) with automatic software fallback on hardware-path errors
 - [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
 
@@ -150,7 +150,9 @@ Tracking docs:
 - [x] Close button to hide source preview and clear current source selection
 - [x] Frame-accurate jog/shuttle control
 - [x] Mark-in / Mark-out visible as timecodes in a dedicated bar
-- [x] Source preview auto-loads proxy files when available and requests proxy transcodes for high-resolution video
+- [x] Source preview uses proxies only when proxy mode is enabled; Off mode keeps original media without proxy requests
+- [x] Source preview proxy fallback parity: use original media until proxy file is ready, and retry once with original URI on proxy load/decode error
+- [x] Source preview seeks continuously to In/Out marker position while dragging markers on the scrubber
 
 ### Timeline Improvements
 - [x] Time-mapped clip filmstrip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
@@ -249,7 +251,7 @@ Tracking docs:
     - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
    - [x] Apply preview quality divisor to Program Monitor processing resolution (slot effects/compositor), reducing heavy-overlap playback cost when `Half`/`Quarter` preview is selected
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
-    - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops
+    - [x] Respect strict Off proxy mode during heavy overlap (no automatic proxy-enable assist)
       - [x] Ensure paused timeline seek in compositor preview re-prerolls after decoder seek so Program Monitor/transform overlay frame refresh remains reliable while scrubbing
        - [x] Use accurate decoder seeks during playback boundary rebuilds (2→3 / 3→2 active-track transitions) so long-GOP proxies do not snap B-roll back to an earlier keyframe
        - [x] Reduce playback boundary handoff blocking by removing redundant paused-transition/state checks and shortening playback-path preroll waits for 3+ tracks

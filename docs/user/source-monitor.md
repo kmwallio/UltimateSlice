@@ -39,6 +39,8 @@ The **Source Monitor** previews individual library clips before they are added t
 
 The selected region is highlighted in the scrubber bar.
 
+When dragging the green/orange In/Out markers directly on the scrubber, Source Monitor now seeks to the marker position continuously so the preview frame follows the marker being moved.
+
 ## Scrubbing
 
 - Click anywhere on the scrubber to jump to that position.
@@ -85,11 +87,11 @@ Both operations target the active track (if its kind matches), or fall back to t
 
 ## Proxy Preview
 
-When a proxy file exists for the selected media (see [Preferences → Proxy Preview](preferences.md)), the Source Monitor automatically loads the proxy instead of the full-resolution original. If no proxy exists yet, a proxy transcode is requested in the background; once it completes, the player reloads with the proxy automatically. This ensures smooth preview playback even with high-resolution footage (e.g. 5.3K GoPro HEVC) without any manual steps.
+When Proxy mode is enabled (`Half Res` or `Quarter Res`), the Source Monitor automatically loads an available proxy for the selected media instead of the full-resolution original. If no proxy exists yet, a proxy transcode is requested in the background and Source Monitor continues using original media until the proxy is ready.
 
-When global Proxy mode is **Off**, Source Monitor proxy scale now adapts to panel size:
-- smaller Source Monitor area → prefers **Quarter** proxy
-- larger Source Monitor area → prefers **Half** proxy
+If a selected proxy URI later fails to load/decode, Source Monitor automatically retries once with the original media URI.
+
+When global Proxy mode is **Off**, the Source Monitor stays on original media and does not request proxy transcodes.
 
 ## Adaptive Quality
 

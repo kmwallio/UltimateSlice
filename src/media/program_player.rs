@@ -5399,10 +5399,22 @@ impl ProgramPlayer {
         // videoconvertscale does color-convert AND scale in a single pass,
         // avoiding an intermediate full-resolution RGBA allocation. Benchmarked
         // at ~2.6× faster than separate videoconvert + videoscale for 5.3K H.265.
+        //
+        // On macOS, VideoToolbox (vtdec) outputs IOSurface-backed NV12 buffers.
+        // If videoconvertscale uses its parallelized task runner (n-threads > 1),
+        // worker threads can read from an IOSurface that has already been released,
+        // causing EXC_BAD_ACCESS (SIGSEGV) in unpack_NV12.  Force single-threaded
+        // conversion on macOS to prevent this race.
         let convertscale = gst::ElementFactory::make("videoconvertscale")
             .property("add-borders", true)
             .build()
             .ok();
+        #[cfg(target_os = "macos")]
+        if let Some(ref cs) = convertscale {
+            if cs.find_property("n-threads").is_some() {
+                cs.set_property("n-threads", 1u32);
+            }
+        }
         let capsfilter_proj = gst::ElementFactory::make("capsfilter").build().ok();
         let videoscale_zoom = gst::ElementFactory::make("videoscale").build().ok();
         let capsfilter_zoom = gst::ElementFactory::make("capsfilter").build().ok();
@@ -5918,6 +5930,12 @@ impl ProgramPlayer {
             .property("add-borders", true)
             .build()
             .ok()?;
+        // On macOS, vtdec IOSurface-backed buffers must not be read by parallel
+        // converter worker threads — force single-threaded conversion.
+        #[cfg(target_os = "macos")]
+        if convertscale.find_property("n-threads").is_some() {
+            convertscale.set_property("n-threads", 1u32);
+        }
         let capsfilter = gst::ElementFactory::make("capsfilter").build().ok()?;
         let proc_caps = gst::Caps::builder("video/x-raw")
             .field("width", proc_w as i32)
@@ -6761,6 +6779,17 @@ impl ProgramPlayer {
             } else if tune_multiqueue && factory_name == "multiqueue" {
                 child.set_property("max-size-time", 0u64);
                 child.set_property("max-size-bytes", 10_485_760u32);
+            }
+            // On macOS, vtdec (VideoToolbox) produces IOSurface-backed NV12
+            // buffers.  Any videoconvertscale element created inside the decode
+            // chain must use a single converter thread to avoid worker threads
+            // reading from a released IOSurface, which causes SIGSEGV in
+            // unpack_NV12 via gst_parallelized_task_runner_run.
+            #[cfg(target_os = "macos")]
+            if factory_name == "videoconvertscale"
+                && child.find_property("n-threads").is_some()
+            {
+                child.set_property("n-threads", 1u32);
             }
             None
         });

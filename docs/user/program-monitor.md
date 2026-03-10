@@ -111,7 +111,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Opening a project and seeking immediately now follows the same safe paused rebuild/seek flow, avoiding intermittent monitor freezes during initial interaction.
 - Opening/creating a project does not auto-start playback; Program Monitor remains paused until you explicitly press Play.
 - Project reload + first seek now run as short staged callbacks (load first, then seek), and stale pending seek/reload requests are coalesced so rapid edits/scrubs don't queue long back-to-back main-thread work.
-- During automatic proxy assist (manual proxy mode Off), proxy enable/disable now uses hysteresis near overlap boundaries to avoid rapid mode flapping while clips start/end.
+- Proxy mode is now strict: when set to `Off`, Program Monitor does not auto-enable proxy playback during overlap boundaries.
 - During paused scrubbing, UltimateSlice waits for a fresh post-seek preroll frame so the Program Monitor and transform overlay update to the new playhead frame instead of showing black.
 - During paused scrubbing, active clip decoder branches are created before preroll/seek settle so the monitor does not remain stuck on a black frame after moving the playhead.
 - With 3+ active video tracks, paused settle waits are budget-capped to keep the UI responsive; if the full second-pass settle would exceed the budget it is skipped in favor of immediate interactivity.
