@@ -1817,9 +1817,28 @@ pub fn build_window(
                     let mut proj = project.borrow_mut();
                     proj.dirty = true;
                 }
-                prog_player
-                    .borrow_mut()
-                    .update_audio_for_clip(clip_id, vol as f64, pan as f64);
+                {
+                    let mut pp = prog_player.borrow_mut();
+                    // Sync volume keyframes from project model to player so
+                    // keyframe evaluation is current without a full pipeline reload.
+                    {
+                        let proj = project.borrow();
+                        for track in &proj.tracks {
+                            if let Some(model_clip) =
+                                track.clips.iter().find(|c| c.id == clip_id)
+                            {
+                                if let Some(player_clip) =
+                                    pp.clips.iter_mut().find(|c| c.id == clip_id)
+                                {
+                                    player_clip.volume_keyframes =
+                                        model_clip.volume_keyframes.clone();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    pp.update_audio_for_clip(clip_id, vol as f64, pan as f64);
+                }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);

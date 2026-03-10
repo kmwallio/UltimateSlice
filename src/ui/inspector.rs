@@ -1233,16 +1233,10 @@ pub fn build_inspector(
                         }
                     }
                 }
-                if animation_mode.get() || {
-                    let proj = project.borrow();
-                    proj.tracks.iter().flat_map(|t| t.clips.iter())
-                        .find(|c| &c.id == clip_id)
-                        .map_or(false, |c| !c.volume_keyframes.is_empty())
-                } {
-                    on_clip_changed();
-                } else {
-                    on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
-                }
+                // Use lightweight audio update (syncs keyframes to player without
+                // full pipeline reload). on_clip_changed would cause a heavy rebuild
+                // and visible playhead jump for every slider tick.
+                on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
             }
         });
     }
