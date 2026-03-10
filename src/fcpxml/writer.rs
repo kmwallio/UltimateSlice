@@ -304,11 +304,39 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             adjust_transform
                 .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
             adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
-            writer.write_event(Event::Empty(adjust_transform))?;
+            let has_transform_kfs = !clip.position_x_keyframes.is_empty()
+                || !clip.position_y_keyframes.is_empty()
+                || !clip.scale_keyframes.is_empty();
+            if has_transform_kfs {
+                writer.write_event(Event::Start(adjust_transform))?;
+                write_transform_keyframe_params(&mut writer, clip, project)?;
+                writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
+            } else {
+                writer.write_event(Event::Empty(adjust_transform))?;
+            }
 
             let mut adjust_compositing = BytesStart::new("adjust-compositing");
             adjust_compositing.push_attribute(("opacity", clip.opacity.to_string().as_str()));
-            writer.write_event(Event::Empty(adjust_compositing))?;
+            if !clip.opacity_keyframes.is_empty() {
+                writer.write_event(Event::Start(adjust_compositing))?;
+                write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                writer.write_event(Event::End(BytesEnd::new("adjust-compositing")))?;
+            } else {
+                writer.write_event(Event::Empty(adjust_compositing))?;
+            }
+
+            // Emit <adjust-volume> with optional keyframes
+            {
+                let mut adjust_volume = BytesStart::new("adjust-volume");
+                adjust_volume.push_attribute(("amount", linear_volume_to_fcpxml_db(clip.volume as f64).as_str()));
+                if !clip.volume_keyframes.is_empty() {
+                    writer.write_event(Event::Start(adjust_volume))?;
+                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                    writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+                } else {
+                    writer.write_event(Event::Empty(adjust_volume))?;
+                }
+            }
 
             let mut adjust_crop = BytesStart::new("adjust-crop");
             adjust_crop.push_attribute(("left", clip.crop_left.to_string().as_str()));
@@ -823,6 +851,181 @@ fn known_fcpxml_format_name(project: &Project) -> Option<&'static str> {
         (3840, 2160, 24, 1) => Some("FFVideoFormat2160p24"),
         _ => None,
     }
+}
+
+/// Convert linear volume (0.0–~4.0) to dB string for FCPXML.
+fn linear_volume_to_fcpxml_db(linear: f64) -> String {
+    if linear <= 0.0 {
+        return "-96dB".to_string();
+    }
+    let db = 20.0 * linear.log10();
+    if db <= -96.0 {
+        "-96dB".to_string()
+    } else {
+        format!("{:.1}dB", db)
+    }
+}
+
+/// Write native `<param>/<keyframeAnimation>/<keyframe>` children for transform properties.
+fn write_transform_keyframe_params(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    clip: &crate::model::clip::Clip,
+    project: &Project,
+) -> Result<()> {
+    let fps = &project.frame_rate;
+
+    // Position keyframes
+    if !clip.position_x_keyframes.is_empty() || !clip.position_y_keyframes.is_empty() {
+        let mut param = BytesStart::new("param");
+        param.push_attribute(("name", "position"));
+        let (static_x, static_y) = internal_position_to_fcpxml(
+            clip.position_x, clip.position_y,
+            project.width, project.height, clip.scale,
+        );
+        param.push_attribute(("value", format!("{} {}", static_x, static_y).as_str()));
+        writer.write_event(Event::Start(param))?;
+
+        let kfa = BytesStart::new("keyframeAnimation");
+        writer.write_event(Event::Start(kfa))?;
+
+        // Merge position_x and position_y keyframes by time
+        let mut time_set: Vec<u64> = Vec::new();
+        for kf in &clip.position_x_keyframes {
+            if !time_set.contains(&kf.time_ns) {
+                time_set.push(kf.time_ns);
+            }
+        }
+        for kf in &clip.position_y_keyframes {
+            if !time_set.contains(&kf.time_ns) {
+                time_set.push(kf.time_ns);
+            }
+        }
+        time_set.sort();
+
+        for &t in &time_set {
+            // Evaluate scale at this time for position conversion
+            let scale_at_t = crate::model::clip::Clip::evaluate_keyframed_value(
+                &clip.scale_keyframes, t, clip.scale,
+            );
+            let ix = crate::model::clip::Clip::evaluate_keyframed_value(
+                &clip.position_x_keyframes, t, clip.position_x,
+            );
+            let iy = crate::model::clip::Clip::evaluate_keyframed_value(
+                &clip.position_y_keyframes, t, clip.position_y,
+            );
+            let (fx, fy) = internal_position_to_fcpxml(
+                ix, iy, project.width, project.height, scale_at_t,
+            );
+            let mut kf_elem = BytesStart::new("keyframe");
+            kf_elem.push_attribute(("time", ns_to_fcpxml_time(t, fps).as_str()));
+            kf_elem.push_attribute(("value", format!("{} {}", fx, fy).as_str()));
+            kf_elem.push_attribute(("interp", "linear"));
+            writer.write_event(Event::Empty(kf_elem))?;
+        }
+
+        writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
+        writer.write_event(Event::End(BytesEnd::new("param")))?;
+    }
+
+    // Scale keyframes
+    if !clip.scale_keyframes.is_empty() {
+        let mut param = BytesStart::new("param");
+        param.push_attribute(("name", "Scale"));
+        param.push_attribute(("value", format!("{} {}", clip.scale, clip.scale).as_str()));
+        writer.write_event(Event::Start(param))?;
+
+        let kfa = BytesStart::new("keyframeAnimation");
+        writer.write_event(Event::Start(kfa))?;
+
+        let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
+            clip.scale_keyframes.iter().collect();
+        sorted.sort_by_key(|kf| kf.time_ns);
+
+        for kf in &sorted {
+            let mut kf_elem = BytesStart::new("keyframe");
+            kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+            kf_elem.push_attribute(("value", format!("{} {}", kf.value, kf.value).as_str()));
+            kf_elem.push_attribute(("interp", "linear"));
+            writer.write_event(Event::Empty(kf_elem))?;
+        }
+
+        writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
+        writer.write_event(Event::End(BytesEnd::new("param")))?;
+    }
+
+    Ok(())
+}
+
+/// Write native `<param>/<keyframeAnimation>/<keyframe>` children for opacity.
+fn write_opacity_keyframe_params(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    clip: &crate::model::clip::Clip,
+    fps: &crate::model::project::FrameRate,
+) -> Result<()> {
+    if clip.opacity_keyframes.is_empty() {
+        return Ok(());
+    }
+
+    let mut param = BytesStart::new("param");
+    param.push_attribute(("name", "amount"));
+    param.push_attribute(("value", clip.opacity.to_string().as_str()));
+    writer.write_event(Event::Start(param))?;
+
+    let kfa = BytesStart::new("keyframeAnimation");
+    writer.write_event(Event::Start(kfa))?;
+
+    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
+        clip.opacity_keyframes.iter().collect();
+    sorted.sort_by_key(|kf| kf.time_ns);
+
+    for kf in &sorted {
+        let mut kf_elem = BytesStart::new("keyframe");
+        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+        kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
+        kf_elem.push_attribute(("interp", "linear"));
+        writer.write_event(Event::Empty(kf_elem))?;
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
+    writer.write_event(Event::End(BytesEnd::new("param")))?;
+
+    Ok(())
+}
+
+/// Write native `<param>/<keyframeAnimation>/<keyframe>` children for volume (dB).
+fn write_volume_keyframe_params(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    clip: &crate::model::clip::Clip,
+    fps: &crate::model::project::FrameRate,
+) -> Result<()> {
+    if clip.volume_keyframes.is_empty() {
+        return Ok(());
+    }
+
+    let mut param = BytesStart::new("param");
+    param.push_attribute(("name", "amount"));
+    param.push_attribute(("value", linear_volume_to_fcpxml_db(clip.volume as f64).as_str()));
+    writer.write_event(Event::Start(param))?;
+
+    let kfa = BytesStart::new("keyframeAnimation");
+    writer.write_event(Event::Start(kfa))?;
+
+    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
+        clip.volume_keyframes.iter().collect();
+    sorted.sort_by_key(|kf| kf.time_ns);
+
+    for kf in &sorted {
+        let mut kf_elem = BytesStart::new("keyframe");
+        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+        kf_elem.push_attribute(("value", linear_volume_to_fcpxml_db(kf.value).as_str()));
+        kf_elem.push_attribute(("interp", "linear"));
+        writer.write_event(Event::Empty(kf_elem))?;
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
+    writer.write_event(Event::End(BytesEnd::new("param")))?;
+
+    Ok(())
 }
 
 /// Convert nanoseconds to FCPXML rational time string (e.g. "48048/24000s")
@@ -1548,5 +1751,79 @@ mod tests {
             !xml.contains("name=\"FFVideoFormat"),
             "expected export to omit unsupported hardcoded format names:\n{xml}"
         );
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_native_keyframe_elements() {
+        use crate::model::clip::{Clip, ClipKind, NumericKeyframe, KeyframeInterpolation};
+        use crate::model::track::Track;
+
+        let mut project = Project::new("NativeKF");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/clip.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.opacity_keyframes = vec![
+            NumericKeyframe { time_ns: 0, value: 1.0, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe { time_ns: 2_000_000_000, value: 0.0, interpolation: KeyframeInterpolation::Linear },
+        ];
+        clip.scale_keyframes = vec![
+            NumericKeyframe { time_ns: 0, value: 0.5, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe { time_ns: 5_000_000_000, value: 1.5, interpolation: KeyframeInterpolation::Linear },
+        ];
+        clip.volume_keyframes = vec![
+            NumericKeyframe { time_ns: 0, value: 1.0, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe { time_ns: 3_000_000_000, value: 0.0, interpolation: KeyframeInterpolation::Linear },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+
+        // Should contain native <adjust-transform> with param/keyframeAnimation/keyframe children
+        assert!(xml.contains("<adjust-transform"), "missing adjust-transform");
+        assert!(xml.contains("<param name=\"Scale\""), "missing Scale param");
+        assert!(xml.contains("<keyframeAnimation"), "missing keyframeAnimation");
+        assert!(xml.contains("<keyframe "), "missing keyframe element");
+        assert!(xml.contains("interp=\"linear\""), "missing interp attribute");
+
+        // Should contain native <adjust-compositing> with opacity keyframes
+        assert!(xml.contains("<adjust-compositing"), "missing adjust-compositing");
+        assert!(xml.contains("<param name=\"amount\""), "missing amount param for opacity");
+
+        // Should contain <adjust-volume> with volume keyframes
+        assert!(xml.contains("<adjust-volume"), "missing adjust-volume");
+
+        // Should also still have vendor attrs for lossless round-trip
+        assert!(xml.contains("us:scale-keyframes="), "missing vendor scale keyframes");
+        assert!(xml.contains("us:opacity-keyframes="), "missing vendor opacity keyframes");
+        assert!(xml.contains("us:volume-keyframes="), "missing vendor volume keyframes");
+    }
+
+    #[test]
+    fn test_write_read_native_keyframe_round_trip() {
+        use crate::model::clip::{Clip, ClipKind, NumericKeyframe, KeyframeInterpolation};
+        use crate::model::track::Track;
+
+        let mut project = Project::new("RoundTrip");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/clip.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.opacity_keyframes = vec![
+            NumericKeyframe { time_ns: 0, value: 1.0, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe { time_ns: 2_000_000_000, value: 0.3, interpolation: KeyframeInterpolation::Linear },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        let loaded = crate::fcpxml::parser::parse_fcpxml(&xml).expect("parse should succeed");
+        let loaded_clip = &loaded.video_tracks().next().unwrap().clips[0];
+
+        // Vendor attrs should survive exactly (they take priority)
+        assert_eq!(loaded_clip.opacity_keyframes.len(), 2);
+        assert_eq!(loaded_clip.opacity_keyframes[0].time_ns, 0);
+        assert!((loaded_clip.opacity_keyframes[0].value - 1.0).abs() < 0.001);
+        assert_eq!(loaded_clip.opacity_keyframes[1].time_ns, 2_000_000_000);
+        assert!((loaded_clip.opacity_keyframes[1].value - 0.3).abs() < 0.001);
     }
 }

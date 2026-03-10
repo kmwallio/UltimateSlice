@@ -47,8 +47,9 @@ src/
     proxy_cache.rs          Background proxy transcoding (half/quarter-res H.264 via ffmpeg) for preview playback
 
   fcpxml/
-    parser.rs               FCPXML 1.10-1.14 → Project (quick-xml; parses assets, spine, asset-clip)
-    writer.rs               Project → FCPXML 1.14
+    parser.rs               FCPXML 1.10-1.14 → Project (quick-xml; parses assets, spine, asset-clip,
+                            native <param>/<keyframeAnimation>/<keyframe> elements for FCP interop)
+    writer.rs               Project → FCPXML 1.14 (emits native keyframe elements + us:* vendor attrs)
 
   undo.rs                   EditCommand trait + EditHistory (undo/redo stacks)
                             Commands: MoveClip, TrimIn, TrimOut, DeleteClip, SplitClip

@@ -56,6 +56,10 @@ struct ActiveClipContext {
     has_us_position: bool,
     has_us_scale: bool,
     has_us_rotate: bool,
+    has_us_position_keyframes: bool,
+    has_us_scale_keyframes: bool,
+    has_us_opacity_keyframes: bool,
+    has_us_volume_keyframes: bool,
 }
 
 /// Parse an FCPXML string into a `Project`.
@@ -248,14 +252,45 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             project.width,
                             project.height,
                         );
+                        // Parse native <param>/<keyframeAnimation>/<keyframe> children
+                        let native = parse_adjust_transform_children(&mut reader)?;
+                        if let Some(ctx) = clip_stack.last() {
+                            apply_native_transform_keyframes(
+                                &native, ctx, &mut track_map,
+                                project.width, project.height,
+                            );
+                            if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
+                                clip.fcpxml_unknown_children.extend(native.unknown_fragments);
+                            }
+                        }
                     }
-                    "adjust-compositing" if in_spine => {
+                    "adjust-compositing" | "adjust-blend" if in_spine => {
                         let attrs = parse_attrs(e)?;
                         apply_adjust_compositing(&attrs, clip_stack.last(), &mut track_map);
+                        // Parse native opacity keyframes from children
+                        let native = parse_adjust_blend_children(&mut reader)?;
+                        if let Some(ctx) = clip_stack.last() {
+                            apply_native_opacity_keyframes(
+                                &native, ctx, &mut track_map,
+                            );
+                            if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
+                                clip.fcpxml_unknown_children.extend(native.unknown_fragments);
+                            }
+                        }
                     }
                     "adjust-volume" if in_spine => {
                         let attrs = parse_attrs(e)?;
                         apply_adjust_volume(&attrs, clip_stack.last(), &mut track_map);
+                        // Parse native volume keyframes from children
+                        let native = parse_adjust_volume_children(&mut reader)?;
+                        if let Some(ctx) = clip_stack.last() {
+                            apply_native_volume_keyframes(
+                                &native, ctx, &mut track_map,
+                            );
+                            if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
+                                clip.fcpxml_unknown_children.extend(native.unknown_fragments);
+                            }
+                        }
                     }
                     "adjust-crop" | "crop-rect" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -437,7 +472,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             project.height,
                         );
                     }
-                    "adjust-compositing" if in_spine => {
+                    "adjust-compositing" | "adjust-blend" if in_spine => {
                         let attrs = parse_attrs(e)?;
                         apply_adjust_compositing(&attrs, clip_stack.last(), &mut track_map);
                     }
@@ -908,6 +943,11 @@ fn parse_asset_clip(
                     || attrs.contains_key("us:position-y"),
                 has_us_scale: attrs.contains_key("us:scale"),
                 has_us_rotate: attrs.contains_key("us:rotate"),
+                has_us_position_keyframes: attrs.contains_key("us:position-x-keyframes")
+                    || attrs.contains_key("us:position-y-keyframes"),
+                has_us_scale_keyframes: attrs.contains_key("us:scale-keyframes"),
+                has_us_opacity_keyframes: attrs.contains_key("us:opacity-keyframes"),
+                has_us_volume_keyframes: attrs.contains_key("us:volume-keyframes"),
             });
         }
     }
@@ -1067,6 +1107,387 @@ fn apply_adjust_crop(
             clip.crop_bottom = v;
         }
     }
+}
+
+/// Keyframe data parsed from native FCPXML `<param>/<keyframeAnimation>/<keyframe>` elements.
+#[derive(Default)]
+struct NativeKeyframeParams {
+    position_keyframes: Vec<(u64, f64, f64)>, // (time_ns, fcpxml_x, fcpxml_y)
+    scale_keyframes: Vec<NumericKeyframe>,
+    opacity_keyframes: Vec<NumericKeyframe>,
+    volume_keyframes: Vec<NumericKeyframe>,
+    unknown_fragments: Vec<String>,
+}
+
+/// Parse children of an `<adjust-transform>` Start element until its matching End.
+/// Extracts `<param name="position">` and `<param name="Scale">` keyframes;
+/// collects other children as unknown fragments for round-trip preservation.
+fn parse_adjust_transform_children(
+    reader: &mut Reader<&[u8]>,
+) -> Result<NativeKeyframeParams> {
+    let mut result = NativeKeyframeParams::default();
+    let mut buf = Vec::new();
+    let mut depth = 1usize;
+
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "param" && depth == 1 {
+                    let attrs = parse_attrs(e)?;
+                    let param_name = attrs.get("name").cloned().unwrap_or_default();
+                    let param_name_lower = param_name.to_ascii_lowercase();
+                    if param_name_lower == "position" {
+                        let kfs = parse_keyframe_animation_children(reader)?;
+                        for (time_ns, val_str) in &kfs {
+                            if let Some((x, y)) = parse_vec2(val_str) {
+                                result.position_keyframes.push((*time_ns, x, y));
+                            }
+                        }
+                    } else if param_name_lower == "scale" {
+                        let kfs = parse_keyframe_animation_children(reader)?;
+                        for (time_ns, val_str) in &kfs {
+                            if let Some((sx, _sy)) = parse_vec2(val_str) {
+                                result.scale_keyframes.push(NumericKeyframe {
+                                    time_ns: *time_ns,
+                                    value: sx,
+                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                });
+                            } else if let Ok(s) = val_str.parse::<f64>() {
+                                result.scale_keyframes.push(NumericKeyframe {
+                                    time_ns: *time_ns,
+                                    value: s,
+                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                });
+                            }
+                        }
+                    } else {
+                        // Unknown param — collect as fragment
+                        let fragment = collect_unknown_start_fragment_from_attrs(reader, e)?;
+                        result.unknown_fragments.push(fragment);
+                    }
+                } else {
+                    depth += 1;
+                    let fragment = collect_remaining_start_fragment(reader, e, depth)?;
+                    depth = 1; // collect_remaining consumed to matching depth
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::Empty(ref e) => {
+                if depth == 1 {
+                    let fragment = collect_unknown_empty_fragment(e)?;
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::End(ref _e) => {
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => bail!("Unexpected EOF inside <adjust-transform>"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(result)
+}
+
+/// Parse children of an `<adjust-blend>` or `<adjust-compositing>` Start element.
+/// Extracts `<param name="amount">` keyframes for opacity.
+fn parse_adjust_blend_children(
+    reader: &mut Reader<&[u8]>,
+) -> Result<NativeKeyframeParams> {
+    let mut result = NativeKeyframeParams::default();
+    let mut buf = Vec::new();
+    let mut depth = 1usize;
+
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "param" && depth == 1 {
+                    let attrs = parse_attrs(e)?;
+                    let param_name = attrs.get("name").cloned().unwrap_or_default();
+                    let param_name_lower = param_name.to_ascii_lowercase();
+                    if param_name_lower == "amount" || param_name_lower == "opacity" {
+                        let kfs = parse_keyframe_animation_children(reader)?;
+                        for (time_ns, val_str) in &kfs {
+                            if let Ok(v) = val_str.parse::<f64>() {
+                                result.opacity_keyframes.push(NumericKeyframe {
+                                    time_ns: *time_ns,
+                                    value: v,
+                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                });
+                            }
+                        }
+                    } else {
+                        let fragment = collect_unknown_start_fragment_from_attrs(reader, e)?;
+                        result.unknown_fragments.push(fragment);
+                    }
+                } else {
+                    depth += 1;
+                    let fragment = collect_remaining_start_fragment(reader, e, depth)?;
+                    depth = 1;
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::Empty(ref e) => {
+                if depth == 1 {
+                    let fragment = collect_unknown_empty_fragment(e)?;
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::End(ref _e) => {
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => bail!("Unexpected EOF inside <adjust-blend>"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(result)
+}
+
+/// Parse children of an `<adjust-volume>` Start element.
+/// Extracts `<param name="amount">` keyframes for volume (dB values).
+fn parse_adjust_volume_children(
+    reader: &mut Reader<&[u8]>,
+) -> Result<NativeKeyframeParams> {
+    let mut result = NativeKeyframeParams::default();
+    let mut buf = Vec::new();
+    let mut depth = 1usize;
+
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "param" && depth == 1 {
+                    let attrs = parse_attrs(e)?;
+                    let param_name = attrs.get("name").cloned().unwrap_or_default();
+                    let param_name_lower = param_name.to_ascii_lowercase();
+                    if param_name_lower == "amount" || param_name_lower == "volume" {
+                        let kfs = parse_keyframe_animation_children(reader)?;
+                        for (time_ns, val_str) in &kfs {
+                            if let Some(linear) = parse_fcpxml_volume_amount(val_str) {
+                                result.volume_keyframes.push(NumericKeyframe {
+                                    time_ns: *time_ns,
+                                    value: linear,
+                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                });
+                            }
+                        }
+                    } else {
+                        let fragment = collect_unknown_start_fragment_from_attrs(reader, e)?;
+                        result.unknown_fragments.push(fragment);
+                    }
+                } else {
+                    depth += 1;
+                    let fragment = collect_remaining_start_fragment(reader, e, depth)?;
+                    depth = 1;
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::Empty(ref e) => {
+                if depth == 1 {
+                    let fragment = collect_unknown_empty_fragment(e)?;
+                    result.unknown_fragments.push(fragment);
+                }
+            }
+            Event::End(ref _e) => {
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => bail!("Unexpected EOF inside <adjust-volume>"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(result)
+}
+
+/// Parse the children of a `<param>` element, looking for `<keyframeAnimation>/<keyframe>`.
+/// Returns a vec of (time_ns, value_string) pairs.
+/// Consumes events until the matching `</param>` End event.
+fn parse_keyframe_animation_children(
+    reader: &mut Reader<&[u8]>,
+) -> Result<Vec<(u64, String)>> {
+    let mut keyframes: Vec<(u64, String)> = Vec::new();
+    let mut buf = Vec::new();
+    let mut depth = 1usize; // already inside <param>
+    let mut in_keyframe_animation = false;
+
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                depth += 1;
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "keyframeAnimation" {
+                    in_keyframe_animation = true;
+                }
+            }
+            Event::Empty(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "keyframe" && in_keyframe_animation {
+                    let attrs = parse_attrs(e)?;
+                    if let (Some(time_str), Some(value_str)) =
+                        (attrs.get("time"), attrs.get("value"))
+                    {
+                        if let Some(time_ns) = parse_fcpxml_time(time_str) {
+                            keyframes.push((time_ns, value_str.clone()));
+                        }
+                    }
+                }
+            }
+            Event::End(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "keyframeAnimation" {
+                    in_keyframe_animation = false;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => bail!("Unexpected EOF inside <param>"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(keyframes)
+}
+
+/// Apply native FCPXML keyframes to a clip, only for properties that lack `us:*-keyframes` vendor attrs.
+fn apply_native_transform_keyframes(
+    params: &NativeKeyframeParams,
+    ctx: &ActiveClipContext,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+    project_width: u32,
+    project_height: u32,
+) {
+    let clip = match current_clip_mut(track_map, Some(ctx)) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Position keyframes: only if no us:position-x-keyframes / us:position-y-keyframes
+    if !ctx.has_us_position_keyframes && !params.position_keyframes.is_empty() {
+        let mut x_kfs = Vec::new();
+        let mut y_kfs = Vec::new();
+        for &(time_ns, fcpxml_x, fcpxml_y) in &params.position_keyframes {
+            // For position conversion, we need the scale at this keyframe's time.
+            // Use scale keyframes if present, otherwise static clip scale.
+            let scale_at_time = if !params.scale_keyframes.is_empty() {
+                Clip::evaluate_keyframed_value(&params.scale_keyframes, time_ns, clip.scale)
+            } else {
+                clip.scale
+            };
+            let (ix, iy) = fcpxml_position_to_internal(
+                fcpxml_x,
+                fcpxml_y,
+                project_width,
+                project_height,
+                scale_at_time,
+            );
+            x_kfs.push(NumericKeyframe {
+                time_ns,
+                value: ix,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            });
+            y_kfs.push(NumericKeyframe {
+                time_ns,
+                value: iy,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            });
+        }
+        clip.position_x_keyframes = x_kfs;
+        clip.position_y_keyframes = y_kfs;
+    }
+
+    // Scale keyframes: only if no us:scale-keyframes
+    if !ctx.has_us_scale_keyframes && !params.scale_keyframes.is_empty() {
+        clip.scale_keyframes = params.scale_keyframes.clone();
+    }
+}
+
+/// Apply native opacity keyframes from adjust-blend/adjust-compositing.
+fn apply_native_opacity_keyframes(
+    params: &NativeKeyframeParams,
+    ctx: &ActiveClipContext,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    if ctx.has_us_opacity_keyframes || params.opacity_keyframes.is_empty() {
+        return;
+    }
+    if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
+        clip.opacity_keyframes = params.opacity_keyframes.clone();
+    }
+}
+
+/// Apply native volume keyframes from adjust-volume.
+fn apply_native_volume_keyframes(
+    params: &NativeKeyframeParams,
+    ctx: &ActiveClipContext,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    if ctx.has_us_volume_keyframes || params.volume_keyframes.is_empty() {
+        return;
+    }
+    if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
+        clip.volume_keyframes = params.volume_keyframes.clone();
+    }
+}
+
+/// Like `collect_unknown_start_fragment` but we already parsed the start event's attributes.
+/// Re-serializes the start tag and then collects everything until matching end.
+fn collect_unknown_start_fragment_from_attrs(
+    reader: &mut Reader<&[u8]>,
+    start: &quick_xml::events::BytesStart,
+) -> Result<String> {
+    collect_unknown_start_fragment(reader, start)
+}
+
+/// Collect an unknown fragment starting from a nested Start event.
+/// `depth` is the current nesting level. Consumes until depth returns to the
+/// level before this element started (depth - 1).
+fn collect_remaining_start_fragment(
+    reader: &mut Reader<&[u8]>,
+    start: &quick_xml::events::BytesStart,
+    start_depth: usize,
+) -> Result<String> {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer.write_event(Event::Start(start.to_owned()))?;
+
+    let mut depth = start_depth;
+    let target_depth = start_depth - 1;
+    let mut buf = Vec::new();
+    while depth > target_depth {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                depth += 1;
+                writer.write_event(Event::Start(e.to_owned()))?;
+            }
+            Event::End(ref e) => {
+                depth = depth.saturating_sub(1);
+                writer.write_event(Event::End(e.to_owned()))?;
+            }
+            Event::Empty(ref e) => {
+                writer.write_event(Event::Empty(e.to_owned()))?;
+            }
+            Event::Text(ref e) => {
+                writer.write_event(Event::Text(e.to_owned()))?;
+            }
+            Event::CData(ref e) => {
+                writer.write_event(Event::CData(e.to_owned()))?;
+            }
+            Event::Comment(ref e) => {
+                writer.write_event(Event::Comment(e.to_owned()))?;
+            }
+            Event::Eof => bail!("Unexpected EOF while capturing unknown fragment"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(String::from_utf8(writer.into_inner().into_inner())?)
 }
 
 fn parse_vec2(value: &str) -> Option<(f64, f64)> {
@@ -2718,5 +3139,206 @@ mod tests {
             track.clips[0].color_label,
             crate::model::clip::ClipColorLabel::Purple
         );
+    }
+
+    #[test]
+    fn test_parse_native_fcp_position_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="FCP Keyframes">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform position="0 0" scale="0.5 0.5">
+            <param name="position" value="0 0">
+              <keyframeAnimation>
+                <keyframe time="0s" value="-50 0" interp="linear"/>
+                <keyframe time="5s" value="50 0" interp="linear"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-transform>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+
+        assert_eq!(clip.position_x_keyframes.len(), 2, "expected 2 position_x keyframes");
+        assert_eq!(clip.position_y_keyframes.len(), 2, "expected 2 position_y keyframes");
+
+        // First keyframe at t=0s: FCPXML position (-50, 0)
+        assert_eq!(clip.position_x_keyframes[0].time_ns, 0);
+        assert_eq!(clip.position_y_keyframes[0].time_ns, 0);
+
+        // Second keyframe at t=5s = 5_000_000_000 ns: FCPXML position (50, 0)
+        assert_eq!(clip.position_x_keyframes[1].time_ns, 5_000_000_000);
+        assert_eq!(clip.position_y_keyframes[1].time_ns, 5_000_000_000);
+
+        // Position values should be opposite signs (left vs right)
+        assert!(
+            clip.position_x_keyframes[0].value < 0.0,
+            "first kf should have negative x (left side)"
+        );
+        assert!(
+            clip.position_x_keyframes[1].value > 0.0,
+            "second kf should have positive x (right side)"
+        );
+    }
+
+    #[test]
+    fn test_parse_native_fcp_opacity_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="FCP Opacity">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-blend amount="1.0">
+            <param name="amount">
+              <keyframeAnimation>
+                <keyframe time="0s" value="1.0"/>
+                <keyframe time="2s" value="0.0"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-blend>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+
+        assert_eq!(clip.opacity_keyframes.len(), 2, "expected 2 opacity keyframes");
+        assert_eq!(clip.opacity_keyframes[0].time_ns, 0);
+        assert!((clip.opacity_keyframes[0].value - 1.0).abs() < 0.001);
+        assert_eq!(clip.opacity_keyframes[1].time_ns, 2_000_000_000);
+        assert!((clip.opacity_keyframes[1].value - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_native_fcp_volume_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s" hasAudio="1"/>
+  </resources>
+  <project name="FCP Volume">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-volume amount="0dB">
+            <param name="amount">
+              <keyframeAnimation>
+                <keyframe time="0s" value="0dB"/>
+                <keyframe time="3s" value="-96dB"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-volume>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let track = project.tracks.iter().find(|t| !t.clips.is_empty()).unwrap();
+        let clip = &track.clips[0];
+
+        assert_eq!(clip.volume_keyframes.len(), 2, "expected 2 volume keyframes");
+        assert_eq!(clip.volume_keyframes[0].time_ns, 0);
+        // 0dB = 1.0 linear
+        assert!((clip.volume_keyframes[0].value - 1.0).abs() < 0.01);
+        assert_eq!(clip.volume_keyframes[1].time_ns, 3_000_000_000);
+        // -96dB = 0.0 linear (silence)
+        assert!((clip.volume_keyframes[1].value - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_vendor_keyframes_take_priority_over_native() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="http://ultimateslice.io/ns">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="Priority Test">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s"
+          us:opacity="0.8"
+          us:opacity-keyframes="[{&quot;time_ns&quot;:0,&quot;value&quot;:0.8,&quot;interpolation&quot;:&quot;linear&quot;},{&quot;time_ns&quot;:1000000000,&quot;value&quot;:0.2,&quot;interpolation&quot;:&quot;linear&quot;}]">
+          <adjust-compositing opacity="1.0">
+            <param name="amount">
+              <keyframeAnimation>
+                <keyframe time="0s" value="1.0"/>
+                <keyframe time="5s" value="0.0"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-compositing>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+
+        // Vendor attrs should win: 2 keyframes from us:opacity-keyframes, NOT the native ones
+        assert_eq!(clip.opacity_keyframes.len(), 2);
+        assert_eq!(clip.opacity_keyframes[0].time_ns, 0);
+        assert!((clip.opacity_keyframes[0].value - 0.8).abs() < 0.001);
+        assert_eq!(clip.opacity_keyframes[1].time_ns, 1_000_000_000);
+        assert!((clip.opacity_keyframes[1].value - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_native_fcp_scale_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="FCP Scale">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform position="0 0" scale="1 1">
+            <param name="Scale" value="1 1">
+              <keyframeAnimation>
+                <keyframe time="0s" value="0.5 0.5" interp="linear"/>
+                <keyframe time="5s" value="2.0 2.0" interp="linear"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-transform>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+
+        assert_eq!(clip.scale_keyframes.len(), 2, "expected 2 scale keyframes");
+        assert_eq!(clip.scale_keyframes[0].time_ns, 0);
+        assert!((clip.scale_keyframes[0].value - 0.5).abs() < 0.001);
+        assert_eq!(clip.scale_keyframes[1].time_ns, 5_000_000_000);
+        assert!((clip.scale_keyframes[1].value - 2.0).abs() < 0.001);
     }
 }
