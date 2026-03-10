@@ -719,20 +719,22 @@ fn build_keyframed_property_expression(
     max_value: f64,
     time_var: &str,
 ) -> String {
-    let mut points: Vec<(u64, f64)> = keyframes
-        .iter()
-        .map(|kf| (kf.time_ns, kf.value.clamp(min_value, max_value)))
-        .collect();
-    points.sort_by_key(|(time_ns, _)| *time_ns);
-    let mut deduped: Vec<(u64, f64)> = Vec::with_capacity(points.len());
-    for (time_ns, value) in points {
+    use crate::model::clip::KeyframeInterpolation;
+
+    let mut sorted: Vec<&NumericKeyframe> = keyframes.iter().collect();
+    sorted.sort_by_key(|kf| kf.time_ns);
+    // Deduplicate by time (last wins)
+    let mut deduped: Vec<(u64, f64, KeyframeInterpolation)> = Vec::with_capacity(sorted.len());
+    for kf in &sorted {
+        let v = kf.value.clamp(min_value, max_value);
         if let Some(last) = deduped.last_mut() {
-            if last.0 == time_ns {
-                last.1 = value;
+            if last.0 == kf.time_ns {
+                last.1 = v;
+                last.2 = kf.interpolation;
                 continue;
             }
         }
-        deduped.push((time_ns, value));
+        deduped.push((kf.time_ns, v, kf.interpolation));
     }
 
     if deduped.is_empty() {
@@ -744,23 +746,34 @@ fn build_keyframed_property_expression(
 
     let mut expr = format!(
         "{:.10}",
-        deduped.last().map(|(_, v)| *v).unwrap_or(default_value)
+        deduped.last().map(|(_, v, _)| *v).unwrap_or(default_value)
     );
     for i in (1..deduped.len()).rev() {
-        let (left_ns, left_value) = deduped[i - 1];
-        let (right_ns, right_value) = deduped[i];
+        let (left_ns, left_value, interp) = deduped[i - 1];
+        let (right_ns, right_value, _) = deduped[i];
         let left_s = left_ns as f64 / 1_000_000_000.0;
         let right_s = right_ns as f64 / 1_000_000_000.0;
         let span_s = (right_s - left_s).max(1e-9);
+        // Compute normalized t for this segment
+        let t_expr = format!("(({time_var})-{left_s:.9})/{span_s:.9}");
+        // Apply easing to t
+        let eased_t = match interp {
+            KeyframeInterpolation::Linear => t_expr.clone(),
+            KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
+            KeyframeInterpolation::EaseOut => format!("(1-pow(1-({t_expr}),2))"),
+            KeyframeInterpolation::EaseInOut => format!(
+                "if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)"
+            ),
+        };
         let segment_expr = format!(
-            "{left_value:.10}+({right_value:.10}-{left_value:.10})*(({time_var})-{left_s:.9})/{span_s:.9}"
+            "{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}"
         );
         expr = format!(
             "if(lt({time_var},{right_s:.9}),{segment_expr},{expr})",
             right_s = right_s
         );
     }
-    let (first_ns, first_value) = deduped[0];
+    let (first_ns, first_value, _) = deduped[0];
     let first_s = first_ns as f64 / 1_000_000_000.0;
     format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
 }

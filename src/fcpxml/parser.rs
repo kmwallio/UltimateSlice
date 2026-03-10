@@ -1,4 +1,4 @@
-use crate::model::clip::{Clip, ClipColorLabel, ClipKind, NumericKeyframe};
+use crate::model::clip::{Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe};
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
 use anyhow::{anyhow, bail, Result};
@@ -1112,7 +1112,7 @@ fn apply_adjust_crop(
 /// Keyframe data parsed from native FCPXML `<param>/<keyframeAnimation>/<keyframe>` elements.
 #[derive(Default)]
 struct NativeKeyframeParams {
-    position_keyframes: Vec<(u64, f64, f64)>, // (time_ns, fcpxml_x, fcpxml_y)
+    position_keyframes: Vec<(u64, f64, f64, KeyframeInterpolation)>, // (time_ns, fcpxml_x, fcpxml_y, interp)
     scale_keyframes: Vec<NumericKeyframe>,
     opacity_keyframes: Vec<NumericKeyframe>,
     volume_keyframes: Vec<NumericKeyframe>,
@@ -1140,25 +1140,25 @@ fn parse_adjust_transform_children(
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "position" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str) in &kfs {
+                        for (time_ns, val_str, interp) in &kfs {
                             if let Some((x, y)) = parse_vec2(val_str) {
-                                result.position_keyframes.push((*time_ns, x, y));
+                                result.position_keyframes.push((*time_ns, x, y, *interp));
                             }
                         }
                     } else if param_name_lower == "scale" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str) in &kfs {
+                        for (time_ns, val_str, interp) in &kfs {
                             if let Some((sx, _sy)) = parse_vec2(val_str) {
                                 result.scale_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: sx,
-                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                    interpolation: *interp,
                                 });
                             } else if let Ok(s) = val_str.parse::<f64>() {
                                 result.scale_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: s,
-                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                    interpolation: *interp,
                                 });
                             }
                         }
@@ -1211,12 +1211,12 @@ fn parse_adjust_blend_children(
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "opacity" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str) in &kfs {
+                        for (time_ns, val_str, interp) in &kfs {
                             if let Ok(v) = val_str.parse::<f64>() {
                                 result.opacity_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: v,
-                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                    interpolation: *interp,
                                 });
                             }
                         }
@@ -1268,12 +1268,12 @@ fn parse_adjust_volume_children(
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "volume" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str) in &kfs {
+                        for (time_ns, val_str, interp) in &kfs {
                             if let Some(linear) = parse_fcpxml_volume_amount(val_str) {
                                 result.volume_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: linear,
-                                    interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                                    interpolation: *interp,
                                 });
                             }
                         }
@@ -1306,12 +1306,12 @@ fn parse_adjust_volume_children(
 }
 
 /// Parse the children of a `<param>` element, looking for `<keyframeAnimation>/<keyframe>`.
-/// Returns a vec of (time_ns, value_string) pairs.
+/// Returns a vec of (time_ns, value_string, interpolation) tuples.
 /// Consumes events until the matching `</param>` End event.
 fn parse_keyframe_animation_children(
     reader: &mut Reader<&[u8]>,
-) -> Result<Vec<(u64, String)>> {
-    let mut keyframes: Vec<(u64, String)> = Vec::new();
+) -> Result<Vec<(u64, String, KeyframeInterpolation)>> {
+    let mut keyframes: Vec<(u64, String, KeyframeInterpolation)> = Vec::new();
     let mut buf = Vec::new();
     let mut depth = 1usize; // already inside <param>
     let mut in_keyframe_animation = false;
@@ -1335,7 +1335,11 @@ fn parse_keyframe_animation_children(
                         (attrs.get("time"), attrs.get("value"))
                     {
                         if let Some(time_ns) = parse_fcpxml_time(time_str) {
-                            keyframes.push((time_ns, value_str.clone()));
+                            let interp = attrs
+                                .get("interp")
+                                .map(|s| KeyframeInterpolation::from_fcpxml(s))
+                                .unwrap_or(KeyframeInterpolation::Linear);
+                            keyframes.push((time_ns, value_str.clone(), interp));
                         }
                     }
                 }
@@ -1373,7 +1377,7 @@ fn apply_native_transform_keyframes(
     if !ctx.has_us_position_keyframes && !params.position_keyframes.is_empty() {
         let mut x_kfs = Vec::new();
         let mut y_kfs = Vec::new();
-        for &(time_ns, fcpxml_x, fcpxml_y) in &params.position_keyframes {
+        for &(time_ns, fcpxml_x, fcpxml_y, interp) in &params.position_keyframes {
             // For position conversion, we need the scale at this keyframe's time.
             // Use scale keyframes if present, otherwise static clip scale.
             let scale_at_time = if !params.scale_keyframes.is_empty() {
@@ -1391,12 +1395,12 @@ fn apply_native_transform_keyframes(
             x_kfs.push(NumericKeyframe {
                 time_ns,
                 value: ix,
-                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                interpolation: interp,
             });
             y_kfs.push(NumericKeyframe {
                 time_ns,
                 value: iy,
-                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                interpolation: interp,
             });
         }
         clip.position_x_keyframes = x_kfs;

@@ -34,6 +34,103 @@ impl Default for ClipColorLabel {
 pub enum KeyframeInterpolation {
     #[default]
     Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+impl KeyframeInterpolation {
+    /// Human-readable label for UI dropdowns.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::EaseIn => "Ease In",
+            Self::EaseOut => "Ease Out",
+            Self::EaseInOut => "Ease In/Out",
+        }
+    }
+
+    /// All variants in display order.
+    pub const ALL: [KeyframeInterpolation; 4] = [
+        Self::Linear,
+        Self::EaseIn,
+        Self::EaseOut,
+        Self::EaseInOut,
+    ];
+
+    /// Parse from FCPXML `interp` attribute value.
+    pub fn from_fcpxml(s: &str) -> Self {
+        match s {
+            "easeIn" => Self::EaseIn,
+            "easeOut" => Self::EaseOut,
+            "ease" => Self::EaseInOut,
+            _ => Self::Linear,
+        }
+    }
+
+    /// Emit as FCPXML `interp` attribute value.
+    pub fn to_fcpxml(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::EaseIn => "easeIn",
+            Self::EaseOut => "easeOut",
+            Self::EaseInOut => "ease",
+        }
+    }
+
+    /// Map a linear `t` (0..1) through this interpolation's easing curve.
+    pub fn ease(self, t: f64) -> f64 {
+        match self {
+            Self::Linear => t,
+            Self::EaseIn => cubic_bezier_ease(0.42, 0.0, 1.0, 1.0, t),
+            Self::EaseOut => cubic_bezier_ease(0.0, 0.0, 0.58, 1.0, t),
+            Self::EaseInOut => cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, t),
+        }
+    }
+}
+
+/// Evaluate a cubic bezier curve with control points (x1,y1) and (x2,y2)
+/// at the given linear time `t` (0..1). Returns the eased output value.
+///
+/// Uses Newton-Raphson iteration to invert the X(s) → t mapping, then
+/// evaluates Y(s) for the eased value. This is the standard algorithm
+/// used by CSS transitions / web animation engines.
+fn cubic_bezier_ease(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+
+    // Find s such that bezier_x(s) = t using Newton-Raphson.
+    let mut s = t; // initial guess
+    for _ in 0..8 {
+        let bx = bezier_component(x1, x2, s);
+        let dx = bezier_component_derivative(x1, x2, s);
+        if dx.abs() < 1e-12 {
+            break;
+        }
+        s -= (bx - t) / dx;
+        s = s.clamp(0.0, 1.0);
+    }
+    bezier_component(y1, y2, s)
+}
+
+/// Evaluate one component of a cubic bezier: B(s) = 3(1-s)²·s·p1 + 3(1-s)·s²·p2 + s³
+#[inline]
+fn bezier_component(p1: f64, p2: f64, s: f64) -> f64 {
+    let s2 = s * s;
+    let s3 = s2 * s;
+    let inv = 1.0 - s;
+    3.0 * inv * inv * s * p1 + 3.0 * inv * s2 * p2 + s3
+}
+
+/// Derivative of bezier_component w.r.t. s.
+#[inline]
+fn bezier_component_derivative(p1: f64, p2: f64, s: f64) -> f64 {
+    let s2 = s * s;
+    3.0 * (1.0 - s) * (1.0 - s) * p1 + 6.0 * (1.0 - s) * s * (p2 - p1) + 3.0 * s2 * (1.0 - p2)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -420,7 +517,8 @@ impl Clip {
                     return next.value;
                 }
                 let t = (local_timeline_ns.saturating_sub(prev.time_ns)) as f64 / span as f64;
-                return prev.value + (next.value - prev.value) * t;
+                let eased_t = prev.interpolation.ease(t);
+                return prev.value + (next.value - prev.value) * eased_t;
             }
             prev = next;
         }
@@ -498,17 +596,32 @@ impl Clip {
         timeline_pos_ns: u64,
         value: f64,
     ) -> u64 {
+        self.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+            property,
+            timeline_pos_ns,
+            value,
+            KeyframeInterpolation::Linear,
+        )
+    }
+
+    pub fn upsert_phase1_keyframe_at_timeline_ns_with_interp(
+        &mut self,
+        property: Phase1KeyframeProperty,
+        timeline_pos_ns: u64,
+        value: f64,
+        interpolation: KeyframeInterpolation,
+    ) -> u64 {
         let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
         let clamped_value = Self::clamp_phase1_property_value(property, value);
         let keyframes = self.keyframes_for_phase1_property_mut(property);
         if let Some(existing) = keyframes.iter_mut().find(|kf| kf.time_ns == local_time_ns) {
             existing.value = clamped_value;
-            existing.interpolation = KeyframeInterpolation::Linear;
+            existing.interpolation = interpolation;
         } else {
             keyframes.push(NumericKeyframe {
                 time_ns: local_time_ns,
                 value: clamped_value,
-                interpolation: KeyframeInterpolation::Linear,
+                interpolation,
             });
             keyframes.sort_by_key(|kf| kf.time_ns);
         }
@@ -566,6 +679,42 @@ impl Clip {
                 let diff = if t >= local_ns { t - local_ns } else { local_ns - t };
                 diff <= tolerance_ns
             })
+    }
+
+    /// Return the next keyframe local time strictly after `local_ns` for a single property.
+    pub fn next_keyframe_local_ns_for_property(
+        &self,
+        property: Phase1KeyframeProperty,
+        local_ns: u64,
+    ) -> Option<u64> {
+        let kfs = self.keyframes_for_phase1_property(property);
+        kfs.iter().map(|kf| kf.time_ns).find(|&t| t > local_ns)
+    }
+
+    /// Return the previous keyframe local time strictly before `local_ns` for a single property.
+    pub fn prev_keyframe_local_ns_for_property(
+        &self,
+        property: Phase1KeyframeProperty,
+        local_ns: u64,
+    ) -> Option<u64> {
+        let kfs = self.keyframes_for_phase1_property(property);
+        kfs.iter()
+            .map(|kf| kf.time_ns)
+            .rev()
+            .find(|&t| t < local_ns)
+    }
+
+    /// Return true if a specific property has a keyframe within `tolerance_ns` of `local_ns`.
+    pub fn has_keyframe_at_local_ns_for_property(
+        &self,
+        property: Phase1KeyframeProperty,
+        local_ns: u64,
+        tolerance_ns: u64,
+    ) -> bool {
+        let kfs = self.keyframes_for_phase1_property(property);
+        kfs.iter().any(|kf| {
+            (kf.time_ns as i64 - local_ns as i64).unsigned_abs() <= tolerance_ns
+        })
     }
 
     pub fn source_timecode_start_ns(&self) -> Option<u64> {
@@ -1018,5 +1167,124 @@ mod tests {
         assert_eq!(clip.next_keyframe_local_ns(1_000_000_000), Some(2_000_000_000));
         // prev from 2s -> 1s (deduplicated)
         assert_eq!(clip.prev_keyframe_local_ns(2_000_000_000), Some(1_000_000_000));
+    }
+
+    #[test]
+    fn test_property_specific_keyframe_navigation() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.volume_keyframes.push(NumericKeyframe { time_ns: 500_000_000, value: 0.5, interpolation: KeyframeInterpolation::Linear });
+        clip.volume_keyframes.push(NumericKeyframe { time_ns: 2_000_000_000, value: 0.8, interpolation: KeyframeInterpolation::Linear });
+        clip.scale_keyframes.push(NumericKeyframe { time_ns: 1_000_000_000, value: 1.5, interpolation: KeyframeInterpolation::Linear });
+
+        // Volume nav: 0 → 500ms → 2s
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 0), Some(500_000_000));
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000), Some(2_000_000_000));
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000), None);
+        // Volume prev
+        assert_eq!(clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 2_000_000_000), Some(500_000_000));
+        assert_eq!(clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000), None);
+        // Scale nav should NOT see volume keyframes
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 0), Some(1_000_000_000));
+        assert_eq!(clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Scale, 1_000_000_000), None);
+        // has_keyframe_at_local_ns_for_property
+        assert!(clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Volume, 500_000_000, 100));
+        assert!(!clip.has_keyframe_at_local_ns_for_property(Phase1KeyframeProperty::Scale, 500_000_000, 100));
+    }
+
+    #[test]
+    fn test_cubic_bezier_ease_boundaries() {
+        // All easing curves must pass through (0,0) and (1,1)
+        for interp in KeyframeInterpolation::ALL {
+            let v0 = interp.ease(0.0);
+            let v1 = interp.ease(1.0);
+            assert!((v0 - 0.0).abs() < 1e-9, "{:?} ease(0) = {}", interp, v0);
+            assert!((v1 - 1.0).abs() < 1e-9, "{:?} ease(1) = {}", interp, v1);
+        }
+    }
+
+    #[test]
+    fn test_cubic_bezier_ease_monotonic() {
+        // Easing curves should be monotonically increasing for t in [0,1]
+        for interp in KeyframeInterpolation::ALL {
+            let mut prev = 0.0;
+            for i in 1..=100 {
+                let t = i as f64 / 100.0;
+                let v = interp.ease(t);
+                assert!(v >= prev - 1e-9, "{:?} not monotonic at t={}: {} < {}", interp, t, v, prev);
+                prev = v;
+            }
+        }
+    }
+
+    #[test]
+    fn test_ease_in_slow_start() {
+        // EaseIn: at t=0.25 the output should be less than 0.25 (slow start)
+        let v = KeyframeInterpolation::EaseIn.ease(0.25);
+        assert!(v < 0.25, "EaseIn(0.25) = {} should be < 0.25", v);
+    }
+
+    #[test]
+    fn test_ease_out_fast_start() {
+        // EaseOut: at t=0.25 the output should be greater than 0.25 (fast start)
+        let v = KeyframeInterpolation::EaseOut.ease(0.25);
+        assert!(v > 0.25, "EaseOut(0.25) = {} should be > 0.25", v);
+    }
+
+    #[test]
+    fn test_ease_in_out_symmetric() {
+        // EaseInOut should be roughly symmetric around (0.5, 0.5)
+        let v = KeyframeInterpolation::EaseInOut.ease(0.5);
+        assert!((v - 0.5).abs() < 0.01, "EaseInOut(0.5) = {} should be ~0.5", v);
+    }
+
+    #[test]
+    fn test_evaluate_keyframed_value_ease_in() {
+        // Two keyframes: 0→100 with EaseIn interpolation
+        let kfs = vec![
+            NumericKeyframe { time_ns: 0, value: 0.0, interpolation: KeyframeInterpolation::EaseIn },
+            NumericKeyframe { time_ns: 1_000_000_000, value: 100.0, interpolation: KeyframeInterpolation::Linear },
+        ];
+        // At t=0.5 (500ms), EaseIn should give a value less than 50 (slow start)
+        let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
+        assert!(v < 50.0, "EaseIn at midpoint should be < 50, got {}", v);
+        assert!(v > 0.0, "EaseIn at midpoint should be > 0, got {}", v);
+    }
+
+    #[test]
+    fn test_evaluate_keyframed_value_ease_out() {
+        let kfs = vec![
+            NumericKeyframe { time_ns: 0, value: 0.0, interpolation: KeyframeInterpolation::EaseOut },
+            NumericKeyframe { time_ns: 1_000_000_000, value: 100.0, interpolation: KeyframeInterpolation::Linear },
+        ];
+        // At t=0.5, EaseOut should give a value greater than 50 (fast start)
+        let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
+        assert!(v > 50.0, "EaseOut at midpoint should be > 50, got {}", v);
+        assert!(v < 100.0, "EaseOut at midpoint should be < 100, got {}", v);
+    }
+
+    #[test]
+    fn test_linear_interpolation_unchanged() {
+        // Confirm linear still works as before (no regression)
+        let kfs = vec![
+            NumericKeyframe { time_ns: 0, value: 0.0, interpolation: KeyframeInterpolation::Linear },
+            NumericKeyframe { time_ns: 1_000_000_000, value: 100.0, interpolation: KeyframeInterpolation::Linear },
+        ];
+        let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
+        assert!((v - 50.0).abs() < 0.01, "Linear at midpoint should be 50, got {}", v);
+    }
+
+    #[test]
+    fn test_interp_serde_round_trip() {
+        // Verify serde rename_all = "snake_case" for new variants
+        let json = serde_json::to_string(&KeyframeInterpolation::EaseIn).unwrap();
+        assert_eq!(json, "\"ease_in\"");
+        let json = serde_json::to_string(&KeyframeInterpolation::EaseOut).unwrap();
+        assert_eq!(json, "\"ease_out\"");
+        let json = serde_json::to_string(&KeyframeInterpolation::EaseInOut).unwrap();
+        assert_eq!(json, "\"ease_in_out\"");
+
+        // Round-trip
+        let de: KeyframeInterpolation = serde_json::from_str("\"ease_in_out\"").unwrap();
+        assert_eq!(de, KeyframeInterpolation::EaseInOut);
     }
 }

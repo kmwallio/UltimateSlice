@@ -1831,9 +1831,28 @@ pub fn build_window(
                     let mut proj = project.borrow_mut();
                     proj.dirty = true;
                 }
-                prog_player
-                    .borrow_mut()
-                    .update_audio_for_clip(clip_id, vol as f64, pan as f64);
+                {
+                    let mut pp = prog_player.borrow_mut();
+                    // Sync volume keyframes from project model to player so
+                    // keyframe evaluation is current without a full pipeline reload.
+                    {
+                        let proj = project.borrow();
+                        for track in &proj.tracks {
+                            if let Some(model_clip) =
+                                track.clips.iter().find(|c| c.id == clip_id)
+                            {
+                                if let Some(player_clip) =
+                                    pp.clips.iter_mut().find(|c| c.id == clip_id)
+                                {
+                                    player_clip.volume_keyframes =
+                                        model_clip.volume_keyframes.clone();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    pp.update_audio_for_clip(clip_id, vol as f64, pan as f64);
+                }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -2082,13 +2101,12 @@ pub fn build_window(
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
-                inspector_view.update(&proj, clip_id.as_deref());
                 let playhead_ns = timeline_state_for_sel.borrow().playhead_ns;
+                inspector_view.update(&proj, clip_id.as_deref(), playhead_ns);
                 inspector_view.update_keyframe_indicator(&proj, playhead_ns);
                 // Sync transform overlay handles with selection state,
                 // using keyframe-interpolated values at the current playhead.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
-                    let playhead_ns = timeline_state_for_sel.borrow().playhead_ns;
                     sync_transform_overlay_to_playhead(
                         to,
                         &proj,
@@ -2698,20 +2716,24 @@ pub fn build_window(
                                     if let Some(clip) =
                                         track.clips.iter_mut().find(|c| c.id == clip_id)
                                     {
-                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                        let interp = inspector_view.selected_interpolation();
+                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                             Phase1KeyframeProperty::Scale,
                                             playhead,
                                             sc,
+                                            interp,
                                         );
-                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                             Phase1KeyframeProperty::PositionX,
                                             playhead,
                                             px,
+                                            interp,
                                         );
-                                        clip.upsert_phase1_keyframe_at_timeline_ns(
+                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                             Phase1KeyframeProperty::PositionY,
                                             playhead,
                                             py,
+                                            interp,
                                         );
                                         proj.dirty = true;
                                         changed = true;
@@ -2876,6 +2898,7 @@ pub fn build_window(
         let picture_b_poll = picture_b.clone();
         let transform_overlay_poll = transform_overlay_cell.clone();
         let timeline_state_poll = timeline_state.clone();
+        let inspector_view_poll = inspector_view.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -3059,6 +3082,12 @@ pub fn build_window(
                             pos_ns,
                         );
                     }
+                }
+                // Update inspector sliders to reflect keyframe-evaluated values
+                // at the new playhead position.
+                {
+                    let proj = project.borrow();
+                    inspector_view_poll.update_keyframed_sliders(&proj, pos_ns);
                 }
                 last_pos_ns_c.set(pos_ns);
             }
@@ -3607,11 +3636,9 @@ pub fn build_window(
             ) = {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
-                inspector_view.update(&proj, selected.as_deref());
-                {
-                    let playhead_ns = timeline_state.borrow().playhead_ns;
-                    inspector_view.update_keyframe_indicator(&proj, playhead_ns);
-                }
+                let playhead_ns = timeline_state.borrow().playhead_ns;
+                inspector_view.update(&proj, selected.as_deref(), playhead_ns);
+                inspector_view.update_keyframe_indicator(&proj, playhead_ns);
 
                 // Sync transform overlay: show handles when a clip is selected,
                 // using keyframe-interpolated values at the current playhead.
@@ -5970,6 +5997,7 @@ fn handle_mcp_command(
             property,
             timeline_pos_ns,
             value,
+            interpolation,
             reply,
         } => {
             let Some(property) = Phase1KeyframeProperty::parse(&property) else {
@@ -5978,6 +6006,15 @@ fn handle_mcp_command(
                     .ok();
                 return;
             };
+            let interp = interpolation
+                .as_deref()
+                .map(|s| match s {
+                    "ease_in" | "easeIn" => crate::model::clip::KeyframeInterpolation::EaseIn,
+                    "ease_out" | "easeOut" => crate::model::clip::KeyframeInterpolation::EaseOut,
+                    "ease_in_out" | "ease" | "easeInOut" => crate::model::clip::KeyframeInterpolation::EaseInOut,
+                    _ => crate::model::clip::KeyframeInterpolation::Linear,
+                })
+                .unwrap_or(crate::model::clip::KeyframeInterpolation::Linear);
             let timeline_pos_ns =
                 timeline_pos_ns.unwrap_or_else(|| prog_player.borrow().timeline_pos_ns);
             let mut found = false;
@@ -5987,10 +6024,11 @@ fn handle_mcp_command(
                 'outer: for track in proj.tracks.iter_mut() {
                     for clip in track.clips.iter_mut() {
                         if clip.id == clip_id {
-                            keyframe_time_ns = Some(clip.upsert_phase1_keyframe_at_timeline_ns(
+                            keyframe_time_ns = Some(clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                 property,
                                 timeline_pos_ns,
                                 value,
+                                interp,
                             ));
                             proj.dirty = true;
                             found = true;

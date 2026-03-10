@@ -1,4 +1,4 @@
-use crate::model::clip::{ClipColorLabel, Phase1KeyframeProperty};
+use crate::model::clip::{ClipColorLabel, KeyframeInterpolation, Phase1KeyframeProperty};
 use crate::model::project::Project;
 use gdk4;
 use gio;
@@ -25,6 +25,15 @@ fn linear_to_db_volume(linear: f64) -> f64 {
         VOLUME_DB_MIN
     } else {
         (20.0 * linear.log10()).clamp(VOLUME_DB_MIN, VOLUME_DB_MAX)
+    }
+}
+
+fn interp_idx_to_enum(idx: u32) -> KeyframeInterpolation {
+    match idx {
+        1 => KeyframeInterpolation::EaseIn,
+        2 => KeyframeInterpolation::EaseOut,
+        3 => KeyframeInterpolation::EaseInOut,
+        _ => KeyframeInterpolation::Linear,
     }
 }
 
@@ -110,11 +119,26 @@ pub struct InspectorView {
     pub keyframe_indicator_label: Label,
     pub animation_mode: Rc<Cell<bool>>,
     pub animation_mode_btn: gtk4::ToggleButton,
+    pub interp_dropdown: gtk4::DropDown,
+    // Audio keyframe navigation
+    pub audio_keyframe_indicator_label: Label,
+    pub audio_animation_mode_btn: gtk4::ToggleButton,
 }
 
 impl InspectorView {
+    /// Get the currently selected interpolation mode from the dropdown.
+    pub fn selected_interpolation(&self) -> KeyframeInterpolation {
+        match self.interp_dropdown.selected() {
+            1 => KeyframeInterpolation::EaseIn,
+            2 => KeyframeInterpolation::EaseOut,
+            3 => KeyframeInterpolation::EaseInOut,
+            _ => KeyframeInterpolation::Linear,
+        }
+    }
+
     /// Refresh all fields to show the given clip, or clear if None.
-    pub fn update(&self, project: &Project, clip_id: Option<&str>) {
+    /// `playhead_ns` is used to display keyframe-evaluated values for animated properties.
+    pub fn update(&self, project: &Project, clip_id: Option<&str>, playhead_ns: u64) {
         use crate::model::clip::ClipKind;
 
         let clip = clip_id.and_then(|id| {
@@ -174,8 +198,13 @@ impl InspectorView {
                 self.shadows_slider.set_value(c.shadows as f64);
                 self.midtones_slider.set_value(c.midtones as f64);
                 self.highlights_slider.set_value(c.highlights as f64);
+                // For keyframed properties, show the evaluated value at the playhead
+                let vol_val = c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::Volume,
+                    playhead_ns,
+                );
                 self.volume_slider
-                    .set_value(linear_to_db_volume(c.volume as f64));
+                    .set_value(linear_to_db_volume(vol_val));
                 self.pan_slider.set_value(c.pan as f64);
                 self.crop_left_slider.set_value(c.crop_left as f64);
                 self.crop_right_slider.set_value(c.crop_right as f64);
@@ -184,10 +213,30 @@ impl InspectorView {
                 self.rotate_spin.set_value(c.rotate as f64);
                 self.flip_h_btn.set_active(c.flip_h);
                 self.flip_v_btn.set_active(c.flip_v);
-                self.scale_slider.set_value(c.scale);
-                self.opacity_slider.set_value(c.opacity);
-                self.position_x_slider.set_value(c.position_x);
-                self.position_y_slider.set_value(c.position_y);
+                self.scale_slider.set_value(
+                    c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::Scale,
+                        playhead_ns,
+                    ),
+                );
+                self.opacity_slider.set_value(
+                    c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::Opacity,
+                        playhead_ns,
+                    ),
+                );
+                self.position_x_slider.set_value(
+                    c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::PositionX,
+                        playhead_ns,
+                    ),
+                );
+                self.position_y_slider.set_value(
+                    c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::PositionY,
+                        playhead_ns,
+                    ),
+                );
                 self.title_entry.set_text(&c.title_text);
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
@@ -311,14 +360,97 @@ impl InspectorView {
                 let tolerance = project.frame_rate.frame_duration_ns() / 2;
                 if c.has_keyframe_at_local_ns(local, tolerance) {
                     self.keyframe_indicator_label.set_text("◆ Keyframe");
+                    // Update dropdown to show the interpolation of the first matching keyframe
+                    let all_kfs = [
+                        &c.scale_keyframes[..],
+                        &c.opacity_keyframes[..],
+                        &c.position_x_keyframes[..],
+                        &c.position_y_keyframes[..],
+                        &c.volume_keyframes[..],
+                    ];
+                    for kfs in &all_kfs {
+                        if let Some(kf) = kfs.iter().find(|kf| {
+                            (kf.time_ns as i64 - local as i64).unsigned_abs() <= tolerance
+                        }) {
+                            let idx = match kf.interpolation {
+                                KeyframeInterpolation::Linear => 0,
+                                KeyframeInterpolation::EaseIn => 1,
+                                KeyframeInterpolation::EaseOut => 2,
+                                KeyframeInterpolation::EaseInOut => 3,
+                            };
+                            self.interp_dropdown.set_selected(idx);
+                            break;
+                        }
+                    }
                 } else {
                     self.keyframe_indicator_label.set_text("");
+                }
+                // Audio (volume) keyframe indicator
+                if c.has_keyframe_at_local_ns_for_property(
+                    Phase1KeyframeProperty::Volume,
+                    local,
+                    tolerance,
+                ) {
+                    self.audio_keyframe_indicator_label
+                        .set_text("◆ Vol KF");
+                } else {
+                    self.audio_keyframe_indicator_label.set_text("");
                 }
             }
             None => {
                 self.keyframe_indicator_label.set_text("");
+                self.audio_keyframe_indicator_label.set_text("");
             }
         }
+    }
+
+    /// Lightweight update of only the 5 keyframed property sliders and keyframe
+    /// indicators.  Called when the playhead moves (scrub, nav, playback) without
+    /// a full clip re-selection.
+    pub fn update_keyframed_sliders(&self, project: &Project, playhead_ns: u64) {
+        let clip = self.selected_clip_id.borrow().clone().and_then(|id| {
+            project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == id)
+                .cloned()
+        });
+        if let Some(c) = clip {
+            *self.updating.borrow_mut() = true;
+            self.volume_slider.set_value(linear_to_db_volume(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::Volume,
+                    playhead_ns,
+                ),
+            ));
+            self.scale_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::Scale,
+                    playhead_ns,
+                ),
+            );
+            self.opacity_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::Opacity,
+                    playhead_ns,
+                ),
+            );
+            self.position_x_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::PositionX,
+                    playhead_ns,
+                ),
+            );
+            self.position_y_slider.set_value(
+                c.value_for_phase1_property_at_timeline_ns(
+                    Phase1KeyframeProperty::PositionY,
+                    playhead_ns,
+                ),
+            );
+            *self.updating.borrow_mut() = false;
+        }
+        self.update_keyframe_indicator(project, playhead_ns);
     }
 }
 
@@ -620,6 +752,28 @@ pub fn build_inspector(
     volume_keyframe_row.append(&volume_remove_keyframe_btn);
     audio_inner.append(&volume_keyframe_row);
 
+    // ── Audio keyframe navigation + animation mode ──
+    let audio_keyframe_nav_row = GBox::new(Orientation::Horizontal, 4);
+    let audio_prev_keyframe_btn = Button::with_label("◀ Prev KF");
+    audio_prev_keyframe_btn.set_tooltip_text(Some("Jump to previous volume keyframe"));
+    let audio_next_keyframe_btn = Button::with_label("Next KF ▶");
+    audio_next_keyframe_btn.set_tooltip_text(Some("Jump to next volume keyframe"));
+    let audio_keyframe_indicator_label = Label::new(None);
+    audio_keyframe_indicator_label.add_css_class("dim-label");
+    audio_keyframe_indicator_label.set_hexpand(true);
+    audio_keyframe_indicator_label.set_halign(gtk4::Align::Center);
+    audio_keyframe_nav_row.append(&audio_prev_keyframe_btn);
+    audio_keyframe_nav_row.append(&audio_keyframe_indicator_label);
+    audio_keyframe_nav_row.append(&audio_next_keyframe_btn);
+    audio_inner.append(&audio_keyframe_nav_row);
+
+    let audio_animation_mode_btn = gtk4::ToggleButton::with_label("⏺ Record Keyframes");
+    audio_animation_mode_btn.set_tooltip_text(Some(
+        "When active, volume slider changes auto-create keyframes (Shift+K)",
+    ));
+    audio_animation_mode_btn.set_active(false);
+    audio_inner.append(&audio_animation_mode_btn);
+
     row_label(&audio_inner, "Pan");
     let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     pan_slider.set_value(0.0);
@@ -661,6 +815,17 @@ pub fn build_inspector(
     ));
     animation_mode_btn.set_active(false);
     transform_inner.append(&animation_mode_btn);
+
+    let interp_row = GBox::new(Orientation::Horizontal, 4);
+    let interp_label = Label::new(Some("Interpolation"));
+    interp_label.set_halign(gtk4::Align::Start);
+    let interp_dropdown = gtk4::DropDown::from_strings(&["Linear", "Ease In", "Ease Out", "Ease In/Out"]);
+    interp_dropdown.set_selected(0);
+    interp_dropdown.set_tooltip_text(Some("Interpolation mode for new keyframes"));
+    interp_dropdown.set_hexpand(true);
+    interp_row.append(&interp_label);
+    interp_row.append(&interp_dropdown);
+    transform_inner.append(&interp_row);
 
     transform_inner.append(&Separator::new(Orientation::Horizontal));
 
@@ -1088,6 +1253,7 @@ pub fn build_inspector(
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let on_clip_changed = on_clip_changed.clone();
+        let interp_dropdown = interp_dropdown.clone();
         volume_slider.connect_value_changed(move |s| {
             if *updating.borrow() {
                 return;
@@ -1099,24 +1265,27 @@ pub fn build_inspector(
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.volume = linear_vol;
-                            if animation_mode.get() {
-                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                            let has_kfs = !clip.volume_keyframes.is_empty();
+                            if animation_mode.get() || has_kfs {
+                                let interp = interp_idx_to_enum(interp_dropdown.selected());
+                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                     Phase1KeyframeProperty::Volume,
                                     current_playhead_ns(),
                                     linear_vol as f64,
+                                    interp,
                                 );
+                            } else {
+                                clip.volume = linear_vol;
                             }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                if animation_mode.get() {
-                    on_clip_changed();
-                } else {
-                    on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
-                }
+                // Use lightweight audio update (syncs keyframes to player without
+                // full pipeline reload). on_clip_changed would cause a heavy rebuild
+                // and visible playhead jump for every slider tick.
+                on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
             }
         });
     }
@@ -1531,6 +1700,7 @@ pub fn build_inspector(
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let on_clip_changed = on_clip_changed.clone();
+        let interp_dropdown_s = interp_dropdown.clone();
         scale_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1542,20 +1712,29 @@ pub fn build_inspector(
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.scale = sc;
-                            if animation_mode.get() {
-                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                            let has_kfs = !clip.scale_keyframes.is_empty();
+                            if animation_mode.get() || has_kfs {
+                                let interp = interp_idx_to_enum(interp_dropdown_s.selected());
+                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                     Phase1KeyframeProperty::Scale,
                                     current_playhead_ns(),
                                     sc,
+                                    interp,
                                 );
+                            } else {
+                                clip.scale = sc;
                             }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                if animation_mode.get() {
+                if animation_mode.get() || {
+                    let proj = project.borrow();
+                    proj.tracks.iter().flat_map(|t| t.clips.iter())
+                        .find(|c| &c.id == clip_id)
+                        .map_or(false, |c| !c.scale_keyframes.is_empty())
+                } {
                     on_clip_changed();
                 } else {
                     let cl = crop_left_s.value() as i32;
@@ -1590,6 +1769,7 @@ pub fn build_inspector(
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let on_clip_changed = on_clip_changed.clone();
+        let interp_dropdown_o = interp_dropdown.clone();
         opacity_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1601,20 +1781,29 @@ pub fn build_inspector(
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.opacity = opacity;
-                            if animation_mode.get() {
-                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                            let has_kfs = !clip.opacity_keyframes.is_empty();
+                            if animation_mode.get() || has_kfs {
+                                let interp = interp_idx_to_enum(interp_dropdown_o.selected());
+                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                     Phase1KeyframeProperty::Opacity,
                                     current_playhead_ns(),
                                     opacity,
+                                    interp,
                                 );
+                            } else {
+                                clip.opacity = opacity;
                             }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                if animation_mode.get() {
+                if animation_mode.get() || {
+                    let proj = project.borrow();
+                    proj.tracks.iter().flat_map(|t| t.clips.iter())
+                        .find(|c| &c.id == clip_id)
+                        .map_or(false, |c| !c.opacity_keyframes.is_empty())
+                } {
                     on_clip_changed();
                 } else {
                     on_opacity_changed(opacity);
@@ -1640,6 +1829,7 @@ pub fn build_inspector(
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let on_clip_changed = on_clip_changed.clone();
+        let interp_dropdown_px = interp_dropdown.clone();
         position_x_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1651,20 +1841,29 @@ pub fn build_inspector(
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.position_x = px;
-                            if animation_mode.get() {
-                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                            let has_kfs = !clip.position_x_keyframes.is_empty();
+                            if animation_mode.get() || has_kfs {
+                                let interp = interp_idx_to_enum(interp_dropdown_px.selected());
+                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                     Phase1KeyframeProperty::PositionX,
                                     current_playhead_ns(),
                                     px,
+                                    interp,
                                 );
+                            } else {
+                                clip.position_x = px;
                             }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                if animation_mode.get() {
+                if animation_mode.get() || {
+                    let proj = project.borrow();
+                    proj.tracks.iter().flat_map(|t| t.clips.iter())
+                        .find(|c| &c.id == clip_id)
+                        .map_or(false, |c| !c.position_x_keyframes.is_empty())
+                } {
                     on_clip_changed();
                 } else {
                     let cl = crop_left_s.value() as i32;
@@ -1709,6 +1908,7 @@ pub fn build_inspector(
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let on_clip_changed = on_clip_changed.clone();
+        let interp_dropdown_py = interp_dropdown.clone();
         position_y_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -1720,20 +1920,29 @@ pub fn build_inspector(
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.position_y = py;
-                            if animation_mode.get() {
-                                clip.upsert_phase1_keyframe_at_timeline_ns(
+                            let has_kfs = !clip.position_y_keyframes.is_empty();
+                            if animation_mode.get() || has_kfs {
+                                let interp = interp_idx_to_enum(interp_dropdown_py.selected());
+                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                     Phase1KeyframeProperty::PositionY,
                                     current_playhead_ns(),
                                     py,
+                                    interp,
                                 );
+                            } else {
+                                clip.position_y = py;
                             }
                             proj.dirty = true;
                             break;
                         }
                     }
                 }
-                if animation_mode.get() {
+                if animation_mode.get() || {
+                    let proj = project.borrow();
+                    proj.tracks.iter().flat_map(|t| t.clips.iter())
+                        .find(|c| &c.id == clip_id)
+                        .map_or(false, |c| !c.position_y_keyframes.is_empty())
+                } {
                     on_clip_changed();
                 } else {
                     let cl = crop_left_s.value() as i32;
@@ -1771,6 +1980,7 @@ pub fn build_inspector(
         current_playhead_ns: Rc<dyn Fn() -> u64>,
         on_clip_changed: Rc<dyn Fn()>,
         value_provider: Rc<dyn Fn() -> f64>,
+        interp_provider: Rc<dyn Fn() -> KeyframeInterpolation>,
     ) {
         set_btn.connect_clicked({
             let project = project.clone();
@@ -1779,6 +1989,7 @@ pub fn build_inspector(
             let current_playhead_ns = current_playhead_ns.clone();
             let on_clip_changed = on_clip_changed.clone();
             let value_provider = value_provider.clone();
+            let interp_provider = interp_provider.clone();
             move |_| {
                 if *updating.borrow() {
                     return;
@@ -1788,15 +1999,17 @@ pub fn build_inspector(
                 };
                 let timeline_pos_ns = current_playhead_ns();
                 let value = value_provider();
+                let interp = interp_provider();
                 let mut changed = false;
                 {
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.upsert_phase1_keyframe_at_timeline_ns(
+                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
                                 property,
                                 timeline_pos_ns,
                                 value,
+                                interp,
                             );
                             proj.dirty = true;
                             changed = true;
@@ -1845,6 +2058,18 @@ pub fn build_inspector(
         });
     }
 
+    let interp_provider: Rc<dyn Fn() -> KeyframeInterpolation> = Rc::new({
+        let interp_dropdown = interp_dropdown.clone();
+        move || {
+            match interp_dropdown.selected() {
+                1 => KeyframeInterpolation::EaseIn,
+                2 => KeyframeInterpolation::EaseOut,
+                3 => KeyframeInterpolation::EaseInOut,
+                _ => KeyframeInterpolation::Linear,
+            }
+        }
+    });
+
     connect_phase1_keyframe_buttons(
         &scale_set_keyframe_btn,
         &scale_remove_keyframe_btn,
@@ -1858,6 +2083,7 @@ pub fn build_inspector(
             let scale_slider = scale_slider.clone();
             move || scale_slider.value()
         }),
+        interp_provider.clone(),
     );
     connect_phase1_keyframe_buttons(
         &opacity_set_keyframe_btn,
@@ -1872,6 +2098,7 @@ pub fn build_inspector(
             let opacity_slider = opacity_slider.clone();
             move || opacity_slider.value().clamp(0.0, 1.0)
         }),
+        interp_provider.clone(),
     );
     connect_phase1_keyframe_buttons(
         &position_x_set_keyframe_btn,
@@ -1886,6 +2113,7 @@ pub fn build_inspector(
             let position_x_slider = position_x_slider.clone();
             move || position_x_slider.value()
         }),
+        interp_provider.clone(),
     );
     connect_phase1_keyframe_buttons(
         &position_y_set_keyframe_btn,
@@ -1900,6 +2128,7 @@ pub fn build_inspector(
             let position_y_slider = position_y_slider.clone();
             move || position_y_slider.value()
         }),
+        interp_provider.clone(),
     );
     connect_phase1_keyframe_buttons(
         &volume_set_keyframe_btn,
@@ -1914,6 +2143,7 @@ pub fn build_inspector(
             let volume_slider = volume_slider.clone();
             move || db_to_linear_volume(volume_slider.value())
         }),
+        interp_provider.clone(),
     );
 
     // ── Keyframe navigation button wiring ──
@@ -1960,11 +2190,75 @@ pub fn build_inspector(
         }
     });
 
-    // ── Animation mode toggle wiring ──
+    // ── Animation mode toggle wiring (synced between transform + audio sections) ──
     animation_mode_btn.connect_toggled({
         let animation_mode = animation_mode.clone();
+        let audio_btn = audio_animation_mode_btn.clone();
         move |btn| {
             animation_mode.set(btn.is_active());
+            if audio_btn.is_active() != btn.is_active() {
+                audio_btn.set_active(btn.is_active());
+            }
+        }
+    });
+    audio_animation_mode_btn.connect_toggled({
+        let animation_mode = animation_mode.clone();
+        let transform_btn = animation_mode_btn.clone();
+        move |btn| {
+            animation_mode.set(btn.is_active());
+            if transform_btn.is_active() != btn.is_active() {
+                transform_btn.set_active(btn.is_active());
+            }
+        }
+    });
+
+    // ── Audio (volume) keyframe navigation ──
+    audio_prev_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else { return };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(prev_local) = clip.prev_keyframe_local_ns_for_property(
+                        Phase1KeyframeProperty::Volume,
+                        local,
+                    ) {
+                        let timeline_ns = clip.timeline_start.saturating_add(prev_local);
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    audio_next_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else { return };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(next_local) = clip.next_keyframe_local_ns_for_property(
+                        Phase1KeyframeProperty::Volume,
+                        local,
+                    ) {
+                        let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
         }
     });
 
@@ -2496,6 +2790,9 @@ pub fn build_inspector(
         keyframe_indicator_label,
         animation_mode,
         animation_mode_btn,
+        interp_dropdown,
+        audio_keyframe_indicator_label,
+        audio_animation_mode_btn,
     });
 
     (vbox, view)

@@ -218,6 +218,7 @@ pub enum McpCommand {
         property: String,
         timeline_pos_ns: Option<u64>,
         value: f64,
+        interpolation: Option<String>,
         reply: SyncSender<Value>,
     },
     RemoveClipKeyframe {
