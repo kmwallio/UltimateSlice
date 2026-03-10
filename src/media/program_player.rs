@@ -462,6 +462,8 @@ struct VideoSlot {
     audio_mixer_pad: Option<gst::Pad>,
     /// `audioconvert` element between decoder audio and audiomixer (must be cleaned up).
     audio_conv: Option<gst::Element>,
+    /// Optional per-slot `audiopanorama` element for pan automation.
+    audio_panorama: Option<gst::Element>,
     /// Optional per-slot `level` element for per-track metering.
     audio_level: Option<gst::Element>,
     /// Per-slot video effect elements.
@@ -2307,6 +2309,16 @@ impl ProgramPlayer {
             .clamp(0.0, MAX_PREVIEW_AUDIO_GAIN)
     }
 
+    fn effective_main_clip_pan(&self, clip_idx: usize, timeline_pos_ns: u64) -> f64 {
+        let Some(clip) = self.clips.get(clip_idx) else {
+            return 0.0;
+        };
+        if self.reverse_video_ducked_clip_idx == Some(clip_idx) {
+            return 0.0;
+        }
+        clip.pan_at_timeline_ns(timeline_pos_ns).clamp(-1.0, 1.0)
+    }
+
     fn effective_audio_source_volume(
         &self,
         source: AudioCurrentSource,
@@ -2377,6 +2389,14 @@ impl ProgramPlayer {
                     self.effective_main_clip_volume(slot.clip_idx, timeline_pos_ns)
                 };
                 pad.set_property("volume", volume);
+            }
+            if let Some(ref pan_elem) = slot.audio_panorama {
+                let pan = if slot.hidden {
+                    0.0
+                } else {
+                    self.effective_main_clip_pan(slot.clip_idx, timeline_pos_ns)
+                };
+                pan_elem.set_property("panorama", pan);
             }
         }
     }
@@ -5188,6 +5208,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             self.pipeline.remove(ac).ok();
         }
+        if let Some(ref ap) = slot.audio_panorama {
+            self.pipeline.remove(ap).ok();
+        }
         if let Some(ref lv) = slot.audio_level {
             self.pipeline.remove(lv).ok();
         }
@@ -5203,6 +5226,10 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             let _ = ac.set_state(gst::State::Null);
             let _ = ac.state(gst::ClockTime::from_mseconds(100));
+        }
+        if let Some(ref ap) = slot.audio_panorama {
+            let _ = ap.set_state(gst::State::Null);
+            let _ = ap.state(gst::ClockTime::from_mseconds(100));
         }
         if let Some(ref lv) = slot.audio_level {
             let _ = lv.set_state(gst::State::Null);
@@ -5843,9 +5870,10 @@ impl ProgramPlayer {
             return None;
         }
 
-        // Audio path: audioconvert → [level] → audiomixer pad.
-        let (audio_conv, audio_level, amix_pad) = {
+        // Audio path: audioconvert → [audiopanorama] → [level] → audiomixer pad.
+        let (audio_conv, audio_panorama, audio_level, amix_pad) = {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
             let mut lv = gst::ElementFactory::make("level")
                 .property("post-messages", true)
                 .property("interval", 50_000_000u64)
@@ -5854,12 +5882,31 @@ impl ProgramPlayer {
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
                     let mut link_src = ac.static_pad("src");
+                    if let Some(ref pano) = ap {
+                        if self.pipeline.add(pano).is_ok() {
+                            pano.set_property(
+                                "panorama",
+                                self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns),
+                            );
+                            if let (Some(ac_src), Some(pano_sink)) =
+                                (ac.static_pad("src"), pano.static_pad("sink"))
+                            {
+                                let _ = ac_src.link(&pano_sink);
+                                link_src = pano.static_pad("src");
+                            } else {
+                                self.pipeline.remove(pano).ok();
+                                ap = None;
+                            }
+                        } else {
+                            ap = None;
+                        }
+                    }
                     if let Some(ref level) = lv {
                         if self.pipeline.add(level).is_ok() {
-                            if let (Some(ac_src), Some(level_sink)) =
-                                (ac.static_pad("src"), level.static_pad("sink"))
+                            if let (Some(link_out), Some(level_sink)) =
+                                (link_src.clone(), level.static_pad("sink"))
                             {
-                                let _ = ac_src.link(&level_sink);
+                                let _ = link_out.link(&level_sink);
                                 link_src = level.static_pad("src");
                             } else {
                                 self.pipeline.remove(level).ok();
@@ -5886,14 +5933,16 @@ impl ProgramPlayer {
                         None
                     }
                 } else {
+                    ap = None;
                     lv = None;
                     None
                 }
             } else {
+                ap = None;
                 lv = None;
                 None
             };
-            (ac, lv, pad)
+            (ac, ap, lv, pad)
         };
 
         // Dynamic pad-added: only link audio pads (no video sink available).
@@ -5925,6 +5974,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref ap) = audio_panorama {
+            let _ = ap.sync_state_with_parent();
+        }
         if let Some(ref lv) = audio_level {
             let _ = lv.sync_state_with_parent();
         }
@@ -5942,6 +5994,7 @@ impl ProgramPlayer {
             compositor_pad: None,
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_panorama,
             audio_level,
             videobalance: None,
             coloradj_rgb: None,
@@ -6066,6 +6119,7 @@ impl ProgramPlayer {
         }
 
         let audio_conv = gst::ElementFactory::make("audioconvert").build().ok();
+        let mut audio_panorama = gst::ElementFactory::make("audiopanorama").build().ok();
         let mut audio_level = gst::ElementFactory::make("level")
             .property("post-messages", true)
             .property("interval", 50_000_000u64)
@@ -6077,12 +6131,28 @@ impl ProgramPlayer {
             if self.pipeline.add(ac).is_ok() {
                 audio_sink = ac.static_pad("sink");
                 let mut link_src = ac.static_pad("src");
+                if let Some(ref pano) = audio_panorama {
+                    if self.pipeline.add(pano).is_ok() {
+                        pano.set_property("panorama", 0.0_f64);
+                        if let (Some(ac_src), Some(pano_sink)) =
+                            (ac.static_pad("src"), pano.static_pad("sink"))
+                        {
+                            let _ = ac_src.link(&pano_sink);
+                            link_src = pano.static_pad("src");
+                        } else {
+                            self.pipeline.remove(pano).ok();
+                            audio_panorama = None;
+                        }
+                    } else {
+                        audio_panorama = None;
+                    }
+                }
                 if let Some(ref level) = audio_level {
                     if self.pipeline.add(level).is_ok() {
-                        if let (Some(ac_src), Some(level_sink)) =
-                            (ac.static_pad("src"), level.static_pad("sink"))
+                        if let (Some(link_out), Some(level_sink)) =
+                            (link_src.clone(), level.static_pad("sink"))
                         {
-                            let _ = ac_src.link(&level_sink);
+                            let _ = link_out.link(&level_sink);
                             link_src = level.static_pad("src");
                         }
                     } else {
@@ -6097,6 +6167,7 @@ impl ProgramPlayer {
                     amix_pad = Some(mp);
                 }
             } else {
+                audio_panorama = None;
                 audio_level = None;
             }
         }
@@ -6170,6 +6241,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref ap) = audio_panorama {
+            let _ = ap.sync_state_with_parent();
+        }
         if let Some(ref lv) = audio_level {
             let _ = lv.sync_state_with_parent();
         }
@@ -6185,6 +6259,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad),
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_panorama,
             audio_level,
             videobalance: None,
             coloradj_rgb: None,
@@ -6717,9 +6792,10 @@ impl ProgramPlayer {
             });
         }
 
-        // Create audio path: audioconvert → [level] → audiomixer pad.
-        let (audio_conv, audio_level, amix_pad) = if clip_has_audio {
+        // Create audio path: audioconvert → [audiopanorama] → [level] → audiomixer pad.
+        let (audio_conv, audio_panorama, audio_level, amix_pad) = if clip_has_audio {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
             let mut lv = gst::ElementFactory::make("level")
                 .property("post-messages", true)
                 .property("interval", 50_000_000u64)
@@ -6728,12 +6804,31 @@ impl ProgramPlayer {
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
                     let mut link_src = ac.static_pad("src");
+                    if let Some(ref pano) = ap {
+                        if self.pipeline.add(pano).is_ok() {
+                            pano.set_property(
+                                "panorama",
+                                self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns),
+                            );
+                            if let (Some(ac_src), Some(pano_sink)) =
+                                (ac.static_pad("src"), pano.static_pad("sink"))
+                            {
+                                let _ = ac_src.link(&pano_sink);
+                                link_src = pano.static_pad("src");
+                            } else {
+                                self.pipeline.remove(pano).ok();
+                                ap = None;
+                            }
+                        } else {
+                            ap = None;
+                        }
+                    }
                     if let Some(ref level) = lv {
                         if self.pipeline.add(level).is_ok() {
-                            if let (Some(ac_src), Some(level_sink)) =
-                                (ac.static_pad("src"), level.static_pad("sink"))
+                            if let (Some(link_out), Some(level_sink)) =
+                                (link_src.clone(), level.static_pad("sink"))
                             {
-                                let _ = ac_src.link(&level_sink);
+                                let _ = link_out.link(&level_sink);
                                 link_src = level.static_pad("src");
                             } else {
                                 self.pipeline.remove(level).ok();
@@ -6760,20 +6855,22 @@ impl ProgramPlayer {
                         None
                     }
                 } else {
+                    ap = None;
                     lv = None;
                     None
                 }
             } else {
+                ap = None;
                 lv = None;
                 None
             };
-            (ac, lv, pad)
+            (ac, ap, lv, pad)
         } else {
             log::info!(
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (None, None, None)
+            (None, None, None, None)
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -6861,6 +6958,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref ap) = audio_panorama {
+            let _ = ap.sync_state_with_parent();
+        }
         if let Some(ref lv) = audio_level {
             let _ = lv.sync_state_with_parent();
         }
@@ -6876,6 +6976,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad.clone()),
             audio_mixer_pad: amix_pad.clone(),
             audio_conv: audio_conv.clone(),
+            audio_panorama: audio_panorama.clone(),
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
             coloradj_rgb: coloradj_rgb.clone(),
@@ -6935,6 +7036,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad),
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_panorama,
             audio_level,
             videobalance,
             coloradj_rgb,
@@ -8839,6 +8941,7 @@ mod tests {
             compositor_pad: None,
             audio_mixer_pad: None,
             audio_conv: None,
+            audio_panorama: None,
             audio_level: None,
             videobalance: if has_videobalance { identity() } else { None },
             coloradj_rgb: if has_coloradj_rgb { identity() } else { None },
