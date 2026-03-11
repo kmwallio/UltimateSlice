@@ -6865,6 +6865,32 @@ fn handle_mcp_command(
             }
         }
 
+        McpCommand::ExportTimelineSnapshot {
+            path,
+            width,
+            height,
+            reply,
+        } => {
+            if path.is_empty() {
+                reply
+                    .send(json!({"ok": false, "error": "path is required"}))
+                    .ok();
+            } else {
+                let st = timeline_state.borrow();
+                match crate::ui::timeline::widget::export_timeline_snapshot_png(
+                    &st,
+                    width as i32,
+                    height as i32,
+                    &path,
+                ) {
+                    Ok(()) => reply
+                        .send(json!({"ok": true, "path": path, "width": width, "height": height}))
+                        .ok(),
+                    Err(e) => reply.send(json!({"ok": false, "error": e})).ok(),
+                };
+            }
+        }
+
         McpCommand::Play { reply } => {
             if let Some(cb) = timeline_state.borrow().on_extraction_pause.clone() {
                 cb(true);
