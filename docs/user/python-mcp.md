@@ -59,6 +59,7 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py set_realtime_preview '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_experimental_preview_optimizations '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_background_prerender '{"enabled":true}'`
+- `python3 tools/mcp_call.py get_performance_snapshot '{}'`
 
 `set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
 

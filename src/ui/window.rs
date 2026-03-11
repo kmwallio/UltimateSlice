@@ -4963,6 +4963,47 @@ fn handle_mcp_command(
                 .ok();
         }
 
+        McpCommand::GetPerformanceSnapshot { reply } => {
+            let snapshot = prog_player.borrow().performance_snapshot();
+            let transition_metrics: Vec<_> = snapshot
+                .transition_metrics
+                .iter()
+                .map(|metric| {
+                    json!({
+                        "kind": metric.kind.clone(),
+                        "hit": metric.hit,
+                        "miss": metric.miss,
+                        "hit_rate_percent": metric.hit_rate_percent
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({
+                    "player_state": snapshot.player_state,
+                    "playback_priority": snapshot.playback_priority,
+                    "timeline_pos_ns": snapshot.timeline_pos_ns,
+                    "background_prerender_enabled": snapshot.background_prerender_enabled,
+                    "prerender_total_requested": snapshot.prerender_total_requested,
+                    "prerender_pending": snapshot.prerender_pending,
+                    "prerender_ready": snapshot.prerender_ready,
+                    "prerender_failed": snapshot.prerender_failed,
+                    "prewarmed_boundary_ns": snapshot.prewarmed_boundary_ns,
+                    "active_prerender_segment_key": snapshot.active_prerender_segment_key,
+                    "rebuild_history_samples": snapshot.rebuild_history_samples,
+                    "rebuild_history_recent_ms": snapshot.rebuild_history_recent_ms,
+                    "rebuild_latest_ms": snapshot.rebuild_latest_ms,
+                    "rebuild_p50_ms": snapshot.rebuild_p50_ms,
+                    "rebuild_p75_ms": snapshot.rebuild_p75_ms,
+                    "transition_hits_total": snapshot.transition_hits_total,
+                    "transition_misses_total": snapshot.transition_misses_total,
+                    "transition_hit_rate_percent": snapshot.transition_hit_rate_percent,
+                    "transition_low_hitrate_pressure": snapshot.transition_low_hitrate_pressure,
+                    "prerender_queue_pressure": snapshot.prerender_queue_pressure,
+                    "transition_metrics": transition_metrics
+                }))
+                .ok();
+        }
+
         McpCommand::SetMagneticMode { enabled, reply } => {
             timeline_state.borrow_mut().magnetic_mode = enabled;
             reply

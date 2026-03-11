@@ -100,6 +100,10 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - During heavy 3+ track playback overlap, the monitor enables an audio-master "drop-late" preview path so late video frames are dropped rather than queued behind audio; when overlap drops or playback pauses/stops, normal non-dropping buffering is restored.
 - During the same heavy-overlap windows, per-clip compositor branch queues also switch to drop-late mode to reduce branch backpressure and boundary handoff stalls.
 - During playback, the monitor also prewarms the next near-future boundary clip set (look-ahead probe/path warm-up), including lightweight incoming decoder/effects resource warm-up, to reduce transition-handoff stalls.
+- In **Smooth** playback priority with background prerender enabled, UltimateSlice prewarms a slightly deeper upcoming-boundary horizon (and farther lookahead) for transition windows; when background prerender jobs are already heavily queued, it automatically falls back to the baseline depth to avoid overscheduling.
+- Program Monitor logs now include periodic transition prerender hit/miss summaries by transition kind, which helps profiling runs identify where prerender is being generated but not consumed.
+- Smooth-mode transition prewarm depth/lookahead is also auto-tuned from recent prerender hit/miss history: if hit rate stays low after enough samples, prewarm temporarily expands (bounded by queue-pressure guardrails) to improve prerender availability.
+- Transition prerender windows include a small frame padding around overlap boundaries; incoming transition input is held through pre-overlap padding so source timing stays correct while reducing edge handoff misses.
 
 ## Seeking
 
@@ -134,5 +138,6 @@ When **Reverse** is enabled on a clip, Program Monitor preview plays that clip b
 ## MCP Automation
 
 - `seek_playhead` seeks the timeline/program-monitor playhead to an absolute nanosecond position.
+- `get_performance_snapshot` returns compact Program Monitor performance metrics for automation (prerender queue/segment state, recent rebuild timings, and transition prerender hit/miss rates).
 - `export_displayed_frame` exports the current displayed frame to a binary PPM (`P6`) image file.
 - `take_screenshot` captures a PNG screenshot of the full application window using the GTK snapshot API and GSK `CairoRenderer`. The PNG is written to the current working directory as `ultimateslice-screenshot-<unix_epoch>.png`.

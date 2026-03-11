@@ -211,6 +211,11 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_performance_snapshot",
+            "description": "Return compact Program Monitor performance counters for tuning: prerender queue state, rebuild telemetry, and transition prerender hit/miss metrics.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "set_magnetic_mode",
             "description": "Enable or disable magnetic timeline mode (gap-free edits on the edited track).",
             "inputSchema": {
@@ -936,6 +941,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "list_clips"
             | "get_timeline_settings"
             | "get_playhead_position"
+            | "get_performance_snapshot"
             | "get_preferences"
             | "list_export_presets"
             | "list_library"
@@ -971,6 +977,7 @@ fn dispatch_tool_payload(
         },
         "get_timeline_settings" => McpCommand::GetTimelineSettings { reply: tx },
         "get_playhead_position" => McpCommand::GetPlayheadPosition { reply: tx },
+        "get_performance_snapshot" => McpCommand::GetPerformanceSnapshot { reply: tx },
         "set_magnetic_mode" => McpCommand::SetMagneticMode {
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
@@ -1650,6 +1657,34 @@ mod tests {
         let params = json!({
             "name": "set_track_solo",
             "arguments": { "track_id": "track-1", "solo": true }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_get_performance_snapshot() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::GetPerformanceSnapshot { reply } => {
+                    reply
+                        .send(json!({
+                            "player_state": "paused",
+                            "prerender_pending": 0
+                        }))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(8);
+        let params = json!({
+            "name": "get_performance_snapshot",
+            "arguments": {}
         });
         let mut cache = std::collections::HashMap::new();
         let response = call_tool(&id, &params, &sender, &mut cache);

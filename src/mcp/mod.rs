@@ -25,6 +25,9 @@ pub enum McpCommand {
     GetPlayheadPosition {
         reply: SyncSender<Value>,
     },
+    GetPerformanceSnapshot {
+        reply: SyncSender<Value>,
+    },
     SetMagneticMode {
         enabled: bool,
         reply: SyncSender<Value>,

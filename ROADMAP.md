@@ -131,6 +131,7 @@ Tracking docs:
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
 - [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
+- [x] MCP performance profiling tool `get_performance_snapshot` (prerender queue/transition hit-rate/rebuild telemetry snapshot)
 - [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
 - [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
 - [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
@@ -285,10 +286,14 @@ Tracking docs:
            - [x] Prerender promotion correctness: when prerender becomes ready mid-overlap, force full rebuild (bypass continue-decoder short-circuit) so prerender segment is actually consumed; add explicit unavailable/promote/used diagnostics
             - [x] Idle prerender warmup + shared status bar: when background prerender is enabled, schedule nearby prerender jobs while paused/stopped and surface progress in the existing proxy generation status bar
             - [x] Status-bar quick toggle for background prerender next to Track Audio Levels
-            - [x] Status-bar Background Render toggle icon state cues (process-stop/system-run for off/on)
-            - [x] Prerender-exit warmup: while a prerender slot is active, prewarm the immediate post-prerender boundary clip resources to reduce handoff stalls
-            - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
-          - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
+             - [x] Status-bar Background Render toggle icon state cues (process-stop/system-run for off/on)
+             - [x] Prerender-exit warmup: while a prerender slot is active, prewarm the immediate post-prerender boundary clip resources to reduce handoff stalls
+             - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
+             - [x] Adaptive transition prerender prewarm horizon: in Smooth mode, scan one extra upcoming boundary and farther lookahead for prerender scheduling, while limiting to baseline depth when prerender queue is already busy
+             - [x] Transition prerender telemetry counters: log per-transition prerender hit/miss outcomes to guide future prewarm/priority tuning
+             - [x] Transition prerender hit-rate auto-tune: when accumulated transition prerender hit rate is low (after minimum samples), temporarily expand Smooth-mode prewarm depth/lookahead while keeping busy-queue guardrails
+             - [x] Transition prerender overlap padding: add small frame padding around overlap boundaries (with incoming pre-overlap `tpad` hold) to reduce edge handoff misses at transition entry/exit
+           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
            - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
            - [x] Debounce duplicate playback boundary rebuild attempts (same desired clip set within ~120ms) to reduce transient rebuild thrash
