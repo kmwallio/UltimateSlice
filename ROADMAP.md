@@ -89,6 +89,7 @@ Tracking docs:
 - [x] Recent projects menu limits to 10 entries and omits missing files
 - [x] Undo / Redo buttons
 - [x] Select / Razor tool toggle buttons
+- [x] Export Project with Media action in **Export ▼** menu (`Export Project with Media…`) that writes XML plus colocated `ProjectName.Library` packaged media
 
 ### Append to Timeline
 - [x] "Append to Timeline" button in media browser
@@ -141,6 +142,7 @@ Tracking docs:
 - [x] Local perf tooling scripts: `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py`
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
 - [x] `select_library_item`, `source_play`, `source_pause` tools — select media in the library and control Source Monitor playback via MCP
+- [x] `save_project_with_media` tool — package-save the project (`.uspxml` + `ProjectName.Library` media copy with rewritten XML media paths)
 
 ---
 

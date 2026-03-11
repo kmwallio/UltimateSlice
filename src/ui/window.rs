@@ -6317,6 +6317,33 @@ fn handle_mcp_command(
             };
         }
 
+        McpCommand::SaveProjectWithMedia { path, reply } => {
+            let result = {
+                let proj = project.borrow();
+                crate::fcpxml::writer::export_project_with_media(&proj, std::path::Path::new(&path))
+            };
+            match result {
+                Ok(library_path) => {
+                    {
+                        let mut proj = project.borrow_mut();
+                        proj.file_path = Some(path.clone());
+                        proj.dirty = false;
+                    }
+                    on_project_changed();
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "path": path,
+                            "library_path": library_path.to_string_lossy()
+                        }))
+                        .ok()
+                }
+                Err(e) => reply
+                    .send(json!({"success": false, "error": e.to_string()}))
+                    .ok(),
+            };
+        }
+
         McpCommand::OpenFcpxml { path, reply } => {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
             let path_bg = path.clone();

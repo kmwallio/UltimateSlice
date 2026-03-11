@@ -6,6 +6,8 @@ All notable project changes and progress should be recorded here.
 
 ### Added
 - **macOS build instructions**: Added Homebrew (`brew install`) dependency setup for GTK4, GStreamer, and FFmpeg in `README.md` and `docs/user/getting-started.md`, including the required `PKG_CONFIG_PATH` export for Apple Silicon and Intel Macs.
+- **Export Project with Media packaging**: Added **Export ▼ → Export Project with Media…** workflow that writes `.uspxml`/`.fcpxml`, copies timeline-used source media into a sibling `ProjectName.Library` directory, rewrites saved XML media paths to those packaged copies (with deterministic collision suffixing and source dedupe), and shows copy/write progress in a dedicated export progress window.
+- **MCP packaged project export**: Added `save_project_with_media` MCP tool to automate the same packaged save workflow and return both output XML path and library path.
 
 ### Fixed
 - **Program Monitor MP4 `not-negotiated` playback regressions**: Stabilized live program playback for keyframed clips by avoiding aggressive pre-preroll EOS injection on not-yet-linked rebuild slots, reducing not-negotiated recovery debounce for faster retry, and preferring compositor sink-pad zoom/position updates over per-frame zoom caps renegotiation that could trip `qtdemux` negotiation failures.

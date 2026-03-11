@@ -60,6 +60,7 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py set_experimental_preview_optimizations '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_background_prerender '{"enabled":true}'`
 - `python3 tools/mcp_call.py get_performance_snapshot '{}'`
+- `python3 tools/mcp_call.py save_project_with_media '{"path":"/absolute/path/MyProject.uspxml"}'`
 
 `set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
 

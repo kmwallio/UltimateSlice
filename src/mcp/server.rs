@@ -510,6 +510,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "save_project_with_media",
+            "description": "Export a packaged project: write .uspxml plus copy all timeline-used media into a sibling ProjectName.Library directory, with XML media paths rewritten to the packaged copies.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for the packaged output .uspxml/.fcpxml file." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "open_fcpxml",
             "description": "Load a project from a Final Cut Pro XML (.fcpxml) file (supports versions up to 1.14), replacing the current project.",
             "inputSchema": {
@@ -1140,6 +1151,11 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "save_project_with_media" => McpCommand::SaveProjectWithMedia {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
         "open_fcpxml" => McpCommand::OpenFcpxml {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
@@ -1685,6 +1701,32 @@ mod tests {
         let params = json!({
             "name": "get_performance_snapshot",
             "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_save_project_with_media() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SaveProjectWithMedia { path, reply } => {
+                    assert_eq!(path, "/tmp/packaged.uspxml");
+                    reply
+                        .send(json!({"success": true, "path": path, "library_path": "/tmp/packaged.Library"}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(9);
+        let params = json!({
+            "name": "save_project_with_media",
+            "arguments": { "path": "/tmp/packaged.uspxml" }
         });
         let mut cache = std::collections::HashMap::new();
         let response = call_tool(&id, &params, &sender, &mut cache);

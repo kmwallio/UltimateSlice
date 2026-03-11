@@ -2,8 +2,10 @@ use crate::model::project::Project;
 use anyhow::Result;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
 
 /// Serialize a `Project` to FCPXML format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
@@ -499,6 +501,245 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
 
     let result = writer.into_inner().into_inner();
     Ok(String::from_utf8(result)?)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportProjectWithMediaProgress {
+    Copying {
+        copied_files: usize,
+        total_files: usize,
+        current_file: String,
+    },
+    WritingProjectXml,
+}
+
+/// Export a packaged project: write `.uspxml` and copy referenced timeline media
+/// into a sibling `ProjectName.Library` directory, then rewrite XML paths to use
+/// that copied media.
+pub fn export_project_with_media(project: &Project, output_fcpxml_path: &Path) -> Result<PathBuf> {
+    export_project_with_media_with_progress(project, output_fcpxml_path, |_| {})
+}
+
+pub fn export_project_with_media_with_progress<F>(
+    project: &Project,
+    output_fcpxml_path: &Path,
+    mut on_progress: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(ExportProjectWithMediaProgress),
+{
+    let output_fcpxml_path = if output_fcpxml_path.is_absolute() {
+        output_fcpxml_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(output_fcpxml_path)
+    };
+    let parent = output_fcpxml_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Export path has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let stem = output_fcpxml_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Project");
+    let library_dir = parent.join(format!("{stem}.Library"));
+    std::fs::create_dir_all(&library_dir)?;
+
+    let mut source_to_canonical_path: HashMap<String, PathBuf> = HashMap::new();
+    let mut unique_canonical_sources: Vec<PathBuf> = Vec::new();
+    let mut seen_canonical_sources: HashSet<PathBuf> = HashSet::new();
+    let mut used_file_names: HashSet<String> = HashSet::new();
+
+    for clip in project.tracks.iter().flat_map(|track| track.clips.iter()) {
+        if source_to_canonical_path.contains_key(&clip.source_path) {
+            continue;
+        }
+        let source_local_path = source_path_to_local_path(&clip.source_path)?;
+        if !source_local_path.exists() {
+            anyhow::bail!(
+                "Source media not found for clip '{}': {}",
+                clip.label,
+                source_local_path.display()
+            );
+        }
+        let canonical_source = std::fs::canonicalize(&source_local_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to resolve source media path {}: {e}",
+                source_local_path.display()
+            )
+        })?;
+
+        if seen_canonical_sources.insert(canonical_source.clone()) {
+            unique_canonical_sources.push(canonical_source.clone());
+        }
+        source_to_canonical_path.insert(clip.source_path.clone(), canonical_source);
+    }
+
+    let mut canonical_to_export_path: HashMap<PathBuf, PathBuf> = HashMap::new();
+    for canonical_source in &unique_canonical_sources {
+        let file_name = canonical_source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unable to determine file name for source media: {}",
+                    canonical_source.display()
+                )
+            })?;
+        let unique_name = unique_packaged_media_name(file_name, canonical_source, &used_file_names);
+        used_file_names.insert(unique_name.clone());
+        canonical_to_export_path.insert(canonical_source.clone(), library_dir.join(unique_name));
+    }
+
+    let total_files = unique_canonical_sources.len();
+    for (index, canonical_source) in unique_canonical_sources.iter().enumerate() {
+        let destination = canonical_to_export_path
+            .get(canonical_source)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing packaged destination for source media: {}",
+                    canonical_source.display()
+                )
+            })?;
+        std::fs::copy(canonical_source, &destination).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to copy media {} to {}: {e}",
+                canonical_source.display(),
+                destination.display()
+            )
+        })?;
+        let resolved_destination = std::fs::canonicalize(&destination).unwrap_or(destination);
+        canonical_to_export_path.insert(canonical_source.clone(), resolved_destination);
+        on_progress(ExportProjectWithMediaProgress::Copying {
+            copied_files: index + 1,
+            total_files,
+            current_file: canonical_source
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("media")
+                .to_string(),
+        });
+    }
+
+    let mut source_to_export_path: HashMap<String, String> = HashMap::new();
+    for (source_path, canonical_source) in source_to_canonical_path {
+        let exported_path = canonical_to_export_path
+            .get(&canonical_source)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing exported media mapping for source: {}",
+                    canonical_source.display()
+                )
+            })?
+            .to_string_lossy()
+            .to_string();
+        source_to_export_path.insert(source_path, exported_path);
+    }
+
+    let mut export_project = project.clone();
+    export_project.source_fcpxml = None;
+    export_project.file_path = None;
+    export_project.dirty = true;
+    for clip in export_project
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.clips.iter_mut())
+    {
+        let mapped = source_to_export_path
+            .get(&clip.source_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing packaged media mapping for source: {}",
+                    clip.source_path
+                )
+            })?;
+        clip.source_path = mapped.clone();
+        clip.fcpxml_original_source_path = None;
+    }
+
+    on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
+    let xml = write_fcpxml(&export_project)?;
+    std::fs::write(&output_fcpxml_path, xml)?;
+    Ok(library_dir)
+}
+
+fn source_path_to_local_path(source_path: &str) -> Result<PathBuf> {
+    if source_path.starts_with("http://") || source_path.starts_with("https://") {
+        anyhow::bail!(
+            "Remote media URI is not supported for project packaging: {}",
+            source_path
+        );
+    }
+    let raw_path = source_path.strip_prefix("file://").unwrap_or(source_path);
+    Ok(PathBuf::from(decode_percent_encoded_path(raw_path)))
+}
+
+fn decode_percent_encoded_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push(((hi << 4) as u8) | (lo as u8));
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn unique_packaged_media_name(
+    original_name: &str,
+    canonical_source: &Path,
+    used_file_names: &HashSet<String>,
+) -> String {
+    if !used_file_names.contains(original_name) {
+        return original_name.to_string();
+    }
+
+    let mut candidate = append_hash_suffix(original_name, &short_source_hash(canonical_source));
+    if !used_file_names.contains(&candidate) {
+        return candidate;
+    }
+
+    let mut attempt = 2u32;
+    loop {
+        candidate = append_hash_suffix(
+            original_name,
+            &format!("{}-{attempt}", short_source_hash(canonical_source)),
+        );
+        if !used_file_names.contains(&candidate) {
+            return candidate;
+        }
+        attempt += 1;
+    }
+}
+
+fn append_hash_suffix(file_name: &str, suffix: &str) -> String {
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file_name);
+    match path.extension().and_then(|s| s.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{stem}_{suffix}.{ext}"),
+        _ => format!("{stem}_{suffix}"),
+    }
+}
+
+fn short_source_hash(path: &Path) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
 }
 
 fn patch_imported_fcpxml_transform(project: &Project, original: &str) -> Option<String> {
@@ -1458,6 +1699,7 @@ mod tests {
     use crate::model::track::Track;
     use quick_xml::events::Event;
     use quick_xml::Reader;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn has_asset_src_attr(xml: &str) -> bool {
         let mut reader = Reader::from_str(xml);
@@ -1481,6 +1723,39 @@ mod tests {
             buf.clear();
         }
         false
+    }
+
+    fn media_rep_src_values(xml: &str) -> Vec<String> {
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut srcs = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                    if e.local_name().as_ref() == b"media-rep" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"src" {
+                                srcs.push(String::from_utf8_lossy(attr.value.as_ref()).to_string());
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            buf.clear();
+        }
+        srcs
+    }
+
+    fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("ultimateslice-{prefix}-{nanos}"))
     }
 
     #[test]
@@ -2281,5 +2556,166 @@ mod tests {
         assert!((loaded_clip.pan_keyframes[0].value + 0.2).abs() < 0.001);
         assert_eq!(loaded_clip.pan_keyframes[1].time_ns, 2_000_000_000);
         assert!((loaded_clip.pan_keyframes[1].value - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_export_project_with_media_copies_and_rewrites_paths() {
+        let root = unique_test_dir("package-export");
+        let source_a_dir = root.join("source-a");
+        let source_b_dir = root.join("source-b");
+        std::fs::create_dir_all(&source_a_dir).expect("create source-a dir");
+        std::fs::create_dir_all(&source_b_dir).expect("create source-b dir");
+
+        let source_a = source_a_dir.join("clip.mp4");
+        let source_b = source_b_dir.join("clip.mp4");
+        std::fs::write(&source_a, b"source-a").expect("write source-a");
+        std::fs::write(&source_b, b"source-b").expect("write source-b");
+
+        let output = root.join("Packaged.uspxml");
+
+        let mut project = Project::new("Packaged");
+        project.tracks.clear();
+        project.source_fcpxml = Some("<fcpxml version=\"1.14\"/>".to_string());
+        project.dirty = false;
+        let mut track = Track::new_video("Video 1");
+        let clip_a = Clip::new(
+            source_a.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        let mut clip_b = Clip::new(
+            source_b.to_string_lossy().to_string(),
+            1_000_000_000,
+            1_000_000_000,
+            ClipKind::Video,
+        );
+        clip_b.fcpxml_original_source_path = Some("/Volumes/original/clip.mp4".to_string());
+        let clip_a_duplicate = Clip::new(
+            source_a.to_string_lossy().to_string(),
+            1_000_000_000,
+            2_000_000_000,
+            ClipKind::Video,
+        );
+        track.add_clip(clip_a);
+        track.add_clip(clip_b);
+        track.add_clip(clip_a_duplicate);
+        project.tracks.push(track);
+
+        let library_dir =
+            export_project_with_media(&project, &output).expect("export project with media");
+        assert_eq!(library_dir, root.join("Packaged.Library"));
+        assert!(output.exists(), "expected packaged .uspxml output");
+
+        let copied_files: Vec<_> = std::fs::read_dir(&library_dir)
+            .expect("read library dir")
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(
+            copied_files.len(),
+            2,
+            "expected deduped copy count with collision handling"
+        );
+
+        let xml = std::fs::read_to_string(&output).expect("read packaged xml");
+        assert!(!xml.contains("/Volumes/original/clip.mp4"));
+        assert!(!xml.contains(source_a.to_string_lossy().as_ref()));
+        assert!(!xml.contains(source_b.to_string_lossy().as_ref()));
+        let srcs = media_rep_src_values(&xml);
+        assert_eq!(
+            srcs.len(),
+            3,
+            "three clips should produce three media-rep refs"
+        );
+        let library_uri_prefix = format!("file://{}/", library_dir.to_string_lossy());
+        assert!(
+            srcs.iter().all(|src| src.starts_with(&library_uri_prefix)),
+            "all media-rep sources should point into packaged library: {srcs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_export_project_with_media_reports_progress() {
+        let root = unique_test_dir("package-progress");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source_a = root.join("clip-a.mp4");
+        let source_b = root.join("clip-b.mp4");
+        std::fs::write(&source_a, b"source-a").expect("write source-a");
+        std::fs::write(&source_b, b"source-b").expect("write source-b");
+        let output = root.join("Progress.uspxml");
+
+        let mut project = Project::new("Progress");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            source_a.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        track.add_clip(Clip::new(
+            source_b.to_string_lossy().to_string(),
+            1_000_000_000,
+            1_000_000_000,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let mut progress_events = Vec::new();
+        let library_dir = export_project_with_media_with_progress(&project, &output, |progress| {
+            progress_events.push(progress);
+        })
+        .expect("export with progress should succeed");
+        assert!(library_dir.exists(), "expected packaged library to exist");
+        assert!(
+            progress_events.iter().any(|event| matches!(
+                event,
+                ExportProjectWithMediaProgress::Copying {
+                    copied_files: 2,
+                    total_files: 2,
+                    ..
+                }
+            )),
+            "expected final copy progress event"
+        );
+        assert!(
+            progress_events.iter().any(|event| {
+                matches!(event, ExportProjectWithMediaProgress::WritingProjectXml)
+            }),
+            "expected writing-xml progress event"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_export_project_with_media_errors_on_missing_source() {
+        let root = unique_test_dir("package-missing");
+        std::fs::create_dir_all(&root).expect("create root");
+        let output = root.join("Missing.uspxml");
+
+        let mut project = Project::new("Missing");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            root.join("does-not-exist.mp4")
+                .to_string_lossy()
+                .to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let error = export_project_with_media(&project, &output)
+            .expect_err("expected missing source error");
+        assert!(
+            error.to_string().contains("Source media not found"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

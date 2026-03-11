@@ -9436,21 +9436,24 @@ impl ProgramPlayer {
                                     }
                                     if !handled {
                                         if let Some(ref name) = src_name {
-                                            if let Some((is_prerender_slot, clip_idx)) = self
-                                                .slots
-                                                .iter()
-                                                .find_map(|slot| {
+                                            if let Some((is_prerender_slot, clip_idx)) =
+                                                self.slots.iter().find_map(|slot| {
                                                     let level = slot.audio_level.as_ref()?;
                                                     (level.name().as_str() == name.as_str())
-                                                        .then_some((slot.is_prerender_slot, slot.clip_idx))
+                                                        .then_some((
+                                                            slot.is_prerender_slot,
+                                                            slot.clip_idx,
+                                                        ))
                                                 })
                                             {
                                                 if is_prerender_slot {
                                                     let track_indices =
                                                         self.prerender_meter_track_indices();
                                                     if track_indices.is_empty() {
-                                                        if let Some(track_index) =
-                                                            self.clips.get(clip_idx).map(|c| c.track_index)
+                                                        if let Some(track_index) = self
+                                                            .clips
+                                                            .get(clip_idx)
+                                                            .map(|c| c.track_index)
                                                         {
                                                             self.push_track_peak(track_index, l, r);
                                                             handled = true;

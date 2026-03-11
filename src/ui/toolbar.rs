@@ -34,6 +34,12 @@ fn save_project_to_path(
     Ok(())
 }
 
+enum ExportProjectWithMediaUiEvent {
+    Progress(fcpxml::writer::ExportProjectWithMediaProgress),
+    Done { library_dir: std::path::PathBuf },
+    Error(String),
+}
+
 fn video_codec_from_selected(selected: u32) -> VideoCodec {
     match selected {
         0 => VideoCodec::H264,
@@ -1210,6 +1216,158 @@ pub fn build_toolbar(
     export_pop_box.set_margin_end(4);
     export_pop_box.set_margin_top(4);
     export_pop_box.set_margin_bottom(4);
+    let btn_export_project_with_media = gtk::Button::with_label("Export Project with Media…");
+    btn_export_project_with_media.add_css_class("flat");
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_project_with_media.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Export Project with Media");
+            dialog.set_initial_name(Some("project.uspxml"));
+
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.uspxml");
+            filter.add_pattern("*.fcpxml");
+            filter.set_name(Some("Project XML Files"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let output_path = path.clone();
+                        let output_string = output_path.to_string_lossy().to_string();
+                        let project_snapshot = project.borrow().clone();
+                        let (tx, rx) = std::sync::mpsc::channel::<ExportProjectWithMediaUiEvent>();
+                        let path_for_worker = output_path.clone();
+
+                        std::thread::spawn(move || {
+                            let result = fcpxml::writer::export_project_with_media_with_progress(
+                                &project_snapshot,
+                                &path_for_worker,
+                                |progress| {
+                                    let _ = tx.send(ExportProjectWithMediaUiEvent::Progress(progress));
+                                },
+                            );
+                            match result {
+                                Ok(library_dir) => {
+                                    let _ = tx.send(ExportProjectWithMediaUiEvent::Done { library_dir });
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(ExportProjectWithMediaUiEvent::Error(e.to_string()));
+                                }
+                            }
+                        });
+
+                        let progress_dialog = gtk::Window::builder()
+                            .title("Exporting Project with Media…")
+                            .default_width(420)
+                            .build();
+                        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                        vbox.set_margin_start(20);
+                        vbox.set_margin_end(20);
+                        vbox.set_margin_top(20);
+                        vbox.set_margin_bottom(20);
+
+                        let status_label = gtk::Label::new(Some("Preparing media package…"));
+                        status_label.set_halign(gtk::Align::Start);
+                        status_label.set_wrap(true);
+
+                        let progress_bar = gtk::ProgressBar::new();
+                        progress_bar.set_show_text(true);
+                        progress_bar.set_fraction(0.0);
+                        progress_bar.set_text(Some("0%"));
+
+                        let close_btn = gtk::Button::with_label("Close");
+                        close_btn.set_halign(gtk::Align::End);
+
+                        vbox.append(&status_label);
+                        vbox.append(&progress_bar);
+                        vbox.append(&close_btn);
+                        progress_dialog.set_child(Some(&vbox));
+                        progress_dialog.present();
+
+                        {
+                            let pd = progress_dialog.clone();
+                            close_btn.connect_clicked(move |_| {
+                                pd.close();
+                            });
+                        }
+
+                        let project = project.clone();
+                        let on_project_changed = on_project_changed.clone();
+                        glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+                            while let Ok(event) = rx.try_recv() {
+                                match event {
+                                    ExportProjectWithMediaUiEvent::Progress(
+                                        fcpxml::writer::ExportProjectWithMediaProgress::Copying {
+                                            copied_files,
+                                            total_files,
+                                            current_file,
+                                        },
+                                    ) => {
+                                        let fraction = if total_files == 0 {
+                                            0.9
+                                        } else {
+                                            ((copied_files as f64) / (total_files as f64)) * 0.9
+                                        };
+                                        progress_bar.set_fraction(fraction.clamp(0.0, 0.9));
+                                        progress_bar
+                                            .set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                                        status_label.set_text(&format!(
+                                            "Copying {current_file} ({copied_files}/{total_files})…"
+                                        ));
+                                    }
+                                    ExportProjectWithMediaUiEvent::Progress(
+                                        fcpxml::writer::ExportProjectWithMediaProgress::WritingProjectXml,
+                                    ) => {
+                                        progress_bar.set_fraction(0.97);
+                                        progress_bar.set_text(Some("97%"));
+                                        status_label.set_text("Writing project XML…");
+                                    }
+                                    ExportProjectWithMediaUiEvent::Done { library_dir } => {
+                                        if let Some(p) = output_path.to_str() {
+                                            recent::push(p);
+                                        }
+                                        {
+                                            let mut proj = project.borrow_mut();
+                                            proj.file_path = Some(output_path.to_string_lossy().to_string());
+                                            proj.dirty = false;
+                                        }
+                                        on_project_changed();
+                                        progress_bar.set_fraction(1.0);
+                                        progress_bar.set_text(Some("Done!"));
+                                        status_label.set_text(&format!(
+                                            "Exported package to {} with media in {}",
+                                            output_string,
+                                            library_dir.display()
+                                        ));
+                                        return glib::ControlFlow::Break;
+                                    }
+                                    ExportProjectWithMediaUiEvent::Error(e) => {
+                                        status_label.set_text(&format!("Error: {e}"));
+                                        eprintln!("Export-with-media error: {e}");
+                                        return glib::ControlFlow::Break;
+                                    }
+                                }
+                            }
+                            glib::ControlFlow::Continue
+                        });
+                    }
+                }
+            });
+        });
+    }
     let btn_export_frame = gtk::Button::with_label("Export Frame…");
     btn_export_frame.add_css_class("flat");
     {
@@ -1222,6 +1380,7 @@ pub fn build_toolbar(
             on_export_frame();
         });
     }
+    export_pop_box.append(&btn_export_project_with_media);
     export_pop_box.append(&btn_export_frame);
     export_pop.set_child(Some(&export_pop_box));
     export_pop.set_parent(&btn_export_more);

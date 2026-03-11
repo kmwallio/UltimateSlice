@@ -40,6 +40,13 @@ Source media references are saved as nested `<media-rep>` entries under each res
 
 Use **Save…** (`Ctrl+S`) to write the project as XML (default suggested filename: `project.uspxml`; `.fcpxml` remains fully supported). Open with **Open…** (`Ctrl+O`) on any future session.
 
+Use **Export ▼ → Export Project with Media…** to create a portable package:
+- Writes the chosen `.uspxml`/`.fcpxml` file.
+- Copies all timeline-used source media into a sibling `ProjectName.Library` folder (based on the output filename stem).
+- Rewrites saved media references to point at those copied library files.
+- If different source files share the same filename, UltimateSlice keeps the first name and adds deterministic suffixes for collisions.
+- Shows an export progress window while copying media and writing the packaged project XML.
+
 When you open an existing FCPXML and save it without making edits, UltimateSlice preserves the original document verbatim so unknown attributes/fields from other tools are retained.
 For edited saves, unsupported `asset-clip` attributes/child tags and imported resource `<asset>` metadata payloads (including nested `<metadata><md .../></metadata>`) are still carried forward in regenerated output. Unknown attrs/child tags are also preserved across core document structure (`<fcpxml>`, `<resources>`, selected `<library>/<event>/<project>/<sequence>/<spine>`, plus selected sequence `<format>` attrs) during dirty-save regeneration. Regenerated documents include `<!DOCTYPE fcpxml>` and keep source references in nested `<media-rep>` entries rather than legacy `asset@src`.
 When possible for imported projects, transform-only dirty saves patch matching `adjust-transform` nodes in-place on the original XML (including nested clips), which keeps the saved file much closer to the source structure and IDs.
