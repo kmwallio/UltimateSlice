@@ -73,6 +73,8 @@ pub fn build_preview(
     // clip selection (in/out range) directly to the timeline.
     {
         let source_marks = source_marks.clone();
+        let player_for_drag = player.clone();
+        let preview_drag_was_playing: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let drag_src = gtk::DragSource::new();
         drag_src.set_actions(gdk4::DragAction::COPY);
         drag_src.connect_prepare({
@@ -88,7 +90,39 @@ pub fn build_preview(
                 )))
             }
         });
+        drag_src.connect_drag_begin({
+            let player_for_drag = player_for_drag.clone();
+            let preview_drag_was_playing = preview_drag_was_playing.clone();
+            move |_, _| {
+                let was_playing = player_for_drag.borrow().state() == PlayerState::Playing;
+                preview_drag_was_playing.set(was_playing);
+                if was_playing {
+                    let _ = player_for_drag.borrow().pause();
+                }
+            }
+        });
+        drag_src.connect_drag_end({
+            let player_for_drag = player_for_drag.clone();
+            let preview_drag_was_playing = preview_drag_was_playing.clone();
+            move |_, _, _| {
+                if preview_drag_was_playing.get() {
+                    let _ = player_for_drag.borrow().play();
+                }
+                preview_drag_was_playing.set(false);
+            }
+        });
         picture.add_controller(drag_src);
+
+        // Swallow internal source-clip payload drops on the source picture so
+        // accidental self-drops are treated as no-ops.
+        let self_drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
+        self_drop_target.connect_drop(move |_target, value, _x, _y| {
+            value
+                .get::<String>()
+                .ok()
+                .is_some_and(|payload| payload.contains('|') && !payload.contains("file://"))
+        });
+        picture.add_controller(self_drop_target);
     }
 
     // ── Source scrubber ───────────────────────────────────────────────────
