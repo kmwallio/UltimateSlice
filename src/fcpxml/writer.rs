@@ -133,6 +133,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     let mut seq = BytesStart::new("sequence");
     seq.push_attribute(("duration", duration_str.as_str()));
     seq.push_attribute(("format", format_ref));
+    seq.push_attribute(("tcFormat", "NDF"));
     if !strip_unknown_fields {
         for (k, v) in &project.fcpxml_unknown_sequence.attrs {
             if !is_writer_managed_sequence_attr(k) {
@@ -207,6 +208,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 elem.push_attribute(("duration", duration.as_str()));
                 elem.push_attribute(("start", start.as_str()));
                 elem.push_attribute(("name", clip.label.as_str()));
+                elem.push_attribute(("format", format_ref));
+                elem.push_attribute(("tcFormat", "NDF"));
                 if let Some(l) = lane {
                     elem.push_attribute(("lane", l.to_string().as_str()));
                 }
@@ -1725,7 +1728,11 @@ fn write_resources(
             let mut asset = BytesStart::new("asset");
             asset.push_attribute(("id", asset_id.as_str()));
             asset.push_attribute(("name", clip.label.as_str()));
+            asset.push_attribute(("start", "0s"));
             asset.push_attribute(("duration", duration.as_str()));
+            if has_video == "1" {
+                asset.push_attribute(("format", "r1"));
+            }
             asset.push_attribute(("hasVideo", has_video));
             asset.push_attribute(("hasAudio", has_audio));
             if !strip_unknown_fields {
@@ -2256,7 +2263,7 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 }
 
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
-    matches!(key, "duration" | "format")
+    matches!(key, "duration" | "format" | "tcFormat")
 }
 
 fn is_writer_managed_spine_attr(_key: &str) -> bool {
@@ -2266,7 +2273,7 @@ fn is_writer_managed_spine_attr(_key: &str) -> bool {
 fn is_writer_managed_asset_attr(key: &str) -> bool {
     matches!(
         key,
-        "id" | "src" | "name" | "duration" | "hasVideo" | "hasAudio"
+        "id" | "src" | "name" | "start" | "duration" | "format" | "hasVideo" | "hasAudio"
     )
 }
 
