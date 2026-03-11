@@ -234,6 +234,11 @@ pub fn build_preview(
                     }
                     drag_mode.set(1);
                     last_marker_seek_us.set(0);
+                    let target_pos = source_marks.borrow().in_ns;
+                    source_marks.borrow_mut().display_pos_ns = target_pos;
+                    if !cfg!(target_os = "macos") {
+                        let _ = player.borrow().seek_accurate(target_pos);
+                    }
                     if let Some(a) = scrubber_weak.upgrade() {
                         a.queue_draw();
                     }
@@ -246,6 +251,11 @@ pub fn build_preview(
                     }
                     drag_mode.set(2);
                     last_marker_seek_us.set(0);
+                    let target_pos = source_marks.borrow().out_ns;
+                    source_marks.borrow_mut().display_pos_ns = target_pos;
+                    if !cfg!(target_os = "macos") {
+                        let _ = player.borrow().seek_accurate(target_pos);
+                    }
                     if let Some(a) = scrubber_weak.upgrade() {
                         a.queue_draw();
                     }
@@ -322,7 +332,7 @@ pub fn build_preview(
                             let now_us = glib::monotonic_time();
                             if now_us - last_marker_seek_us.get() >= 33_000 {
                                 last_marker_seek_us.set(now_us);
-                                let _ = player.borrow().seek(target_pos);
+                                let _ = player.borrow().seek_accurate(target_pos);
                             }
                         }
                         if let Some(a) = scrubber_weak.upgrade() {
@@ -344,7 +354,11 @@ pub fn build_preview(
             move |_, _, _| {
                 let mode = drag_mode.get();
                 let target_pos = source_marks.borrow().display_pos_ns;
-                let _ = player.borrow().seek(target_pos);
+                if mode != 0 {
+                    let _ = player.borrow().seek_accurate(target_pos);
+                } else {
+                    let _ = player.borrow().seek(target_pos);
+                }
                 if mode != 0 {
                     if marker_drag_was_playing.get() {
                         let _ = player.borrow().play();
