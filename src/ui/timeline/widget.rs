@@ -1802,6 +1802,11 @@ impl TimelineState {
     /// Hit-test keyframe markers on clip bodies.
     /// Returns (clip_id, track_id, timeline_ns) if a marker was clicked.
     fn hit_test_keyframe_marker(&self, x: f64, y: f64) -> Option<(String, String, u64)> {
+        self.keyframe_marker_hit(x, y)
+            .map(|hit| (hit.clip_id, hit.track_id, hit.timeline_ns))
+    }
+
+    fn keyframe_marker_hit(&self, x: f64, y: f64) -> Option<KeyframeMarkerHit> {
         let track_idx = self.track_index_at_y(y)?;
         let proj = self.project.borrow();
         let track = proj.tracks.get(track_idx)?;
@@ -1828,16 +1833,9 @@ impl TimelineState {
             let marker_h = (ch * 0.22).clamp(4.0, 8.0);
             let row_pitch = 3.4;
             let base_y = cy + 3.0;
-            let all_kfs: [(&[crate::model::clip::NumericKeyframe], usize); 6] = [
-                (&clip.scale_keyframes, 0),
-                (&clip.opacity_keyframes, 1),
-                (&clip.position_x_keyframes, 2),
-                (&clip.position_y_keyframes, 3),
-                (&clip.volume_keyframes, 4),
-                (&clip.pan_keyframes, 5),
-            ];
-            for (keyframes, row) in &all_kfs {
-                let marker_y = base_y + *row as f64 * row_pitch;
+            let keyframe_lanes = clip_keyframe_lanes(clip);
+            for (row, (keyframes, _property_label, _color)) in keyframe_lanes.iter().enumerate() {
+                let marker_y = base_y + row as f64 * row_pitch;
                 if y < marker_y || y > marker_y + marker_h {
                     continue;
                 }
@@ -1847,12 +1845,36 @@ impl TimelineState {
                     let marker_x = cx + frac * cw;
                     if (x - marker_x).abs() <= hit_tolerance {
                         let timeline_ns = clip.timeline_start.saturating_add(local_time_ns);
-                        return Some((clip.id.clone(), track.id.clone(), timeline_ns));
+                        return Some(KeyframeMarkerHit {
+                            clip_id: clip.id.clone(),
+                            track_id: track.id.clone(),
+                            clip_label: clip.label.clone(),
+                            timeline_ns,
+                            impacted_properties: collect_keyframe_property_labels_at_local_time(
+                                clip,
+                                local_time_ns,
+                            ),
+                        });
                     }
                 }
             }
         }
         None
+    }
+
+    fn keyframe_marker_tooltip_text(&self, x: f64, y: f64) -> Option<String> {
+        let hit = self.keyframe_marker_hit(x, y)?;
+        let timeline_secs = hit.timeline_ns as f64 / NS_PER_SECOND;
+        let timeline_label = format_timecode(timeline_secs, 0.1);
+        let impacted = if hit.impacted_properties.is_empty() {
+            "Unknown".to_string()
+        } else {
+            hit.impacted_properties.join(", ")
+        };
+        Some(format!(
+            "Clip: {}\nKeyframe at {}\nImpacts: {}",
+            hit.clip_label, timeline_label, impacted
+        ))
     }
 
     /// Find which clip and track are at a given (x, y) coordinate.
@@ -2152,6 +2174,21 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     };
     area.set_content_height(initial_content_height.max(1));
     area.set_focusable(true);
+    area.set_has_tooltip(true);
+    {
+        let state = state.clone();
+        area.connect_query_tooltip(move |_area, x, y, _keyboard_mode, tooltip| {
+            let text = state
+                .borrow()
+                .keyframe_marker_tooltip_text(x as f64, y as f64);
+            if let Some(text) = text {
+                tooltip.set_text(Some(&text));
+                true
+            } else {
+                false
+            }
+        });
+    }
 
     let thumb_cache = Rc::new(RefCell::new(
         crate::media::thumb_cache::ThumbnailCache::new(),
@@ -4436,6 +4473,31 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     area
 }
 
+pub fn export_timeline_snapshot_png(
+    state: &TimelineState,
+    width: i32,
+    height: i32,
+    path: &str,
+) -> Result<(), String> {
+    let width = width.max(1);
+    let height = height.max(1);
+    let mut surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height)
+        .map_err(|e| e.to_string())?;
+    let cr = gtk::cairo::Context::new(&surface).map_err(|e| e.to_string())?;
+    let mut cache = crate::media::thumb_cache::ThumbnailCache::new();
+    let mut wcache = crate::media::waveform_cache::WaveformCache::new();
+    draw_timeline(&cr, width, height, state, &mut cache, &mut wcache);
+    drop(cr);
+    surface.flush();
+    let stride = surface.stride() as usize;
+    let data = surface.data().map_err(|e| e.to_string())?;
+    let bytes = glib::Bytes::from_owned(data.to_vec());
+    let texture =
+        gdk4::MemoryTexture::new(width, height, gdk4::MemoryFormat::B8g8r8a8, &bytes, stride);
+    texture.save_to_png(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Cairo drawing of the entire timeline
 fn draw_timeline(
     cr: &gtk::cairo::Context,
@@ -5187,10 +5249,18 @@ fn draw_clip(
     draw_clip_keyframe_markers(cr, clip, cx, cy, cw, ch, view_width, is_selected);
 
     if cw > 30.0 {
+        let keyframe_count = clip_phase1_keyframe_count(clip);
+        let has_keyframe_badge = keyframe_count > 0;
+        let display_label = if has_keyframe_badge {
+            format!("◆ {}", clip.label)
+        } else {
+            clip.label.clone()
+        };
+
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.set_font_size(11.0);
         let _ = cr.move_to(cx + 6.0, cy + ch / 2.0 + 4.0);
-        let _ = cr.show_text(&clip.label);
+        let _ = cr.show_text(&display_label);
 
         // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0, and "◀" when reversed
         let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse;
@@ -5205,6 +5275,21 @@ fn draw_clip(
             .map(|gid| !gid.is_empty())
             .unwrap_or(false);
         let mut badge_right = cx + cw - 6.0;
+        if has_keyframe_badge && cw > 78.0 {
+            let badge = format!("KF {keyframe_count}");
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(&badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(1.0, 0.86, 0.24);
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(&badge);
+                badge_right = bx - 8.0;
+            }
+        }
         if has_speed_badge && cw > 60.0 {
             let badge = if clip.reverse {
                 if (clip.speed - 1.0).abs() > 0.01 {
@@ -5278,6 +5363,61 @@ struct ClipKeyframeMarkerGeometry {
     color: (f64, f64, f64),
 }
 
+#[derive(Debug, Clone)]
+struct KeyframeMarkerHit {
+    clip_id: String,
+    track_id: String,
+    clip_label: String,
+    timeline_ns: u64,
+    impacted_properties: Vec<&'static str>,
+}
+
+fn clip_keyframe_lanes(
+    clip: &Clip,
+) -> [(
+    &[crate::model::clip::NumericKeyframe],
+    &'static str,
+    (f64, f64, f64),
+); 11] {
+    [
+        (&clip.scale_keyframes, "Scale", (1.0, 0.83, 0.30)),
+        (&clip.opacity_keyframes, "Opacity", (0.94, 0.94, 0.94)),
+        (&clip.position_x_keyframes, "Position X", (0.45, 0.90, 1.0)),
+        (&clip.position_y_keyframes, "Position Y", (0.82, 0.62, 1.0)),
+        (&clip.volume_keyframes, "Volume", (0.55, 1.0, 0.62)),
+        (&clip.pan_keyframes, "Pan", (1.0, 0.66, 0.36)),
+        (&clip.rotate_keyframes, "Rotate", (1.0, 0.55, 0.85)),
+        (&clip.crop_left_keyframes, "Crop Left", (1.0, 0.76, 0.36)),
+        (&clip.crop_right_keyframes, "Crop Right", (1.0, 0.72, 0.33)),
+        (&clip.crop_top_keyframes, "Crop Top", (1.0, 0.69, 0.30)),
+        (
+            &clip.crop_bottom_keyframes,
+            "Crop Bottom",
+            (1.0, 0.65, 0.28),
+        ),
+    ]
+}
+
+fn collect_keyframe_property_labels_at_local_time(
+    clip: &Clip,
+    local_time_ns: u64,
+) -> Vec<&'static str> {
+    let duration_ns = clip.duration();
+    if duration_ns == 0 {
+        return Vec::new();
+    }
+    let local = local_time_ns.min(duration_ns);
+    clip_keyframe_lanes(clip)
+        .iter()
+        .filter_map(|(keyframes, label, _)| {
+            keyframes
+                .iter()
+                .any(|kf| kf.time_ns.min(duration_ns) == local)
+                .then_some(*label)
+        })
+        .collect()
+}
+
 fn clip_keyframe_marker_geometry(
     clip: &Clip,
     cx: f64,
@@ -5289,17 +5429,9 @@ fn clip_keyframe_marker_geometry(
     if duration_ns == 0 || cw <= 2.0 {
         return Vec::new();
     }
-    let properties: [(&[crate::model::clip::NumericKeyframe], (f64, f64, f64)); 6] = [
-        (&clip.scale_keyframes, (1.0, 0.83, 0.30)),
-        (&clip.opacity_keyframes, (0.94, 0.94, 0.94)),
-        (&clip.position_x_keyframes, (0.45, 0.90, 1.0)),
-        (&clip.position_y_keyframes, (0.82, 0.62, 1.0)),
-        (&clip.volume_keyframes, (0.55, 1.0, 0.62)),
-        (&clip.pan_keyframes, (1.0, 0.66, 0.36)),
-    ];
 
     let mut markers = Vec::new();
-    for (row, (keyframes, color)) in properties.iter().enumerate() {
+    for (row, (keyframes, _label, color)) in clip_keyframe_lanes(clip).iter().enumerate() {
         if keyframes.is_empty() {
             continue;
         }
@@ -5361,6 +5493,25 @@ fn draw_clip_keyframe_markers(
         if marker_y + marker_h > cy + ch - 1.0 {
             continue;
         }
+        let diamond_mid_y = cy + 4.5;
+        cr.set_source_rgba(marker.color.0, marker.color.1, marker.color.2, alpha);
+        cr.move_to(marker.x, diamond_mid_y - 3.0);
+        cr.line_to(marker.x + 3.0, diamond_mid_y);
+        cr.line_to(marker.x, diamond_mid_y + 3.0);
+        cr.line_to(marker.x - 3.0, diamond_mid_y);
+        cr.close_path();
+        cr.fill().ok();
+        cr.set_source_rgba(0.05, 0.05, 0.05, 0.65);
+        cr.set_line_width(0.9);
+        cr.move_to(marker.x, diamond_mid_y - 3.0);
+        cr.line_to(marker.x + 3.0, diamond_mid_y);
+        cr.line_to(marker.x, diamond_mid_y + 3.0);
+        cr.line_to(marker.x - 3.0, diamond_mid_y);
+        cr.close_path();
+        cr.stroke().ok();
+        cr.set_source_rgba(1.0, 1.0, 1.0, if is_selected { 0.28 } else { 0.22 });
+        cr.rectangle(marker.x - 0.5, cy + 1.0, 1.0, (ch - 2.0).max(1.0));
+        cr.fill().ok();
         cr.set_source_rgba(marker.color.0, marker.color.1, marker.color.2, alpha);
         cr.rectangle(marker.x - 1.5, marker_y, 3.0, marker_h);
         cr.fill().ok();
@@ -5370,6 +5521,20 @@ fn draw_clip_keyframe_markers(
         cr.stroke().ok();
     }
     cr.restore().ok();
+}
+
+fn clip_phase1_keyframe_count(clip: &Clip) -> usize {
+    clip.scale_keyframes.len()
+        + clip.opacity_keyframes.len()
+        + clip.position_x_keyframes.len()
+        + clip.position_y_keyframes.len()
+        + clip.volume_keyframes.len()
+        + clip.pan_keyframes.len()
+        + clip.rotate_keyframes.len()
+        + clip.crop_left_keyframes.len()
+        + clip.crop_right_keyframes.len()
+        + clip.crop_top_keyframes.len()
+        + clip.crop_bottom_keyframes.len()
 }
 
 fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
@@ -7105,5 +7270,61 @@ mod tests {
         assert_eq!(markers.len(), 1);
         assert_eq!(markers[0].row, 1);
         assert!((markers[0].x - (TRACK_LABEL_WIDTH + 110.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn clip_phase1_keyframe_count_sums_all_supported_lanes() {
+        let mut clip = Clip::new("clip.mov", 1_000_000_000, 0, ClipKind::Video);
+        let mk = |time_ns| NumericKeyframe {
+            time_ns,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+        };
+        clip.scale_keyframes = vec![mk(0)];
+        clip.opacity_keyframes = vec![mk(0)];
+        clip.position_x_keyframes = vec![mk(0)];
+        clip.position_y_keyframes = vec![mk(0)];
+        clip.volume_keyframes = vec![mk(0)];
+        clip.pan_keyframes = vec![mk(0)];
+        clip.rotate_keyframes = vec![mk(0)];
+        clip.crop_left_keyframes = vec![mk(0)];
+        clip.crop_right_keyframes = vec![mk(0)];
+        clip.crop_top_keyframes = vec![mk(0)];
+        clip.crop_bottom_keyframes = vec![mk(0)];
+
+        assert_eq!(clip_phase1_keyframe_count(&clip), 11);
+    }
+
+    #[test]
+    fn collect_keyframe_property_labels_at_local_time_reports_impacted_lanes() {
+        let mut clip = Clip::new("clip.mov", 2_000_000_000, 0, ClipKind::Video);
+        let mk = |time_ns| NumericKeyframe {
+            time_ns,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+        };
+        clip.scale_keyframes = vec![mk(1_000_000_000)];
+        clip.position_x_keyframes = vec![mk(1_000_000_000)];
+        clip.rotate_keyframes = vec![mk(1_000_000_000)];
+        clip.crop_top_keyframes = vec![mk(1_000_000_000)];
+        clip.volume_keyframes = vec![mk(250_000_000)];
+
+        let labels = collect_keyframe_property_labels_at_local_time(&clip, 1_000_000_000);
+        assert_eq!(labels, vec!["Scale", "Position X", "Rotate", "Crop Top"]);
+    }
+
+    #[test]
+    fn collect_keyframe_property_labels_clamps_to_clip_duration() {
+        let mut clip = Clip::new("clip.mov", 1_000_000_000, 0, ClipKind::Video);
+        let mk = |time_ns| NumericKeyframe {
+            time_ns,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+        };
+        clip.opacity_keyframes = vec![mk(2_000_000_000)];
+        clip.crop_bottom_keyframes = vec![mk(5_000_000_000)];
+
+        let labels = collect_keyframe_property_labels_at_local_time(&clip, 1_000_000_000);
+        assert_eq!(labels, vec!["Opacity", "Crop Bottom"]);
     }
 }

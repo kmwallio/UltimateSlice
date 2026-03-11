@@ -269,6 +269,12 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    ExportTimelineSnapshot {
+        path: String,
+        width: u32,
+        height: u32,
+        reply: SyncSender<Value>,
+    },
     Play {
         reply: SyncSender<Value>,
     },

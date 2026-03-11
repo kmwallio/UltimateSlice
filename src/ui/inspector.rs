@@ -209,11 +209,31 @@ impl InspectorView {
                         Phase1KeyframeProperty::Pan,
                         playhead_ns,
                     ));
-                self.crop_left_slider.set_value(c.crop_left as f64);
-                self.crop_right_slider.set_value(c.crop_right as f64);
-                self.crop_top_slider.set_value(c.crop_top as f64);
-                self.crop_bottom_slider.set_value(c.crop_bottom as f64);
-                self.rotate_spin.set_value(c.rotate as f64);
+                self.crop_left_slider
+                    .set_value(c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::CropLeft,
+                        playhead_ns,
+                    ));
+                self.crop_right_slider
+                    .set_value(c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::CropRight,
+                        playhead_ns,
+                    ));
+                self.crop_top_slider
+                    .set_value(c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::CropTop,
+                        playhead_ns,
+                    ));
+                self.crop_bottom_slider
+                    .set_value(c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::CropBottom,
+                        playhead_ns,
+                    ));
+                self.rotate_spin
+                    .set_value(c.value_for_phase1_property_at_timeline_ns(
+                        Phase1KeyframeProperty::Rotate,
+                        playhead_ns,
+                    ));
                 self.flip_h_btn.set_active(c.flip_h);
                 self.flip_v_btn.set_active(c.flip_v);
                 self.scale_slider
@@ -950,6 +970,12 @@ pub fn build_inspector(
     crop_left_slider.set_draw_value(true);
     crop_left_slider.set_digits(0);
     transform_inner.append(&crop_left_slider);
+    let crop_left_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let crop_left_set_keyframe_btn = Button::with_label("Set Crop Left Keyframe");
+    let crop_left_remove_keyframe_btn = Button::with_label("Remove Crop Left Keyframe");
+    crop_left_keyframe_row.append(&crop_left_set_keyframe_btn);
+    crop_left_keyframe_row.append(&crop_left_remove_keyframe_btn);
+    transform_inner.append(&crop_left_keyframe_row);
 
     row_label(&transform_inner, "Crop Right");
     let crop_right_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
@@ -957,6 +983,12 @@ pub fn build_inspector(
     crop_right_slider.set_draw_value(true);
     crop_right_slider.set_digits(0);
     transform_inner.append(&crop_right_slider);
+    let crop_right_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let crop_right_set_keyframe_btn = Button::with_label("Set Crop Right Keyframe");
+    let crop_right_remove_keyframe_btn = Button::with_label("Remove Crop Right Keyframe");
+    crop_right_keyframe_row.append(&crop_right_set_keyframe_btn);
+    crop_right_keyframe_row.append(&crop_right_remove_keyframe_btn);
+    transform_inner.append(&crop_right_keyframe_row);
 
     row_label(&transform_inner, "Crop Top");
     let crop_top_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
@@ -964,6 +996,12 @@ pub fn build_inspector(
     crop_top_slider.set_draw_value(true);
     crop_top_slider.set_digits(0);
     transform_inner.append(&crop_top_slider);
+    let crop_top_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let crop_top_set_keyframe_btn = Button::with_label("Set Crop Top Keyframe");
+    let crop_top_remove_keyframe_btn = Button::with_label("Remove Crop Top Keyframe");
+    crop_top_keyframe_row.append(&crop_top_set_keyframe_btn);
+    crop_top_keyframe_row.append(&crop_top_remove_keyframe_btn);
+    transform_inner.append(&crop_top_keyframe_row);
 
     row_label(&transform_inner, "Crop Bottom");
     let crop_bottom_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
@@ -971,6 +1009,12 @@ pub fn build_inspector(
     crop_bottom_slider.set_draw_value(true);
     crop_bottom_slider.set_digits(0);
     transform_inner.append(&crop_bottom_slider);
+    let crop_bottom_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let crop_bottom_set_keyframe_btn = Button::with_label("Set Crop Bottom Keyframe");
+    let crop_bottom_remove_keyframe_btn = Button::with_label("Remove Crop Bottom Keyframe");
+    crop_bottom_keyframe_row.append(&crop_bottom_set_keyframe_btn);
+    crop_bottom_keyframe_row.append(&crop_bottom_remove_keyframe_btn);
+    transform_inner.append(&crop_bottom_keyframe_row);
 
     row_label(&transform_inner, "Rotate");
     let rotate_row = GBox::new(Orientation::Horizontal, 8);
@@ -1022,6 +1066,12 @@ pub fn build_inspector(
     rotate_row.append(&rotate_dial);
     rotate_row.append(&rotate_spin);
     transform_inner.append(&rotate_row);
+    let rotate_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let rotate_set_keyframe_btn = Button::with_label("Set Rotate Keyframe");
+    let rotate_remove_keyframe_btn = Button::with_label("Remove Rotate Keyframe");
+    rotate_keyframe_row.append(&rotate_set_keyframe_btn);
+    rotate_keyframe_row.append(&rotate_remove_keyframe_btn);
+    transform_inner.append(&rotate_keyframe_row);
 
     row_label(&transform_inner, "Flip");
     let flip_row = GBox::new(Orientation::Horizontal, 8);
@@ -2217,6 +2267,81 @@ pub fn build_inspector(
         Rc::new({
             let pan_slider = pan_slider.clone();
             move || pan_slider.value().clamp(-1.0, 1.0)
+        }),
+        interp_provider.clone(),
+    );
+    connect_phase1_keyframe_buttons(
+        &crop_left_set_keyframe_btn,
+        &crop_left_remove_keyframe_btn,
+        Phase1KeyframeProperty::CropLeft,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let crop_left_slider = crop_left_slider.clone();
+            move || crop_left_slider.value().clamp(0.0, 500.0).round()
+        }),
+        interp_provider.clone(),
+    );
+    connect_phase1_keyframe_buttons(
+        &crop_right_set_keyframe_btn,
+        &crop_right_remove_keyframe_btn,
+        Phase1KeyframeProperty::CropRight,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let crop_right_slider = crop_right_slider.clone();
+            move || crop_right_slider.value().clamp(0.0, 500.0).round()
+        }),
+        interp_provider.clone(),
+    );
+    connect_phase1_keyframe_buttons(
+        &crop_top_set_keyframe_btn,
+        &crop_top_remove_keyframe_btn,
+        Phase1KeyframeProperty::CropTop,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let crop_top_slider = crop_top_slider.clone();
+            move || crop_top_slider.value().clamp(0.0, 500.0).round()
+        }),
+        interp_provider.clone(),
+    );
+    connect_phase1_keyframe_buttons(
+        &crop_bottom_set_keyframe_btn,
+        &crop_bottom_remove_keyframe_btn,
+        Phase1KeyframeProperty::CropBottom,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let crop_bottom_slider = crop_bottom_slider.clone();
+            move || crop_bottom_slider.value().clamp(0.0, 500.0).round()
+        }),
+        interp_provider.clone(),
+    );
+    connect_phase1_keyframe_buttons(
+        &rotate_set_keyframe_btn,
+        &rotate_remove_keyframe_btn,
+        Phase1KeyframeProperty::Rotate,
+        project.clone(),
+        selected_clip_id.clone(),
+        updating.clone(),
+        current_playhead_ns.clone(),
+        on_clip_changed.clone(),
+        Rc::new({
+            let rotate_spin = rotate_spin.clone();
+            move || rotate_spin.value().clamp(-180.0, 180.0).round()
         }),
         interp_provider.clone(),
     );

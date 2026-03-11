@@ -275,14 +275,15 @@ pub fn export_project(
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
-                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[pv{i}];",
+                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[pv{i}raw];\
+                 [pv{i}raw]format=yuv420p[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else if clip.chroma_key_enabled || clip.bg_removal_enabled {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             filter.push_str(&format!(
-                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
@@ -324,30 +325,23 @@ pub fn export_project(
         let mut total_overlap_s = 0.0_f64;
         for i in 0..(primary_clips.len() - 1) {
             let next_label = format!("pv{}", i + 1);
-            let out_label = format!("vxd{}", i + 1);
+            let out_label = format!("vseq{}", i + 1);
             let clip = &primary_clips[i];
-            let mut d_s = if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
-                clip.transition_after_ns as f64 / 1_000_000_000.0
-            } else {
-                0.0
-            };
-            let max_d = (primary_clips[i]
-                .duration()
-                .min(primary_clips[i + 1].duration()) as f64
-                / 1_000_000_000.0)
-                - 0.001;
-            d_s = d_s.clamp(0.0, max_d.max(0.0));
-            if d_s <= 0.0 {
-                d_s = 0.001;
-            }
-            let offset_s = (running_s - d_s).max(0.0);
             let sep = if i == 0 { "" } else { ";" };
-            let xfade = transition_xfade_name(&clip.transition_after);
-            filter.push_str(&format!(
-                "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
-            ));
-            running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
-            total_overlap_s += d_s;
+            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, primary_clips[i + 1]) {
+                let offset_s = (running_s - d_s).max(0.0);
+                let xfade = transition_xfade_name(&clip.transition_after);
+                filter.push_str(&format!(
+                    "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
+                ));
+                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
+                total_overlap_s += d_s;
+            } else {
+                filter.push_str(&format!(
+                    "{sep}[{prev_label}][{next_label}]concat=n=2:v=1:a=0[{out_label}]"
+                ));
+                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0;
+            }
             prev_label = out_label;
         }
         if total_overlap_s > 0.0 {
@@ -1135,6 +1129,16 @@ fn build_scale_position_filter(
     }
 }
 
+fn clamped_primary_xfade_duration_s(current: &Clip, next: &Clip) -> Option<f64> {
+    if current.transition_after.is_empty() || current.transition_after_ns == 0 {
+        return None;
+    }
+    let mut d_s = current.transition_after_ns as f64 / 1_000_000_000.0;
+    let max_d = (current.duration().min(next.duration()) as f64 / 1_000_000_000.0) - 0.001;
+    d_s = d_s.clamp(0.001, max_d.max(0.001));
+    Some(d_s)
+}
+
 /// Build atempo filter chain for audio speed change.
 /// atempo is limited to 0.5–2.0 per filter, so chain multiple for extremes.
 /// Returns a string like "atempo=2.0," (with trailing comma) or "" for 1.0x.
@@ -1419,10 +1423,10 @@ mod tests {
     use super::{
         append_pan_filter_chain, audio_crossfade_curve_name, build_audio_crossfade_filters,
         build_crop_filter, build_keyframed_property_expression, build_pan_expression,
-        build_rotation_filter, build_timing_filter, build_volume_filter, compute_clip_audio_fades,
-        estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
-        parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
-        ExportOptions, VideoCodec,
+        build_rotation_filter, build_timing_filter, build_volume_filter,
+        clamped_primary_xfade_duration_s, compute_clip_audio_fades, estimate_export_size_bytes,
+        has_linked_audio_peer, has_transform_keyframes, parse_progress_line,
+        video_input_seek_and_duration, AudioCodec, ClipAudioFade, ExportOptions, VideoCodec,
     };
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
@@ -1741,6 +1745,23 @@ mod tests {
         assert!(graph.contains("volume='if(gt("));
         assert!(graph.contains("':eval=frame"));
         assert!(graph.contains("amerge=inputs=2"));
+    }
+
+    #[test]
+    fn clamped_primary_xfade_duration_requires_explicit_transition() {
+        let a = make_video_clip("a", 0, 4_000_000_000);
+        let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
+        assert_eq!(clamped_primary_xfade_duration_s(&a, &b), None);
+    }
+
+    #[test]
+    fn clamped_primary_xfade_duration_clamps_to_boundary_limits() {
+        let mut a = make_video_clip("a", 0, 4_000_000_000);
+        let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
+        a.transition_after = "cross_dissolve".to_string();
+        a.transition_after_ns = 10_000_000_000;
+        let d = clamped_primary_xfade_duration_s(&a, &b).expect("transition should be enabled");
+        assert!((d - 3.999).abs() < 0.000_001);
     }
 
     #[test]

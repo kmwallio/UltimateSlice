@@ -806,6 +806,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "export_timeline_snapshot",
+            "description": "Render the timeline panel to a PNG image file. Useful for verifying timeline overlays like keyframe markers in headless environments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute output file path (recommended .png extension)." },
+                    "width": { "type": "integer", "description": "Output image width in pixels (default 1920)." },
+                    "height": { "type": "integer", "description": "Output image height in pixels (default 1080)." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "play",
             "description": "Start program monitor playback from the current playhead position.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -1203,6 +1216,12 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
         "export_displayed_frame" => McpCommand::ExportDisplayedFrame {
             path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "export_timeline_snapshot" => McpCommand::ExportTimelineSnapshot {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            width: args["width"].as_u64().unwrap_or(1920) as u32,
+            height: args["height"].as_u64().unwrap_or(1080) as u32,
             reply: tx,
         },
         "take_screenshot" => McpCommand::TakeScreenshot { reply: tx },
