@@ -26,7 +26,7 @@ FCPXML separates the **definition** of a resource (like a high-res video file or
 FCPXML follows a strictly hierarchical structure, mirroring the organization of a real-world video project.
 
 ### **Attribute Meanings**
-*   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`, `1.14`). Version 1.10+ is required for many modern features like HDR and Cinematic mode.
+*   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`, `1.14`). Version 1.10+ is required for many modern features like HDR and Cinematic mode. Version 1.13 corresponds to Final Cut Pro 11. Version 1.14 corresponds to Final Cut Pro 12.0.
 *   **`format`**: A unique ID referencing a `<format>` resource. This defines the "canvas" (resolution) and "heartbeat" (frame rate) of the element.
 *   **`tcStart`**: The starting timecode of the timeline. Usually `3600s` (01:00:00:00).
 *   **`tcFormat`**: Determines if the clock skips frames to stay in sync with real-time (`DF` for Drop Frame) or counts every single frame (`NDF` for Non-Drop Frame).
@@ -36,9 +36,21 @@ FCPXML uses a central repository for all "heavy" objects. This avoids duplicatin
 
 *   **`<format>`**: Defines the canvas (resolution and frame rate). See above for details.
 *   **`<asset>`**: Represents a physical file on disk (video, audio, or image).
-    *   **`src`**: The file URL (e.g., `file:///media/clip.mov`).
+    *   Contains one or more **`<media-rep>`** children that reference the actual file(s), plus optional `<metadata>`.
     *   **`start` / `duration`**: The intrinsic bounds of the file.
     *   **`hasVideo` / `hasAudio`**: Boolean flags (`1` or `0`).
+    *   **`format`**: Reference to a `<format>` resource ID.
+    *   **`audioSources`**, **`audioChannels`**, **`audioRate`**: Audio stream properties.
+    *   **`videoSources`**: Number of video sources.
+    *   **`customLUTOverride`**: Custom LUT or built-in log mode identifier.
+    *   **`auxVideoFlags`**: Auxiliary video flags.
+*   **`<media-rep>`**: A physical file reference within an `<asset>`. Each asset must have at least one.
+    *   **`src`** (required): The file URL (e.g., `file:///media/clip.mov`).
+    *   **`kind`**: `original-media` (default) or `proxy-media`.
+    *   **`sig`**: File signature assigned by FCP.
+    *   **`suggestedFilename`**: Filename hint (with extension) when the name shouldn't be derived from the URL.
+    *   Can contain an optional `<bookmark>` child.
+    > **Backward compatibility note:** Older FCPXML versions (pre-1.11) had `src` directly on `<asset>`. In v1.11+, `src` lives on `<media-rep>` children instead.
 *   **`<media>`**: Represents "synthetic" or "nested" media, such as Multicam clips or Compound clips. It contains its own internal timeline.
 *   **`<effect>`**: Defines a visual or audio filter, transition, or generator.
     *   **`uid`**: A unique string identifying the specific plugin (e.g., `.../Video Filters/Color/Color Board`).
@@ -49,7 +61,9 @@ FCPXML uses a central repository for all "heavy" objects. This avoids duplicatin
 ```xml
 <resources>
     <format id="r1" frameDuration="100/2400s" width="1920" height="1080"/>
-    <asset id="r2" name="Interview" src="file:///media/clip.mov" start="0s" duration="100s"/>
+    <asset id="r2" name="Interview" start="0s" duration="100s" hasVideo="1" hasAudio="1">
+        <media-rep kind="original-media" src="file:///media/clip.mov"/>
+    </asset>
     <effect id="r3" name="Color Board" uid=".../Video Filters/Color/Color Board"/>
 </resources>
 
@@ -61,6 +75,21 @@ FCPXML uses a central repository for all "heavy" objects. This avoids duplicatin
         </asset-clip>
     </spine>
 </sequence>
+```
+
+### **Developer Example: Asset with Original + Proxy Media**
+*An asset can have multiple `<media-rep>` children for different quality levels.*
+
+```xml
+<resources>
+    <format id="r1" frameDuration="100/2400s" width="1920" height="1080"/>
+    <asset id="r2" name="Interview_CamA" start="0s" duration="3600s"
+           hasVideo="1" hasAudio="1" format="r1"
+           audioSources="1" audioChannels="2" audioRate="48000">
+        <media-rep kind="original-media" src="file:///media/camera_a.mov"/>
+        <media-rep kind="proxy-media" src="file:///media/camera_a_proxy.mov"/>
+    </asset>
+</resources>
 ```
 
 ---
@@ -90,19 +119,29 @@ The `<media>` resource allows for complex nesting. A **Compound Clip** is essent
 A **Multicam clip** is a "stack" of synchronized camera angles. In the editor, you only see the "active" angle, but all angles remain perfectly synced in the background.
 
 *   **`<multicam>`**: The container inside a `<media>` resource that defines the angles.
+    *   **`format`** (required): Reference to a `<format>` resource ID.
+    *   **`duration`**: Total duration.
+    *   **`tcStart`**: Timecode origin.
+    *   **`tcFormat`**: `DF` | `NDF`.
+    *   **`renderFormat`**: Codec for preview renders.
 *   **`<mc-angle>`**: A container for a single camera's footage. Each angle has a unique `angleID`.
 *   **`<mc-clip>`**: The usage tag in the timeline that references a multicam resource.
-    *   **`videoAngleID`**: The ID of the angle currently being shown.
-    *   **`audioAngleID`**: The ID of the angle currently being heard.
-*   **`<mc-source>`**: Used inside an `<mc-clip>` to create "Angle Cuts." It overrides the default angle for a specific segment of the clip.
+    *   **`ref`** (required): Reference to a `<media>` ID containing a `<multicam>`.
+    *   **`srcEnable`**: `all` (default) | `audio` | `video`. Controls which streams are active.
+    *   **`audioStart` / `audioDuration`**: For split edits (J/L cuts).
+    *   **`modDate`**: Modification date.
+    > **Note:** Some FCP exports include `videoAngleID` and `audioAngleID` attributes, but these are **not declared in the v1.14 DTD**. Angle switching is handled through `<mc-source>` children instead.
+*   **`<mc-source>`**: Used inside an `<mc-clip>` to define settings for a specific multicam angle.
+    *   **`angleID`** (required): The ID of the target angle.
+    *   **`srcEnable`**: `all` (default) | `audio` | `video` | `none`. Controls which streams from this angle are active.
 
 ### **Developer Example: Multicam Setup & Angle Switching**
-*In this example, we have two cameras. The clip starts by showing Angle 1, then mid-clip, we "cut" to Angle 2 for the video while keeping the audio from Angle 1.*
+*In this example, we have two cameras. The mc-clip uses `srcEnable` on `<mc-source>` to control which angle provides video vs. audio.*
 
 ```xml
 <resources>
     <media id="r10" name="Interview Multicam">
-        <multicam>
+        <multicam format="r1">
             <mc-angle name="Angle 1" angleID="cam1">
                 <asset-clip ref="r2" offset="0s" duration="100s"/>
             </mc-angle>
@@ -113,11 +152,10 @@ A **Multicam clip** is a "stack" of synchronized camera angles. In the editor, y
     </media>
 </resources>
 
-<!-- The main instance uses cam1 for both video and audio by default -->
-<mc-clip ref="r10" offset="3600s" duration="10s" videoAngleID="cam1" audioAngleID="cam1">
-    <!-- At this point in the timeline, we switch the video to cam2 -->
-    <!-- The 'usage' attribute can be 'video' or 'audio' -->
-    <mc-source angleID="cam2" usage="video" start="5s" duration="5s"/>
+<!-- In the timeline, mc-clip references the multicam media -->
+<mc-clip ref="r10" offset="3600s" duration="10s" srcEnable="all">
+    <!-- Switch to cam2 for video only on this angle -->
+    <mc-source angleID="cam2" srcEnable="video"/>
 </mc-clip>
 ```
 
@@ -136,7 +174,10 @@ An **Audition** (`<audition>`) is a container that lets editors try out alternat
 *   **`<audition>`**: Container for audition alternatives.
     *   The **first child** element is the active "pick" shown in the timeline.
     *   Subsequent children are hidden alternatives the editor can swap in.
-    *   Can contain: `<audio>`, `<video>`, `<title>`, `<ref-clip>`, `<asset-clip>`, `<clip>`, `<sync-clip>`, `<mc-clip>`.
+    *   Can contain: `<audio>`, `<video>`, `<title>`, `<ref-clip>`, `<asset-clip>`, `<clip>`, `<sync-clip>`, `<live-drawing>`.
+
+### Live Drawings
+A **Live Drawing** (`<live-drawing>`) is a vector graphics animation element (introduced in v1.11). It can appear in spines, as connected clips, or inside auditions. Live drawings reference external PKDrawing data files via a `<locator>` resource. See Section 16.1 for a developer example.
 
 ### Connected Storylines
 A `<spine>` element can appear not only as the primary storyline inside a `<sequence>`, but also as a **child of a clip**. When nested this way, it forms a "connected storyline" — a secondary storyline that is attached to and moves with the parent clip. Connected clips use the **`lane`** attribute on their parent element to position vertically relative to the primary storyline.
@@ -397,8 +438,9 @@ Variable speed (retime) effects are controlled by `<timeMap>` and `<timept>` ele
 ```
 
 *   **`<conform-rate>`**: Part of timing parameters. Controls frame rate conforming when a clip's native frame rate differs from the sequence.
-    *   **`scaleEnabled`**: Whether rate conforming is active (`0` | `1`).
-    *   **`srcFrameRate`**: The source frame rate to conform from.
+    *   **`scaleEnabled`**: Whether rate conforming is active (`0` | `1`). Default: `1`.
+    *   **`srcFrameRate`**: The source frame rate to conform from. Enumeration: `23.98` | `24` | `25` | `29.97` | `30` | `60` | `47.95` | `48` | `50` | `59.94` | `90` | `100` | `119.88` | `120`.
+    *   **`frameSampling`**: Frame interpolation method: `floor` (default) | `nearest-neighbor` | `frame-blending` | `optical-flow-classic` | `optical-flow` | `optical-flow-frc`.
 
 ---
 
@@ -418,13 +460,18 @@ If you are writing code to parse FCPXML, follow these steps:
 
 ### **Root & Organizational Tags**
 *   **`<fcpxml>`**: The root element.
-    *   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`).
+    *   **`version`**: The schema version (e.g., `1.10`, `1.11`, `1.12`, `1.13`, `1.14`).
 *   **`<library>`**: Represents an FCP library.
     *   **`location`**: The file URL to the library on disk.
+    *   **`colorProcessing`**: `standard` | `wide` | `wide-hdr`. See Section 13.
 *   **`<event>`**: A container for clips and projects.
     *   **`name`**: The display name of the event.
+    *   **`uid`**: FCP-assigned unique identifier.
 *   **`<project>`**: Represents a Final Cut Pro project (timeline).
     *   **`name`**: The display name of the project.
+    *   **`uid`**: FCP-assigned unique identifier.
+    *   **`id`**: XML ID for internal referencing.
+    *   **`modDate`**: Modification date.
 
 ### **Resource Tags (Inside `<resources>`)**
 *   **`<format>`**: Defines resolution and frame rate.
@@ -433,34 +480,76 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`frameDuration`**: Frame time in rational seconds (e.g., `100/2400s`).
     *   **`width` / `height`**: Frame dimensions in pixels.
     *   **`colorSpace`**: The color profile (e.g., `Rec. 709`, `Rec. 2020`).
-*   **`<asset>`**: References a physical media file.
+    *   **`fieldOrder`**: `progressive` | `upper first` | `lower first`.
+    *   **`paspH` / `paspV`**: Pixel aspect ratio (horizontal/vertical).
+    *   **`projection`**: `none` | `equirectangular` | `fisheye` | `back-to-back fisheye` | `cubic`.
+    *   **`stereoscopic`**: `mono` | `side by side` | `over under`.
+    *   **`heroEye`**: `left` | `right`.
+*   **`<asset>`**: References a physical media file. Contains `<media-rep>+` and optional `<metadata>`.
     *   **`id`**: Unique resource ID.
-    *   **`src`**: File URL.
+    *   **`name`**: Display name.
+    *   **`uid`**: A unique ID used for media linking.
     *   **`start` / `duration`**: Intrinsic bounds of the file.
     *   **`hasVideo` / `hasAudio`**: Boolean flags (`1` or `0`).
-    *   **`uid`**: A unique ID used for media linking.
+    *   **`format`**: Reference to a `<format>` resource ID.
+    *   **`videoSources`**: Number of video sources.
+    *   **`audioSources`** / **`audioChannels`** / **`audioRate`**: Audio stream properties.
+    *   **`customLUTOverride`**: Custom LUT or built-in log mode identifier.
+    *   **`colorSpaceOverride`**: Override the auto-detected color space.
+    *   **`projectionOverride`**: Override projection type.
+    *   **`stereoscopicOverride`**: Override stereoscopic mode.
+    *   **`heroEyeOverride`**: Override hero eye (`left` | `right`).
+    *   **`auxVideoFlags`**: Auxiliary video flags.
+*   **`<media-rep>`**: Physical file reference within an `<asset>`.
+    *   **`src`** (required): File URL.
+    *   **`kind`**: `original-media` (default) | `proxy-media`.
+    *   **`sig`**: File signature (assigned by FCP).
+    *   **`suggestedFilename`**: Filename hint with extension.
+    *   Can contain optional `<bookmark>` child.
 *   **`<media>`**: Represents synthetic or nested media (Compound/Multicam).
     *   **`id`**: Unique resource ID.
     *   **`name`**: Display name.
+    *   **`uid`**: FCP-assigned unique identifier.
+    *   **`projectRef`**: IDREF to a project.
+    *   **`modDate`**: Modification date.
 *   **`<effect>`**: Defines a plugin or filter.
     *   **`id`**: Unique resource ID.
-    *   **`uid`**: The system path/ID for the effect plugin.
+    *   **`uid`** (required): The system path/ID for the effect plugin.
+    *   **`name`**: Display name.
+    *   **`src`**: Source path for custom effects.
+*   **`<locator>`**: URL reference resource. Used for external data files (e.g., tracking data, drawing data).
+    *   **`id`** (required): Unique resource ID.
+    *   **`url`** (required): The URL of the referenced resource.
+    *   Can contain optional `<bookmark>` child.
 
 ### **Timeline & Story Elements**
 *   **`<sequence>`**: The main timeline container.
-    *   **`format`**: Reference to a `<format>` ID.
+    *   **`format`** (required): Reference to a `<format>` ID.
     *   **`duration`**: Total length of the sequence.
     *   **`tcStart`**: Starting timecode (usually `3600s`).
     *   **`tcFormat`**: Timecode format (`DF` or `NDF`).
+    *   **`audioLayout`**: `mono` | `stereo` | `surround`.
+    *   **`audioRate`**: Audio sample rate (`32k` | `44.1k` | `48k` | `88.2k` | `96k` | `176.4k` | `192k`).
+    *   **`renderFormat`**: Codec used for preview render files.
+    *   **`keywords`**: Keywords associated with the sequence.
 *   **`<spine>`**: The primary "storyline" of the timeline.
+    *   **`name`**: Display name of the spine.
+    *   **`format`**: Reference to a `<format>` ID (defaults to parent's format).
 *   **`<asset-clip>`**: A clip referencing an `<asset>`.
-    *   **`ref`**: Reference to an `<asset>` ID.
+    *   **`ref`** (required): Reference to an `<asset>` ID.
     *   **`offset`**: Start time relative to parent.
-    *   **`start` / `duration`**: Range within the asset.
+    *   **`start` / `duration`**: Range within the asset. Duration is optional (defaults to asset's full duration).
     *   **`lane`**: Vertical position (default `0`).
-    *   **`role`**: Media role (e.g., `dialogue`, `titles`).
+    *   **`audioRole`**: Audio role assignment.
+    *   **`videoRole`**: Video role assignment (default: `video`).
+    *   **`srcEnable`**: `all` (default) | `audio` | `video`. Controls which streams are active.
+    *   **`format`**: Reference to a `<format>` ID (defaults to parent's format).
+    *   **`audioStart` / `audioDuration`**: For split edits (J/L cuts).
+    *   **`tcStart` / `tcFormat`**: Clip timecode origin and format.
+    *   **`modDate`**: Modification date.
 *   **`<clip>`**: A generic clip element (distinct from `<asset-clip>`).
     *   Supports `format`, `audioStart` / `audioDuration` (for split edits), `tcStart` / `tcFormat`.
+    *   **`modDate`**: Modification date.
     *   Can contain nested spines, captions, markers, and filters.
 *   **`<video>`**: A video-only clip referencing an asset or an effect (generator).
     *   **`ref`**: Reference to an `<asset>` ID or `<effect>` ID (for generators — see Section 11).
@@ -477,14 +566,25 @@ If you are writing code to parse FCPXML, follow these steps:
 *   **`<sync-clip>`**: A synchronized clip grouping independently recorded media.
     *   **`format`**: Reference to a `<format>` ID.
     *   **`audioStart` / `audioDuration`**: For split edits.
+    *   **`tcStart` / `tcFormat`**: Clip timecode origin and format.
+    *   **`modDate`**: Modification date.
     *   Contains `<sync-source>` children mapping source streams.
 *   **`<audition>`**: Container for audition alternatives.
     *   First child is the active "pick"; subsequent children are alternatives.
-    *   Can contain: `<audio>`, `<video>`, `<title>`, `<ref-clip>`, `<asset-clip>`, `<clip>`, `<sync-clip>`, `<mc-clip>`.
+    *   **`modDate`**: Modification date.
+    *   Can contain: `<audio>`, `<video>`, `<title>`, `<ref-clip>`, `<asset-clip>`, `<clip>`, `<sync-clip>`, `<live-drawing>`.
 *   **`<mc-clip>`**: A clip referencing a `<multicam>` media resource.
-    *   **`ref`**: Reference to a `<media>` ID.
-    *   **`videoAngleID` / `audioAngleID`**: Active angle IDs.
+    *   **`ref`** (required): Reference to a `<media>` ID.
+    *   **`srcEnable`**: `all` (default) | `audio` | `video`. Controls which streams are active.
+    *   **`audioStart` / `audioDuration`**: For split edits.
+    *   **`modDate`**: Modification date.
+    > **Note:** Some FCP exports include `videoAngleID`/`audioAngleID` attributes not declared in the v1.14 DTD.
 *   **`<ref-clip>`**: A clip referencing a `<media>` resource (Compound clip).
+    *   **`ref`** (required): Reference to a `<media>` ID.
+    *   **`srcEnable`**: `all` (default) | `audio` | `video`.
+    *   **`audioStart` / `audioDuration`**: For split edits.
+    *   **`useAudioSubroles`**: `0` (default) | `1`.
+    *   **`modDate`**: Modification date.
 *   **`<gap>`**: A placeholder for empty space.
     *   **`duration` / `offset`**: Position and length.
 *   **`<transition>`**: A transition effect between two clips.
@@ -505,15 +605,45 @@ If you are writing code to parse FCPXML, follow these steps:
 
 ### **Metadata & Locators**
 *   **`<marker>`**: A point-of-interest locator.
-    *   **`start`**: Position relative to the clip's start.
-    *   **`value`**: Note or name.
+    *   **`start`** (required): Position relative to the clip's start.
+    *   **`duration`**: Length of the marker range.
+    *   **`value`** (required): Note or name.
+    *   **`completed`**: When present, turns the marker into a to-do item. `0` = not completed, `1` = completed.
+    *   **`note`**: Additional notes for the marker.
 *   **`<chapter-marker>`**: A locator for chapter markers.
+    *   **`start`** (required): Position relative to the clip's start.
+    *   **`duration`**: Length of the chapter range.
+    *   **`value`** (required): Chapter name.
+    *   **`note`**: Additional notes.
     *   **`posterOffset`**: Thumbnail frame position.
+*   **`<rating>`**: A favorite/reject marker applied to a time range.
+    *   **`value`** (required): `favorite` | `reject`.
+    *   **`start` / `duration`**: The range covered.
+    *   **`name`**: Display name.
+    *   **`note`**: Additional notes.
 *   **`<keyword>`**: A tag applied to a time range.
+    *   **`value`** (required): Comma-separated list of keywords.
     *   **`start` / `duration`**: The range covered by the tag.
+    *   **`note`**: Additional notes.
+*   **`<analysis-marker>`**: Created automatically by FCP for analysis results (face detection, shake detection).
+    *   **`start` / `duration`**: The analyzed range.
+    *   Children: one or more `<shot-type>` or `<stabilization-type>` elements.
+*   **`<shot-type>`**: Analysis result for shot composition.
+    *   **`value`** (required): `onePerson` | `twoPersons` | `group` | `closeUp` | `mediumShot` | `wideShot`.
+*   **`<stabilization-type>`**: Analysis result for camera stability.
+    *   **`value`** (required): `excessiveShake`.
+*   **`<hidden-clip-marker>`**: An internal empty marker element.
 *   **`<metadata>`**: Container for key-value metadata.
-    *   **`<md>`**: A metadata entry with `key` and `value` attributes.
-*   **`<note>`**: A simple text element for attaching notes to clips or other elements.
+    *   **`<md>`**: A metadata entry.
+        *   **`key`** (required): Metadata key identifier.
+        *   **`value`**: Metadata value.
+        *   **`editable`**: `0` (default) | `1`.
+        *   **`type`**: `string` | `boolean` | `integer` | `float` | `date` | `timecode`.
+        *   **`displayName`**: Human-readable name.
+        *   **`description`**: Description of the metadata field.
+        *   **`source`**: Source identifier.
+        *   Can contain an `<array>` child with `<string>` elements for multi-value metadata.
+*   **`<note>`**: A simple text element (PCDATA) for attaching notes to clips or other elements.
 
 ### **Adjustments & Effects**
 *   **`<adjust-transform>`**: Spatial transformations.
@@ -532,18 +662,36 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`enabled`**: `0` or `1` (default: `1`).
 *   **`<adjust-volume>`**: Audio level controls.
     *   **`amount`**: Volume in dB.
-*   **`<filter-video>` / `<filter-audio>`**: Usage tags for effects.
-    *   **`ref`**: Reference to an `<effect>` ID.
+*   **`<filter-video>`**: A video effect applied to its parent element.
+    *   **`ref`** (required): Reference to an `<effect>` ID.
+    *   **`name`**: Display name.
+    *   **`nameOverride`**: Overrides the display name.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   Can contain `<data>` and `<param>` children.
+*   **`<filter-audio>`**: An audio effect applied to its parent element.
+    *   **`ref`** (required): Reference to an `<effect>` ID.
+    *   **`name`**: Display name.
+    *   **`nameOverride`**: Overrides the display name.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`presetID`**: Preset identifier.
+    *   Can contain `<data>` and `<param>` children.
 
 ### **Audio Channel Configuration**
 *   **`<audio-channel-source>`**: Maps source audio channels to output channels.
-    *   **`srcCh`**: Source channel(s) (e.g., `"1, 2"`).
+    *   **`srcCh`** (required): Source channel(s) (e.g., `"1, 2"`).
     *   **`outCh`**: Output channel assignment (e.g., `"L, R"`).
     *   **`role`**: Audio role for these channels.
-    *   **`enabled`** / **`active`**: Boolean flags (`1` or `0`).
+    *   **`start` / `duration`**: Time range within the clip.
+    *   **`enabled`** / **`active`**: Boolean flags (`1` or `0`). Both default to `1`.
+    *   Contains audio enhancement adjustments, audio intrinsic params, `<filter-audio>*`, and `<mute>*`.
 *   **`<audio-role-source>`**: Manages role-based audio mixing.
-    *   **`role`**: The audio role (e.g., `dialogue.dialogue-1`).
-    *   **`enabled`** / **`active`**: Boolean flags (`1` or `0`).
+    *   **`role`** (required): The audio role (e.g., `dialogue.dialogue-1`).
+    *   **`start` / `duration`**: Time range within the clip.
+    *   **`enabled`** / **`active`**: Boolean flags (`1` or `0`). Both default to `1`.
+    *   Contains audio enhancement adjustments, audio intrinsic params, `<filter-audio>*`, and `<mute>*`.
+*   **`<mute>`**: Suppresses audio output for a range of source media time.
+    *   **`start` / `duration`**: The muted time range.
+    *   Can contain optional `<fadeIn>` and `<fadeOut>` children for smooth transitions.
 
 ### **Speed & Retime**
 *   **`<timeMap>`**: Container for speed mapping points.
@@ -554,8 +702,9 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`value`**: Corresponding source time.
     *   **`interp`**: `smooth2` | `linear` | `smooth` (default: `smooth2`).
 *   **`<conform-rate>`**: Frame rate conforming.
-    *   **`scaleEnabled`**: `0` | `1`.
-    *   **`srcFrameRate`**: Source frame rate to conform from.
+    *   **`scaleEnabled`**: `0` | `1` (default: `1`).
+    *   **`srcFrameRate`**: `23.98` | `24` | `25` | `29.97` | `30` | `60` | `47.95` | `48` | `50` | `59.94` | `90` | `100` | `119.88` | `120`.
+    *   **`frameSampling`**: `floor` (default) | `nearest-neighbor` | `frame-blending` | `optical-flow-classic` | `optical-flow` | `optical-flow-frc`.
 
 ---
 
@@ -565,24 +714,33 @@ This complete example demonstrates how resources, timelines, multicam clips, key
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
-<fcpxml version="1.11">
+<fcpxml version="1.14">
     <resources>
         <!-- 1. Format: Defines 1080p 24fps canvas -->
         <format id="r1" name="FFVideoFormat1080p24" frameDuration="100/2400s" width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>
-        
-        <!-- 2. Assets: Physical media files -->
-        <asset id="r2" name="Interview_CamA" src="file:///media/camera_a.mov" start="0s" duration="3600s" hasVideo="1" hasAudio="1"/>
-        <asset id="r3" name="Interview_CamB" src="file:///media/camera_b.mov" start="0s" duration="3600s" hasVideo="1" hasAudio="1"/>
-        <asset id="r4" name="External_Audio" src="file:///media/audio_rec.wav" start="0s" duration="3600s" hasVideo="0" hasAudio="1"/>
+
+        <!-- 2. Assets: Physical media files (src is on media-rep, not on asset) -->
+        <asset id="r2" name="Interview_CamA"
+               start="0s" duration="3600s" hasVideo="1" hasAudio="1">
+            <media-rep kind="original-media" src="file:///media/camera_a.mov"/>
+        </asset>
+        <asset id="r3" name="Interview_CamB"
+               start="0s" duration="3600s" hasVideo="1" hasAudio="1">
+            <media-rep kind="original-media" src="file:///media/camera_b.mov"/>
+        </asset>
+        <asset id="r4" name="External_Audio"
+               start="0s" duration="3600s" hasVideo="0" hasAudio="1">
+            <media-rep kind="original-media" src="file:///media/audio_rec.wav"/>
+        </asset>
         
         <!-- 3. Multicam Resource: Groups Cam A and Cam B -->
         <media id="r5" name="Interview Multicam">
-            <multicam>
+            <multicam format="r1">
                 <mc-angle name="Camera A" angleID="cam1">
-                    <asset-clip ref="r2" offset="0s" duration="3600s" role="dialogue.dialogue-1"/>
+                    <asset-clip ref="r2" offset="0s" duration="3600s" audioRole="dialogue.dialogue-1"/>
                 </mc-angle>
                 <mc-angle name="Camera B" angleID="cam2">
-                    <asset-clip ref="r3" offset="0s" duration="3600s" role="dialogue.dialogue-2"/>
+                    <asset-clip ref="r3" offset="0s" duration="3600s" audioRole="dialogue.dialogue-2"/>
                 </mc-angle>
             </multicam>
         </media>
@@ -629,8 +787,8 @@ This complete example demonstrates how resources, timelines, multicam clips, key
                         </asset-clip>
                         
                         <!-- 7. Multicam Clip: Switching angles mid-segment -->
-                        <mc-clip ref="r5" offset="3605s" duration="10s" videoAngleID="cam1" audioAngleID="cam1">
-                            <mc-source angleID="cam2" usage="video" start="5s" duration="5s"/>
+                        <mc-clip ref="r5" offset="3605s" duration="10s" srcEnable="all">
+                            <mc-source angleID="cam2" srcEnable="video"/>
                         </mc-clip>
                         
                         <!-- 8. Synchronized Clip: Combining Camera Video with External Audio -->
@@ -860,23 +1018,27 @@ A complete reference of important attribute defaults that parsers must assume wh
 | Attribute | Default | Notes |
 |-----------|---------|-------|
 | `offset` | `0s` | Position in parent timeline. Omitted = start of parent. |
-| `start` | `#IMPLIED` (no DTD default) | When omitted, behavior is context-dependent. For `asset-clip`, FCP typically uses the asset's `start` value from the resource. For clips in a spine, treated as `0s`. Parsers should default to `0s` if not specified and no asset reference provides one. |
+| `start` | `0s` | DTD default is `0s`. For `asset-clip`, FCP may use the asset's `start` value from the resource. |
 | `duration` | `#REQUIRED` on most clips | Must be specified on `<clip>`, `<gap>`, `<transition>`. Is `#IMPLIED` (optional) on `<asset-clip>` -- when omitted, uses the asset's full duration. |
 | `lane` | `0` (implied) | `0` = contained in parent. Positive = above, negative = below. |
 | `enabled` | `1` | Element is active by default. |
 | `active` | `1` | Audio channel/role source is active by default. |
 | `tcStart` | `#IMPLIED` | No default; when omitted, typically `0s` or inherited from parent sequence. |
 | `tcFormat` | `#IMPLIED` | No default; when omitted, inherited from parent sequence or assumed NDF. |
-| `srcEnable` | `"all"` | On `<ref-clip>`, `<asset-clip>`, `<mc-clip>`: enables both audio and video. |
+| `srcEnable` | `"all"` | On `<ref-clip>`, `<asset-clip>`, `<mc-clip>`, `<mc-source>`: enables both audio and video. |
+| `videoRole` | `"video"` | On `<asset-clip>`: default video role assignment. |
 | `audioStart` | `#IMPLIED` | When omitted, audio uses the same `start` as video (no split edit). |
 | `audioDuration` | `#IMPLIED` | When omitted, audio uses the same `duration` as video (no split edit). |
+| `modDate` | `#IMPLIED` | Modification date. Optional on clips, projects, media, and auditions. |
 | `interp` (timept) | `"smooth2"` | Default interpolation for speed mapping points. |
 | `interp` (keyframe) | `"linear"` | Default interpolation for animation keyframes. |
-| `frameSampling` | `"floor"` | Default frame sampling for retiming. |
+| `frameSampling` | `"floor"` | Default frame sampling for retiming and conform-rate. |
+| `scaleEnabled` | `1` | Rate conforming is active by default on `<conform-rate>`. |
 | `preservesPitch` | `1` | Audio pitch is preserved during speed changes by default. |
 | `amount` (adjust-blend) | `1.0` | Full opacity by default. |
 | `amount` (adjust-panner) | `0` | Center pan by default. |
 | `mode` (adjust-blend) | Omitted = Normal (`0`) | Normal compositing when not specified. |
+| `type` (adjust-conform) | `"fit"` | Fit mode is assumed when `<adjust-conform>` is absent. |
 | `inverted` (filter-video-mask) | `0` | Mask is not inverted by default. |
 | `useAudioSubroles` (ref-clip) | `0` | Audio subroles are not used by default. |
 
@@ -892,7 +1054,7 @@ When a clip's native frame rate differs from the sequence (e.g., 25fps clip in a
 *   Always check the `version` attribute on `<fcpxml>` before parsing.
 
 #### File Path Encoding
-Asset `src` URLs use standard percent-encoding. Spaces become `%20`. Always use proper URL encoding/decoding when reading or writing the `src` attribute (e.g., `file:///Users/dev/My%20Project/clip.mov`).
+The `src` attribute on `<media-rep>` (and `url` on `<locator>`) uses standard percent-encoding. Spaces become `%20`. Always use proper URL encoding/decoding when reading or writing these attributes (e.g., `file:///Users/dev/My%20Project/clip.mov`).
 
 #### Unicode in Markers
 Marker `value` attributes can contain Unicode characters. Ensure your XML parser handles UTF-8 encoding correctly, and when writing FCPXML, use proper XML character escaping.
@@ -900,7 +1062,7 @@ Marker `value` attributes can contain Unicode characters. Ensure your XML parser
 #### DTD Validation
 FCPXML documents can be validated against the DTD bundled with Final Cut Pro:
 ```bash
-xmllint --dtdvalid "/Applications/Final Cut Pro.app/Contents/Frameworks/Flexo.framework/Resources/FCPXMLv1_11.dtd" "/path/to/file.fcpxml"
+xmllint --dtdvalid "/Applications/Final Cut Pro.app/Contents/Frameworks/Flexo.framework/Resources/FCPXMLv1_14.dtd" "/path/to/file.fcpxml"
 ```
 This is the most reliable way to catch structural errors before importing into FCP.
 
@@ -1074,6 +1236,20 @@ When a parameter has multiple sources, priority is (highest to lowest):
 2.  **`<param>` element's `value` attribute** (static value).
 3.  **Adjustment element's attribute** (e.g., `position` on `<adjust-transform>`).
 
+### **The `<data>` Element**
+
+The `<data>` element stores arbitrary data chunks, typically used by effects and match EQ profiles.
+
+*   **`key`**: Identifier for the data (e.g., `effectData`, `effectConfig`).
+*   Content: `#PCDATA` (raw data).
+
+### **Supporting Elements**
+
+*   **`<bookmark>`**: A `#PCDATA` element that stores file bookmark data. Appears as a child of `<media-rep>` or `<locator>`.
+*   **`<reserved>`**: Internal use element containing `#PCDATA`. May appear in `<adjust-blend>` or `<transition>`.
+*   **`<array>`**: Container for array values in `<md>` metadata. Contains `<string>` children.
+*   **`<string>`**: Text content (`#PCDATA`) within an `<array>`.
+
 ### **Developer Example: Finding the Right `key`**
 The easiest way to discover the `key` for a specific parameter is:
 1.  Create a timeline in FCP with the desired effect.
@@ -1110,9 +1286,11 @@ The `colorSpace` attribute on `<format>` defines the render color space for that
 The `colorSpaceOverride` attribute on `<asset>` allows overriding the auto-detected color space of source media. This is useful when FCP misidentifies a clip's color space:
 
 ```xml
-<asset id="r2" name="LOG Footage" src="file:///media/clip.mov"
+<asset id="r2" name="LOG Footage"
        start="0s" duration="100s" hasVideo="1" hasAudio="1"
-       colorSpaceOverride="Rec. 2020 HLG"/>
+       colorSpaceOverride="Rec. 2020 HLG">
+    <media-rep kind="original-media" src="file:///media/clip.mov"/>
+</asset>
 ```
 
 ### Color Conforming (`<adjust-colorConform>`)
@@ -1134,8 +1312,10 @@ Introduced in FCPXML v1.11, this element handles automatic tone mapping when mix
 <resources>
     <format id="r1" frameDuration="100/2400s" width="3840" height="2160"
             colorSpace="Rec. 2020 HLG"/>
-    <asset id="r2" name="SDR Interview" src="file:///media/interview.mov"
-           start="0s" duration="60s" hasVideo="1" hasAudio="1"/>
+    <asset id="r2" name="SDR Interview"
+           start="0s" duration="60s" hasVideo="1" hasAudio="1">
+        <media-rep kind="original-media" src="file:///media/interview.mov"/>
+    </asset>
 </resources>
 
 <sequence format="r1" duration="60s">
@@ -1165,9 +1345,9 @@ Simple edge trimming. Uses a `<trim-rect>` child with inset values.
 </adjust-crop>
 ```
 
-*   **`<trim-rect>`**: Defines inset amounts from each edge.
-    *   **`left`** / **`top`** / **`right`** / **`bottom`**: Fractional inset values (0.0 = no trim, 1.0 = fully trimmed). Default: `0` for all.
-*   Trim mode does **not** support keyframing — the crop is static.
+*   **`<trim-rect>`**: Defines inset amounts from each edge. Values are expressed as a **percentage of original frame height**.
+    *   **`left`** / **`top`** / **`right`** / **`bottom`**: Inset values as percentage of frame height. Default: `0` for all.
+    *   Can contain `<param>` children for keyframed animation (same as `<crop-rect>`).
 
 ### **Mode: `crop`**
 Allows keyframed cropping via `<crop-rect>` with nested `<param>` elements.
@@ -1185,7 +1365,7 @@ Allows keyframed cropping via `<crop-rect>` with nested `<param>` elements.
 </adjust-crop>
 ```
 
-*   **`<crop-rect>`**: Same attributes as `<trim-rect>`, but supports `<param>` children for animation.
+*   **`<crop-rect>`**: Same attributes as `<trim-rect>` (values as percentage of original frame height), but supports `<param>` children for animation.
 
 ### **Mode: `pan` (Ken Burns Effect)**
 Animates between a start and end crop rectangle, creating a pan-and-zoom effect commonly used for still images.
@@ -1286,69 +1466,318 @@ These elements exist in the DTD but are less commonly encountered. Included here
 #### **Video Adjustments**
 
 *   **`<adjust-360-transform>`**: Spatial transformations for 360° video.
-    *   Controls pan, tilt, roll, and field of view for spherical video.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`coordinates`** (required): `spherical` | `cartesian`.
+    *   **Spherical coordinates**: `latitude` (default `0`), `longitude` (default `0`), `distance`.
+    *   **Cartesian coordinates**: `xPosition` (default `0`), `yPosition` (default `0`), `zPosition`.
+    *   **`xOrientation`** / **`yOrientation`** / **`zOrientation`**: Orientation angles (all default `0`).
+    *   **`autoOrient`**: `0` | `1` (default: `1`).
+    *   **`convergence`**: Stereo convergence (default `0`).
+    *   **`interaxial`**: Stereo interaxial distance.
+    *   **`scale`**: Scale factor (default `1 1`).
     *   Contains `<param>` children for keyframing.
 
 *   **`<adjust-reorient>`**: Reorients the horizon in 360° video.
     *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`tilt`** / **`pan`** / **`roll`**: Rotation angles (all default `0`).
+    *   **`convergence`**: Stereo convergence (default `0`).
     *   Contains `<param>` children.
 
 *   **`<adjust-orientation>`**: Adjusts the viewing orientation for 360° video.
     *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`tilt`** / **`pan`** / **`roll`**: Rotation angles (all default `0`).
+    *   **`fieldOfView`**: Field of view angle.
+    *   **`mapping`**: `normal` (default) | `tinyPlanet`.
     *   Contains `<param>` children.
 
 *   **`<adjust-cinematic>`** (v1.11+): Controls Cinematic Mode focus editing for iPhone footage.
     *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`dataLocator`**: IDREF referencing external focus data via a `<locator>` resource.
+    *   **`aperture`**: Virtual aperture value.
     *   Contains `<param>` children for focus adjustments.
 
 *   **`<adjust-stereo-3D>`** (v1.13+): Controls spatial video (stereoscopic 3D) properties.
-    *   Related attributes on `<asset>`: `stereoscopic`, `heroEye`, `stereoscopicOverride`, `heroEyeOverride`.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`convergence`**: Stereo convergence (default `0`).
+    *   **`autoScale`**: `0` | `1` (default: `1`).
+    *   **`swapEyes`**: `0` (default) | `1`.
+    *   **`depth`**: Depth adjustment (default `0`).
+    *   Contains `<param>` children.
 
 *   **`<adjust-corners>`**: Four-corner pin distortion (perspective transforms).
     *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`botLeft`** / **`topLeft`** / **`topRight`** / **`botRight`**: Corner positions as `"x y"` (all default `"0 0"`).
     *   Contains `<param>` children for each corner position.
 
 #### **Audio Adjustments**
 
 *   **`<adjust-loudness>`**: Automatic loudness correction.
-    *   **`amount`**: Target loudness level.
-    *   **`uniformity`**: Loudness uniformity setting.
+    *   **`amount`** (required): Target loudness level.
+    *   **`uniformity`** (required): Loudness uniformity setting.
 
 *   **`<adjust-noiseReduction>`**: Background noise removal.
-    *   **`amount`**: Reduction strength.
-    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`amount`** (required): Reduction strength.
 
 *   **`<adjust-humReduction>`**: Removes electrical hum (50/60 Hz).
-    *   **`frequency`**: The hum frequency to target.
-    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`frequency`** (required): `50` | `60`. The hum frequency to target.
 
 *   **`<adjust-EQ>`**: Parametric equalizer.
-    *   **`mode`**: EQ preset mode.
+    *   **`mode`** (required): `flat` | `voice_enhance` | `music_enhance` | `loudness` | `hum_reduction` | `bass_boost` | `bass_reduce` | `treble_boost` | `treble_reduce`.
     *   Contains `<param>` children for band-specific adjustments.
 
-*   **`<adjust-matchEQ>`**: Matches the EQ profile of one clip to another.
+*   **`<adjust-matchEQ>`**: Matches the EQ profile of one clip to another. Contains a `<data>` child.
 
 *   **`<adjust-voiceIsolation>`** (v1.11+): AI-powered voice isolation that separates speech from background noise.
-    *   **`amount`**: Isolation strength.
-    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`amount`** (required): Isolation strength.
 
-*   **`<mute>`**: Mutes the element's audio output entirely.
+*   **`<mute>`**: Suppresses audio output for a range of source media time.
+    *   **`start` / `duration`**: The muted time range.
+    *   Can contain optional `<fadeIn>` and `<fadeOut>` children for smooth transitions.
 
 #### **Masking**
 
 *   **`<filter-video-mask>`**: Applies a video filter through a mask shape.
-    *   **`ref`**: Reference to an `<effect>` ID.
-    *   **`inverted`**: `0` (default) | `1`. Whether the mask is inverted.
     *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`inverted`**: `0` (default) | `1`. Whether the mask is inverted.
+    *   Contains one or more `<mask-shape>` or `<mask-isolation>` elements, followed by one or two `<filter-video>` elements (second is for outer color correction only).
 
 *   **`<mask-shape>`**: Defines a shape mask.
+    *   **`name`**: Display name.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`blendMode`**: `add` (default) | `subtract` | `multiply`.
     *   **`tracking`**: IDREF linking to an `<object-tracker>` for tracked masks.
+    *   Contains `<param>` children.
 
 *   **`<mask-isolation>`** (v1.8+): Isolation mask for color-based selections.
+    *   **`name`**: Display name.
+    *   **`enabled`**: `0` | `1` (default: `1`).
+    *   **`blendMode`**: `add` | `subtract` | `multiply` (default: `multiply`).
+    *   **`type`**: `3D` (default) | `HSL`.
+    *   Contains a `<data>` child and optional `<param>` children.
 
 ---
 
-## 16. Version History & Compatibility
+## 16. Additional Developer Examples
+
+### 16.1 Live Drawing
+Live drawings (`<live-drawing>`) are vector graphics animations introduced in v1.11. They reference external drawing data via a `<locator>` resource.
+
+```xml
+<resources>
+    <locator id="r15" url="file:///path/to/drawing-data.pkdrawing"/>
+</resources>
+
+<!-- In a spine or as a connected clip -->
+<live-drawing lane="1" offset="3600s" duration="5s" role="video"
+             dataLocator="r15" animationType="replay"/>
+```
+
+**Attributes:**
+*   **`role`**: Role assignment (default: `video`).
+*   **`dataLocator`**: IDREF referencing a `<locator>` resource for the serialized PKDrawing data file.
+*   **`animationType`**: Animation playback mode.
+*   Standard clip attributes (`offset`, `duration`, `lane`, `enabled`, etc.).
+*   Supports a subset of intrinsic video params: `adjust-crop`, `adjust-corners`, `adjust-conform`, `adjust-transform`, `adjust-blend`, `adjust-360-transform`, `adjust-colorConform`, `adjust-stereo-3D`.
+
+### 16.2 Ratings and Keywords with Notes
+
+```xml
+<asset-clip ref="r2" offset="3600s" duration="30s">
+    <!-- Mark a range as a favorite with a note -->
+    <rating start="5s" duration="10s" value="favorite" note="Great expression"/>
+
+    <!-- Reject a bad section -->
+    <rating start="25s" duration="5s" value="reject"/>
+
+    <!-- Tag a range with keywords -->
+    <keyword start="0s" duration="30s" value="interview, wide shot"
+             note="Main angle, good lighting"/>
+</asset-clip>
+```
+
+### 16.3 Analysis Markers with Shot Types
+
+```xml
+<asset-clip ref="r2" offset="3600s" duration="60s">
+    <!-- FCP's automatic analysis results -->
+    <analysis-marker start="0s" duration="10s">
+        <shot-type value="wideShot"/>
+    </analysis-marker>
+    <analysis-marker start="10s" duration="15s">
+        <shot-type value="onePerson"/>
+        <shot-type value="closeUp"/>
+    </analysis-marker>
+    <analysis-marker start="40s" duration="5s">
+        <stabilization-type value="excessiveShake"/>
+    </analysis-marker>
+</asset-clip>
+```
+
+### 16.4 Mute with Fades
+
+```xml
+<audio-channel-source srcCh="1, 2" outCh="L, R" role="dialogue">
+    <!-- Suppress audio from 5s to 7s with smooth fades -->
+    <mute start="5s" duration="2s">
+        <fadeIn type="easeIn" duration="100/2400s"/>
+        <fadeOut type="easeOut" duration="100/2400s"/>
+    </mute>
+</audio-channel-source>
+```
+
+### 16.5 Adjust-Corners (Perspective Transform)
+
+```xml
+<!-- Pin the four corners to create a perspective effect -->
+<adjust-corners enabled="1"
+    botLeft="-480 -270" topLeft="-480 270"
+    topRight="480 270" botRight="480 -270">
+    <!-- Animate bottom-left corner -->
+    <param name="botLeft">
+        <keyframeAnimation>
+            <keyframe time="0s" value="-480 -270" interp="ease"/>
+            <keyframe time="5s" value="-400 -200"/>
+        </keyframeAnimation>
+    </param>
+</adjust-corners>
+```
+
+### 16.6 Audio Enhancements
+
+```xml
+<asset-clip ref="r2" offset="3600s" duration="30s">
+    <audio-channel-source srcCh="1, 2" outCh="L, R" role="dialogue">
+        <!-- Normalize loudness -->
+        <adjust-loudness amount="-14" uniformity="0.5"/>
+
+        <!-- Remove background noise -->
+        <adjust-noiseReduction amount="50"/>
+
+        <!-- Remove 60Hz electrical hum -->
+        <adjust-humReduction frequency="60"/>
+
+        <!-- Apply voice enhancement EQ -->
+        <adjust-EQ mode="voice_enhance"/>
+
+        <!-- Isolate voice from background -->
+        <adjust-voiceIsolation amount="50"/>
+    </audio-channel-source>
+</asset-clip>
+```
+
+### 16.7 Marker as To-Do Item
+
+```xml
+<asset-clip ref="r2" offset="3600s" duration="10s">
+    <!-- Standard marker -->
+    <marker start="2s" value="Great expression here"/>
+
+    <!-- To-do marker (not yet completed) -->
+    <marker start="5s" value="Fix color here" completed="0"
+            note="Skin tones look too warm"/>
+
+    <!-- Completed to-do marker -->
+    <marker start="8s" value="Audio level fixed" completed="1"/>
+</asset-clip>
+```
+
+### 16.8 Metadata with Types and Arrays
+
+```xml
+<metadata>
+    <md key="com.apple.proapps.studio.reel" value="A001"
+        type="string" editable="1" displayName="Reel"/>
+    <md key="com.apple.proapps.studio.scene" value="Scene 5"
+        type="string" editable="1"/>
+    <md key="com.example.custom.tags" type="string" displayName="Tags">
+        <array>
+            <string>outdoor</string>
+            <string>sunset</string>
+            <string>drone</string>
+        </array>
+    </md>
+</metadata>
+```
+
+---
+
+## 17. Smart Collections & Organization
+
+FCPXML supports a rich system for organizing clips through keyword collections, smart collections with rule-based matching, and collection folders.
+
+### **Collection Elements**
+
+*   **`<keyword-collection>`**: A simple collection based on a keyword.
+    *   **`name`** (required): The keyword name.
+*   **`<collection-folder>`**: A folder for organizing collections.
+    *   **`name`** (required): The folder name.
+    *   Contains: `<collection-folder>`, `<keyword-collection>`, and/or `<smart-collection>` children.
+*   **`<smart-collection>`**: A rule-based collection that automatically matches clips.
+    *   **`name`** (required): Display name.
+    *   **`match`** (required): `any` | `all`. Whether clips must match any or all rules.
+
+### **Match Rules**
+
+Smart collections contain one or more match rule elements:
+
+| Element | Key Attributes | Description |
+|---|---|---|
+| `<match-text>` | `rule` (includes\|doesNotInclude\|is\|isNot\|startsWith\|endsWith\|isRelatedTo), `value`, `scope` (all\|notes\|names\|markers\|transcript\|visual\|all-text) | Text search |
+| `<match-ratings>` | `value` (favorites\|rejected) | Rating filter |
+| `<match-media>` | `rule` (is\|isNot), `type` (videoWithAudio\|videoOnly\|audioOnly\|stills) | Media type filter |
+| `<match-clip>` | `rule` (is\|isNot), `type` (audition\|synchronized\|compound\|multicam\|layeredGraphic\|project) | Clip type filter |
+| `<match-stabilization>` | `rule` (includesAny\|includesAll\|doesNotIncludeAny\|doesNotIncludeAll) | Camera shake filter. Contains `<stabilization-type>` children. |
+| `<match-keywords>` | `rule` (includesAny\|includesAll\|doesNotIncludeAny\|doesNotIncludeAll) | Keyword filter. Contains `<keyword-name>` children. |
+| `<match-shot>` | `rule` (includesAny\|includesAll\|doesNotIncludeAny\|doesNotIncludeAll) | Shot type filter. Contains `<shot-type>` children. |
+| `<match-property>` | `key` (reel\|scene\|take\|audioOutputChannels\|frameSize\|videoFrameRate\|audioSampleRate\|cameraName\|cameraAngle\|projection\|stereoscopic\|cinematic), `rule`, `value` | Property metadata filter |
+| `<match-time>` | `type` (contentCreated\|dateImported), `rule` (is\|isBefore\|isAfter), `value` | Exact time filter |
+| `<match-timeRange>` | `type` (contentCreated\|dateImported), `rule` (isInLast\|isNotInLast), `value`, `units` (hour\|day\|week\|month\|year) | Relative time range filter |
+| `<match-roles>` | `rule` (includesAny\|includesAll\|doesNotIncludeAny\|doesNotIncludeAll) | Role filter. Contains `<role>` children (`name` attr). |
+| `<match-usage>` | `rule` (used\|unused) | Usage status filter |
+| `<match-representation>` | `type` (original\|optimized\|proxy), `rule` (isAvailable\|isMissing) | Media representation filter |
+| `<match-markers>` | `type` (all\|standard\|allTodo\|complete\|incomplete) | Marker presence filter |
+| `<match-analysis-type>` | `rule` (isAvailable\|isMissing), `value` (any\|transcript\|visual) | Analysis data filter (v1.14: `transcript`/`visual` values) |
+
+All match rules have an `enabled` attribute (`0` | `1`, default: `1`).
+
+### **Developer Example: Smart Collections**
+
+```xml
+<library location="file:///Users/dev/Movies/MyProject.fcpbundle/">
+    <!-- A smart collection that finds all favorited wide shots -->
+    <smart-collection name="Favorite Wide Shots" match="all">
+        <match-ratings enabled="1" value="favorites"/>
+        <match-shot enabled="1" rule="includesAny">
+            <shot-type value="wideShot"/>
+        </match-shot>
+    </smart-collection>
+
+    <!-- A smart collection for unused interview clips -->
+    <smart-collection name="Unused Interviews" match="all">
+        <match-usage enabled="1" rule="unused"/>
+        <match-keywords enabled="1" rule="includesAny">
+            <keyword-name value="interview"/>
+        </match-keywords>
+    </smart-collection>
+
+    <!-- Collection folder for organization -->
+    <collection-folder name="Selects">
+        <keyword-collection name="B-Roll"/>
+        <smart-collection name="Recent Imports" match="all">
+            <match-timeRange enabled="1" type="dateImported"
+                             rule="isInLast" value="7" units="day"/>
+        </smart-collection>
+    </collection-folder>
+
+    <event name="Day 1">
+        <!-- ... clips ... -->
+    </event>
+</library>
+```
+
+---
+
+## 18. Version History & Compatibility
 
 ### FCPXML Version to Final Cut Pro Mapping
 
@@ -1361,7 +1790,7 @@ These elements exist in the DTD but are less commonly encountered. Included here
 | 1.11 | FCP 10.6.6 | `<adjust-colorConform>`, `<adjust-cinematic>`, `<live-drawing>`, `<adjust-voiceIsolation>`, `optical-flow-frc` frame sampling |
 | 1.12 | FCP 10.8 | `nameOverride` attribute on filters, additional metadata features |
 | 1.13 | FCP 11.0 | `<adjust-stereo-3D>`, spatial video attributes (`stereoscopic`, `heroEye`), `<hidden-clip-marker>`, 90/100/120fps conform rates |
-| 1.14 | FCP 12.0 | Transcript Search, Visual Search, Beat Detection |
+| 1.14 | FCP 12.0 | `<match-analysis-type>` gains `transcript`/`visual` values, `<match-text>` scope gains `transcript`/`visual`/`all-text`, beat detection support |
 
 ### Breaking Changes & Migration Notes
 
@@ -1372,26 +1801,26 @@ These elements exist in the DTD but are less commonly encountered. Included here
 ### Parser Recommendations
 1.  Always check the `version` attribute on the `<fcpxml>` root element before parsing.
 2.  Gracefully handle unknown elements and attributes from newer versions — skip them rather than failing.
-3.  FCP can export older versions (e.g., FCP 11 can export as v1.13, v1.12, or v1.11). If you only support a specific version, instruct users to export in that version.
+3.  FCP can export older versions (e.g., FCP 12 can export as v1.14, v1.13, v1.12, or v1.11). If you only support a specific version, instruct users to export in that version.
 4.  When generating FCPXML, target the **oldest version** that supports the features you need, for maximum compatibility.
 
 ### DTD Validation
 The DTD files are bundled with Final Cut Pro. Validate before import:
 ```bash
-xmllint --dtdvalid "/Applications/Final Cut Pro.app/Contents/Frameworks/Flexo.framework/Resources/FCPXMLv1_11.dtd" "/path/to/file.fcpxml"
+xmllint --dtdvalid "/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework/Versions/A/Resources/FCPXMLv1_14.dtd" "/path/to/file.fcpxml"
 ```
 
 DTD files are also available on GitHub for reference (e.g., in the CommandPost and cutlass repositories).
 
 ---
 
-## 17. Import Options
+## 19. Import Options
 
 The `<import-options>` element appears as an optional first child of `<fcpxml>`, before `<resources>`. It controls how FCP processes the file during import.
 
 ### **Structure**
 ```xml
-<fcpxml version="1.11">
+<fcpxml version="1.14">
     <import-options>
         <option key="copy assets" value="1"/>
         <option key="assign audio role" value="dialogue"/>
