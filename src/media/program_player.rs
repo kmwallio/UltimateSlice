@@ -2408,6 +2408,22 @@ impl ProgramPlayer {
         }
     }
 
+    fn prerender_meter_track_indices_for(clips: &[ProgramClip], active: &[usize]) -> Vec<usize> {
+        let mut seen = HashSet::new();
+        active
+            .iter()
+            .filter_map(|&clip_idx| clips.get(clip_idx).map(|c| c.track_index))
+            .filter(|track_idx| seen.insert(*track_idx))
+            .collect()
+    }
+
+    fn prerender_meter_track_indices(&self) -> Vec<usize> {
+        let Some(active) = self.prerender_active_clips.as_ref() else {
+            return Vec::new();
+        };
+        Self::prerender_meter_track_indices_for(&self.clips, active)
+    }
+
     fn crossfade_curve_gain(curve: &CrossfadeCurve, progress: f64, incoming: bool) -> f64 {
         let t = progress.clamp(0.0, 1.0);
         match (curve, incoming) {
@@ -9420,20 +9436,37 @@ impl ProgramPlayer {
                                     }
                                     if !handled {
                                         if let Some(ref name) = src_name {
-                                            if let Some(track_index) =
-                                                self.slots.iter().find_map(|slot| {
+                                            if let Some((is_prerender_slot, clip_idx)) = self
+                                                .slots
+                                                .iter()
+                                                .find_map(|slot| {
                                                     let level = slot.audio_level.as_ref()?;
-                                                    if level.name().as_str() == name.as_str() {
-                                                        self.clips
-                                                            .get(slot.clip_idx)
-                                                            .map(|c| c.track_index)
-                                                    } else {
-                                                        None
-                                                    }
+                                                    (level.name().as_str() == name.as_str())
+                                                        .then_some((slot.is_prerender_slot, slot.clip_idx))
                                                 })
                                             {
-                                                self.push_track_peak(track_index, l, r);
-                                                handled = true;
+                                                if is_prerender_slot {
+                                                    let track_indices =
+                                                        self.prerender_meter_track_indices();
+                                                    if track_indices.is_empty() {
+                                                        if let Some(track_index) =
+                                                            self.clips.get(clip_idx).map(|c| c.track_index)
+                                                        {
+                                                            self.push_track_peak(track_index, l, r);
+                                                            handled = true;
+                                                        }
+                                                    } else {
+                                                        for track_index in track_indices {
+                                                            self.push_track_peak(track_index, l, r);
+                                                        }
+                                                        handled = true;
+                                                    }
+                                                } else if let Some(track_index) =
+                                                    self.clips.get(clip_idx).map(|c| c.track_index)
+                                                {
+                                                    self.push_track_peak(track_index, l, r);
+                                                    handled = true;
+                                                }
                                             }
                                         }
                                     }
@@ -9919,6 +9952,24 @@ mod tests {
         assert!(with_original.contains("lut3d="));
         assert_eq!(with_proxy, "");
         let _ = std::fs::remove_file(lut_path);
+    }
+
+    #[test]
+    fn prerender_meter_track_indices_returns_unique_track_order() {
+        let mut c1 = make_clip();
+        c1.id = "a".to_string();
+        c1.track_index = 0;
+        let mut c2 = make_clip();
+        c2.id = "b".to_string();
+        c2.track_index = 2;
+        let mut c3 = make_clip();
+        c3.id = "c".to_string();
+        c3.track_index = 2;
+        let clips = vec![c1, c2, c3];
+        assert_eq!(
+            ProgramPlayer::prerender_meter_track_indices_for(&clips, &[0, 1, 2]),
+            vec![0, 2]
+        );
     }
 
     fn cache_entry(

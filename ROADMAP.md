@@ -301,6 +301,7 @@ Tracking docs:
              - [x] Prerender ready-cache pruning: bound cached ready segments and evict far-from-playhead entries first (while keeping active key) to reduce stale-cache churn
              - [x] Prerender cache hit telemetry: track cache hit/miss counters and expose hit-rate in performance snapshot/logging for tighter tuning feedback
              - [x] Prerender LUT guard for proxy-backed inputs: skip LUT re-application in prerender when source media is already proxy-backed/LUT-baked
+             - [x] Track meter continuity during prerender playback: map prerender level telemetry to active prerender tracks so per-track audio monitors stay visible
            - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
            - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at

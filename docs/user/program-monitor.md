@@ -72,6 +72,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Each active clip gets its own decoder branch with per-clip effects, connected to the compositor with correct z-ordering (higher tracks render on top).
 - Audio from active video clips is mixed through an **audiomixer** element (except freeze-frame video holds, which are intentionally silent); audio-only tracks use a separate playbin.
 - Program Monitor shows a **master stereo meter** (L/R), updated from GStreamer `level` elements.
+- During prerender playback, per-track timeline meters remain active by mapping prerender audio-level telemetry to the currently active prerender track set.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
 - Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
