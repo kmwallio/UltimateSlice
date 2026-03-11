@@ -53,6 +53,9 @@ struct ActiveClipContext {
     clip_index: usize,
     timeline_start: u64,
     source_in: u64,
+    /// Raw value of the clip's `start` attribute (timecoded source start).
+    /// Used to map connected clip offsets from parent source time to timeline.
+    raw_source_start_ns: u64,
     has_us_position: bool,
     has_us_scale: bool,
     has_us_rotate: bool,
@@ -248,6 +251,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             &mut track_map,
                             mount_root.as_deref(),
                             &mount_users,
+                            clip_stack.last(),
                         ) {
                             clip_stack.push(ctx);
                             last_spine_clip_ctx = Some(ctx);
@@ -261,6 +265,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             &mut track_map,
                             mount_root.as_deref(),
                             &mount_users,
+                            clip_stack.last(),
                         ) {
                             clip_stack.push(ctx);
                             last_spine_clip_ctx = Some(ctx);
@@ -517,6 +522,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             &mut track_map,
                             mount_root.as_deref(),
                             &mount_users,
+                            clip_stack.last(),
                         ) {
                             last_spine_clip_ctx = Some(ctx);
                         }
@@ -529,6 +535,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             &mut track_map,
                             mount_root.as_deref(),
                             &mount_users,
+                            clip_stack.last(),
                         ) {
                             last_spine_clip_ctx = Some(ctx);
                         }
@@ -721,13 +728,29 @@ fn parse_asset_clip(
     track_map: &mut BTreeMap<(u8, usize), Track>,
     mount_root: Option<&Path>,
     mount_users: &[String],
+    parent_ctx: Option<&ActiveClipContext>,
 ) -> Option<ActiveClipContext> {
     if let Some(asset_ref) = attrs.get("ref") {
         if let Some(asset) = assets.get(asset_ref) {
-            let timeline_start = attrs
+            let raw_offset = attrs
                 .get("offset")
                 .and_then(|t| parse_fcpxml_time(t))
                 .unwrap_or(0);
+            let lane = attrs.get("lane").and_then(|s| s.parse::<i32>().ok());
+
+            // Connected clips (lane != 0) use offset in parent's source time
+            // space. Convert to timeline: parent_timeline + (offset - parent_start).
+            let timeline_start = if lane.is_some() {
+                if let Some(parent) = parent_ctx {
+                    parent
+                        .timeline_start
+                        .saturating_add(raw_offset.saturating_sub(parent.raw_source_start_ns))
+                } else {
+                    raw_offset
+                }
+            } else {
+                raw_offset
+            };
             let raw_source_start = attrs
                 .get("start")
                 .and_then(|t| parse_fcpxml_time(t))
@@ -751,7 +774,6 @@ fn parse_asset_clip(
                 .cloned()
                 .unwrap_or_else(|| asset.name.clone());
 
-            let lane = attrs.get("lane").and_then(|s| s.parse::<i32>().ok());
             let explicit_track_idx = attrs.get("us:track-idx").and_then(|s| s.parse().ok());
             let clip_kind = match attrs.get("us:track-kind").map(|s| s.as_str()) {
                 Some("audio") => ClipKind::Audio,
@@ -1079,6 +1101,7 @@ fn parse_asset_clip(
                 clip_index,
                 timeline_start,
                 source_in,
+                raw_source_start_ns: raw_source_start,
                 has_us_position: attrs.contains_key("us:position-x")
                     || attrs.contains_key("us:position-y"),
                 has_us_scale: attrs.contains_key("us:scale"),
@@ -4407,5 +4430,59 @@ mod tests {
         assert!((clip.scale_keyframes[0].value - 0.5).abs() < 0.001);
         assert_eq!(clip.scale_keyframes[1].time_ns, 5_000_000_000);
         assert!((clip.scale_keyframes[1].value - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_fcp_connected_clips_timeline_offset() {
+        // Simulates FCP's connected clip nesting. Connected clips use `offset`
+        // in the parent clip's source time space. The parser must convert to
+        // absolute timeline positions.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1001/24000s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/primary.mp4" start="1000000/24000s" duration="1200000/24000s" hasVideo="1" hasAudio="1" format="r1"/>
+    <asset id="a2" src="file:///tmp/connected_v.mp4" start="500000/24000s" duration="600000/24000s" hasVideo="1" hasAudio="1" format="r1"/>
+    <asset id="a3" src="file:///tmp/connected_a.mp3" start="0s" duration="100s" hasVideo="0" hasAudio="1"/>
+  </resources>
+  <project name="Connected Test">
+    <sequence format="r1" duration="200200/24000s">
+      <spine>
+        <asset-clip ref="a1" offset="0/24000s" name="Primary" start="1000000/24000s" duration="100100/24000s">
+          <asset-clip ref="a2" lane="1" offset="1050050/24000s" name="ConnectedVideo" start="500000/24000s" duration="50050/24000s"/>
+          <asset-clip ref="a3" lane="-1" offset="1000000/24000s" name="ConnectedAudio" duration="24024/24000s"/>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+        let project = parse_fcpxml(xml).expect("should parse");
+        // Primary clip at timeline 0
+        let primary = project
+            .video_tracks()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.label == "Primary")
+            .expect("primary clip");
+        assert_eq!(primary.timeline_start, 0);
+
+        // Connected video (lane=1): offset 1050050 in parent source space.
+        // Parent source start = 1000000. So timeline = 0 + (1050050 - 1000000)
+        // = 50050/24000s ≈ 2.085s → 50050 * 1_000_000_000 / 24000 ns
+        let connected_v = project
+            .video_tracks()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.label == "ConnectedVideo")
+            .expect("connected video clip");
+        let expected_ns = 50050u64 * 1_000_000_000 / 24000;
+        let delta = connected_v.timeline_start.abs_diff(expected_ns);
+        assert!(delta <= 1, "connected video timeline_start off by {delta}ns");
+
+        // Connected audio (lane=-1): offset 1000000 = parent start → timeline = 0
+        let connected_a = project
+            .audio_tracks()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.label == "ConnectedAudio")
+            .expect("connected audio clip");
+        assert_eq!(connected_a.timeline_start, 0);
     }
 }
