@@ -44,6 +44,7 @@ Use **Export ▼ → Export Project with Media…** to create a portable package
 - Writes the chosen `.uspxml`/`.fcpxml` file.
 - Copies all timeline-used source media into a sibling `ProjectName.Library` folder (based on the output filename stem).
 - Rewrites saved media references to point at those copied library files.
+- For packaged exports targeting external Linux mount roots (`/media`, `/run/media`, `/mnt`), paths are normalized to `/Volumes/<drive>/...` in the XML for better macOS and cross-distro portability.
 - If different source files share the same filename, UltimateSlice keeps the first name and adds deterministic suffixes for collisions.
 - Shows an export progress window while copying media and writing the packaged project XML.
 

@@ -122,6 +122,7 @@ Tracking docs:
 - [x] Shared MIME registration for UltimateSlice projects: ship `application/x-ultimateslice-project+xml` shared-mime-info definition with `*.uspxml` glob and install it in Flatpak package metadata
 - [x] Dirty imported transform edits prefer in-place XML patching (when `adjust-transform` exists), preserving original asset IDs/document structure instead of full regeneration
 - [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
+- [x] Packaged export external-drive path normalization: **Export Project with Media** rewrites Linux external mount roots (`/media`, `/run/media`, `/mnt`) to `/Volumes/<drive>/...` in saved XML for cross-platform portability
 - [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)

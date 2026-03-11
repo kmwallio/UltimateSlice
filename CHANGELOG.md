@@ -6,7 +6,7 @@ All notable project changes and progress should be recorded here.
 
 ### Added
 - **macOS build instructions**: Added Homebrew (`brew install`) dependency setup for GTK4, GStreamer, and FFmpeg in `README.md` and `docs/user/getting-started.md`, including the required `PKG_CONFIG_PATH` export for Apple Silicon and Intel Macs.
-- **Export Project with Media packaging**: Added **Export ▼ → Export Project with Media…** workflow that writes `.uspxml`/`.fcpxml`, copies timeline-used source media into a sibling `ProjectName.Library` directory, rewrites saved XML media paths to those packaged copies (with deterministic collision suffixing and source dedupe), and shows copy/write progress in a dedicated export progress window.
+- **Export Project with Media packaging**: Added **Export ▼ → Export Project with Media…** workflow that writes `.uspxml`/`.fcpxml`, copies timeline-used source media into a sibling `ProjectName.Library` directory, rewrites saved XML media paths to those packaged copies (with deterministic collision suffixing and source dedupe), shows copy/write progress in a dedicated export progress window, and normalizes external Linux mount exports to `/Volumes/<drive>/...` paths for improved macOS/cross-distro portability.
 - **MCP packaged project export**: Added `save_project_with_media` MCP tool to automate the same packaged save workflow and return both output XML path and library path.
 
 ### Fixed

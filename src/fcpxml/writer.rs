@@ -632,10 +632,9 @@ where
                     "Missing exported media mapping for source: {}",
                     canonical_source.display()
                 )
-            })?
-            .to_string_lossy()
-            .to_string();
-        source_to_export_path.insert(source_path, exported_path);
+            })?;
+        let portable_path = normalize_packaged_path_for_portability(exported_path);
+        source_to_export_path.insert(source_path, portable_path.to_string_lossy().to_string());
     }
 
     let mut export_project = project.clone();
@@ -674,6 +673,44 @@ fn source_path_to_local_path(source_path: &str) -> Result<PathBuf> {
     }
     let raw_path = source_path.strip_prefix("file://").unwrap_or(source_path);
     Ok(PathBuf::from(decode_percent_encoded_path(raw_path)))
+}
+
+fn normalize_packaged_path_for_portability(path: &Path) -> PathBuf {
+    if !path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    if components.is_empty() {
+        return path.to_path_buf();
+    }
+
+    let suffix_start = if components[0] == "media" && components.len() >= 3 {
+        Some(2usize)
+    } else if components[0] == "run"
+        && components.get(1).is_some_and(|c| c == "media")
+        && components.len() >= 4
+    {
+        Some(3usize)
+    } else if components[0] == "mnt" && components.len() >= 2 {
+        Some(1usize)
+    } else {
+        None
+    };
+
+    let Some(start) = suffix_start else {
+        return path.to_path_buf();
+    };
+    let mut normalized = PathBuf::from("/Volumes");
+    for part in components.iter().skip(start) {
+        normalized.push(part);
+    }
+    normalized
 }
 
 fn decode_percent_encoded_path(path: &str) -> String {
@@ -2634,6 +2671,42 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_normalize_packaged_path_for_portability_external_mounts() {
+        assert_eq!(
+            normalize_packaged_path_for_portability(Path::new(
+                "/media/alex/LEXAR/Show/Packaged.Library/clip.mp4"
+            )),
+            PathBuf::from("/Volumes/LEXAR/Show/Packaged.Library/clip.mp4")
+        );
+        assert_eq!(
+            normalize_packaged_path_for_portability(Path::new(
+                "/run/media/alex/SSD_A/Packaged.Library/audio.wav"
+            )),
+            PathBuf::from("/Volumes/SSD_A/Packaged.Library/audio.wav")
+        );
+        assert_eq!(
+            normalize_packaged_path_for_portability(Path::new(
+                "/mnt/DriveB/Packaged.Library/shot.mov"
+            )),
+            PathBuf::from("/Volumes/DriveB/Packaged.Library/shot.mov")
+        );
+    }
+
+    #[test]
+    fn test_normalize_packaged_path_for_portability_noop_for_non_external_paths() {
+        let home_path = PathBuf::from("/home/alex/Projects/Packaged.Library/clip.mp4");
+        assert_eq!(
+            normalize_packaged_path_for_portability(&home_path),
+            home_path
+        );
+        let already_volumes = PathBuf::from("/Volumes/LEXAR/Packaged.Library/clip.mp4");
+        assert_eq!(
+            normalize_packaged_path_for_portability(&already_volumes),
+            already_volumes
+        );
     }
 
     #[test]
