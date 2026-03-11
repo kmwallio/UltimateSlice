@@ -295,6 +295,10 @@ Tracking docs:
              - [x] Transition prerender overlap padding: add small frame padding around overlap boundaries (with incoming pre-overlap `tpad` hold) to reduce edge handoff misses at transition entry/exit
              - [x] Transition-priority prewarm scheduling: when Smooth-mode queue budget is tight, prioritize worst hit-rate transition boundaries first so limited prewarm slots target highest-risk misses
              - [x] Transition overlap audio-padding parity: delay incoming transition audio during prerender pre-padding so overlap audio starts at boundary (no early incoming bleed)
+             - [x] Distance-aware transition prewarm priority: blend transition risk and boundary proximity so queue-constrained prewarm still favors near-term boundaries while targeting high miss-risk transitions
+             - [x] Recency-weighted transition metrics: apply periodic decay to prerender hit/miss counters so scheduling reacts to current playback behavior
+             - [x] Priority-aware prerender queue admission: cap in-flight prerender queue depth and allow limited overflow only for meaningfully higher-priority requests
+             - [x] Prerender ready-cache pruning: bound cached ready segments and evict far-from-playhead entries first (while keeping active key) to reduce stale-cache churn
            - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
            - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at

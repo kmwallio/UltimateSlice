@@ -106,6 +106,10 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Transition prerender windows include a small frame padding around overlap boundaries; incoming transition input is held through pre-overlap padding so source timing stays correct while reducing edge handoff misses.
 - When Smooth-mode queue budget is tight, transition prewarm scheduling prioritizes boundaries with the worst observed prerender hit rates first, improving the odds that limited background prerender work helps the most problematic transitions.
 - Transition prerender overlap padding now includes incoming audio timing parity: incoming transition audio is delayed until the overlap boundary, avoiding early incoming-audio bleed during the pre-padding window.
+- Queue-constrained transition prewarm now also factors boundary proximity into prioritization, preventing far-future high-risk boundaries from starving near-term boundary preparation.
+- Transition prerender hit/miss metrics are recency-weighted via periodic decay, so adaptive tuning and prioritization respond to current session behavior rather than stale long-ago outcomes.
+- Background prerender queue admission is now priority-aware under load: queue depth is capped, and overflow is only allowed for substantially higher-priority requests, reducing low-value prerender churn.
+- Ready prerender segments are now cache-pruned by playhead distance (while protecting any currently active prerender segment), keeping cache size bounded and focused on likely near-term reuse.
 
 ## Seeking
 

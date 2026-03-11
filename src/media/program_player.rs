@@ -867,6 +867,8 @@ pub struct ProgramPlayer {
     prerender_segments: HashMap<String, PrerenderSegment>,
     /// In-flight prerender job keys.
     prerender_pending: HashSet<String>,
+    /// Scheduling priority scores for in-flight prerender jobs.
+    prerender_pending_priority: HashMap<String, u64>,
     /// Failed prerender job keys (skip immediate retry churn).
     prerender_failed: HashSet<String>,
     /// Result channel for background prerender jobs.
@@ -1393,6 +1395,7 @@ impl ProgramPlayer {
                 prepreroll_sidecars: Vec::new(),
                 prerender_segments: HashMap::new(),
                 prerender_pending: HashSet::new(),
+                prerender_pending_priority: HashMap::new(),
                 prerender_failed: HashSet::new(),
                 prerender_result_rx,
                 prerender_result_tx,
@@ -1494,6 +1497,7 @@ impl ProgramPlayer {
         }
         self.prerender_segments.clear();
         self.prerender_pending.clear();
+        self.prerender_pending_priority.clear();
         self.prerender_failed.clear();
         self.prerender_active_clips = None;
         self.current_prerender_segment_key = None;
@@ -3798,29 +3802,82 @@ impl ProgramPlayer {
     }
 
     fn record_transition_prerender_metric(&mut self, transition_kind: &str, hit: bool) {
-        let entry = self
-            .transition_prerender_metrics
-            .entry(transition_kind.to_string())
-            .or_insert((0, 0));
-        if hit {
-            entry.0 = entry.0.saturating_add(1);
-        } else {
-            entry.1 = entry.1.saturating_add(1);
-        }
-        let total = entry.0.saturating_add(entry.1);
-        if total == 1 || total % 10 == 0 {
-            let hit_rate = if total > 0 {
-                entry.0 as f64 * 100.0 / total as f64
+        let total = {
+            let entry = self
+                .transition_prerender_metrics
+                .entry(transition_kind.to_string())
+                .or_insert((0, 0));
+            if hit {
+                entry.0 = entry.0.saturating_add(1);
             } else {
-                0.0
-            };
+                entry.1 = entry.1.saturating_add(1);
+            }
+            entry.0.saturating_add(entry.1)
+        };
+        if total == 1 || total % 10 == 0 {
+            if let Some((hit_count, miss_count)) =
+                self.transition_prerender_metrics.get(transition_kind)
+            {
+                let hit_rate = if total > 0 {
+                    *hit_count as f64 * 100.0 / total as f64
+                } else {
+                    0.0
+                };
+                log::info!(
+                    "transition_prerender_metrics: kind={} hit={} miss={} hit_rate={:.1}%",
+                    transition_kind,
+                    hit_count,
+                    miss_count,
+                    hit_rate
+                );
+            }
+        }
+        self.maybe_decay_transition_prerender_metrics();
+    }
+
+    fn decay_transition_metric_count(value: u64) -> u64 {
+        if value <= 1 {
+            value
+        } else {
+            (value.saturating_add(1)) / 2
+        }
+    }
+
+    fn apply_transition_metric_decay(metrics: &mut HashMap<String, (u64, u64)>) -> (u64, u64) {
+        let mut hits = 0_u64;
+        let mut misses = 0_u64;
+        for (hit, miss) in metrics.values_mut() {
+            *hit = Self::decay_transition_metric_count(*hit);
+            *miss = Self::decay_transition_metric_count(*miss);
+            hits = hits.saturating_add(*hit);
+            misses = misses.saturating_add(*miss);
+        }
+        (hits, misses)
+    }
+
+    fn maybe_decay_transition_prerender_metrics(&mut self) {
+        const DECAY_INTERVAL_SAMPLES: u64 = 64;
+        let (hits_before, misses_before) = self.transition_prerender_hit_miss_totals();
+        let total_before = hits_before.saturating_add(misses_before);
+        if total_before == 0 || total_before % DECAY_INTERVAL_SAMPLES != 0 {
+            return;
+        }
+        let (hits_after, misses_after) =
+            Self::apply_transition_metric_decay(&mut self.transition_prerender_metrics);
+        log::info!(
+            "transition_prerender_metrics: decay applied total={}=>{} (hit={}=>{}, miss={}=>{})",
+            total_before,
+            hits_after.saturating_add(misses_after),
+            hits_before,
+            hits_after,
+            misses_before,
+            misses_after
+        );
+        if hits_after.saturating_add(misses_after) == 0 {
             log::info!(
-                "transition_prerender_metrics: kind={} hit={} miss={} hit_rate={:.1}%",
-                transition_kind,
-                entry.0,
-                entry.1,
-                hit_rate
+                "transition_prerender_metrics: decay cleared counters; resetting transition metrics"
             );
+            self.transition_prerender_metrics.clear();
         }
     }
 
@@ -3868,6 +3925,53 @@ impl ProgramPlayer {
         miss_rate_per_mille.saturating_mul(10) + confidence_bonus
     }
 
+    fn transition_prerender_effective_priority_score(
+        base_priority: u64,
+        timeline_pos_ns: u64,
+        boundary_ns: u64,
+        lookahead_ns: u64,
+    ) -> u64 {
+        const PROXIMITY_BONUS_SCALE: u64 = 2;
+        if lookahead_ns == 0 {
+            return base_priority;
+        }
+        let distance_ns = boundary_ns
+            .saturating_sub(timeline_pos_ns)
+            .min(lookahead_ns);
+        let proximity_per_mille = lookahead_ns
+            .saturating_sub(distance_ns)
+            .saturating_mul(1000)
+            / lookahead_ns;
+        base_priority.saturating_add(proximity_per_mille.saturating_mul(PROXIMITY_BONUS_SCALE))
+    }
+
+    fn sort_prerender_candidates(
+        candidates: &mut [(u64, Vec<usize>, u64)],
+        queue_budget_tight: bool,
+        timeline_pos_ns: u64,
+        lookahead_ns: u64,
+    ) {
+        if queue_budget_tight {
+            candidates.sort_by(|a, b| {
+                let score_a = Self::transition_prerender_effective_priority_score(
+                    a.2,
+                    timeline_pos_ns,
+                    a.0,
+                    lookahead_ns,
+                );
+                let score_b = Self::transition_prerender_effective_priority_score(
+                    b.2,
+                    timeline_pos_ns,
+                    b.0,
+                    lookahead_ns,
+                );
+                score_b.cmp(&score_a).then_with(|| a.0.cmp(&b.0))
+            });
+        } else {
+            candidates.sort_by_key(|entry| entry.0);
+        }
+    }
+
     fn collect_upcoming_prerender_boundaries(
         &self,
         timeline_pos_ns: u64,
@@ -3889,6 +3993,45 @@ impl ProgramPlayer {
             cursor = boundary_ns.saturating_add(self.frame_duration_ns.max(1));
         }
         candidates
+    }
+
+    fn prerender_request_priority_score(&self, boundary_ns: u64, active: &[usize]) -> u64 {
+        const REQUEST_PRIORITY_LOOKAHEAD_NS: u64 = 16_000_000_000;
+        const NON_TRANSITION_BASE_PRIORITY: u64 = 300;
+        const TRANSITION_PRIORITY_OFFSET: u64 = 2_000;
+        let transition_priority = self.transition_prerender_priority_score_at(boundary_ns, active);
+        let base = if transition_priority > 0 {
+            TRANSITION_PRIORITY_OFFSET.saturating_add(transition_priority)
+        } else {
+            let overlap_bonus = (active.len().saturating_sub(2) as u64).saturating_mul(75);
+            NON_TRANSITION_BASE_PRIORITY.saturating_add(overlap_bonus)
+        };
+        Self::transition_prerender_effective_priority_score(
+            base,
+            self.timeline_pos_ns,
+            boundary_ns,
+            REQUEST_PRIORITY_LOOKAHEAD_NS,
+        )
+    }
+
+    fn prerender_queue_allows_request(
+        pending_count: usize,
+        lowest_pending_priority: Option<u64>,
+        request_priority: u64,
+    ) -> bool {
+        const MAX_PENDING_PRERENDER_JOBS: usize = 6;
+        const MAX_PENDING_OVERFLOW_JOBS: usize = 2;
+        const OVERFLOW_PRIORITY_MARGIN: u64 = 200;
+        if pending_count < MAX_PENDING_PRERENDER_JOBS {
+            return true;
+        }
+        if pending_count >= MAX_PENDING_PRERENDER_JOBS + MAX_PENDING_OVERFLOW_JOBS {
+            return false;
+        }
+        let Some(lowest) = lowest_pending_priority else {
+            return false;
+        };
+        request_priority > lowest.saturating_add(OVERFLOW_PRIORITY_MARGIN)
     }
 
     fn ordered_rebuild_history_ms(&self) -> Vec<u64> {
@@ -4123,6 +4266,7 @@ impl ProgramPlayer {
     fn poll_background_prerender_results(&mut self) {
         while let Ok(result) = self.prerender_result_rx.try_recv() {
             self.prerender_pending.remove(&result.key);
+            self.prerender_pending_priority.remove(&result.key);
             if !self.background_prerender {
                 if Path::new(&result.path).exists() {
                     let _ = std::fs::remove_file(&result.path);
@@ -4148,6 +4292,7 @@ impl ProgramPlayer {
                         signature: result.signature,
                     },
                 );
+                self.prune_prerender_segment_cache();
                 if self.state == PlayerState::Playing
                     && !self.slots.iter().any(|s| s.is_prerender_slot)
                 {
@@ -4325,6 +4470,7 @@ impl ProgramPlayer {
                     signature,
                 },
             );
+            self.prune_prerender_segment_cache();
             return;
         }
         let duration_ns = segment_end_ns.saturating_sub(segment_start_ns);
@@ -4354,6 +4500,23 @@ impl ProgramPlayer {
         let key_for_job = key.clone();
         let key_for_log = key.clone();
         let input_count = inputs.len();
+        let request_priority = self.prerender_request_priority_score(boundary_ns, active);
+        let pending_count = self.prerender_pending.len();
+        let lowest_pending_priority = self.prerender_pending_priority.values().copied().min();
+        if !Self::prerender_queue_allows_request(
+            pending_count,
+            lowest_pending_priority,
+            request_priority,
+        ) {
+            log::debug!(
+                "background_prerender: skip queue admission key={} priority={} pending={} lowest_pending={:?}",
+                key_for_log,
+                request_priority,
+                pending_count,
+                lowest_pending_priority
+            );
+            return;
+        }
         let tx = self.prerender_result_tx.clone();
         let prerender_divisor = if self.proxy_enabled {
             self.proxy_scale_divisor.max(1)
@@ -4384,14 +4547,72 @@ impl ProgramPlayer {
             });
         });
         self.prerender_pending.insert(key);
+        self.prerender_pending_priority
+            .insert(key_for_log.clone(), request_priority);
         self.prerender_total_requested += 1;
         log::info!(
-            "background_prerender: queued key={} range={}..{} clips={}",
+            "background_prerender: queued key={} range={}..{} clips={} priority={} pending={}",
             key_for_log,
             segment_start_ns,
             segment_end_ns,
-            input_count
+            input_count,
+            request_priority,
+            self.prerender_pending.len()
         );
+    }
+
+    fn segment_distance_to_timeline_ns(timeline_pos_ns: u64, start_ns: u64, end_ns: u64) -> u64 {
+        if timeline_pos_ns < start_ns {
+            start_ns.saturating_sub(timeline_pos_ns)
+        } else if timeline_pos_ns >= end_ns {
+            timeline_pos_ns.saturating_sub(end_ns)
+        } else {
+            0
+        }
+    }
+
+    fn prune_prerender_segment_cache(&mut self) {
+        const MAX_READY_PRERENDER_SEGMENTS: usize = 24;
+        if self.prerender_segments.len() <= MAX_READY_PRERENDER_SEGMENTS {
+            return;
+        }
+        let protected_key = self.current_prerender_segment_key.as_deref();
+        while self.prerender_segments.len() > MAX_READY_PRERENDER_SEGMENTS {
+            let victim_key = self
+                .prerender_segments
+                .values()
+                .filter(|seg| Some(seg.key.as_str()) != protected_key)
+                .max_by(|a, b| {
+                    let da = Self::segment_distance_to_timeline_ns(
+                        self.timeline_pos_ns,
+                        a.start_ns,
+                        a.end_ns,
+                    );
+                    let db = Self::segment_distance_to_timeline_ns(
+                        self.timeline_pos_ns,
+                        b.start_ns,
+                        b.end_ns,
+                    );
+                    da.cmp(&db).then_with(|| a.end_ns.cmp(&b.end_ns))
+                })
+                .map(|seg| seg.key.clone());
+            let Some(victim_key) = victim_key else {
+                break;
+            };
+            if let Some(victim) = self.prerender_segments.remove(&victim_key) {
+                let _ = std::fs::remove_file(&victim.path);
+                self.prerender_runtime_files.remove(&victim.path);
+                log::debug!(
+                    "background_prerender: evicted key={} range={}..{} path={}",
+                    victim.key,
+                    victim.start_ns,
+                    victim.end_ns,
+                    victim.path
+                );
+            } else {
+                break;
+            }
+        }
     }
 
     fn find_prerender_segment_for(
@@ -4466,11 +4687,12 @@ impl ProgramPlayer {
             );
             let queue_budget_tight =
                 smooth_mode && queued_jobs >= TRANSITION_PRIORITY_QUEUE_TIGHT_PENDING;
-            if queue_budget_tight {
-                candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-            } else {
-                candidates.sort_by_key(|entry| entry.0);
-            }
+            Self::sort_prerender_candidates(
+                &mut candidates,
+                queue_budget_tight,
+                timeline_pos_ns,
+                lookahead_ns,
+            );
             for (scan_boundary_ns, scan_active, _) in candidates.into_iter().take(max_boundaries) {
                 self.maybe_request_background_prerender_segment(scan_boundary_ns, &scan_active);
             }
@@ -4609,11 +4831,12 @@ impl ProgramPlayer {
         );
         let queue_budget_tight =
             smooth_mode && queued_jobs >= TRANSITION_PRIORITY_QUEUE_TIGHT_PENDING;
-        if queue_budget_tight {
-            candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-        } else {
-            candidates.sort_by_key(|entry| entry.0);
-        }
+        Self::sort_prerender_candidates(
+            &mut candidates,
+            queue_budget_tight,
+            self.timeline_pos_ns,
+            idle_lookahead_ns,
+        );
         for (boundary_ns, boundary_active, _) in candidates.into_iter().take(idle_max_boundaries) {
             self.maybe_request_background_prerender_segment(boundary_ns, &boundary_active);
         }
@@ -9391,6 +9614,7 @@ mod tests {
     };
     use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
     use gstreamer as gst;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
 
@@ -9517,6 +9741,117 @@ mod tests {
         assert_eq!(
             ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 83_333_333, 0),
             ""
+        );
+    }
+
+    #[test]
+    fn transition_effective_priority_prefers_nearer_boundary_for_equal_risk() {
+        let lookahead_ns = 10_000_000_000;
+        let near = ProgramPlayer::transition_prerender_effective_priority_score(
+            1500,
+            5_000_000_000,
+            6_000_000_000,
+            lookahead_ns,
+        );
+        let far = ProgramPlayer::transition_prerender_effective_priority_score(
+            1500,
+            5_000_000_000,
+            14_000_000_000,
+            lookahead_ns,
+        );
+        assert!(near > far);
+    }
+
+    #[test]
+    fn transition_effective_priority_still_respects_large_risk_gap() {
+        let lookahead_ns = 10_000_000_000;
+        let low_risk_near = ProgramPlayer::transition_prerender_effective_priority_score(
+            300,
+            5_000_000_000,
+            5_500_000_000,
+            lookahead_ns,
+        );
+        let high_risk_far = ProgramPlayer::transition_prerender_effective_priority_score(
+            7000,
+            5_000_000_000,
+            14_500_000_000,
+            lookahead_ns,
+        );
+        assert!(high_risk_far > low_risk_near);
+    }
+
+    #[test]
+    fn transition_metric_decay_halves_counts_rounding_up() {
+        let mut metrics: HashMap<String, (u64, u64)> = HashMap::new();
+        metrics.insert("cross_dissolve".to_string(), (11, 4));
+        metrics.insert("fade_to_black".to_string(), (2, 1));
+        let (hits, misses) = ProgramPlayer::apply_transition_metric_decay(&mut metrics);
+        assert_eq!(metrics.get("cross_dissolve"), Some(&(6, 2)));
+        assert_eq!(metrics.get("fade_to_black"), Some(&(1, 1)));
+        assert_eq!(hits, 7);
+        assert_eq!(misses, 3);
+    }
+
+    #[test]
+    fn transition_metric_decay_preserves_singleton_counts() {
+        assert_eq!(ProgramPlayer::decay_transition_metric_count(0), 0);
+        assert_eq!(ProgramPlayer::decay_transition_metric_count(1), 1);
+    }
+
+    #[test]
+    fn prerender_queue_admits_low_load_requests() {
+        assert!(ProgramPlayer::prerender_queue_allows_request(
+            3,
+            Some(400),
+            350
+        ));
+    }
+
+    #[test]
+    fn prerender_queue_rejects_full_queue_without_clear_priority_gain() {
+        assert!(!ProgramPlayer::prerender_queue_allows_request(
+            6,
+            Some(900),
+            1_050
+        ));
+        assert!(!ProgramPlayer::prerender_queue_allows_request(
+            8,
+            Some(100),
+            10_000
+        ));
+    }
+
+    #[test]
+    fn prerender_queue_allows_limited_overflow_for_high_priority_requests() {
+        assert!(ProgramPlayer::prerender_queue_allows_request(
+            6,
+            Some(700),
+            1_100
+        ));
+        assert!(ProgramPlayer::prerender_queue_allows_request(
+            7,
+            Some(700),
+            1_100
+        ));
+    }
+
+    #[test]
+    fn segment_distance_is_zero_inside_segment() {
+        assert_eq!(
+            ProgramPlayer::segment_distance_to_timeline_ns(2_500, 2_000, 3_000),
+            0
+        );
+    }
+
+    #[test]
+    fn segment_distance_handles_before_and_after_positions() {
+        assert_eq!(
+            ProgramPlayer::segment_distance_to_timeline_ns(1_500, 2_000, 3_000),
+            500
+        );
+        assert_eq!(
+            ProgramPlayer::segment_distance_to_timeline_ns(3_500, 2_000, 3_000),
+            500
         );
     }
 
