@@ -134,6 +134,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     seq.push_attribute(("duration", duration_str.as_str()));
     seq.push_attribute(("format", format_ref));
     seq.push_attribute(("tcFormat", "NDF"));
+    if options.strict_dtd {
+        seq.push_attribute(("audioLayout", "stereo"));
+        seq.push_attribute(("audioRate", "48k"));
+    }
     if !strip_unknown_fields {
         for (k, v) in &project.fcpxml_unknown_sequence.attrs {
             if !is_writer_managed_sequence_attr(k) {
@@ -210,6 +214,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 elem.push_attribute(("name", clip.label.as_str()));
                 elem.push_attribute(("format", format_ref));
                 elem.push_attribute(("tcFormat", "NDF"));
+                elem.push_attribute(("audioRole", "dialogue"));
                 if let Some(l) = lane {
                     elem.push_attribute(("lane", l.to_string().as_str()));
                 }
@@ -1717,7 +1722,12 @@ fn write_resources(
                 .as_deref()
                 .unwrap_or(&clip.source_path);
             let uri = fcpxml_media_src_uri(export_source_path);
-            let duration = ns_to_fcpxml_time(clip.source_out, &project.frame_rate);
+            // FCP asset duration = timecoded end of usable range
+            let duration_ns = clip
+                .source_timecode_base_ns
+                .unwrap_or(0)
+                .saturating_add(clip.source_out);
+            let duration = ns_to_fcpxml_time(duration_ns, &project.frame_rate);
             let has_video = if clip.kind == crate::model::clip::ClipKind::Audio {
                 "0"
             } else {
@@ -1725,10 +1735,15 @@ fn write_resources(
             };
             let has_audio = "1";
 
+            let asset_start = clip
+                .source_timecode_base_ns
+                .map(|ns| ns_to_fcpxml_time(ns, &project.frame_rate))
+                .unwrap_or_else(|| "0s".to_string());
+
             let mut asset = BytesStart::new("asset");
             asset.push_attribute(("id", asset_id.as_str()));
             asset.push_attribute(("name", clip.label.as_str()));
-            asset.push_attribute(("start", "0s"));
+            asset.push_attribute(("start", asset_start.as_str()));
             asset.push_attribute(("duration", duration.as_str()));
             if has_video == "1" {
                 asset.push_attribute(("format", "r1"));
@@ -2216,14 +2231,19 @@ fn write_pan_keyframe_params(
     Ok(())
 }
 
-/// Convert nanoseconds to FCPXML rational time string (e.g. "48048/24000s")
+/// Convert nanoseconds to FCPXML rational time string (e.g. "48048/24000s").
+///
+/// FCPXML encodes time as `numerator/denominator s` where the result is seconds.
+/// For NTSC rates (fps_den=1001): 119 frames at 23.976fps → 119×1001/24000 s = 119119/24000s.
+/// For integer rates (fps_den=1):  48 frames at 24fps      → 48×1/24 s       = 48/24s.
 fn ns_to_fcpxml_time(ns: u64, fps: &crate::model::project::FrameRate) -> String {
-    // FCPXML uses frame-accurate time: frames/timebase s
     let timebase = fps.numerator as u64;
     let denom = fps.denominator as u64;
     // frames = ns * fps_num / (fps_den * 1_000_000_000)
     let frames = ns * timebase / (denom * 1_000_000_000);
-    format!("{frames}/{timebase}s")
+    // FCPXML numerator = frames × fps_den so that numerator/timebase gives seconds
+    let numerator = frames * denom;
+    format!("{numerator}/{timebase}s")
 }
 
 fn sanitize_id(id: &str) -> String {
@@ -2263,7 +2283,10 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 }
 
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
-    matches!(key, "duration" | "format" | "tcFormat")
+    matches!(
+        key,
+        "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate"
+    )
 }
 
 fn is_writer_managed_spine_attr(_key: &str) -> bool {
