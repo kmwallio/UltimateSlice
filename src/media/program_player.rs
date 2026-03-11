@@ -3804,8 +3804,11 @@ impl ProgramPlayer {
         timeline_pos_ns: u64,
         active: &[usize],
     ) -> bool {
-        active.len() >= 3
-            || self
+        if active.len() >= 3 {
+            return true;
+        }
+        matches!(self.playback_priority, PlaybackPriority::Smooth)
+            && self
                 .transition_overlap_prerender_spec_at(timeline_pos_ns, active)
                 .is_some()
     }
@@ -4024,7 +4027,9 @@ impl ProgramPlayer {
 
     fn maybe_request_background_prerender_segment(&mut self, boundary_ns: u64, active: &[usize]) {
         let transition_spec = self.transition_overlap_prerender_spec_at(boundary_ns, active);
-        if !self.background_prerender || (active.len() < 3 && transition_spec.is_none()) {
+        let transition_prerender_allowed =
+            transition_spec.is_some() && matches!(self.playback_priority, PlaybackPriority::Smooth);
+        if !self.background_prerender || (active.len() < 3 && !transition_prerender_allowed) {
             return;
         }
         if active.iter().any(|&idx| {
@@ -4032,7 +4037,8 @@ impl ProgramPlayer {
                 .get(idx)
                 .map(|c| c.is_freeze_frame() || Self::clip_has_phase1_keyframes(c))
                 .unwrap_or(false)
-        }) {
+        }) && !transition_prerender_allowed
+        {
             return;
         }
         let next_boundary = self
@@ -4319,9 +4325,34 @@ impl ProgramPlayer {
         gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     }
 
+    fn transition_overlap_active_now(&self) -> bool {
+        if self.slots.len() < 2 {
+            return false;
+        }
+        let timeline_pos_ns = self.timeline_pos_ns;
+        self.slots.iter().any(|slot| {
+            !slot.hidden
+                && !slot.is_prerender_slot
+                && self
+                    .compute_transition_state(slot.clip_idx, timeline_pos_ns)
+                    .is_some()
+        })
+    }
+
+    fn should_drop_late_for_playback(&self) -> bool {
+        if self.state != PlayerState::Playing || self.transform_live {
+            return false;
+        }
+        if self.slots.len() >= 3 {
+            return true;
+        }
+        self.slots.len() >= 2
+            && matches!(self.playback_priority, PlaybackPriority::Smooth)
+            && self.transition_overlap_active_now()
+    }
+
     fn update_drop_late_policy(&mut self) {
-        let should_drop_late =
-            self.state == PlayerState::Playing && self.slots.len() >= 3 && !self.transform_live;
+        let should_drop_late = self.should_drop_late_for_playback();
         if should_drop_late == self.playback_drop_late_active {
             return;
         }
@@ -4350,8 +4381,7 @@ impl ProgramPlayer {
     }
 
     fn update_slot_queue_policy(&mut self) {
-        let should_drop_late =
-            self.state == PlayerState::Playing && self.slots.len() >= 3 && !self.transform_live;
+        let should_drop_late = self.should_drop_late_for_playback();
         if should_drop_late == self.slot_queue_drop_late_active {
             return;
         }
@@ -8170,12 +8200,17 @@ impl ProgramPlayer {
         {
             return false;
         }
+        let transition_prerender_allowed = self
+            .transition_overlap_prerender_spec_at(timeline_pos, active)
+            .is_some()
+            && matches!(self.playback_priority, PlaybackPriority::Smooth);
         if active.iter().any(|&idx| {
             self.clips
                 .get(idx)
                 .map(Self::clip_has_phase1_keyframes)
                 .unwrap_or(false)
-        }) {
+        }) && !transition_prerender_allowed
+        {
             return false;
         }
         self.poll_background_prerender_results();
@@ -8274,14 +8309,18 @@ impl ProgramPlayer {
         // removed.
         if had_existing_slots {
             let desired = self.clips_active_at(timeline_pos);
+            let transition_prerender_allowed = self
+                .transition_overlap_prerender_spec_at(timeline_pos, &desired)
+                .is_some()
+                && matches!(self.playback_priority, PlaybackPriority::Smooth);
             let bypass_continue_for_prerender = if self.background_prerender
                 && self.active_supports_background_prerender_at(timeline_pos, &desired)
-                && !desired.iter().any(|&idx| {
+                && (!desired.iter().any(|&idx| {
                     self.clips
                         .get(idx)
                         .map(Self::clip_has_phase1_keyframes)
                         .unwrap_or(false)
-                })
+                }) || transition_prerender_allowed)
                 && !self.slots.iter().any(|s| s.is_prerender_slot)
             {
                 let signature = self.prerender_signature_for_active(&desired);
