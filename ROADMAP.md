@@ -127,6 +127,7 @@ Tracking docs:
 - [x] Strict packaged-export FCPXML mode: **Export Project with Media** now emits DTD-safe XML (no `xmlns:us`/`us:*` attrs, no passthrough unknown attrs/children, DTD-friendly `adjust-blend` and structured `adjust-crop` with `crop-rect`)
 - [x] Extension-based strict-save routing: normal Save now uses strict compatibility writer for `.fcpxml` outputs while `.uspxml` retains feature-rich round-trip output
 - [x] Strict export DTD + multitrack hardening: strict writer now emits lane-based track mapping for multi-track fallback routing and enforces DTD asset-clip intrinsic ordering (video params before audio params), with strict-mode sequence-marker suppression for validator compliance
+- [x] Strict FCPXML connected clip nesting: connected clips (lane ≠ 0) are nested inside the primary storyline clip per FCPXML spec, fixing Final Cut Pro import assertion failures
 - [x] Native transition import/export parity (phase 1): parse native spine `<transition>` into clip transition fields and emit native `<transition>` between adjacent clips using mapped transition names/duration/offset
 - [x] Native `timeMap/timept` import/export parity (phase 1): parse 2-point constant retimes (speed/reverse/freeze) from native time maps and emit native time maps for constant speed/reverse/freeze clips
 - [x] Native `timeMap/timept` import/export parity (phase 2): support representable multi-point monotonic retimes (speed ramps) via speed keyframes, while preserving unsupported mixed-direction/partial-hold maps as passthrough

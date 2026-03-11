@@ -153,7 +153,147 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     }
     writer.write_event(Event::Start(spine))?;
 
-    // Emit all clips from all tracks.
+    if options.strict_dtd {
+        // Strict mode: nest connected clips inside primary clips per FCPXML spec.
+        // Connected clips (lane ≠ 0) must be children of the primary storyline
+        // clip they connect to, not flat siblings in the <spine>.
+        struct ConnectedTrackInfo {
+            track_idx: usize,
+            lane: i32,
+        }
+        let mut primary_track_idx: Option<usize> = None;
+        let mut connected_tracks: Vec<ConnectedTrackInfo> = Vec::new();
+        let mut video_kind_idx = 0usize;
+        let mut audio_kind_idx = 0usize;
+        for (track_idx, track) in project.tracks.iter().enumerate() {
+            match track.kind {
+                crate::model::track::TrackKind::Video => {
+                    if video_kind_idx == 0 {
+                        primary_track_idx = Some(track_idx);
+                    } else {
+                        connected_tracks.push(ConnectedTrackInfo {
+                            track_idx,
+                            lane: video_kind_idx as i32,
+                        });
+                    }
+                    video_kind_idx += 1;
+                }
+                crate::model::track::TrackKind::Audio => {
+                    connected_tracks.push(ConnectedTrackInfo {
+                        track_idx,
+                        lane: -((audio_kind_idx as i32) + 1),
+                    });
+                    audio_kind_idx += 1;
+                }
+            }
+        }
+
+        // Helper: write an asset-clip open tag with standard attributes.
+        let write_asset_clip_start =
+            |writer: &mut Writer<Cursor<Vec<u8>>>,
+             clip: &crate::model::clip::Clip,
+             lane: Option<i32>|
+             -> Result<()> {
+                let asset_ref = format!("a_{}", sanitize_id(&clip.id));
+                let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
+                let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
+                let start = ns_to_fcpxml_time(
+                    clip.source_timecode_start_ns().unwrap_or(clip.source_in),
+                    &project.frame_rate,
+                );
+                let mut elem = BytesStart::new("asset-clip");
+                elem.push_attribute(("ref", asset_ref.as_str()));
+                elem.push_attribute(("offset", offset.as_str()));
+                elem.push_attribute(("duration", duration.as_str()));
+                elem.push_attribute(("start", start.as_str()));
+                elem.push_attribute(("name", clip.label.as_str()));
+                if let Some(l) = lane {
+                    elem.push_attribute(("lane", l.to_string().as_str()));
+                }
+                writer.write_event(Event::Start(elem))?;
+                Ok(())
+            };
+
+        if let Some(primary_idx) = primary_track_idx {
+            let primary_track = &project.tracks[primary_idx];
+            for (clip_idx, clip) in primary_track.clips.iter().enumerate() {
+                write_asset_clip_start(&mut writer, clip, None)?;
+                write_strict_clip_body(&mut writer, clip, project)?;
+
+                // Nest connected clips whose offset falls within this primary clip's range.
+                // A connected clip belongs to the last primary clip whose timeline_start
+                // is <= the connected clip's timeline_start.
+                for ct in &connected_tracks {
+                    let conn_track = &project.tracks[ct.track_idx];
+                    for conn_clip in &conn_track.clips {
+                        let belongs_here = if clip_idx == 0 {
+                            clip_idx + 1 >= primary_track.clips.len()
+                                || conn_clip.timeline_start
+                                    < primary_track.clips[clip_idx + 1].timeline_start
+                        } else {
+                            conn_clip.timeline_start >= clip.timeline_start
+                                && (clip_idx + 1 >= primary_track.clips.len()
+                                    || conn_clip.timeline_start
+                                        < primary_track.clips[clip_idx + 1].timeline_start)
+                        };
+                        if belongs_here {
+                            write_asset_clip_start(&mut writer, conn_clip, Some(ct.lane))?;
+                            write_strict_clip_body(&mut writer, conn_clip, project)?;
+                            writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
+                        }
+                    }
+                }
+
+                writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
+
+                // Transition between adjacent primary clips
+                if clip_idx + 1 < primary_track.clips.len()
+                    && !clip.transition_after.trim().is_empty()
+                    && clip.transition_after_ns > 0
+                {
+                    let next_clip = &primary_track.clips[clip_idx + 1];
+                    let clamped_duration_ns = clip
+                        .transition_after_ns
+                        .min(clip.duration())
+                        .min(next_clip.duration());
+                    if clamped_duration_ns > 0 {
+                        let mut transition = BytesStart::new("transition");
+                        if let Some(name) =
+                            fcpxml_transition_name_for_kind(clip.transition_after.trim())
+                        {
+                            transition.push_attribute(("name", name));
+                        }
+                        transition.push_attribute((
+                            "offset",
+                            ns_to_fcpxml_time(
+                                clip.timeline_start
+                                    .saturating_add(clip.duration())
+                                    .saturating_sub(clamped_duration_ns),
+                                &project.frame_rate,
+                            )
+                            .as_str(),
+                        ));
+                        transition.push_attribute((
+                            "duration",
+                            ns_to_fcpxml_time(clamped_duration_ns, &project.frame_rate).as_str(),
+                        ));
+                        writer.write_event(Event::Empty(transition))?;
+                    }
+                }
+            }
+        } else {
+            // No primary video track — emit connected clips flat as spine children.
+            for ct in &connected_tracks {
+                let track = &project.tracks[ct.track_idx];
+                for clip in &track.clips {
+                    write_asset_clip_start(&mut writer, clip, Some(ct.lane))?;
+                    write_strict_clip_body(&mut writer, clip, project)?;
+                    writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
+                }
+            }
+        }
+    } else {
+    // Non-strict (rich) mode: flat spine structure with us:* vendor attributes.
     let mut video_track_idx = 0usize;
     let mut audio_track_idx = 0usize;
     for (track_idx, track) in project.tracks.iter().enumerate() {
@@ -455,20 +595,6 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         clip.transition_after_ns.to_string().as_str(),
                     ));
                 }
-            } else {
-                let strict_lane: Option<i32> = match track.kind {
-                    crate::model::track::TrackKind::Video => {
-                        if track_kind_idx == 0 {
-                            None
-                        } else {
-                            Some(track_kind_idx as i32)
-                        }
-                    }
-                    crate::model::track::TrackKind::Audio => Some(-((track_kind_idx as i32) + 1)),
-                };
-                if let Some(lane) = strict_lane {
-                    asset_clip.push_attribute(("lane", lane.to_string().as_str()));
-                }
             }
             if !strip_unknown_fields {
                 for (k, v) in &clip.fcpxml_unknown_attrs {
@@ -491,76 +617,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 project.height,
                 clip.scale,
             );
-            if options.strict_dtd {
-                // Strict mode must follow DTD order for %intrinsic-params:
-                // video intrinsic params first, then audio intrinsic params.
-                let mut adjust_crop = BytesStart::new("adjust-crop");
-                adjust_crop.push_attribute(("mode", "trim"));
-                writer.write_event(Event::Start(adjust_crop))?;
-                let mut crop_rect = BytesStart::new("crop-rect");
-                crop_rect.push_attribute(("left", clip.crop_left.to_string().as_str()));
-                crop_rect.push_attribute(("right", clip.crop_right.to_string().as_str()));
-                crop_rect.push_attribute(("top", clip.crop_top.to_string().as_str()));
-                crop_rect.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
-                writer.write_event(Event::Empty(crop_rect))?;
-                writer.write_event(Event::End(BytesEnd::new("adjust-crop")))?;
-
-                let mut adjust_transform = BytesStart::new("adjust-transform");
-                adjust_transform.push_attribute((
-                    "position",
-                    format!("{} {}", position_x, position_y).as_str(),
-                ));
-                adjust_transform
-                    .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
-                adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
-                let has_transform_kfs = !clip.position_x_keyframes.is_empty()
-                    || !clip.position_y_keyframes.is_empty()
-                    || !clip.scale_keyframes.is_empty()
-                    || !clip.rotate_keyframes.is_empty();
-                if has_transform_kfs {
-                    writer.write_event(Event::Start(adjust_transform))?;
-                    write_transform_keyframe_params(&mut writer, clip, project)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_transform))?;
-                }
-
-                let mut adjust_blend = BytesStart::new("adjust-blend");
-                adjust_blend.push_attribute(("amount", clip.opacity.to_string().as_str()));
-                if !clip.opacity_keyframes.is_empty() {
-                    writer.write_event(Event::Start(adjust_blend))?;
-                    write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-blend")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_blend))?;
-                }
-
-                let mut adjust_volume = BytesStart::new("adjust-volume");
-                adjust_volume.push_attribute((
-                    "amount",
-                    linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
-                ));
-                if !clip.volume_keyframes.is_empty() {
-                    writer.write_event(Event::Start(adjust_volume))?;
-                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_volume))?;
-                }
-
-                let mut adjust_panner = BytesStart::new("adjust-panner");
-                adjust_panner.push_attribute((
-                    "amount",
-                    format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
-                ));
-                if !clip.pan_keyframes.is_empty() {
-                    writer.write_event(Event::Start(adjust_panner))?;
-                    write_pan_keyframe_params(&mut writer, clip, &project.frame_rate)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_panner))?;
-                }
-            } else {
+            {
                 let mut adjust_transform = BytesStart::new("adjust-transform");
                 adjust_transform.push_attribute((
                     "position",
@@ -670,6 +727,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             }
         }
     }
+    } // end non-strict else
 
     if !strip_unknown_fields {
         for fragment in &project.fcpxml_unknown_spine.children {
@@ -1071,6 +1129,104 @@ fn patch_imported_fcpxml_transform(project: &Project, original: &str) -> Option<
     } else {
         None
     }
+}
+
+/// Write the body of an asset-clip in strict DTD mode: timeMap followed by
+/// intrinsic params in DTD order (adjust-crop, adjust-transform, adjust-blend,
+/// adjust-volume, adjust-panner).
+fn write_strict_clip_body(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    clip: &crate::model::clip::Clip,
+    project: &Project,
+) -> Result<()> {
+    // timeMap
+    if let Some(fragment) = preserved_unknown_time_map_fragment(clip) {
+        writer.get_mut().write_all(fragment.as_bytes())?;
+    } else {
+        write_native_time_map(writer, clip, &project.frame_rate)?;
+    }
+
+    let (position_x, position_y) = internal_position_to_fcpxml(
+        clip.position_x,
+        clip.position_y,
+        project.width,
+        project.height,
+        clip.scale,
+    );
+
+    // adjust-crop
+    let mut adjust_crop = BytesStart::new("adjust-crop");
+    adjust_crop.push_attribute(("mode", "trim"));
+    writer.write_event(Event::Start(adjust_crop))?;
+    let mut crop_rect = BytesStart::new("crop-rect");
+    crop_rect.push_attribute(("left", clip.crop_left.to_string().as_str()));
+    crop_rect.push_attribute(("right", clip.crop_right.to_string().as_str()));
+    crop_rect.push_attribute(("top", clip.crop_top.to_string().as_str()));
+    crop_rect.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
+    writer.write_event(Event::Empty(crop_rect))?;
+    writer.write_event(Event::End(BytesEnd::new("adjust-crop")))?;
+
+    // adjust-transform
+    let mut adjust_transform = BytesStart::new("adjust-transform");
+    adjust_transform.push_attribute((
+        "position",
+        format!("{} {}", position_x, position_y).as_str(),
+    ));
+    adjust_transform
+        .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
+    adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
+    let has_transform_kfs = !clip.position_x_keyframes.is_empty()
+        || !clip.position_y_keyframes.is_empty()
+        || !clip.scale_keyframes.is_empty()
+        || !clip.rotate_keyframes.is_empty();
+    if has_transform_kfs {
+        writer.write_event(Event::Start(adjust_transform))?;
+        write_transform_keyframe_params(writer, clip, project)?;
+        writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
+    } else {
+        writer.write_event(Event::Empty(adjust_transform))?;
+    }
+
+    // adjust-blend
+    let mut adjust_blend = BytesStart::new("adjust-blend");
+    adjust_blend.push_attribute(("amount", clip.opacity.to_string().as_str()));
+    if !clip.opacity_keyframes.is_empty() {
+        writer.write_event(Event::Start(adjust_blend))?;
+        write_opacity_keyframe_params(writer, clip, &project.frame_rate)?;
+        writer.write_event(Event::End(BytesEnd::new("adjust-blend")))?;
+    } else {
+        writer.write_event(Event::Empty(adjust_blend))?;
+    }
+
+    // adjust-volume
+    let mut adjust_volume = BytesStart::new("adjust-volume");
+    adjust_volume.push_attribute((
+        "amount",
+        linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
+    ));
+    if !clip.volume_keyframes.is_empty() {
+        writer.write_event(Event::Start(adjust_volume))?;
+        write_volume_keyframe_params(writer, clip, &project.frame_rate)?;
+        writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+    } else {
+        writer.write_event(Event::Empty(adjust_volume))?;
+    }
+
+    // adjust-panner
+    let mut adjust_panner = BytesStart::new("adjust-panner");
+    adjust_panner.push_attribute((
+        "amount",
+        format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
+    ));
+    if !clip.pan_keyframes.is_empty() {
+        writer.write_event(Event::Start(adjust_panner))?;
+        write_pan_keyframe_params(writer, clip, &project.frame_rate)?;
+        writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
+    } else {
+        writer.write_event(Event::Empty(adjust_panner))?;
+    }
+
+    Ok(())
 }
 
 fn internal_position_to_fcpxml(
@@ -2733,6 +2889,39 @@ mod tests {
         assert_eq!(
             lanes,
             vec![None, Some("1".to_string()), Some("-1".to_string())]
+        );
+
+        // Verify connected clips are nested inside the primary clip, not flat
+        // siblings in the <spine>.
+        let spine_start = xml.find("<spine>").expect("spine start");
+        let spine_end = xml.find("</spine>").expect("spine end");
+        let spine_xml = &xml[spine_start..spine_end];
+
+        // The spine should contain exactly one direct asset-clip child (the primary).
+        // Connected clips (lane="1", lane="-1") must be nested inside it.
+        let primary_start = spine_xml.find("<asset-clip ").expect("primary clip");
+        let primary_clip_xml = &spine_xml[primary_start..];
+        // Check just the opening tag of the primary clip (up to first '>').
+        let primary_tag_end = primary_clip_xml.find('>').expect("primary tag end");
+        let primary_tag = &primary_clip_xml[..primary_tag_end];
+        assert!(
+            !primary_tag.contains("lane="),
+            "primary clip opening tag should not have a lane attribute"
+        );
+        // Find the LAST </asset-clip> in the spine — this is the primary's
+        // closing tag. Everything between the primary's opening and this closing
+        // tag includes the nested connected clips.
+        let last_close = primary_clip_xml
+            .rfind("</asset-clip>")
+            .expect("last close");
+        let inner = &primary_clip_xml[..last_close];
+        assert!(
+            inner.contains("lane=\"1\""),
+            "video overlay (lane=1) should be nested inside primary clip"
+        );
+        assert!(
+            inner.contains("lane=\"-1\""),
+            "audio (lane=-1) should be nested inside primary clip"
         );
     }
 
