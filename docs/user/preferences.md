@@ -61,7 +61,10 @@ Preferences are grouped by category in a sidebar:
 - Proxy files are transcoded in the background via ffmpeg and prefer a managed local cache root at `$XDG_CACHE_HOME/ultimateslice/proxies` (fallback `/tmp/ultimateslice/proxies`) for better external-drive playback.
 - While a proxy is still incomplete/unusable, UltimateSlice keeps playback on original media and switches to the proxy only after it is valid.
 - If local-cache writes/transcodes fail, UltimateSlice falls back to alongside-media `UltimateSlice.cache/` for that source.
-- Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index), and project unload/app close performs managed-cache cleanup.
+- When **Proxy mode is enabled**, successful local proxy transcodes are also mirrored into alongside-media `UltimateSlice.cache/` for reuse.
+- Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index).
+- On project unload/app close, UltimateSlice always cleans tracked proxy files from managed local cache (`$XDG_CACHE_HOME`/`/tmp`).
+- Alongside-media `UltimateSlice.cache/` proxies are preserved only when **Proxy mode is enabled** (for reopen/reuse); if **Proxy mode is disabled**, those tracked sidecar proxies are cleaned too.
 - When Proxy mode is enabled, project reload eagerly primes a capped set of near-playhead proxy sources so first playback can pick up local proxies sooner on slower/external storage.
 - A yellow progress bar appears at the bottom of the window during proxy generation (and now also when background timeline prerender jobs are in flight).
 - Proxy percentage now uses ffmpeg bytes-written (`total_size`) versus a bitrate×duration estimate, and remains below 100% while jobs are still running.

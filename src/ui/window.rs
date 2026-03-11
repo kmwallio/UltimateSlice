@@ -1604,6 +1604,9 @@ pub fn build_window(
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
+    proxy_cache
+        .borrow_mut()
+        .set_sidecar_mirror_enabled(initial_proxy_mode.is_enabled());
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
@@ -1691,6 +1694,9 @@ pub fn build_window(
                         prog_player
                             .borrow_mut()
                             .set_proxy_enabled(new_state.proxy_mode.is_enabled());
+                        proxy_cache
+                            .borrow_mut()
+                            .set_sidecar_mirror_enabled(new_state.proxy_mode.is_enabled());
                         prog_player.borrow_mut().set_proxy_scale_divisor(
                             match new_state.proxy_mode {
                                 crate::ui_state::ProxyMode::QuarterRes => 4,
@@ -3645,9 +3651,10 @@ pub fn build_window(
                 on_close_preview();
                 library.borrow_mut().clear();
                 prog_player.borrow_mut().stop();
+                let proxy_mode_enabled = preferences_state.borrow().proxy_mode.is_enabled();
                 {
                     let mut cache = proxy_cache.borrow_mut();
-                    cache.cleanup_local_cache_for_unload();
+                    cache.cleanup_for_unload(proxy_mode_enabled);
                     cache.invalidate_all();
                 }
                 prog_player.borrow_mut().update_proxy_paths(HashMap::new());
@@ -4710,21 +4717,30 @@ pub fn build_window(
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
         let proxy_cache = proxy_cache.clone();
+        let preferences_state = preferences_state.clone();
         let close_approved = Rc::new(Cell::new(false));
         let close_approved_for_signal = close_approved.clone();
         window.connect_close_request(move |w| {
+            let proxy_mode_enabled = preferences_state.borrow().proxy_mode.is_enabled();
             if close_approved_for_signal.get() {
-                proxy_cache.borrow_mut().cleanup_local_cache_for_unload();
+                proxy_cache
+                    .borrow_mut()
+                    .cleanup_for_unload(proxy_mode_enabled);
                 return glib::Propagation::Proceed;
             }
             let close_approved_for_continue = close_approved.clone();
             let proxy_cache_for_continue = proxy_cache.clone();
+            let preferences_state_for_continue = preferences_state.clone();
             let weak = w.downgrade();
             let on_continue: Rc<dyn Fn()> = Rc::new(move || {
                 close_approved_for_continue.set(true);
+                let proxy_mode_enabled = preferences_state_for_continue
+                    .borrow()
+                    .proxy_mode
+                    .is_enabled();
                 proxy_cache_for_continue
                     .borrow_mut()
-                    .cleanup_local_cache_for_unload();
+                    .cleanup_for_unload(proxy_mode_enabled);
                 if let Some(win) = weak.upgrade() {
                     win.close();
                 }
@@ -4987,6 +5003,9 @@ fn handle_mcp_command(
                     "prerender_pending": snapshot.prerender_pending,
                     "prerender_ready": snapshot.prerender_ready,
                     "prerender_failed": snapshot.prerender_failed,
+                    "prerender_cache_hits": snapshot.prerender_cache_hits,
+                    "prerender_cache_misses": snapshot.prerender_cache_misses,
+                    "prerender_cache_hit_rate_percent": snapshot.prerender_cache_hit_rate_percent,
                     "prewarmed_boundary_ns": snapshot.prewarmed_boundary_ns,
                     "active_prerender_segment_key": snapshot.active_prerender_segment_key,
                     "rebuild_history_samples": snapshot.rebuild_history_samples,
@@ -5233,6 +5252,7 @@ fn handle_mcp_command(
                 prefs.clone()
             };
             crate::ui_state::save_preferences_state(&new_state);
+            proxy_cache.borrow_mut().set_sidecar_mirror_enabled(enabled);
             prog_player.borrow_mut().set_proxy_enabled(enabled);
             prog_player
                 .borrow_mut()

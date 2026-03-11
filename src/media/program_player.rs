@@ -714,6 +714,9 @@ pub struct ProgramPerformanceSnapshot {
     pub prerender_pending: usize,
     pub prerender_ready: usize,
     pub prerender_failed: usize,
+    pub prerender_cache_hits: u64,
+    pub prerender_cache_misses: u64,
+    pub prerender_cache_hit_rate_percent: f64,
     pub prewarmed_boundary_ns: Option<u64>,
     pub active_prerender_segment_key: Option<String>,
     pub rebuild_history_samples: usize,
@@ -885,6 +888,10 @@ pub struct ProgramPlayer {
     current_prerender_segment_key: Option<String>,
     /// Total prerender jobs requested this session (for status UI).
     prerender_total_requested: usize,
+    /// Prerender segment cache lookup hit count.
+    prerender_cache_hits: u64,
+    /// Prerender segment cache lookup miss count.
+    prerender_cache_misses: u64,
     /// Transition prerender usage counters keyed by transition kind:
     /// value = (hit_count, miss_count).
     transition_prerender_metrics: HashMap<String, (u64, u64)>,
@@ -1404,6 +1411,8 @@ impl ProgramPlayer {
                 prerender_active_clips: None,
                 current_prerender_segment_key: None,
                 prerender_total_requested: 0,
+                prerender_cache_hits: 0,
+                prerender_cache_misses: 0,
                 transition_prerender_metrics: HashMap::new(),
                 last_idle_prerender_scan_at: None,
                 pending_prerender_promote: false,
@@ -1502,6 +1511,8 @@ impl ProgramPlayer {
         self.prerender_active_clips = None;
         self.current_prerender_segment_key = None;
         self.prerender_total_requested = 0;
+        self.prerender_cache_hits = 0;
+        self.prerender_cache_misses = 0;
         self.transition_prerender_metrics.clear();
         self.last_idle_prerender_scan_at = None;
         self.pending_prerender_promote = false;
@@ -3891,6 +3902,36 @@ impl ProgramPlayer {
         (hits, misses)
     }
 
+    fn prerender_cache_hit_rate_percent(&self) -> f64 {
+        let total = self
+            .prerender_cache_hits
+            .saturating_add(self.prerender_cache_misses);
+        if total == 0 {
+            0.0
+        } else {
+            self.prerender_cache_hits as f64 * 100.0 / total as f64
+        }
+    }
+
+    fn record_prerender_cache_lookup(&mut self, hit: bool) {
+        if hit {
+            self.prerender_cache_hits = self.prerender_cache_hits.saturating_add(1);
+        } else {
+            self.prerender_cache_misses = self.prerender_cache_misses.saturating_add(1);
+        }
+        let total = self
+            .prerender_cache_hits
+            .saturating_add(self.prerender_cache_misses);
+        if total > 0 && total % 25 == 0 {
+            log::info!(
+                "prerender_cache_metrics: hit={} miss={} hit_rate={:.1}%",
+                self.prerender_cache_hits,
+                self.prerender_cache_misses,
+                self.prerender_cache_hit_rate_percent()
+            );
+        }
+    }
+
     fn transition_low_hitrate_pressure(&self) -> bool {
         const LOW_HITRATE_MIN_SAMPLES: u64 = 6;
         const LOW_HITRATE_PERCENT: u64 = 60;
@@ -4108,6 +4149,9 @@ impl ProgramPlayer {
             prerender_pending: self.prerender_pending.len(),
             prerender_ready: self.prerender_segments.len(),
             prerender_failed: self.prerender_failed.len(),
+            prerender_cache_hits: self.prerender_cache_hits,
+            prerender_cache_misses: self.prerender_cache_misses,
+            prerender_cache_hit_rate_percent: self.prerender_cache_hit_rate_percent(),
             prewarmed_boundary_ns: self.prewarmed_boundary_ns,
             active_prerender_segment_key: self.current_prerender_segment_key.clone(),
             rebuild_history_samples,
@@ -8811,7 +8855,9 @@ impl ProgramPlayer {
         }
         self.poll_background_prerender_results();
         let signature = self.prerender_signature_for_active(active);
-        let Some(segment) = self.find_prerender_segment_for(timeline_pos, signature) else {
+        let segment = self.find_prerender_segment_for(timeline_pos, signature);
+        self.record_prerender_cache_lookup(segment.is_some());
+        let Some(segment) = segment else {
             let sig_hex = format!("{signature:016x}");
             let same_sig_cached = self
                 .prerender_segments

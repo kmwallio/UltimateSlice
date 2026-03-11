@@ -95,7 +95,7 @@ pub struct ProxyCache {
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyWorkerUpdate>,
-    work_tx: Option<mpsc::Sender<(String, ProxyScale, Option<String>)>>,
+    work_tx: Option<mpsc::Sender<(String, ProxyScale, Option<String>, bool)>>,
     /// Per-job estimated bytes and written bytes for byte-based status progress.
     estimated_bytes: HashMap<String, u64>,
     written_bytes: HashMap<String, u64>,
@@ -105,6 +105,9 @@ pub struct ProxyCache {
     ffprobe_path: Option<String>,
     /// Local managed-cache files created by this process.
     runtime_owned_local_files: HashSet<String>,
+    /// When true, successful local proxy transcodes are mirrored to
+    /// alongside-media `UltimateSlice.cache` files too.
+    sidecar_mirror_enabled: bool,
 }
 
 impl ProxyCache {
@@ -120,7 +123,7 @@ impl ProxyCache {
             );
         }
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
-        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Option<String>)>();
+        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Option<String>, bool)>();
 
         // Pool of worker threads to transcode proxies in parallel.
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
@@ -135,7 +138,7 @@ impl ProxyCache {
                     lock.recv()
                 };
                 match item {
-                    Ok((source_path, scale, lut_path)) => {
+                    Ok((source_path, scale, lut_path, sidecar_mirror_enabled)) => {
                         let key = proxy_key(&source_path, lut_path.as_deref());
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
@@ -144,6 +147,7 @@ impl ProxyCache {
                             &local_root,
                             &key,
                             &tx,
+                            sidecar_mirror_enabled,
                         );
                         if tx
                             .send(ProxyWorkerUpdate::Done(ProxyResult {
@@ -174,7 +178,12 @@ impl ProxyCache {
             local_cache_root,
             ffprobe_path: find_ffprobe_path(),
             runtime_owned_local_files: HashSet::new(),
+            sidecar_mirror_enabled: false,
         }
+    }
+
+    pub fn set_sidecar_mirror_enabled(&mut self, enabled: bool) {
+        self.sidecar_mirror_enabled = enabled;
     }
 
     /// Enqueue a proxy transcode for `source_path` (with optional `lut_path`).
@@ -207,6 +216,7 @@ impl ProxyCache {
                 source_path.to_string(),
                 scale,
                 lut_path.map(|s| s.to_string()),
+                self.sidecar_mirror_enabled,
             ));
         }
     }
@@ -272,21 +282,17 @@ impl ProxyCache {
     /// Remove managed local proxy cache files on project unload/close.
     /// - For `$XDG_CACHE_HOME` managed roots, clears local managed files referenced
     ///   by this project/session.
-    /// - For `/tmp` managed roots, removes only files this process created.
+    /// - For `/tmp` managed roots, also clears tracked project/session proxy files
+    ///   under the managed root.
     pub fn cleanup_local_cache_for_unload(&mut self) {
-        let root_is_tmp = self.local_cache_root.starts_with("/tmp");
         let mut candidates: HashSet<String> = HashSet::new();
-        if root_is_tmp {
-            candidates.extend(self.runtime_owned_local_files.iter().cloned());
-        } else {
-            candidates.extend(
-                self.proxies
-                    .values()
-                    .filter(|p| is_path_within_root(p, &self.local_cache_root))
-                    .cloned(),
-            );
-            candidates.extend(self.runtime_owned_local_files.iter().cloned());
-        }
+        candidates.extend(
+            self.proxies
+                .values()
+                .filter(|p| is_path_within_root(p, &self.local_cache_root))
+                .cloned(),
+        );
+        candidates.extend(self.runtime_owned_local_files.iter().cloned());
         if candidates.is_empty() {
             return;
         }
@@ -317,6 +323,63 @@ impl ProxyCache {
             "ProxyCache: removed {} managed cache file(s) on project unload/close",
             removed.len()
         );
+    }
+
+    /// Remove alongside-media proxy files (`.../UltimateSlice.cache/*.proxy_*.mp4`)
+    /// tracked by this session/project and prune emptied sidecar cache dirs.
+    pub fn cleanup_sidecar_cache_for_unload(&mut self) {
+        let candidates: HashSet<String> = self
+            .proxies
+            .values()
+            .filter(|p| is_sidecar_proxy_path(p))
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let mut removed: HashSet<String> = HashSet::new();
+        let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
+        for path in &candidates {
+            match std::fs::remove_file(path) {
+                Ok(_) => {
+                    removed.insert(path.clone());
+                }
+                Err(_) => {
+                    if !Path::new(path).exists() {
+                        removed.insert(path.clone());
+                    }
+                }
+            }
+            if let Some(parent) = Path::new(path).parent() {
+                touched_dirs.insert(parent.to_path_buf());
+            }
+        }
+        if removed.is_empty() {
+            return;
+        }
+        self.proxies.retain(|_, p| !removed.contains(p));
+        for dir in touched_dirs {
+            let _ = std::fs::remove_dir(dir);
+        }
+        log::info!(
+            "ProxyCache: removed {} alongside-media cache file(s) on project unload/close",
+            removed.len()
+        );
+    }
+
+    /// Cleanup policy for project unload/close:
+    /// - always clear managed local/tmp cache files tracked by this session/project.
+    /// - when proxy mode is enabled, preserve alongside-media `UltimateSlice.cache` files.
+    /// - when proxy mode is disabled, clear alongside-media `UltimateSlice.cache` files too.
+    pub fn cleanup_for_unload(&mut self, proxy_mode_enabled: bool) {
+        self.cleanup_local_cache_for_unload();
+        if proxy_mode_enabled {
+            log::info!(
+                "ProxyCache: preserving alongside-media proxy cache on unload/close because proxy mode is enabled"
+            );
+            return;
+        }
+        self.cleanup_sidecar_cache_for_unload();
     }
 
     /// Current progress snapshot.
@@ -381,6 +444,14 @@ fn now_epoch_secs() -> u64 {
 
 fn is_path_within_root(path: &str, root: &Path) -> bool {
     Path::new(path).starts_with(root)
+}
+
+fn is_sidecar_proxy_path(path: &str) -> bool {
+    let p = Path::new(path);
+    p.parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        == Some("UltimateSlice.cache")
 }
 
 fn read_owned_entries(root: &Path) -> Vec<(u64, String)> {
@@ -698,6 +769,34 @@ fn estimate_proxy_size_bytes(
     Some(((bitrate_bps as f64 * duration_secs) / 8.0).round() as u64)
 }
 
+fn mirror_local_proxy_to_sidecar(local_proxy_path: &str, sidecar_path: &str, ffprobe: &str) {
+    if sidecar_path == local_proxy_path {
+        return;
+    }
+    let sidecar_dir = Path::new(sidecar_path).parent().unwrap_or(Path::new("."));
+    if std::fs::create_dir_all(sidecar_dir).is_err() {
+        return;
+    }
+    let temp_sidecar_path = format!("{sidecar_path}.partial");
+    let _ = std::fs::remove_file(&temp_sidecar_path);
+    if std::fs::copy(local_proxy_path, &temp_sidecar_path).is_err() {
+        let _ = std::fs::remove_file(&temp_sidecar_path);
+        return;
+    }
+    if !proxy_file_is_ready(&temp_sidecar_path, Some(ffprobe)) {
+        let _ = std::fs::remove_file(&temp_sidecar_path);
+        return;
+    }
+    if std::fs::rename(&temp_sidecar_path, sidecar_path).is_err() {
+        let _ = std::fs::remove_file(&temp_sidecar_path);
+        return;
+    }
+    log::debug!(
+        "ProxyCache: mirrored local proxy to alongside-media cache path={}",
+        sidecar_path
+    );
+}
+
 /// Run ffmpeg to create a proxy file.
 /// Returns `(proxy_path, success, owned_local)`.
 fn transcode_proxy(
@@ -707,6 +806,7 @@ fn transcode_proxy(
     local_root: &Path,
     cache_key: &str,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
+    sidecar_mirror_enabled: bool,
 ) -> (String, bool, bool) {
     let local_proxy_path = match local_proxy_path_for(source_path, scale, lut_path, local_root) {
         Some(p) => p,
@@ -732,7 +832,8 @@ fn transcode_proxy(
     }
 
     let attempts = sidecar_proxy_path
-        .map(|p| vec![(local_proxy_path.clone(), true), (p, false)])
+        .as_ref()
+        .map(|p| vec![(local_proxy_path.clone(), true), (p.clone(), false)])
         .unwrap_or_else(|| vec![(local_proxy_path.clone(), true)]);
 
     for (proxy_path, owned_local) in attempts {
@@ -769,6 +870,11 @@ fn transcode_proxy(
                 let _ = std::fs::remove_file(&proxy_path);
                 continue;
             }
+            if owned_local && sidecar_mirror_enabled {
+                if let Some(sidecar_path) = sidecar_proxy_path.as_deref() {
+                    mirror_local_proxy_to_sidecar(&proxy_path, sidecar_path, &ffprobe);
+                }
+            }
             return (proxy_path, true, owned_local);
         }
         let _ = std::fs::remove_file(&temp_proxy_path);
@@ -780,4 +886,76 @@ fn transcode_proxy(
         }
     }
     (local_proxy_path, false, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_sidecar_file_path() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let unique = format!(
+            "ultimateslice-proxy-cache-test-{}-{}",
+            std::process::id(),
+            nanos
+        );
+        let sidecar_dir = std::env::temp_dir()
+            .join(unique)
+            .join("UltimateSlice.cache");
+        let _ = std::fs::create_dir_all(&sidecar_dir);
+        let path = sidecar_dir.join("clip.proxy_half.mp4");
+        let _ = std::fs::write(&path, b"test");
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn sidecar_proxy_path_detection_matches_directory_name() {
+        assert!(is_sidecar_proxy_path(
+            "/tmp/project/UltimateSlice.cache/a.proxy_half.mp4"
+        ));
+        assert!(!is_sidecar_proxy_path(
+            "/tmp/ultimateslice/proxies/a.proxy_half.mp4"
+        ));
+    }
+
+    #[test]
+    fn cleanup_for_unload_removes_sidecar_when_proxy_mode_disabled() {
+        let sidecar_path = test_sidecar_file_path();
+        let mut cache = ProxyCache::new();
+        cache.proxies.insert("k".to_string(), sidecar_path.clone());
+        cache.cleanup_for_unload(false);
+        assert!(!Path::new(&sidecar_path).exists());
+        if let Some(parent) = Path::new(&sidecar_path).parent().and_then(|p| p.parent()) {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn cleanup_for_unload_preserves_sidecar_when_proxy_mode_enabled() {
+        let sidecar_path = test_sidecar_file_path();
+        let mut cache = ProxyCache::new();
+        let local_path = cache
+            .local_cache_root
+            .join("cleanup-policy-test.proxy_half.mp4")
+            .to_string_lossy()
+            .to_string();
+        let _ = std::fs::create_dir_all(&cache.local_cache_root);
+        let _ = std::fs::write(&local_path, b"test");
+        cache
+            .proxies
+            .insert("side".to_string(), sidecar_path.clone());
+        cache
+            .proxies
+            .insert("local".to_string(), local_path.clone());
+        cache.cleanup_for_unload(true);
+        assert!(Path::new(&sidecar_path).exists());
+        assert!(!Path::new(&local_path).exists());
+        if let Some(parent) = Path::new(&sidecar_path).parent().and_then(|p| p.parent()) {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
 }

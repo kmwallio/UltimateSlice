@@ -110,6 +110,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Transition prerender hit/miss metrics are recency-weighted via periodic decay, so adaptive tuning and prioritization respond to current session behavior rather than stale long-ago outcomes.
 - Background prerender queue admission is now priority-aware under load: queue depth is capped, and overflow is only allowed for substantially higher-priority requests, reducing low-value prerender churn.
 - Ready prerender segments are now cache-pruned by playhead distance (while protecting any currently active prerender segment), keeping cache size bounded and focused on likely near-term reuse.
+- Prerender cache lookups now track hit/miss telemetry (with hit-rate summaries), and `get_performance_snapshot` includes `prerender_cache_hits`, `prerender_cache_misses`, and `prerender_cache_hit_rate_percent`.
 
 ## Seeking
 
