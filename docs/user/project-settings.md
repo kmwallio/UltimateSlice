@@ -36,22 +36,30 @@ All clips are automatically scaled and letterboxed/pillarboxed to fit the chosen
 ## Saving
 
 Project settings (resolution and frame rate) are saved as the `<format>` element in the FCPXML file. UltimateSlice always writes numeric format fields (`width`, `height`, `frameDuration`) and only writes a canonical `name` when the preset is known, which improves interoperability with other editors.
-Source media references are saved as nested `<media-rep>` entries under each resource `<asset>`; non-proxy files are tagged `kind="original-media"`.
+Source media references are saved as nested `<media-rep>` entries under each resource `<asset>`; non-proxy files are tagged `kind="original-media"`. Exported `file://` media paths are URI-safe (percent-encoding spaces and other URI-unsafe characters).
 
 Use **Save…** (`Ctrl+S`) to write the project as XML (default suggested filename: `project.uspxml`; `.fcpxml` remains fully supported). Open with **Open…** (`Ctrl+O`) on any future session.
+
+Save format behavior is extension-based:
+- Saving as `.uspxml` keeps UltimateSlice feature-rich round-trip metadata (including vendor `us:*` fields and unknown passthrough fields where applicable).
+- Saving as `.fcpxml` uses strict compatibility output (no UltimateSlice vendor namespace/attrs, with strict DTD-friendly structure) for broader interoperability. Strict output includes standards-native `lane` mapping for multi-track timeline layering and enforces DTD-ordered intrinsic params in clips.
 
 Use **Export ▼ → Export Project with Media…** to create a portable package:
 - Writes the chosen `.uspxml`/`.fcpxml` file.
 - Copies all timeline-used source media into a sibling `ProjectName.Library` folder (based on the output filename stem).
 - Rewrites saved media references to point at those copied library files.
+- Writes packaged XML in a strict compatibility mode that omits UltimateSlice vendor `us:*` attributes and passthrough unknown XML fields for better strict FCPXML 1.14 validator interoperability.
 - For packaged exports targeting external Linux mount roots (`/media`, `/run/media`, `/mnt`), paths are normalized to `/Volumes/<drive>/...` in the XML for better macOS and cross-distro portability.
 - If different source files share the same filename, UltimateSlice keeps the first name and adds deterministic suffixes for collisions.
 - Shows an export progress window while copying media and writing the packaged project XML.
 
 When you open an existing FCPXML and save it without making edits, UltimateSlice preserves the original document verbatim so unknown attributes/fields from other tools are retained.
 For edited saves, unsupported `asset-clip` attributes/child tags and imported resource `<asset>` metadata payloads (including nested `<metadata><md .../></metadata>`) are still carried forward in regenerated output. Unknown attrs/child tags are also preserved across core document structure (`<fcpxml>`, `<resources>`, selected `<library>/<event>/<project>/<sequence>/<spine>`, plus selected sequence `<format>` attrs) during dirty-save regeneration. Regenerated documents include `<!DOCTYPE fcpxml>` and keep source references in nested `<media-rep>` entries rather than legacy `asset@src`.
+UltimateSlice also reads and writes native spine `<transition>` elements, mapping them to clip transition settings so common transition timing/name metadata interoperates better with other FCPXML tools.
+UltimateSlice also reads and writes native `<timeMap>/<timept>` for constant 2-point retimes (speed changes, reverse playback, and full-clip freeze holds) plus representable multi-point monotonic ramps mapped to speed keyframes. `timept@interp` smooth modes (`smooth2`/`smooth`) are mapped to eased keyframe interpolation for representable ramps, while native maps that depend on `inTime`/`outTime` handles (or other unsupported semantics) are preserved and re-emitted in the proper timing-params position instead of being lossy-remapped.
 When possible for imported projects, transform-only dirty saves patch matching `adjust-transform` nodes in-place on the original XML (including nested clips), which keeps the saved file much closer to the source structure and IDs.
 For transform position compatibility, UltimateSlice converts FCPXML `adjust-transform@position` values using frame-height percentage semantics (both X and Y percentages based on frame height, center-origin) to and from UltimateSlice's internal scale-aware position model (with Y-axis inversion) during import/export.
+For broader import compatibility, spine `ref-clip` elements are mapped through their referenced assets, and `sync-clip` wrappers (including nested `spine` containers) are traversed so nested `asset-clip`/`ref-clip` story elements are imported instead of ignored as opaque unknown blocks.
 For FCPXML assets that use absolute source-time domains, UltimateSlice rebases `asset-clip@start` against `asset@start` during import so layered lane clips seek/play from the intended media-relative source position.
 When imported FCPXML media references start with `/Volumes/...` and are missing locally, UltimateSlice URI-decodes the path (for example `%20` → space), retries common Linux external-drive mount locations (`/media/<user>/...`, `/run/media/<user>/...`, `/media/...`, `/run/media/...`, `/mnt/...`) plus the opened FCPXML mount-root fallback, then uses the found file for runtime playback while still saving the original imported XML source path.
 

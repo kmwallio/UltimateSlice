@@ -20,7 +20,8 @@ fn save_project_to_path(
 ) -> Result<(), String> {
     let xml = {
         let proj = project.borrow();
-        fcpxml::writer::write_fcpxml(&proj).map_err(|e| format!("FCPXML write error: {e}"))?
+        fcpxml::writer::write_fcpxml_for_path(&proj, path)
+            .map_err(|e| format!("FCPXML write error: {e}"))?
     };
     std::fs::write(path, xml).map_err(|e| format!("Save error: {e}"))?;
     if let Some(p) = path.to_str() {

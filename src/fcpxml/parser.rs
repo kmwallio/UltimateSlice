@@ -62,6 +62,12 @@ struct ActiveClipContext {
     has_us_opacity_keyframes: bool,
     has_us_volume_keyframes: bool,
     has_us_pan_keyframes: bool,
+    has_us_speed: bool,
+    has_us_speed_keyframes: bool,
+    has_us_reverse: bool,
+    has_us_freeze_frame: bool,
+    has_us_freeze_source_ns: bool,
+    has_us_freeze_hold_duration_ns: bool,
 }
 
 /// Parse an FCPXML string into a `Project`.
@@ -101,6 +107,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
     let mut selected_sequence_format_ref: Option<String> = None;
     let mut current_asset: Option<AssetBuilder> = None;
     let mut clip_stack: Vec<ActiveClipContext> = Vec::new();
+    let mut last_spine_clip_ctx: Option<ActiveClipContext> = None;
     let mount_root = fcpxml_path.and_then(fcpxml_mount_root);
     let mount_users = fcpxml_path
         .map(linux_mount_users_for_fcpxml)
@@ -221,7 +228,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             }
                         }
                     }
-                    "spine" if in_selected_sequence => {
+                    "spine" if in_selected_sequence && !in_spine => {
                         let attrs = parse_attrs(e)?;
                         if !selected_spine_seen {
                             in_spine = true;
@@ -243,6 +250,40 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             &mount_users,
                         ) {
                             clip_stack.push(ctx);
+                            last_spine_clip_ctx = Some(ctx);
+                        }
+                    }
+                    "ref-clip" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        if let Some(ctx) = parse_asset_clip(
+                            &attrs,
+                            &assets,
+                            &mut track_map,
+                            mount_root.as_deref(),
+                            &mount_users,
+                        ) {
+                            clip_stack.push(ctx);
+                            last_spine_clip_ctx = Some(ctx);
+                        }
+                    }
+                    "sync-clip" | "spine" if in_spine => {
+                        // Transparent container: keep scanning nested clip items inside the
+                        // selected sequence spine instead of treating the whole subtree as unknown.
+                    }
+                    "transition" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        apply_transition(&attrs, last_spine_clip_ctx.as_ref(), &mut track_map);
+                        let _ = collect_unknown_start_fragment(&mut reader, e)?;
+                    }
+                    "timeMap" if in_spine => {
+                        let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                        let applied = parse_native_time_map_fragment(&fragment)
+                            .map(|native| {
+                                apply_native_time_map(&native, clip_stack.last(), &mut track_map)
+                            })
+                            .unwrap_or(false);
+                        if !applied {
+                            append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
                         }
                     }
                     "adjust-transform" if in_spine => {
@@ -470,13 +511,43 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                     }
                     "asset-clip" if in_spine => {
                         let attrs = parse_attrs(e)?;
-                        parse_asset_clip(
+                        if let Some(ctx) = parse_asset_clip(
                             &attrs,
                             &assets,
                             &mut track_map,
                             mount_root.as_deref(),
                             &mount_users,
-                        );
+                        ) {
+                            last_spine_clip_ctx = Some(ctx);
+                        }
+                    }
+                    "ref-clip" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        if let Some(ctx) = parse_asset_clip(
+                            &attrs,
+                            &assets,
+                            &mut track_map,
+                            mount_root.as_deref(),
+                            &mount_users,
+                        ) {
+                            last_spine_clip_ctx = Some(ctx);
+                        }
+                    }
+                    "sync-clip" | "spine" if in_spine => {}
+                    "transition" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        apply_transition(&attrs, last_spine_clip_ctx.as_ref(), &mut track_map);
+                    }
+                    "timeMap" if in_spine => {
+                        let fragment = collect_unknown_empty_fragment(e)?;
+                        let applied = parse_native_time_map_fragment(&fragment)
+                            .map(|native| {
+                                apply_native_time_map(&native, clip_stack.last(), &mut track_map)
+                            })
+                            .unwrap_or(false);
+                        if !applied {
+                            append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
+                        }
                     }
                     "adjust-transform" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -580,9 +651,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if in_spine {
                             in_spine = false;
                             clip_stack.clear();
+                            last_spine_clip_ctx = None;
                         }
                     }
-                    "asset-clip" => {
+                    "asset-clip" | "ref-clip" => {
                         if in_spine {
                             clip_stack.pop();
                         }
@@ -928,6 +1000,10 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:speed") {
                 clip.speed = v.parse().unwrap_or(1.0);
             }
+            if let Some(v) = attrs.get("us:speed-keyframes") {
+                clip.speed_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:reverse") {
                 clip.reverse = v.parse().unwrap_or(false);
             }
@@ -1014,6 +1090,12 @@ fn parse_asset_clip(
                 has_us_opacity_keyframes: attrs.contains_key("us:opacity-keyframes"),
                 has_us_volume_keyframes: attrs.contains_key("us:volume-keyframes"),
                 has_us_pan_keyframes: attrs.contains_key("us:pan-keyframes"),
+                has_us_speed: attrs.contains_key("us:speed"),
+                has_us_speed_keyframes: attrs.contains_key("us:speed-keyframes"),
+                has_us_reverse: attrs.contains_key("us:reverse"),
+                has_us_freeze_frame: attrs.contains_key("us:freeze-frame"),
+                has_us_freeze_source_ns: attrs.contains_key("us:freeze-source-ns"),
+                has_us_freeze_hold_duration_ns: attrs.contains_key("us:freeze-hold-duration-ns"),
             });
         }
     }
@@ -1144,6 +1226,247 @@ fn apply_adjust_panner(
             clip.pan = pan as f32;
         }
     }
+}
+
+fn transition_kind_from_name(name: &str) -> Option<&'static str> {
+    let token: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect();
+    match token.as_str() {
+        "crossdissolve" | "dissolve" | "fade" => Some("cross_dissolve"),
+        "fadetoblack" | "fadeblack" => Some("fade_to_black"),
+        "wiperight" => Some("wipe_right"),
+        "wipeleft" => Some("wipe_left"),
+        _ => None,
+    }
+}
+
+fn apply_transition(
+    attrs: &HashMap<String, String>,
+    last_spine_clip_ctx: Option<&ActiveClipContext>,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    let Some(clip) = current_clip_mut(track_map, last_spine_clip_ctx) else {
+        return;
+    };
+    let duration_ns = attrs
+        .get("duration")
+        .and_then(|s| parse_fcpxml_time(s))
+        .unwrap_or(0);
+    if duration_ns == 0 {
+        return;
+    }
+    let kind = attrs
+        .get("name")
+        .and_then(|name| transition_kind_from_name(name))
+        .unwrap_or("cross_dissolve");
+    clip.transition_after = kind.to_string();
+    clip.transition_after_ns = duration_ns;
+}
+
+#[derive(Clone, Copy)]
+struct NativeTimeMapPoint {
+    time_ns: u64,
+    value_ns: u64,
+    interp: KeyframeInterpolation,
+}
+
+struct NativeTimeMap {
+    points: Vec<NativeTimeMapPoint>,
+    has_curve_timing: bool,
+    has_unsupported_interp: bool,
+}
+
+fn time_map_interp_from_fcpxml(interp: &str) -> Option<KeyframeInterpolation> {
+    match interp {
+        "linear" => Some(KeyframeInterpolation::Linear),
+        "smooth2" | "smooth" => Some(KeyframeInterpolation::EaseInOut),
+        // Be permissive with non-timeMap values if encountered in wild files.
+        "easeIn" => Some(KeyframeInterpolation::EaseIn),
+        "easeOut" => Some(KeyframeInterpolation::EaseOut),
+        "ease" => Some(KeyframeInterpolation::EaseInOut),
+        _ => None,
+    }
+}
+
+fn parse_native_time_map_fragment(fragment: &str) -> Option<NativeTimeMap> {
+    let mut reader = Reader::from_str(fragment);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut points = Vec::new();
+    let mut has_curve_timing = false;
+    let mut has_unsupported_interp = false;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if e.local_name().as_ref() == b"timept" {
+                    let attrs = parse_attrs(e).ok()?;
+                    let time_ns = attrs.get("time").and_then(|s| parse_fcpxml_time(s))?;
+                    let value_ns = attrs.get("value").and_then(|s| parse_fcpxml_time(s))?;
+                    let interp = attrs
+                        .get("interp")
+                        .and_then(|s| time_map_interp_from_fcpxml(s))
+                        .unwrap_or_else(|| {
+                            if attrs.contains_key("interp") {
+                                has_unsupported_interp = true;
+                            }
+                            KeyframeInterpolation::Linear
+                        });
+                    has_curve_timing |=
+                        attrs.contains_key("inTime") || attrs.contains_key("outTime");
+                    points.push(NativeTimeMapPoint {
+                        time_ns,
+                        value_ns,
+                        interp,
+                    });
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        buf.clear();
+    }
+    Some(NativeTimeMap {
+        points,
+        has_curve_timing,
+        has_unsupported_interp,
+    })
+}
+
+fn apply_native_time_map(
+    native: &NativeTimeMap,
+    active_ctx: Option<&ActiveClipContext>,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) -> bool {
+    const EPS: f64 = 1e-9;
+    let Some(ctx) = active_ctx else {
+        return false;
+    };
+    if native.has_curve_timing || native.has_unsupported_interp {
+        return false;
+    }
+    if ctx.has_us_speed
+        || ctx.has_us_speed_keyframes
+        || ctx.has_us_reverse
+        || ctx.has_us_freeze_frame
+        || ctx.has_us_freeze_source_ns
+        || ctx.has_us_freeze_hold_duration_ns
+    {
+        return false;
+    }
+    if native.points.len() < 2 {
+        return false;
+    }
+    let mut points = native.points.clone();
+    points.sort_by_key(|p| p.time_ns);
+    for window in points.windows(2) {
+        if window[1].time_ns <= window[0].time_ns {
+            return false;
+        }
+    }
+    let Some(clip) = current_clip_mut(track_map, Some(ctx)) else {
+        return false;
+    };
+    let first = points[0];
+    let last = *points.last().unwrap_or(&first);
+
+    let mut segment_speeds = Vec::with_capacity(points.len().saturating_sub(1));
+    let mut segment_signs = Vec::with_capacity(points.len().saturating_sub(1));
+    for window in points.windows(2) {
+        let p0 = window[0];
+        let p1 = window[1];
+        let dt = p1.time_ns.saturating_sub(p0.time_ns);
+        if dt == 0 {
+            return false;
+        }
+        let dv = p1.value_ns as i128 - p0.value_ns as i128;
+        let speed = (dv.unsigned_abs() as f64) / dt as f64;
+        if !speed.is_finite() {
+            return false;
+        }
+        segment_speeds.push(speed);
+        segment_signs.push(dv.signum());
+    }
+
+    let has_nonzero_segments = segment_signs.iter().any(|sign| *sign != 0);
+    if !has_nonzero_segments {
+        if clip.kind == ClipKind::Audio {
+            return false;
+        }
+        let source_ns = if first.value_ns >= clip.source_in && first.value_ns <= clip.source_out {
+            first.value_ns
+        } else {
+            clip.source_in.saturating_add(first.value_ns)
+        };
+        clip.speed = 1.0;
+        clip.speed_keyframes.clear();
+        clip.reverse = false;
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(source_ns);
+        clip.freeze_frame_hold_duration_ns = Some(last.time_ns.saturating_sub(first.time_ns));
+        return true;
+    }
+
+    if segment_signs.iter().any(|sign| *sign == 0) {
+        return false;
+    }
+    let reverse = segment_signs[0] < 0;
+    if segment_signs
+        .iter()
+        .any(|sign| (*sign < 0) != reverse || *sign == 0)
+    {
+        return false;
+    }
+    if segment_speeds
+        .iter()
+        .any(|speed| *speed <= 0.0 || !speed.is_finite())
+    {
+        return false;
+    }
+
+    let first_speed = segment_speeds[0];
+    let all_same_speed = segment_speeds
+        .iter()
+        .all(|speed| (*speed - first_speed).abs() <= EPS);
+    clip.speed = first_speed;
+    if all_same_speed {
+        clip.speed_keyframes.clear();
+    } else {
+        let base_time_ns = first.time_ns;
+        let mut speed_keyframes = Vec::new();
+        speed_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: first_speed,
+            interpolation: points[0].interp,
+        });
+        for segment_idx in 1..segment_speeds.len() {
+            let boundary_time_ns = points[segment_idx].time_ns.saturating_sub(base_time_ns);
+            let incoming = segment_speeds[segment_idx - 1];
+            let outgoing = segment_speeds[segment_idx];
+            if (incoming - outgoing).abs() <= EPS {
+                continue;
+            }
+            speed_keyframes.push(NumericKeyframe {
+                time_ns: boundary_time_ns,
+                value: incoming,
+                interpolation: points[segment_idx - 1].interp,
+            });
+            speed_keyframes.push(NumericKeyframe {
+                time_ns: boundary_time_ns,
+                value: outgoing,
+                interpolation: points[segment_idx].interp,
+            });
+        }
+        clip.speed_keyframes = speed_keyframes;
+    }
+    clip.reverse = reverse;
+    clip.freeze_frame = false;
+    clip.freeze_frame_source_ns = None;
+    clip.freeze_frame_hold_duration_ns = None;
+    true
 }
 
 fn parse_fcpxml_volume_amount(value: &str) -> Option<f64> {
@@ -1726,6 +2049,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-x"
             | "us:title-y"
             | "us:speed"
+            | "us:speed-keyframes"
             | "us:reverse"
             | "us:freeze-frame"
             | "us:freeze-source-ns"
@@ -2740,6 +3064,384 @@ mod tests {
             .map(|c| c.label.clone())
             .collect();
         assert_eq!(clips, vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_transition_maps_to_clip_transition_after() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="240/24s"/>
+    <asset id="a2" src="file:///b.mov" name="b" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TransitionMap">
+        <sequence duration="480/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="240/24s" name="a"/>
+            <transition name="Cross Dissolve" duration="24/24s"/>
+            <asset-clip ref="a2" offset="216/24s" start="0s" duration="240/24s" name="b"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let video = project.video_tracks().next().expect("video track");
+        assert_eq!(video.clips.len(), 2);
+        assert_eq!(video.clips[0].transition_after, "cross_dissolve");
+        assert_eq!(video.clips[0].transition_after_ns, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_sets_constant_speed() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="480/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapSpeed">
+        <sequence duration="480/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="240/24s" name="a">
+              <timeMap>
+                <timept time="0s" value="0s" interp="linear"/>
+                <timept time="120/24s" value="240/24s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!((clip.speed - 2.0).abs() < 1e-6);
+        assert!(!clip.reverse);
+        assert!(!clip.freeze_frame);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_sets_reverse_speed() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapReverse">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="120/24s" name="a">
+              <timeMap>
+                <timept time="0s" value="120/24s" interp="linear"/>
+                <timept time="120/24s" value="0s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!((clip.speed - 1.0).abs() < 1e-6);
+        assert!(clip.reverse);
+        assert!(!clip.freeze_frame);
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_sets_freeze_frame() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapFreeze">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="120/24s" name="a">
+              <timeMap>
+                <timept time="0s" value="48/24s" interp="linear"/>
+                <timept time="120/24s" value="48/24s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!(clip.freeze_frame);
+        assert_eq!(clip.freeze_frame_source_ns, Some(2_000_000_000));
+        assert_eq!(clip.freeze_frame_hold_duration_ns, Some(5_000_000_000));
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_preserved_when_vendor_speed_exists() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapVendorPriority">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="120/24s" name="a" us:speed="3.0">
+              <timeMap>
+                <timept time="0s" value="0s" interp="linear"/>
+                <timept time="120/24s" value="240/24s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!((clip.speed - 3.0).abs() < 1e-6);
+        assert!(
+            clip.fcpxml_unknown_children
+                .iter()
+                .any(|f| f.contains("<timeMap")),
+            "original native timeMap should be preserved when vendor speed attrs are present"
+        );
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_multi_point_sets_speed_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="480/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapRamp">
+        <sequence duration="480/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="240/24s" name="a">
+              <timeMap>
+                <timept time="0s" value="0s" interp="linear"/>
+                <timept time="48/24s" value="48/24s" interp="linear"/>
+                <timept time="96/24s" value="144/24s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!(!clip.reverse);
+        assert!(!clip.freeze_frame);
+        assert!((clip.speed - 1.0).abs() < 1e-6);
+        assert!(
+            clip.speed_keyframes.len() >= 2,
+            "expected step keyframes for multi-point timeMap"
+        );
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_mixed_direction_is_preserved_unknown() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="480/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapUnsupported">
+        <sequence duration="480/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="240/24s" name="a">
+              <timeMap>
+                <timept time="0s" value="0s" interp="linear"/>
+                <timept time="48/24s" value="96/24s" interp="linear"/>
+                <timept time="96/24s" value="24/24s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!(
+            clip.fcpxml_unknown_children
+                .iter()
+                .any(|f| f.contains("<timeMap")),
+            "unsupported mixed-direction native timeMap should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_smooth2_maps_to_ease_keyframes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="480/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapSmooth2">
+        <sequence duration="480/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="240/24s" name="a">
+              <timeMap>
+                <timept time="0s" value="0s" interp="smooth2"/>
+                <timept time="48/24s" value="48/24s" interp="smooth2"/>
+                <timept time="96/24s" value="144/24s" interp="smooth2"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!(
+            clip.speed_keyframes
+                .iter()
+                .any(|kf| kf.interpolation == KeyframeInterpolation::EaseInOut),
+            "smooth2 timept interpolation should map to ease interpolation"
+        );
+    }
+
+    #[test]
+    fn test_parse_fcpxml_native_time_map_with_in_out_time_is_preserved_unknown() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///a.mov" name="a" duration="480/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="TimeMapInOut">
+        <sequence duration="480/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="240/24s" name="a">
+              <timeMap>
+                <timept time="0s" value="0s" interp="smooth2" outTime="12/24s"/>
+                <timept time="96/24s" value="144/24s" interp="smooth2" inTime="84/24s"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert!(clip.speed_keyframes.is_empty());
+        assert!(
+            clip.fcpxml_unknown_children
+                .iter()
+                .any(|f| f.contains("inTime=") || f.contains("outTime=")),
+            "timeMap with inTime/outTime should be preserved as unknown passthrough"
+        );
+    }
+
+    #[test]
+    fn test_parse_fcpxml_ref_clip_in_spine_maps_to_timeline_clip() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///ref.mov" name="ref-src" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="RefClipImport">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <ref-clip ref="a1" offset="0s" start="0s" duration="48/24s" name="ref-clip"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().expect("video").clips[0];
+        assert_eq!(clip.label, "ref-clip");
+        assert_eq!(clip.source_path, "/ref.mov");
+    }
+
+    #[test]
+    fn test_parse_fcpxml_sync_clip_nested_spine_imports_child_clips() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///sync-a.mov" name="sync-a" duration="240/24s"/>
+    <asset id="a2" src="file:///sync-b.mov" name="sync-b" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="SyncClipImport">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <sync-clip offset="0s" start="0s" duration="96/24s" name="sync-wrapper">
+              <spine>
+                <asset-clip ref="a1" offset="0s" start="0s" duration="48/24s" name="sync-a"/>
+                <ref-clip ref="a2" offset="48/24s" start="0s" duration="48/24s" name="sync-b"/>
+              </spine>
+            </sync-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let labels: Vec<String> = project
+            .video_tracks()
+            .flat_map(|t| t.clips.iter().map(|c| c.label.clone()))
+            .collect();
+        assert_eq!(labels, vec!["sync-a".to_string(), "sync-b".to_string()]);
     }
 
     #[test]

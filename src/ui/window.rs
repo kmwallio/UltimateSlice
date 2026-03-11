@@ -6298,7 +6298,7 @@ fn handle_mcp_command(
         McpCommand::SaveFcpxml { path, reply } => {
             let result = {
                 let proj = project.borrow();
-                crate::fcpxml::writer::write_fcpxml(&proj)
+                crate::fcpxml::writer::write_fcpxml_for_path(&proj, std::path::Path::new(&path))
                     .and_then(|xml| std::fs::write(&path, xml).map_err(|e| anyhow::anyhow!(e)))
             };
             match result {

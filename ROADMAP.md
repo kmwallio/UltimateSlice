@@ -122,7 +122,17 @@ Tracking docs:
 - [x] Shared MIME registration for UltimateSlice projects: ship `application/x-ultimateslice-project+xml` shared-mime-info definition with `*.uspxml` glob and install it in Flatpak package metadata
 - [x] Dirty imported transform edits prefer in-place XML patching (when `adjust-transform` exists), preserving original asset IDs/document structure instead of full regeneration
 - [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
+- [x] Export URI safety: writer now percent-encodes `media-rep@src` file paths (spaces/special characters) for standards-friendly `file://` references
 - [x] Packaged export external-drive path normalization: **Export Project with Media** rewrites Linux external mount roots (`/media`, `/run/media`, `/mnt`) to `/Volumes/<drive>/...` in saved XML for cross-platform portability
+- [x] Strict packaged-export FCPXML mode: **Export Project with Media** now emits DTD-safe XML (no `xmlns:us`/`us:*` attrs, no passthrough unknown attrs/children, DTD-friendly `adjust-blend` and structured `adjust-crop` with `crop-rect`)
+- [x] Extension-based strict-save routing: normal Save now uses strict compatibility writer for `.fcpxml` outputs while `.uspxml` retains feature-rich round-trip output
+- [x] Strict export DTD + multitrack hardening: strict writer now emits lane-based track mapping for multi-track fallback routing and enforces DTD asset-clip intrinsic ordering (video params before audio params), with strict-mode sequence-marker suppression for validator compliance
+- [x] Native transition import/export parity (phase 1): parse native spine `<transition>` into clip transition fields and emit native `<transition>` between adjacent clips using mapped transition names/duration/offset
+- [x] Native `timeMap/timept` import/export parity (phase 1): parse 2-point constant retimes (speed/reverse/freeze) from native time maps and emit native time maps for constant speed/reverse/freeze clips
+- [x] Native `timeMap/timept` import/export parity (phase 2): support representable multi-point monotonic retimes (speed ramps) via speed keyframes, while preserving unsupported mixed-direction/partial-hold maps as passthrough
+- [x] Native `timeMap/timept` preservation hardening (phase 3): preserve and emit unsupported imported native timeMap fragments in timing-params order (including strict output) instead of replacing them with generated approximations
+- [x] Native `timeMap/timept` easing compatibility (phase 4): map `timept@interp` smooth modes to eased speed keyframes, emit `smooth2` for non-linear native retimes, and preserve `inTime`/`outTime` maps as passthrough
+- [x] Import fallback for spine `ref-clip` and `sync-clip`: parse `ref-clip@ref` via asset mapping and traverse `sync-clip`/nested `spine` containers to import nested clip items
 - [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)

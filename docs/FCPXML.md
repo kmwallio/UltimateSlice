@@ -8,7 +8,10 @@ This document provides a technical overview of the FCPXML (Final Cut Pro XML) fo
 > UltimateSlice's currently implemented import/export subset is centered on:
 > - FCPXML versions **1.10 through 1.14** (export writes `1.14`)
 > - `format`, `asset`, nested `media-rep`, and `asset-clip` timeline structures
+> - import fallback for spine `ref-clip` and `sync-clip` containers (nested clip item traversal)
 > - marker + chapter-marker import
+> - native spine `transition` import/export (mapped to UltimateSlice transition fields)
+> - native `timeMap`/`timept` import/export for 2-point constant retimes plus representable multi-point monotonic ramps (mapped to speed keyframes), including `smooth2` easing mapping; unsupported imported maps (for example with `inTime`/`outTime`) are preserved and re-emitted
 > - `adjust-transform`, `adjust-compositing`, and `adjust-crop`/`crop-rect` mappings used by Inspector fields
 > - unknown-field preservation for imported FCPXML in clean-save and dirty-save flows
 

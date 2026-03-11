@@ -7,14 +7,57 @@ use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy)]
+struct WriterOptions {
+    strict_dtd: bool,
+}
+
 /// Serialize a `Project` to FCPXML format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
-    if let Some(original) = &project.source_fcpxml {
-        if !project.dirty {
-            return Ok(original.clone());
-        }
-        if let Some(patched) = patch_imported_fcpxml_transform(project, original) {
-            return Ok(patched);
+    write_fcpxml_with_options(project, WriterOptions { strict_dtd: false })
+}
+
+/// Serialize a `Project` to strict DTD-safe FCPXML for distribution workflows.
+pub fn write_fcpxml_strict(project: &Project) -> Result<String> {
+    write_fcpxml_with_options(project, WriterOptions { strict_dtd: true })
+}
+
+pub fn use_strict_fcpxml_for_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("fcpxml"))
+        .unwrap_or(false)
+}
+
+pub fn write_fcpxml_for_path(project: &Project, path: &Path) -> Result<String> {
+    if use_strict_fcpxml_for_path(path) {
+        write_fcpxml_strict(project)
+    } else {
+        write_fcpxml(project)
+    }
+}
+
+fn fcpxml_transition_name_for_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "cross_dissolve" => Some("Cross Dissolve"),
+        "fade_to_black" => Some("Fade To Black"),
+        "wipe_right" => Some("Wipe Right"),
+        "wipe_left" => Some("Wipe Left"),
+        _ => None,
+    }
+}
+
+fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Result<String> {
+    let emit_vendor_extensions = !options.strict_dtd;
+    let strip_unknown_fields = options.strict_dtd;
+    if !options.strict_dtd {
+        if let Some(original) = &project.source_fcpxml {
+            if !project.dirty {
+                return Ok(original.clone());
+            }
+            if let Some(patched) = patch_imported_fcpxml_transform(project, original) {
+                return Ok(patched);
+            }
         }
     }
 
@@ -31,30 +74,38 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     // <fcpxml version="1.14">
     let mut fcpxml = BytesStart::new("fcpxml");
     fcpxml.push_attribute(("version", crate::fcpxml::FCPXML_EXPORT_VERSION));
-    fcpxml.push_attribute(("xmlns:us", "urn:ultimateslice"));
-    for (k, v) in &project.fcpxml_unknown_root.attrs {
-        if !is_writer_managed_fcpxml_attr(k) {
-            fcpxml.push_attribute((k.as_str(), v.as_str()));
+    if emit_vendor_extensions {
+        fcpxml.push_attribute(("xmlns:us", "urn:ultimateslice"));
+    }
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_root.attrs {
+            if !is_writer_managed_fcpxml_attr(k) {
+                fcpxml.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
     writer.write_event(Event::Start(fcpxml))?;
 
     // <resources>
-    write_resources(project, &mut writer)?;
+    write_resources(project, &mut writer, options)?;
 
     // <library>
     let mut library = BytesStart::new("library");
-    for (k, v) in &project.fcpxml_unknown_library.attrs {
-        if !is_writer_managed_library_attr(k) {
-            library.push_attribute((k.as_str(), v.as_str()));
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_library.attrs {
+            if !is_writer_managed_library_attr(k) {
+                library.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
     writer.write_event(Event::Start(library))?;
 
     let mut event = BytesStart::new("event");
-    for (k, v) in &project.fcpxml_unknown_event.attrs {
-        if !is_writer_managed_event_attr(k) {
-            event.push_attribute((k.as_str(), v.as_str()));
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_event.attrs {
+            if !is_writer_managed_event_attr(k) {
+                event.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
     writer.write_event(Event::Start(event))?;
@@ -62,9 +113,11 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     // <project name="...">
     let mut proj_elem = BytesStart::new("project");
     proj_elem.push_attribute(("name", project.title.as_str()));
-    for (k, v) in &project.fcpxml_unknown_project.attrs {
-        if !is_writer_managed_project_attr(k) {
-            proj_elem.push_attribute((k.as_str(), v.as_str()));
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_project.attrs {
+            if !is_writer_managed_project_attr(k) {
+                proj_elem.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
     writer.write_event(Event::Start(proj_elem))?;
@@ -80,31 +133,47 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
     let mut seq = BytesStart::new("sequence");
     seq.push_attribute(("duration", duration_str.as_str()));
     seq.push_attribute(("format", format_ref));
-    for (k, v) in &project.fcpxml_unknown_sequence.attrs {
-        if !is_writer_managed_sequence_attr(k) {
-            seq.push_attribute((k.as_str(), v.as_str()));
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_sequence.attrs {
+            if !is_writer_managed_sequence_attr(k) {
+                seq.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
     writer.write_event(Event::Start(seq))?;
 
     // <spine>
     let mut spine = BytesStart::new("spine");
-    for (k, v) in &project.fcpxml_unknown_spine.attrs {
-        if !is_writer_managed_spine_attr(k) {
-            spine.push_attribute((k.as_str(), v.as_str()));
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_spine.attrs {
+            if !is_writer_managed_spine_attr(k) {
+                spine.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
     writer.write_event(Event::Start(spine))?;
 
-    // Emit all clips from all tracks, tagging each with us:track-idx and us:track-kind
-    // so the parser can reconstruct the full multi-track layout.
-    let all_tracks: Vec<_> = project.tracks.iter().enumerate().collect();
-    for (track_idx, track) in &all_tracks {
+    // Emit all clips from all tracks.
+    let mut video_track_idx = 0usize;
+    let mut audio_track_idx = 0usize;
+    for (track_idx, track) in project.tracks.iter().enumerate() {
+        let track_kind_idx = match track.kind {
+            crate::model::track::TrackKind::Video => {
+                let idx = video_track_idx;
+                video_track_idx += 1;
+                idx
+            }
+            crate::model::track::TrackKind::Audio => {
+                let idx = audio_track_idx;
+                audio_track_idx += 1;
+                idx
+            }
+        };
         let track_kind = match track.kind {
             crate::model::track::TrackKind::Video => "video",
             crate::model::track::TrackKind::Audio => "audio",
         };
-        for clip in &track.clips {
+        for (clip_idx, clip) in track.clips.iter().enumerate() {
             let asset_ref = format!("a_{}", sanitize_id(&clip.id));
             let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
             let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
@@ -119,265 +188,301 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("duration", duration.as_str()));
             asset_clip.push_attribute(("start", start.as_str()));
             asset_clip.push_attribute(("name", clip.label.as_str()));
-            // Multi-track routing
-            asset_clip.push_attribute(("us:track-idx", track_idx.to_string().as_str()));
-            asset_clip.push_attribute(("us:track-kind", track_kind));
-            asset_clip.push_attribute(("us:track-name", track.label.as_str()));
-            asset_clip.push_attribute(("us:track-muted", track.muted.to_string().as_str()));
-            asset_clip.push_attribute(("us:track-locked", track.locked.to_string().as_str()));
-            asset_clip.push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
-            asset_clip.push_attribute((
-                "us:track-height",
-                match track.height_preset {
-                    crate::model::track::TrackHeightPreset::Small => "small",
-                    crate::model::track::TrackHeightPreset::Medium => "medium",
-                    crate::model::track::TrackHeightPreset::Large => "large",
-                },
-            ));
-            asset_clip.push_attribute((
-                "us:color-label",
-                match clip.color_label {
-                    crate::model::clip::ClipColorLabel::None => "none",
-                    crate::model::clip::ClipColorLabel::Red => "red",
-                    crate::model::clip::ClipColorLabel::Orange => "orange",
-                    crate::model::clip::ClipColorLabel::Yellow => "yellow",
-                    crate::model::clip::ClipColorLabel::Green => "green",
-                    crate::model::clip::ClipColorLabel::Teal => "teal",
-                    crate::model::clip::ClipColorLabel::Blue => "blue",
-                    crate::model::clip::ClipColorLabel::Purple => "purple",
-                    crate::model::clip::ClipColorLabel::Magenta => "magenta",
-                },
-            ));
-            // Store color/effects as custom vendor attributes (us: prefix).
-            // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
-            asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
-            asset_clip.push_attribute(("us:contrast", clip.contrast.to_string().as_str()));
-            asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
-            asset_clip.push_attribute(("us:temperature", clip.temperature.to_string().as_str()));
-            asset_clip.push_attribute(("us:tint", clip.tint.to_string().as_str()));
-            let brightness_keyframes_json = if clip.brightness_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.brightness_keyframes).ok()
-            };
-            if let Some(value) = brightness_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:brightness-keyframes", value));
-            }
-            let contrast_keyframes_json = if clip.contrast_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.contrast_keyframes).ok()
-            };
-            if let Some(value) = contrast_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:contrast-keyframes", value));
-            }
-            let saturation_keyframes_json = if clip.saturation_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.saturation_keyframes).ok()
-            };
-            if let Some(value) = saturation_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:saturation-keyframes", value));
-            }
-            let temperature_keyframes_json = if clip.temperature_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.temperature_keyframes).ok()
-            };
-            if let Some(value) = temperature_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:temperature-keyframes", value));
-            }
-            let tint_keyframes_json = if clip.tint_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.tint_keyframes).ok()
-            };
-            if let Some(value) = tint_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:tint-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
-            asset_clip.push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
-            asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
-            let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.volume_keyframes).ok()
-            };
-            if let Some(value) = volume_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:volume-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:pan", clip.pan.to_string().as_str()));
-            let pan_keyframes_json = if clip.pan_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.pan_keyframes).ok()
-            };
-            if let Some(value) = pan_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:pan-keyframes", value));
-            }
-            let rotate_keyframes_json = if clip.rotate_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.rotate_keyframes).ok()
-            };
-            if let Some(value) = rotate_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:rotate-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:crop-left", clip.crop_left.to_string().as_str()));
-            asset_clip.push_attribute(("us:crop-right", clip.crop_right.to_string().as_str()));
-            asset_clip.push_attribute(("us:crop-top", clip.crop_top.to_string().as_str()));
-            asset_clip.push_attribute(("us:crop-bottom", clip.crop_bottom.to_string().as_str()));
-            let crop_left_keyframes_json = if clip.crop_left_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.crop_left_keyframes).ok()
-            };
-            if let Some(value) = crop_left_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:crop-left-keyframes", value));
-            }
-            let crop_right_keyframes_json = if clip.crop_right_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.crop_right_keyframes).ok()
-            };
-            if let Some(value) = crop_right_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:crop-right-keyframes", value));
-            }
-            let crop_top_keyframes_json = if clip.crop_top_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.crop_top_keyframes).ok()
-            };
-            if let Some(value) = crop_top_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:crop-top-keyframes", value));
-            }
-            let crop_bottom_keyframes_json = if clip.crop_bottom_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.crop_bottom_keyframes).ok()
-            };
-            if let Some(value) = crop_bottom_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:crop-bottom-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:rotate", clip.rotate.to_string().as_str()));
-            asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
-            asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
-            asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
-            let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.scale_keyframes).ok()
-            };
-            if let Some(value) = scale_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:scale-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:opacity", clip.opacity.to_string().as_str()));
-            let opacity_keyframes_json = if clip.opacity_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.opacity_keyframes).ok()
-            };
-            if let Some(value) = opacity_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:opacity-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:position-x", clip.position_x.to_string().as_str()));
-            let position_x_keyframes_json = if clip.position_x_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.position_x_keyframes).ok()
-            };
-            if let Some(value) = position_x_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:position-x-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:position-y", clip.position_y.to_string().as_str()));
-            let position_y_keyframes_json = if clip.position_y_keyframes.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&clip.position_y_keyframes).ok()
-            };
-            if let Some(value) = position_y_keyframes_json.as_deref() {
-                asset_clip.push_attribute(("us:position-y-keyframes", value));
-            }
-            asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));
-            asset_clip.push_attribute(("us:title-font", clip.title_font.as_str()));
-            asset_clip.push_attribute((
-                "us:title-color",
-                format!("{:08X}", clip.title_color).as_str(),
-            ));
-            asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
-            asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
-            asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
-            asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
-            if clip.freeze_frame {
-                asset_clip.push_attribute(("us:freeze-frame", "true"));
-            }
-            if let Some(freeze_source_ns) = clip.freeze_frame_source_ns {
+            if emit_vendor_extensions {
+                // Multi-track routing
+                asset_clip.push_attribute(("us:track-idx", track_idx.to_string().as_str()));
+                asset_clip.push_attribute(("us:track-kind", track_kind));
+                asset_clip.push_attribute(("us:track-name", track.label.as_str()));
+                asset_clip.push_attribute(("us:track-muted", track.muted.to_string().as_str()));
+                asset_clip.push_attribute(("us:track-locked", track.locked.to_string().as_str()));
+                asset_clip.push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
+                asset_clip.push_attribute((
+                    "us:track-height",
+                    match track.height_preset {
+                        crate::model::track::TrackHeightPreset::Small => "small",
+                        crate::model::track::TrackHeightPreset::Medium => "medium",
+                        crate::model::track::TrackHeightPreset::Large => "large",
+                    },
+                ));
+                asset_clip.push_attribute((
+                    "us:color-label",
+                    match clip.color_label {
+                        crate::model::clip::ClipColorLabel::None => "none",
+                        crate::model::clip::ClipColorLabel::Red => "red",
+                        crate::model::clip::ClipColorLabel::Orange => "orange",
+                        crate::model::clip::ClipColorLabel::Yellow => "yellow",
+                        crate::model::clip::ClipColorLabel::Green => "green",
+                        crate::model::clip::ClipColorLabel::Teal => "teal",
+                        crate::model::clip::ClipColorLabel::Blue => "blue",
+                        crate::model::clip::ClipColorLabel::Purple => "purple",
+                        crate::model::clip::ClipColorLabel::Magenta => "magenta",
+                    },
+                ));
+                // Store color/effects as custom vendor attributes (us: prefix).
+                // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
+                asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
+                asset_clip.push_attribute(("us:contrast", clip.contrast.to_string().as_str()));
+                asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
                 asset_clip
-                    .push_attribute(("us:freeze-source-ns", freeze_source_ns.to_string().as_str()));
-            }
-            if let Some(freeze_hold_duration_ns) = clip.freeze_frame_hold_duration_ns {
+                    .push_attribute(("us:temperature", clip.temperature.to_string().as_str()));
+                asset_clip.push_attribute(("us:tint", clip.tint.to_string().as_str()));
+                let brightness_keyframes_json = if clip.brightness_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.brightness_keyframes).ok()
+                };
+                if let Some(value) = brightness_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:brightness-keyframes", value));
+                }
+                let contrast_keyframes_json = if clip.contrast_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.contrast_keyframes).ok()
+                };
+                if let Some(value) = contrast_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:contrast-keyframes", value));
+                }
+                let saturation_keyframes_json = if clip.saturation_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.saturation_keyframes).ok()
+                };
+                if let Some(value) = saturation_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:saturation-keyframes", value));
+                }
+                let temperature_keyframes_json = if clip.temperature_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.temperature_keyframes).ok()
+                };
+                if let Some(value) = temperature_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:temperature-keyframes", value));
+                }
+                let tint_keyframes_json = if clip.tint_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.tint_keyframes).ok()
+                };
+                if let Some(value) = tint_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:tint-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
+                asset_clip.push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
+                asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
+                let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.volume_keyframes).ok()
+                };
+                if let Some(value) = volume_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:volume-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:pan", clip.pan.to_string().as_str()));
+                let pan_keyframes_json = if clip.pan_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.pan_keyframes).ok()
+                };
+                if let Some(value) = pan_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:pan-keyframes", value));
+                }
+                let rotate_keyframes_json = if clip.rotate_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.rotate_keyframes).ok()
+                };
+                if let Some(value) = rotate_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:rotate-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:crop-left", clip.crop_left.to_string().as_str()));
+                asset_clip.push_attribute(("us:crop-right", clip.crop_right.to_string().as_str()));
+                asset_clip.push_attribute(("us:crop-top", clip.crop_top.to_string().as_str()));
+                asset_clip
+                    .push_attribute(("us:crop-bottom", clip.crop_bottom.to_string().as_str()));
+                let crop_left_keyframes_json = if clip.crop_left_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.crop_left_keyframes).ok()
+                };
+                if let Some(value) = crop_left_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:crop-left-keyframes", value));
+                }
+                let crop_right_keyframes_json = if clip.crop_right_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.crop_right_keyframes).ok()
+                };
+                if let Some(value) = crop_right_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:crop-right-keyframes", value));
+                }
+                let crop_top_keyframes_json = if clip.crop_top_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.crop_top_keyframes).ok()
+                };
+                if let Some(value) = crop_top_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:crop-top-keyframes", value));
+                }
+                let crop_bottom_keyframes_json = if clip.crop_bottom_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.crop_bottom_keyframes).ok()
+                };
+                if let Some(value) = crop_bottom_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:crop-bottom-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:rotate", clip.rotate.to_string().as_str()));
+                asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
+                asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
+                asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
+                let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.scale_keyframes).ok()
+                };
+                if let Some(value) = scale_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:scale-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:opacity", clip.opacity.to_string().as_str()));
+                let opacity_keyframes_json = if clip.opacity_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.opacity_keyframes).ok()
+                };
+                if let Some(value) = opacity_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:opacity-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:position-x", clip.position_x.to_string().as_str()));
+                let position_x_keyframes_json = if clip.position_x_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.position_x_keyframes).ok()
+                };
+                if let Some(value) = position_x_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:position-x-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:position-y", clip.position_y.to_string().as_str()));
+                let position_y_keyframes_json = if clip.position_y_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.position_y_keyframes).ok()
+                };
+                if let Some(value) = position_y_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:position-y-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));
+                asset_clip.push_attribute(("us:title-font", clip.title_font.as_str()));
                 asset_clip.push_attribute((
-                    "us:freeze-hold-duration-ns",
-                    freeze_hold_duration_ns.to_string().as_str(),
+                    "us:title-color",
+                    format!("{:08X}", clip.title_color).as_str(),
                 ));
-            }
-            if let Some(ref gid) = clip.group_id {
-                if !gid.is_empty() {
-                    asset_clip.push_attribute(("us:group-id", gid.as_str()));
+                asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
+                asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
+                asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
+                let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&clip.speed_keyframes).ok()
+                };
+                if let Some(value) = speed_keyframes_json.as_deref() {
+                    asset_clip.push_attribute(("us:speed-keyframes", value));
+                }
+                asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
+                if clip.freeze_frame {
+                    asset_clip.push_attribute(("us:freeze-frame", "true"));
+                }
+                if let Some(freeze_source_ns) = clip.freeze_frame_source_ns {
+                    asset_clip.push_attribute((
+                        "us:freeze-source-ns",
+                        freeze_source_ns.to_string().as_str(),
+                    ));
+                }
+                if let Some(freeze_hold_duration_ns) = clip.freeze_frame_hold_duration_ns {
+                    asset_clip.push_attribute((
+                        "us:freeze-hold-duration-ns",
+                        freeze_hold_duration_ns.to_string().as_str(),
+                    ));
+                }
+                if let Some(ref gid) = clip.group_id {
+                    if !gid.is_empty() {
+                        asset_clip.push_attribute(("us:group-id", gid.as_str()));
+                    }
+                }
+                if let Some(ref link_gid) = clip.link_group_id {
+                    if !link_gid.is_empty() {
+                        asset_clip.push_attribute(("us:link-group-id", link_gid.as_str()));
+                    }
+                }
+                if let Some(source_timecode_base_ns) = clip.source_timecode_base_ns {
+                    asset_clip.push_attribute((
+                        "us:source-timecode-base-ns",
+                        source_timecode_base_ns.to_string().as_str(),
+                    ));
+                }
+                asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
+                asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
+                asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
+                if clip.chroma_key_enabled {
+                    asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
+                    asset_clip.push_attribute((
+                        "us:chroma-key-color",
+                        format!("{:#08X}", clip.chroma_key_color).as_str(),
+                    ));
+                    asset_clip.push_attribute((
+                        "us:chroma-key-tolerance",
+                        clip.chroma_key_tolerance.to_string().as_str(),
+                    ));
+                    asset_clip.push_attribute((
+                        "us:chroma-key-softness",
+                        clip.chroma_key_softness.to_string().as_str(),
+                    ));
+                }
+                if clip.bg_removal_enabled {
+                    asset_clip.push_attribute(("us:bg-removal-enabled", "true"));
+                    asset_clip.push_attribute((
+                        "us:bg-removal-threshold",
+                        clip.bg_removal_threshold.to_string().as_str(),
+                    ));
+                }
+                if let Some(ref lut) = clip.lut_path {
+                    asset_clip.push_attribute(("us:lut-path", lut.as_str()));
+                }
+                if !clip.transition_after.is_empty() {
+                    asset_clip
+                        .push_attribute(("us:transition-after", clip.transition_after.as_str()));
+                    asset_clip.push_attribute((
+                        "us:transition-after-ns",
+                        clip.transition_after_ns.to_string().as_str(),
+                    ));
+                }
+            } else {
+                let strict_lane: Option<i32> = match track.kind {
+                    crate::model::track::TrackKind::Video => {
+                        if track_kind_idx == 0 {
+                            None
+                        } else {
+                            Some(track_kind_idx as i32)
+                        }
+                    }
+                    crate::model::track::TrackKind::Audio => Some(-((track_kind_idx as i32) + 1)),
+                };
+                if let Some(lane) = strict_lane {
+                    asset_clip.push_attribute(("lane", lane.to_string().as_str()));
                 }
             }
-            if let Some(ref link_gid) = clip.link_group_id {
-                if !link_gid.is_empty() {
-                    asset_clip.push_attribute(("us:link-group-id", link_gid.as_str()));
-                }
-            }
-            if let Some(source_timecode_base_ns) = clip.source_timecode_base_ns {
-                asset_clip.push_attribute((
-                    "us:source-timecode-base-ns",
-                    source_timecode_base_ns.to_string().as_str(),
-                ));
-            }
-            asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
-            asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
-            asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
-            if clip.chroma_key_enabled {
-                asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
-                asset_clip.push_attribute((
-                    "us:chroma-key-color",
-                    format!("{:#08X}", clip.chroma_key_color).as_str(),
-                ));
-                asset_clip.push_attribute((
-                    "us:chroma-key-tolerance",
-                    clip.chroma_key_tolerance.to_string().as_str(),
-                ));
-                asset_clip.push_attribute((
-                    "us:chroma-key-softness",
-                    clip.chroma_key_softness.to_string().as_str(),
-                ));
-            }
-            if clip.bg_removal_enabled {
-                asset_clip.push_attribute(("us:bg-removal-enabled", "true"));
-                asset_clip.push_attribute((
-                    "us:bg-removal-threshold",
-                    clip.bg_removal_threshold.to_string().as_str(),
-                ));
-            }
-            if let Some(ref lut) = clip.lut_path {
-                asset_clip.push_attribute(("us:lut-path", lut.as_str()));
-            }
-            if !clip.transition_after.is_empty() {
-                asset_clip.push_attribute(("us:transition-after", clip.transition_after.as_str()));
-                asset_clip.push_attribute((
-                    "us:transition-after-ns",
-                    clip.transition_after_ns.to_string().as_str(),
-                ));
-            }
-            for (k, v) in &clip.fcpxml_unknown_attrs {
-                if !is_writer_managed_asset_clip_attr(k) {
-                    asset_clip.push_attribute((k.as_str(), v.as_str()));
+            if !strip_unknown_fields {
+                for (k, v) in &clip.fcpxml_unknown_attrs {
+                    if !is_writer_managed_asset_clip_attr(k) {
+                        asset_clip.push_attribute((k.as_str(), v.as_str()));
+                    }
                 }
             }
             writer.write_event(Event::Start(asset_clip))?;
+            if let Some(fragment) = preserved_unknown_time_map_fragment(clip) {
+                writer.get_mut().write_all(fragment.as_bytes())?;
+            } else {
+                write_native_time_map(&mut writer, clip, &project.frame_rate)?;
+            }
 
             let (position_x, position_y) = internal_position_to_fcpxml(
                 clip.position_x,
@@ -386,38 +491,50 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                 project.height,
                 clip.scale,
             );
-            let mut adjust_transform = BytesStart::new("adjust-transform");
-            adjust_transform.push_attribute((
-                "position",
-                format!("{} {}", position_x, position_y).as_str(),
-            ));
-            adjust_transform
-                .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
-            adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
-            let has_transform_kfs = !clip.position_x_keyframes.is_empty()
-                || !clip.position_y_keyframes.is_empty()
-                || !clip.scale_keyframes.is_empty()
-                || !clip.rotate_keyframes.is_empty();
-            if has_transform_kfs {
-                writer.write_event(Event::Start(adjust_transform))?;
-                write_transform_keyframe_params(&mut writer, clip, project)?;
-                writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
-            } else {
-                writer.write_event(Event::Empty(adjust_transform))?;
-            }
+            if options.strict_dtd {
+                // Strict mode must follow DTD order for %intrinsic-params:
+                // video intrinsic params first, then audio intrinsic params.
+                let mut adjust_crop = BytesStart::new("adjust-crop");
+                adjust_crop.push_attribute(("mode", "trim"));
+                writer.write_event(Event::Start(adjust_crop))?;
+                let mut crop_rect = BytesStart::new("crop-rect");
+                crop_rect.push_attribute(("left", clip.crop_left.to_string().as_str()));
+                crop_rect.push_attribute(("right", clip.crop_right.to_string().as_str()));
+                crop_rect.push_attribute(("top", clip.crop_top.to_string().as_str()));
+                crop_rect.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
+                writer.write_event(Event::Empty(crop_rect))?;
+                writer.write_event(Event::End(BytesEnd::new("adjust-crop")))?;
 
-            let mut adjust_compositing = BytesStart::new("adjust-compositing");
-            adjust_compositing.push_attribute(("opacity", clip.opacity.to_string().as_str()));
-            if !clip.opacity_keyframes.is_empty() {
-                writer.write_event(Event::Start(adjust_compositing))?;
-                write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
-                writer.write_event(Event::End(BytesEnd::new("adjust-compositing")))?;
-            } else {
-                writer.write_event(Event::Empty(adjust_compositing))?;
-            }
+                let mut adjust_transform = BytesStart::new("adjust-transform");
+                adjust_transform.push_attribute((
+                    "position",
+                    format!("{} {}", position_x, position_y).as_str(),
+                ));
+                adjust_transform
+                    .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
+                adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
+                let has_transform_kfs = !clip.position_x_keyframes.is_empty()
+                    || !clip.position_y_keyframes.is_empty()
+                    || !clip.scale_keyframes.is_empty()
+                    || !clip.rotate_keyframes.is_empty();
+                if has_transform_kfs {
+                    writer.write_event(Event::Start(adjust_transform))?;
+                    write_transform_keyframe_params(&mut writer, clip, project)?;
+                    writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
+                } else {
+                    writer.write_event(Event::Empty(adjust_transform))?;
+                }
 
-            // Emit <adjust-volume> with optional keyframes
-            {
+                let mut adjust_blend = BytesStart::new("adjust-blend");
+                adjust_blend.push_attribute(("amount", clip.opacity.to_string().as_str()));
+                if !clip.opacity_keyframes.is_empty() {
+                    writer.write_event(Event::Start(adjust_blend))?;
+                    write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                    writer.write_event(Event::End(BytesEnd::new("adjust-blend")))?;
+                } else {
+                    writer.write_event(Event::Empty(adjust_blend))?;
+                }
+
                 let mut adjust_volume = BytesStart::new("adjust-volume");
                 adjust_volume.push_attribute((
                     "amount",
@@ -430,8 +547,7 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                 } else {
                     writer.write_event(Event::Empty(adjust_volume))?;
                 }
-            }
-            {
+
                 let mut adjust_panner = BytesStart::new("adjust-panner");
                 adjust_panner.push_attribute((
                     "amount",
@@ -444,58 +560,170 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
                 } else {
                     writer.write_event(Event::Empty(adjust_panner))?;
                 }
-            }
+            } else {
+                let mut adjust_transform = BytesStart::new("adjust-transform");
+                adjust_transform.push_attribute((
+                    "position",
+                    format!("{} {}", position_x, position_y).as_str(),
+                ));
+                adjust_transform
+                    .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
+                adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
+                let has_transform_kfs = !clip.position_x_keyframes.is_empty()
+                    || !clip.position_y_keyframes.is_empty()
+                    || !clip.scale_keyframes.is_empty()
+                    || !clip.rotate_keyframes.is_empty();
+                if has_transform_kfs {
+                    writer.write_event(Event::Start(adjust_transform))?;
+                    write_transform_keyframe_params(&mut writer, clip, project)?;
+                    writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
+                } else {
+                    writer.write_event(Event::Empty(adjust_transform))?;
+                }
 
-            let mut adjust_crop = BytesStart::new("adjust-crop");
-            adjust_crop.push_attribute(("left", clip.crop_left.to_string().as_str()));
-            adjust_crop.push_attribute(("right", clip.crop_right.to_string().as_str()));
-            adjust_crop.push_attribute(("top", clip.crop_top.to_string().as_str()));
-            adjust_crop.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
-            writer.write_event(Event::Empty(adjust_crop))?;
-            for fragment in &clip.fcpxml_unknown_children {
-                writer.get_mut().write_all(fragment.as_bytes())?;
+                let mut adjust_compositing = BytesStart::new("adjust-compositing");
+                adjust_compositing.push_attribute(("opacity", clip.opacity.to_string().as_str()));
+                if !clip.opacity_keyframes.is_empty() {
+                    writer.write_event(Event::Start(adjust_compositing))?;
+                    write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                    writer.write_event(Event::End(BytesEnd::new("adjust-compositing")))?;
+                } else {
+                    writer.write_event(Event::Empty(adjust_compositing))?;
+                }
+
+                let mut adjust_volume = BytesStart::new("adjust-volume");
+                adjust_volume.push_attribute((
+                    "amount",
+                    linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
+                ));
+                if !clip.volume_keyframes.is_empty() {
+                    writer.write_event(Event::Start(adjust_volume))?;
+                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                    writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+                } else {
+                    writer.write_event(Event::Empty(adjust_volume))?;
+                }
+
+                let mut adjust_panner = BytesStart::new("adjust-panner");
+                adjust_panner.push_attribute((
+                    "amount",
+                    format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
+                ));
+                if !clip.pan_keyframes.is_empty() {
+                    writer.write_event(Event::Start(adjust_panner))?;
+                    write_pan_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                    writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
+                } else {
+                    writer.write_event(Event::Empty(adjust_panner))?;
+                }
+
+                let mut adjust_crop = BytesStart::new("adjust-crop");
+                adjust_crop.push_attribute(("left", clip.crop_left.to_string().as_str()));
+                adjust_crop.push_attribute(("right", clip.crop_right.to_string().as_str()));
+                adjust_crop.push_attribute(("top", clip.crop_top.to_string().as_str()));
+                adjust_crop.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
+                writer.write_event(Event::Empty(adjust_crop))?;
+            }
+            if !strip_unknown_fields {
+                for fragment in &clip.fcpxml_unknown_children {
+                    if is_time_map_fragment(fragment) {
+                        continue;
+                    }
+                    writer.get_mut().write_all(fragment.as_bytes())?;
+                }
             }
 
             writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
+
+            if clip_idx + 1 < track.clips.len()
+                && !clip.transition_after.trim().is_empty()
+                && clip.transition_after_ns > 0
+            {
+                let next_clip = &track.clips[clip_idx + 1];
+                let clamped_duration_ns = clip
+                    .transition_after_ns
+                    .min(clip.duration())
+                    .min(next_clip.duration());
+                if clamped_duration_ns > 0 {
+                    let mut transition = BytesStart::new("transition");
+                    if let Some(name) =
+                        fcpxml_transition_name_for_kind(clip.transition_after.trim())
+                    {
+                        transition.push_attribute(("name", name));
+                    }
+                    transition.push_attribute((
+                        "offset",
+                        ns_to_fcpxml_time(
+                            clip.timeline_start
+                                .saturating_add(clip.duration())
+                                .saturating_sub(clamped_duration_ns),
+                            &project.frame_rate,
+                        )
+                        .as_str(),
+                    ));
+                    transition.push_attribute((
+                        "duration",
+                        ns_to_fcpxml_time(clamped_duration_ns, &project.frame_rate).as_str(),
+                    ));
+                    writer.write_event(Event::Empty(transition))?;
+                }
+            }
         }
     }
 
-    for fragment in &project.fcpxml_unknown_spine.children {
-        writer.get_mut().write_all(fragment.as_bytes())?;
+    if !strip_unknown_fields {
+        for fragment in &project.fcpxml_unknown_spine.children {
+            writer.get_mut().write_all(fragment.as_bytes())?;
+        }
     }
     writer.write_event(Event::End(BytesEnd::new("spine")))?;
 
-    // Write markers as <marker> elements inside <sequence>
-    for marker in &project.markers {
-        let mut m = BytesStart::new("marker");
-        m.push_attribute((
-            "start",
-            ns_to_fcpxml_time(marker.position_ns, &project.frame_rate).as_str(),
-        ));
-        m.push_attribute(("duration", "1/24s"));
-        m.push_attribute(("value", marker.label.as_str()));
-        m.push_attribute(("us:color", format!("{:08X}", marker.color).as_str()));
-        writer.write_event(Event::Empty(m))?;
+    if !options.strict_dtd {
+        // Rich mode compatibility: write timeline markers as <marker> inside <sequence>.
+        // Strict mode omits these because sequence-level markers are outside DTD sequence content.
+        for marker in &project.markers {
+            let mut m = BytesStart::new("marker");
+            m.push_attribute((
+                "start",
+                ns_to_fcpxml_time(marker.position_ns, &project.frame_rate).as_str(),
+            ));
+            m.push_attribute(("duration", "1/24s"));
+            m.push_attribute(("value", marker.label.as_str()));
+            if emit_vendor_extensions {
+                m.push_attribute(("us:color", format!("{:08X}", marker.color).as_str()));
+            }
+            writer.write_event(Event::Empty(m))?;
+        }
     }
-    for fragment in &project.fcpxml_unknown_sequence.children {
-        writer.get_mut().write_all(fragment.as_bytes())?;
+    if !strip_unknown_fields {
+        for fragment in &project.fcpxml_unknown_sequence.children {
+            writer.get_mut().write_all(fragment.as_bytes())?;
+        }
     }
 
     writer.write_event(Event::End(BytesEnd::new("sequence")))?;
-    for fragment in &project.fcpxml_unknown_project.children {
-        writer.get_mut().write_all(fragment.as_bytes())?;
+    if !strip_unknown_fields {
+        for fragment in &project.fcpxml_unknown_project.children {
+            writer.get_mut().write_all(fragment.as_bytes())?;
+        }
     }
     writer.write_event(Event::End(BytesEnd::new("project")))?;
-    for fragment in &project.fcpxml_unknown_event.children {
-        writer.get_mut().write_all(fragment.as_bytes())?;
+    if !strip_unknown_fields {
+        for fragment in &project.fcpxml_unknown_event.children {
+            writer.get_mut().write_all(fragment.as_bytes())?;
+        }
     }
     writer.write_event(Event::End(BytesEnd::new("event")))?;
-    for fragment in &project.fcpxml_unknown_library.children {
-        writer.get_mut().write_all(fragment.as_bytes())?;
+    if !strip_unknown_fields {
+        for fragment in &project.fcpxml_unknown_library.children {
+            writer.get_mut().write_all(fragment.as_bytes())?;
+        }
     }
     writer.write_event(Event::End(BytesEnd::new("library")))?;
-    for fragment in &project.fcpxml_unknown_root.children {
-        writer.get_mut().write_all(fragment.as_bytes())?;
+    if !strip_unknown_fields {
+        for fragment in &project.fcpxml_unknown_root.children {
+            writer.get_mut().write_all(fragment.as_bytes())?;
+        }
     }
     writer.write_event(Event::End(BytesEnd::new("fcpxml")))?;
 
@@ -659,7 +887,7 @@ where
     }
 
     on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
-    let xml = write_fcpxml(&export_project)?;
+    let xml = write_fcpxml_strict(&export_project)?;
     std::fs::write(&output_fcpxml_path, xml)?;
     Ok(library_dir)
 }
@@ -673,6 +901,44 @@ fn source_path_to_local_path(source_path: &str) -> Result<PathBuf> {
     }
     let raw_path = source_path.strip_prefix("file://").unwrap_or(source_path);
     Ok(PathBuf::from(decode_percent_encoded_path(raw_path)))
+}
+
+fn fcpxml_media_src_uri(source_path: &str) -> String {
+    if source_path.starts_with("http://") || source_path.starts_with("https://") {
+        return source_path.to_string();
+    }
+    let raw_path = source_path.strip_prefix("file://").unwrap_or(source_path);
+    let decoded_path = decode_percent_encoded_path(raw_path);
+    let canonical = Path::new(&decoded_path)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(decoded_path);
+    format!("file://{}", percent_encode_path_for_fcpxml_uri(&canonical))
+}
+
+fn percent_encode_path_for_fcpxml_uri(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for &b in path.as_bytes() {
+        if matches!(
+            b,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'-'
+                | b'_'
+                | b'.'
+                | b'~'
+                | b'/'
+                | b':'
+        ) {
+            encoded.push(b as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from_digit(((b >> 4) & 0x0f) as u32, 16).unwrap_or('0'));
+            encoded.push(char::from_digit((b & 0x0f) as u32, 16).unwrap_or('0'));
+        }
+    }
+    encoded
 }
 
 fn normalize_packaged_path_for_portability(path: &Path) -> PathBuf {
@@ -1223,11 +1489,18 @@ fn remove_attr(tag_text: &str, attr_name: &str) -> String {
     tag_text.to_string()
 }
 
-fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> Result<()> {
+fn write_resources(
+    project: &Project,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    options: WriterOptions,
+) -> Result<()> {
+    let strip_unknown_fields = options.strict_dtd;
     let mut resources = BytesStart::new("resources");
-    for (k, v) in &project.fcpxml_unknown_resources.attrs {
-        if !is_writer_managed_resources_attr(k) {
-            resources.push_attribute((k.as_str(), v.as_str()));
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_resources.attrs {
+            if !is_writer_managed_resources_attr(k) {
+                resources.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
     writer.write_event(Event::Start(resources))?;
@@ -1252,12 +1525,14 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
     ));
     fmt.push_attribute(("width", project.width.to_string().as_str()));
     fmt.push_attribute(("height", project.height.to_string().as_str()));
-    for (k, v) in &project.fcpxml_unknown_format.attrs {
-        if !is_writer_managed_format_attr(k) {
-            fmt.push_attribute((k.as_str(), v.as_str()));
+    if !strip_unknown_fields {
+        for (k, v) in &project.fcpxml_unknown_format.attrs {
+            if !is_writer_managed_format_attr(k) {
+                fmt.push_attribute((k.as_str(), v.as_str()));
+            }
         }
     }
-    if project.fcpxml_unknown_format.children.is_empty() {
+    if strip_unknown_fields || project.fcpxml_unknown_format.children.is_empty() {
         writer.write_event(Event::Empty(fmt))?;
     } else {
         writer.write_event(Event::Start(fmt))?;
@@ -1275,7 +1550,7 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
                 .fcpxml_original_source_path
                 .as_deref()
                 .unwrap_or(&clip.source_path);
-            let uri = crate::media::thumbnail::path_to_uri(export_source_path);
+            let uri = fcpxml_media_src_uri(export_source_path);
             let duration = ns_to_fcpxml_time(clip.source_out, &project.frame_rate);
             let has_video = if clip.kind == crate::model::clip::ClipKind::Audio {
                 "0"
@@ -1290,9 +1565,11 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
             asset.push_attribute(("duration", duration.as_str()));
             asset.push_attribute(("hasVideo", has_video));
             asset.push_attribute(("hasAudio", has_audio));
-            for (k, v) in &clip.fcpxml_unknown_asset_attrs {
-                if !is_writer_managed_asset_attr(k) {
-                    asset.push_attribute((k.as_str(), v.as_str()));
+            if !strip_unknown_fields {
+                for (k, v) in &clip.fcpxml_unknown_asset_attrs {
+                    if !is_writer_managed_asset_attr(k) {
+                        asset.push_attribute((k.as_str(), v.as_str()));
+                    }
                 }
             }
             writer.write_event(Event::Start(asset))?;
@@ -1301,15 +1578,19 @@ fn write_resources(project: &Project, writer: &mut Writer<Cursor<Vec<u8>>>) -> R
             media_rep.push_attribute(("kind", media_rep_kind_for_path(export_source_path)));
             media_rep.push_attribute(("src", uri.as_str()));
             writer.write_event(Event::Empty(media_rep))?;
-            for fragment in &clip.fcpxml_unknown_asset_children {
-                writer.get_mut().write_all(fragment.as_bytes())?;
+            if !strip_unknown_fields {
+                for fragment in &clip.fcpxml_unknown_asset_children {
+                    writer.get_mut().write_all(fragment.as_bytes())?;
+                }
             }
 
             writer.write_event(Event::End(BytesEnd::new("asset")))?;
         }
     }
-    for fragment in &project.fcpxml_unknown_resources.children {
-        writer.get_mut().write_all(fragment.as_bytes())?;
+    if !strip_unknown_fields {
+        for fragment in &project.fcpxml_unknown_resources.children {
+            writer.get_mut().write_all(fragment.as_bytes())?;
+        }
     }
 
     writer.write_event(Event::End(BytesEnd::new("resources")))?;
@@ -1341,6 +1622,183 @@ fn linear_volume_to_fcpxml_db(linear: f64) -> String {
     } else {
         format!("{:.1}dB", db)
     }
+}
+
+fn is_time_map_fragment(fragment: &str) -> bool {
+    fragment.contains("<timeMap")
+}
+
+fn preserved_unknown_time_map_fragment(clip: &crate::model::clip::Clip) -> Option<&str> {
+    clip.fcpxml_unknown_children
+        .iter()
+        .find(|fragment| is_time_map_fragment(fragment))
+        .map(|fragment| fragment.as_str())
+}
+
+#[derive(Clone, Copy)]
+struct TimeMapPoint {
+    time_ns: u64,
+    value_ns: u64,
+    interp: crate::model::clip::KeyframeInterpolation,
+}
+
+fn time_map_interp_to_fcpxml(interp: crate::model::clip::KeyframeInterpolation) -> &'static str {
+    match interp {
+        crate::model::clip::KeyframeInterpolation::Linear => "linear",
+        crate::model::clip::KeyframeInterpolation::EaseIn
+        | crate::model::clip::KeyframeInterpolation::EaseOut
+        | crate::model::clip::KeyframeInterpolation::EaseInOut => "smooth2",
+    }
+}
+
+fn write_native_time_map(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    clip: &crate::model::clip::Clip,
+    fps: &crate::model::project::FrameRate,
+) -> Result<()> {
+    let clip_duration_ns = clip.duration();
+    if clip_duration_ns == 0 {
+        return Ok(());
+    }
+
+    let Some(points) = native_time_map_points_for_clip(clip, clip_duration_ns) else {
+        return Ok(());
+    };
+    let mut time_map = BytesStart::new("timeMap");
+    time_map.push_attribute(("preservesPitch", "1"));
+    writer.write_event(Event::Start(time_map))?;
+
+    for point in points {
+        let mut pt = BytesStart::new("timept");
+        pt.push_attribute(("time", ns_to_fcpxml_time(point.time_ns, fps).as_str()));
+        pt.push_attribute(("value", ns_to_fcpxml_time(point.value_ns, fps).as_str()));
+        pt.push_attribute(("interp", time_map_interp_to_fcpxml(point.interp)));
+        writer.write_event(Event::Empty(pt))?;
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("timeMap")))?;
+    Ok(())
+}
+
+fn native_time_map_points_for_clip(
+    clip: &crate::model::clip::Clip,
+    clip_duration_ns: u64,
+) -> Option<Vec<TimeMapPoint>> {
+    let source_span_ns = clip.source_out.saturating_sub(clip.source_in);
+    if source_span_ns == 0 {
+        return None;
+    }
+    if clip.is_freeze_frame() {
+        let source_abs_ns = clip.freeze_frame_source_time_ns().unwrap_or(clip.source_in);
+        let source_value_ns = source_abs_ns.saturating_sub(clip.source_in);
+        return Some(vec![
+            TimeMapPoint {
+                time_ns: 0,
+                value_ns: source_value_ns,
+                interp: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            TimeMapPoint {
+                time_ns: clip_duration_ns,
+                value_ns: source_value_ns,
+                interp: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+        ]);
+    }
+
+    if !clip.speed_keyframes.is_empty() {
+        return native_time_map_points_for_speed_keyframes(clip, clip_duration_ns, source_span_ns);
+    }
+
+    let has_constant_retime = clip.reverse || (clip.speed - 1.0).abs() > f64::EPSILON;
+    if !has_constant_retime {
+        return None;
+    }
+    let (start_value_ns, end_value_ns) = if clip.reverse {
+        (source_span_ns, 0u64)
+    } else {
+        (0u64, source_span_ns)
+    };
+    Some(vec![
+        TimeMapPoint {
+            time_ns: 0,
+            value_ns: start_value_ns,
+            interp: crate::model::clip::KeyframeInterpolation::Linear,
+        },
+        TimeMapPoint {
+            time_ns: clip_duration_ns,
+            value_ns: end_value_ns,
+            interp: crate::model::clip::KeyframeInterpolation::Linear,
+        },
+    ])
+}
+
+fn native_time_map_points_for_speed_keyframes(
+    clip: &crate::model::clip::Clip,
+    clip_duration_ns: u64,
+    source_span_ns: u64,
+) -> Option<Vec<TimeMapPoint>> {
+    let mut times = vec![0u64, clip_duration_ns];
+    for keyframe in &clip.speed_keyframes {
+        let t = keyframe.time_ns.min(clip_duration_ns);
+        if !times.contains(&t) {
+            times.push(t);
+        }
+    }
+    times.sort_unstable();
+    if times.len() < 2 {
+        return None;
+    }
+
+    let mut points = Vec::with_capacity(times.len());
+    for &time_ns in &times {
+        let forward_distance_ns =
+            integrate_speed_distance_to_time_ns(clip, time_ns).clamp(0.0, source_span_ns as f64);
+        let value_ns = if clip.reverse {
+            source_span_ns.saturating_sub(forward_distance_ns as u64)
+        } else {
+            (forward_distance_ns as u64).min(source_span_ns)
+        };
+        let interp = clip
+            .speed_keyframes
+            .iter()
+            .find(|kf| kf.time_ns == time_ns)
+            .map(|kf| kf.interpolation)
+            .unwrap_or(crate::model::clip::KeyframeInterpolation::Linear);
+        points.push(TimeMapPoint {
+            time_ns,
+            value_ns,
+            interp,
+        });
+    }
+    Some(points)
+}
+
+fn integrate_speed_distance_to_time_ns(
+    clip: &crate::model::clip::Clip,
+    local_timeline_ns: u64,
+) -> f64 {
+    if local_timeline_ns == 0 {
+        return 0.0;
+    }
+    if clip.speed_keyframes.is_empty() {
+        return clip.speed.clamp(0.05, 16.0) * local_timeline_ns as f64;
+    }
+    const MAX_SAMPLES: u64 = 4096;
+    const STEP_NS: u64 = 8_333_333; // ~120Hz
+    let sample_count = (local_timeline_ns / STEP_NS).max(1).min(MAX_SAMPLES);
+    let mut integrated = 0.0f64;
+    for i in 0..sample_count {
+        let t0 = (u128::from(local_timeline_ns) * u128::from(i) / u128::from(sample_count)) as u64;
+        let t1 =
+            (u128::from(local_timeline_ns) * u128::from(i + 1) / u128::from(sample_count)) as u64;
+        let dt = t1.saturating_sub(t0);
+        if dt == 0 {
+            continue;
+        }
+        let mid = t0.saturating_add(dt / 2);
+        integrated += clip.speed_at_local_timeline_ns(mid) * dt as f64;
+    }
+    integrated
 }
 
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for transform properties.
@@ -1707,6 +2165,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-x"
             | "us:title-y"
             | "us:speed"
+            | "us:speed-keyframes"
             | "us:reverse"
             | "us:freeze-frame"
             | "us:freeze-source-ns"
@@ -1787,6 +2246,35 @@ mod tests {
         srcs
     }
 
+    fn asset_clip_lane_values(xml: &str) -> Vec<Option<String>> {
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut lanes = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                    if e.local_name().as_ref() == b"asset-clip" {
+                        let mut lane = None;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"lane" {
+                                lane =
+                                    Some(String::from_utf8_lossy(attr.value.as_ref()).to_string());
+                                break;
+                            }
+                        }
+                        lanes.push(lane);
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            buf.clear();
+        }
+        lanes
+    }
+
     fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1823,6 +2311,45 @@ mod tests {
         assert!(xml.contains("rotation=\"90\""));
         assert!(xml.contains("<adjust-compositing opacity=\"0.75\""));
         assert!(xml.contains("<adjust-crop left=\"10\" right=\"20\" top=\"30\" bottom=\"40\""));
+    }
+
+    #[test]
+    fn test_fcpxml_media_src_uri_percent_encodes_special_chars() {
+        let uri = fcpxml_media_src_uri("/tmp/Final Cut/clip #1%.mov");
+        assert_eq!(uri, "file:///tmp/Final%20Cut/clip%20%231%25.mov");
+    }
+
+    #[test]
+    fn test_fcpxml_media_src_uri_reencodes_existing_file_uri_path() {
+        let uri = fcpxml_media_src_uri("file:///tmp/Final%20Cut/clip%20A.mov");
+        assert_eq!(uri, "file:///tmp/Final%20Cut/clip%20A.mov");
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_native_transition_for_adjacent_clips() {
+        let mut project = Project::new("TransitionWrite");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut a = Clip::new("/tmp/a.mov", 2_000_000_000, 0, ClipKind::Video);
+        a.transition_after = "cross_dissolve".to_string();
+        a.transition_after_ns = 1_000_000_000;
+        track.add_clip(a);
+        track.add_clip(Clip::new(
+            "/tmp/b.mov",
+            2_000_000_000,
+            1_000_000_000,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("<transition name=\"Cross Dissolve\""));
+        assert!(xml.contains("duration=\"24/24s\"") || xml.contains("duration=\"1/1s\""));
+
+        let parsed = parse_fcpxml(&xml).expect("parse written xml");
+        let first = &parsed.video_tracks().next().expect("video track").clips[0];
+        assert_eq!(first.transition_after, "cross_dissolve");
+        assert_eq!(first.transition_after_ns, 1_000_000_000);
     }
 
     #[test]
@@ -1888,6 +2415,196 @@ mod tests {
         assert!(xml.contains("us:freeze-frame=\"true\""));
         assert!(xml.contains("us:freeze-source-ns=\"1250000000\""));
         assert!(xml.contains("us:freeze-hold-duration-ns=\"3000000000\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_native_time_map_for_constant_speed() {
+        let mut project = Project::new("TimeMapSpeed");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.speed = 2.0;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("<timeMap preservesPitch=\"1\">"));
+        assert!(xml.contains("time=\"24/24s\""));
+        assert!(xml.contains("value=\"48/24s\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_native_time_map_for_reverse() {
+        let mut project = Project::new("TimeMapReverse");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.reverse = true;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("<timeMap preservesPitch=\"1\">"));
+        assert!(xml.contains("time=\"48/24s\""));
+        assert!(xml.contains("value=\"48/24s\""));
+        assert!(xml.contains("value=\"0/24s\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_avoids_duplicate_timemap_when_preserving_unknown_timemap() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mov" name="clip" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="DupTimeMapGuard">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="120/24s" us:speed="3.0">
+              <timeMap>
+                <timept time="0s" value="0s" interp="linear"/>
+                <timept time="120/24s" value="240/24s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let mut project = parse_fcpxml(xml).expect("parse should succeed");
+        project.dirty = true;
+        let written = write_fcpxml(&project).expect("write should succeed");
+        assert_eq!(written.match_indices("<timeMap").count(), 1);
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_preserves_imported_unknown_timemap_fragment() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mov" name="clip" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="StrictTimeMapPreserve">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="120/24s" us:speed="3.0">
+              <timeMap>
+                <timept time="0s" value="0s" interp="linear"/>
+                <timept time="48/24s" value="96/24s" interp="linear"/>
+                <timept time="96/24s" value="24/24s" interp="linear"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let mut project = parse_fcpxml(xml).expect("parse should succeed");
+        project.dirty = true;
+        let written = write_fcpxml_strict(&project).expect("strict write should succeed");
+        assert!(!written.contains("xmlns:us="));
+        assert_eq!(written.match_indices("<timeMap").count(), 1);
+        assert!(written.contains("value=\"96/24s\""));
+        let t_idx = written
+            .find("<timeMap")
+            .expect("timeMap should be emitted in strict output");
+        let transform_idx = written
+            .find("<adjust-transform")
+            .expect("transform should be present");
+        assert!(
+            t_idx < transform_idx,
+            "timeMap must appear before intrinsic params per DTD timing order"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_native_time_map_for_speed_keyframes() {
+        let mut project = Project::new("TimeMapKeyframed");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 4_000_000_000, 0, ClipKind::Video);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 2.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+            },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("<timeMap preservesPitch=\"1\">"));
+        assert!(
+            xml.matches("<timept ").count() >= 3,
+            "expected multi-point timeMap output"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_smooth2_interp_for_eased_speed_keyframes() {
+        let mut project = Project::new("TimeMapSmooth2Write");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 4_000_000_000, 0, ClipKind::Video);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 2.0,
+            interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+        }];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("interp=\"smooth2\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_keyframed_timemap_roundtrip_preserves_keyframes() {
+        let mut project = Project::new("TimeMapRoundtrip");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 4_000_000_000, 0, ClipKind::Video);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 2.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        let parsed = parse_fcpxml(&xml).expect("parse should succeed");
+        let parsed_clip = &parsed.video_tracks().next().expect("video").clips[0];
+        assert!(
+            !parsed_clip.speed_keyframes.is_empty(),
+            "expected native timeMap to parse back into speed keyframes"
+        );
     }
 
     #[test]
@@ -1966,6 +2683,154 @@ mod tests {
         assert!(xml.contains("<!DOCTYPE fcpxml>"));
         assert!(xml.contains("<fcpxml version=\"1.14\""));
         assert!(xml.contains("xmlns:us=\"urn:ultimateslice\""));
+    }
+
+    #[test]
+    fn test_use_strict_fcpxml_for_path_extension_detection() {
+        assert!(use_strict_fcpxml_for_path(std::path::Path::new(
+            "/tmp/test.fcpxml"
+        )));
+        assert!(use_strict_fcpxml_for_path(std::path::Path::new(
+            "/tmp/test.FCPXML"
+        )));
+        assert!(!use_strict_fcpxml_for_path(std::path::Path::new(
+            "/tmp/test.uspxml"
+        )));
+        assert!(!use_strict_fcpxml_for_path(std::path::Path::new(
+            "/tmp/test.xml"
+        )));
+    }
+
+    #[test]
+    fn test_write_fcpxml_for_path_routes_by_extension() {
+        let project = Project::new("RouteByExtension");
+        let strict = write_fcpxml_for_path(&project, std::path::Path::new("/tmp/test.fcpxml"))
+            .expect("strict extension write should succeed");
+        let rich = write_fcpxml_for_path(&project, std::path::Path::new("/tmp/test.uspxml"))
+            .expect("uspxml extension write should succeed");
+        assert!(!strict.contains("xmlns:us=\"urn:ultimateslice\""));
+        assert!(rich.contains("xmlns:us=\"urn:ultimateslice\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_emits_lane_mapping_for_multitrack() {
+        let mut project = Project::new("StrictLanes");
+        project.tracks.clear();
+
+        let mut video_1 = Track::new_video("Video 1");
+        video_1.add_clip(Clip::new("/tmp/v1.mov", 1_000_000_000, 0, ClipKind::Video));
+        let mut video_2 = Track::new_video("Video 2");
+        video_2.add_clip(Clip::new("/tmp/v2.mov", 1_000_000_000, 0, ClipKind::Video));
+        let mut audio_1 = Track::new_audio("Audio 1");
+        audio_1.add_clip(Clip::new("/tmp/a1.wav", 1_000_000_000, 0, ClipKind::Audio));
+
+        project.tracks.push(video_1);
+        project.tracks.push(video_2);
+        project.tracks.push(audio_1);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        let lanes = asset_clip_lane_values(&xml);
+        assert_eq!(
+            lanes,
+            vec![None, Some("1".to_string()), Some("-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_intrinsic_param_order_matches_dtd() {
+        let mut project = Project::new("StrictOrder");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.crop_left = 2;
+        clip.crop_top = 3;
+        clip.crop_right = 4;
+        clip.crop_bottom = 5;
+        clip.opacity = 0.7;
+        clip.opacity_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 250_000_000,
+            value: 0.7,
+            interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+        }];
+        clip.volume_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 250_000_000,
+            value: 0.9,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.pan_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 250_000_000,
+            value: 0.2,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        track.add_clip(clip);
+        project.tracks.push(track);
+        project.markers.push(crate::model::project::Marker {
+            id: "m1".to_string(),
+            position_ns: 0,
+            label: "Marker".to_string(),
+            color: 0xFF00FF00,
+        });
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        let clip_start = xml.find("<asset-clip ").expect("asset-clip start");
+        let clip_end = xml[clip_start..]
+            .find("</asset-clip>")
+            .map(|idx| clip_start + idx)
+            .expect("asset-clip end");
+        let clip_xml = &xml[clip_start..clip_end];
+        let crop_idx = clip_xml.find("<adjust-crop").expect("adjust-crop");
+        let transform_idx = clip_xml
+            .find("<adjust-transform")
+            .expect("adjust-transform");
+        let blend_idx = clip_xml.find("<adjust-blend").expect("adjust-blend");
+        let volume_idx = clip_xml.find("<adjust-volume").expect("adjust-volume");
+        let panner_idx = clip_xml.find("<adjust-panner").expect("adjust-panner");
+        assert!(crop_idx < transform_idx);
+        assert!(transform_idx < blend_idx);
+        assert!(blend_idx < volume_idx);
+        assert!(volume_idx < panner_idx);
+        assert!(
+            !xml.contains("<marker "),
+            "strict output should omit sequence markers"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_omits_vendor_extensions_and_unknown_fields() {
+        let original = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice" customRoot="keep-root">
+  <resources customResources="keep-resources">
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080" customFormat="keep-format"/>
+    <asset id="a1" src="file:///tmp/clip.mov" name="clip" duration="48/24s" customAsset="keep-asset">
+      <media-rep kind="original-media" src="file:///tmp/clip.mov"/>
+      <metadata key="com.example.unknown" value="keep-meta"/>
+    </asset>
+  </resources>
+  <library customLibrary="keep-library">
+    <event customEvent="keep-event">
+      <project name="MainProject" customProject="keep-project">
+        <sequence format="r1" duration="48/24s" customSequence="keep-seq">
+          <spine customSpine="keep-spine">
+            <asset-clip ref="a1" offset="0s" start="0s" duration="48/24s" customClip="keep-clip" us:track-idx="0"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+        let project = parse_fcpxml(original).expect("parse should succeed");
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        assert!(xml.contains("<fcpxml version=\"1.14\""));
+        assert!(!xml.contains("xmlns:us="));
+        assert!(!xml.contains("us:"));
+        assert!(!xml.contains("customRoot="));
+        assert!(!xml.contains("customResources="));
+        assert!(!xml.contains("customAsset="));
+        assert!(!xml.contains("customClip="));
+        assert!(!xml.contains("<metadata "));
+        assert!(xml.contains("<adjust-blend amount=\"1\""));
+        assert!(xml.contains("<adjust-crop mode=\"trim\">"));
+        assert!(xml.contains("<crop-rect left=\"0\" right=\"0\" top=\"0\" bottom=\"0\""));
     }
 
     #[test]
@@ -2758,6 +3623,269 @@ mod tests {
                 matches!(event, ExportProjectWithMediaProgress::WritingProjectXml)
             }),
             "expected writing-xml progress event"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_export_project_with_media_writes_strict_xml_without_vendor_attrs() {
+        let root = unique_test_dir("package-strict");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source_a = root.join("clip-a.mp4");
+        let source_b = root.join("clip-b.mp4");
+        std::fs::write(&source_a, b"source-a").expect("write source-a");
+        std::fs::write(&source_b, b"source-b").expect("write source-b");
+        let output = root.join("Strict.uspxml");
+
+        let mut project = Project::new("Strict");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip_a = Clip::new(
+            source_a.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip_a.opacity = 0.75;
+        clip_a.crop_left = 1;
+        clip_a.crop_right = 2;
+        clip_a.crop_top = 3;
+        clip_a.crop_bottom = 4;
+        clip_a.opacity_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 500_000_000,
+                value: 0.75,
+                interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+            },
+        ];
+        let mut clip_b = Clip::new(
+            source_b.to_string_lossy().to_string(),
+            1_000_000_000,
+            1_000_000_000,
+            ClipKind::Video,
+        );
+        clip_b.scale = 1.2;
+        clip_b.position_x = 0.25;
+        clip_b.position_y = -0.15;
+        clip_b.scale_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 750_000_000,
+                value: 1.2,
+                interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+            },
+        ];
+        track.add_clip(clip_a);
+        track.add_clip(clip_b);
+        project.tracks.push(track);
+
+        let _library =
+            export_project_with_media(&project, &output).expect("packaged export should succeed");
+        let xml = std::fs::read_to_string(&output).expect("read packaged xml");
+        assert!(!xml.contains("xmlns:us="));
+        assert!(!xml.contains("us:"));
+        assert!(
+            xml.matches("<asset-clip ").count() >= 2,
+            "expected multiple clips in strict packaged output"
+        );
+        assert!(xml.contains("<adjust-blend amount=\"0.75\""));
+        assert!(xml.contains("<adjust-crop mode=\"trim\">"));
+        assert!(xml.contains("<crop-rect left=\"1\" right=\"2\" top=\"3\" bottom=\"4\""));
+        assert!(xml.contains("<param name=\"Scale\""));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_export_project_with_media_strict_preserves_multitrack_layout_via_lane() {
+        let root = unique_test_dir("package-strict-multitrack");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source_v1 = root.join("v1.mp4");
+        let source_v2 = root.join("v2.mp4");
+        let source_a1 = root.join("a1.wav");
+        std::fs::write(&source_v1, b"source-v1").expect("write v1");
+        std::fs::write(&source_v2, b"source-v2").expect("write v2");
+        std::fs::write(&source_a1, b"source-a1").expect("write a1");
+        let output = root.join("StrictMultiTrack.uspxml");
+
+        let mut project = Project::new("StrictMultiTrack");
+        project.tracks.clear();
+        let mut video_1 = Track::new_video("Video 1");
+        video_1.add_clip(Clip::new(
+            source_v1.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        let mut video_2 = Track::new_video("Video 2");
+        video_2.add_clip(Clip::new(
+            source_v2.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        let mut audio_1 = Track::new_audio("Audio 1");
+        audio_1.add_clip(Clip::new(
+            source_a1.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Audio,
+        ));
+        project.tracks.push(video_1);
+        project.tracks.push(video_2);
+        project.tracks.push(audio_1);
+
+        let _library =
+            export_project_with_media(&project, &output).expect("packaged export should succeed");
+        let xml = std::fs::read_to_string(&output).expect("read packaged xml");
+        assert!(
+            xml.contains("lane=\"1\""),
+            "expected lane for second video track"
+        );
+        assert!(
+            xml.contains("lane=\"-1\""),
+            "expected lane for first audio track"
+        );
+        let parsed = parse_fcpxml(&xml).expect("parse exported xml");
+        let video_tracks_with_clips = parsed
+            .tracks
+            .iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Video && !t.clips.is_empty())
+            .count();
+        let audio_tracks_with_clips = parsed
+            .tracks
+            .iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Audio && !t.clips.is_empty())
+            .count();
+        assert!(
+            video_tracks_with_clips >= 2,
+            "expected at least two populated video tracks after round-trip"
+        );
+        assert!(
+            audio_tracks_with_clips >= 1,
+            "expected at least one populated audio track after round-trip"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_packaged_export_strict_xml_validates_with_external_dtd_when_available() {
+        let dtd_path = match std::env::var("ULTIMATESLICE_FCPXML_DTD_PATH") {
+            Ok(path) if !path.trim().is_empty() => path,
+            _ => return,
+        };
+        if !std::path::Path::new(&dtd_path).exists() {
+            return;
+        }
+        let xmllint_available = std::process::Command::new("xmllint")
+            .arg("--version")
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !xmllint_available {
+            return;
+        }
+
+        let root = unique_test_dir("package-dtd");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source_a = root.join("clip-a.mp4");
+        let source_b = root.join("clip-b.mp4");
+        std::fs::write(&source_a, b"source-a").expect("write source-a");
+        std::fs::write(&source_b, b"source-b").expect("write source-b");
+        let output = root.join("Validate.uspxml");
+
+        let mut project = Project::new("Validate");
+        project.tracks.clear();
+        let mut video_1 = Track::new_video("Video 1");
+        let mut clip_a = Clip::new(
+            source_a.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip_a.opacity = 0.8;
+        clip_a.opacity_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 500_000_000,
+                value: 0.8,
+                interpolation: crate::model::clip::KeyframeInterpolation::EaseIn,
+            },
+        ];
+        video_1.add_clip(clip_a);
+
+        let mut video_2 = Track::new_video("Video 2");
+        let mut clip_b = Clip::new(
+            source_b.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip_b.position_x = 0.1;
+        clip_b.position_y = -0.2;
+        clip_b.scale = 1.15;
+        clip_b.scale_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 750_000_000,
+                value: 1.15,
+                interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+            },
+        ];
+        video_2.add_clip(clip_b);
+
+        let source_audio = root.join("audio-a.wav");
+        std::fs::write(&source_audio, b"audio-a").expect("write source-audio");
+        let mut audio_1 = Track::new_audio("Audio 1");
+        let mut clip_c = Clip::new(
+            source_audio.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Audio,
+        );
+        clip_c.pan = -0.25;
+        clip_c.pan_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 250_000_000,
+            value: -0.25,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        audio_1.add_clip(clip_c);
+
+        project.tracks.push(video_1);
+        project.tracks.push(video_2);
+        project.tracks.push(audio_1);
+        export_project_with_media(&project, &output).expect("packaged export should succeed");
+
+        let validation = std::process::Command::new("xmllint")
+            .arg("--noout")
+            .arg("--dtdvalid")
+            .arg(&dtd_path)
+            .arg(&output)
+            .output()
+            .expect("run xmllint");
+        assert!(
+            validation.status.success(),
+            "xmllint validation failed: {}",
+            String::from_utf8_lossy(&validation.stderr)
         );
 
         let _ = std::fs::remove_dir_all(&root);
