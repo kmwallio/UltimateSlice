@@ -1146,56 +1146,63 @@ fn write_strict_clip_body(
         write_native_time_map(writer, clip, &project.frame_rate)?;
     }
 
-    let (position_x, position_y) = internal_position_to_fcpxml(
-        clip.position_x,
-        clip.position_y,
-        project.width,
-        project.height,
-        clip.scale,
-    );
+    // Video intrinsic params only for clips with video content
+    let has_video = clip.kind != crate::model::clip::ClipKind::Audio;
+    if has_video {
+        let (position_x, position_y) = internal_position_to_fcpxml(
+            clip.position_x,
+            clip.position_y,
+            project.width,
+            project.height,
+            clip.scale,
+        );
+        // Normalize negative zero to positive zero for FCP compatibility
+        let position_x = if position_x == 0.0 { 0.0 } else { position_x };
+        let position_y = if position_y == 0.0 { 0.0 } else { position_y };
 
-    // adjust-crop
-    let mut adjust_crop = BytesStart::new("adjust-crop");
-    adjust_crop.push_attribute(("mode", "trim"));
-    writer.write_event(Event::Start(adjust_crop))?;
-    let mut crop_rect = BytesStart::new("crop-rect");
-    crop_rect.push_attribute(("left", clip.crop_left.to_string().as_str()));
-    crop_rect.push_attribute(("right", clip.crop_right.to_string().as_str()));
-    crop_rect.push_attribute(("top", clip.crop_top.to_string().as_str()));
-    crop_rect.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
-    writer.write_event(Event::Empty(crop_rect))?;
-    writer.write_event(Event::End(BytesEnd::new("adjust-crop")))?;
+        // adjust-crop
+        let mut adjust_crop = BytesStart::new("adjust-crop");
+        adjust_crop.push_attribute(("mode", "trim"));
+        writer.write_event(Event::Start(adjust_crop))?;
+        let mut crop_rect = BytesStart::new("crop-rect");
+        crop_rect.push_attribute(("left", clip.crop_left.to_string().as_str()));
+        crop_rect.push_attribute(("right", clip.crop_right.to_string().as_str()));
+        crop_rect.push_attribute(("top", clip.crop_top.to_string().as_str()));
+        crop_rect.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
+        writer.write_event(Event::Empty(crop_rect))?;
+        writer.write_event(Event::End(BytesEnd::new("adjust-crop")))?;
 
-    // adjust-transform
-    let mut adjust_transform = BytesStart::new("adjust-transform");
-    adjust_transform.push_attribute((
-        "position",
-        format!("{} {}", position_x, position_y).as_str(),
-    ));
-    adjust_transform
-        .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
-    adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
-    let has_transform_kfs = !clip.position_x_keyframes.is_empty()
-        || !clip.position_y_keyframes.is_empty()
-        || !clip.scale_keyframes.is_empty()
-        || !clip.rotate_keyframes.is_empty();
-    if has_transform_kfs {
-        writer.write_event(Event::Start(adjust_transform))?;
-        write_transform_keyframe_params(writer, clip, project)?;
-        writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
-    } else {
-        writer.write_event(Event::Empty(adjust_transform))?;
-    }
+        // adjust-transform
+        let mut adjust_transform = BytesStart::new("adjust-transform");
+        adjust_transform.push_attribute((
+            "position",
+            format!("{} {}", position_x, position_y).as_str(),
+        ));
+        adjust_transform
+            .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
+        adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
+        let has_transform_kfs = !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
+            || !clip.scale_keyframes.is_empty()
+            || !clip.rotate_keyframes.is_empty();
+        if has_transform_kfs {
+            writer.write_event(Event::Start(adjust_transform))?;
+            write_transform_keyframe_params(writer, clip, project)?;
+            writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
+        } else {
+            writer.write_event(Event::Empty(adjust_transform))?;
+        }
 
-    // adjust-blend
-    let mut adjust_blend = BytesStart::new("adjust-blend");
-    adjust_blend.push_attribute(("amount", clip.opacity.to_string().as_str()));
-    if !clip.opacity_keyframes.is_empty() {
-        writer.write_event(Event::Start(adjust_blend))?;
-        write_opacity_keyframe_params(writer, clip, &project.frame_rate)?;
-        writer.write_event(Event::End(BytesEnd::new("adjust-blend")))?;
-    } else {
-        writer.write_event(Event::Empty(adjust_blend))?;
+        // adjust-blend
+        let mut adjust_blend = BytesStart::new("adjust-blend");
+        adjust_blend.push_attribute(("amount", clip.opacity.to_string().as_str()));
+        if !clip.opacity_keyframes.is_empty() {
+            writer.write_event(Event::Start(adjust_blend))?;
+            write_opacity_keyframe_params(writer, clip, &project.frame_rate)?;
+            writer.write_event(Event::End(BytesEnd::new("adjust-blend")))?;
+        } else {
+            writer.write_event(Event::Empty(adjust_blend))?;
+        }
     }
 
     // adjust-volume
@@ -1674,7 +1681,7 @@ fn write_resources(
     fmt.push_attribute((
         "frameDuration",
         format!(
-            "{}/{}",
+            "{}/{}s",
             project.frame_rate.denominator, project.frame_rate.numerator
         )
         .as_str(),
@@ -2923,6 +2930,25 @@ mod tests {
             inner.contains("lane=\"-1\""),
             "audio (lane=-1) should be nested inside primary clip"
         );
+        // Audio-only clip should not have video intrinsic params
+        let audio_start = inner.find("lane=\"-1\"").expect("audio lane");
+        let audio_clip_xml = &inner[audio_start..];
+        assert!(
+            !audio_clip_xml.contains("<adjust-crop"),
+            "audio clip should not have adjust-crop"
+        );
+        assert!(
+            !audio_clip_xml.contains("<adjust-transform"),
+            "audio clip should not have adjust-transform"
+        );
+        assert!(
+            !audio_clip_xml.contains("<adjust-blend"),
+            "audio clip should not have adjust-blend"
+        );
+        assert!(
+            audio_clip_xml.contains("<adjust-volume"),
+            "audio clip should still have adjust-volume"
+        );
     }
 
     #[test]
@@ -3403,7 +3429,7 @@ mod tests {
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(
             xml.contains(
-                "<format id=\"r1\" name=\"FFVideoFormat1080p24\" frameDuration=\"1/24\" width=\"1920\" height=\"1080\"/>"
+                "<format id=\"r1\" name=\"FFVideoFormat1080p24\" frameDuration=\"1/24s\" width=\"1920\" height=\"1080\"/>"
             ),
             "expected known format name for standard 1080p24 export:\n{xml}"
         );
@@ -3439,7 +3465,7 @@ mod tests {
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(
             xml.contains(
-                "<format id=\"r1\" frameDuration=\"1001/30000\" width=\"1280\" height=\"720\"/>"
+                "<format id=\"r1\" frameDuration=\"1001/30000s\" width=\"1280\" height=\"720\"/>"
             ),
             "expected export to keep numeric format data for non-standard preset:\n{xml}"
         );
