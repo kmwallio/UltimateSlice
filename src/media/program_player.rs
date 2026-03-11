@@ -4518,15 +4518,15 @@ impl ProgramPlayer {
             return;
         }
         let duration_ns = segment_end_ns.saturating_sub(segment_start_ns);
-        let inputs: Vec<(ProgramClip, String, u64, bool)> = active
+        let inputs: Vec<(ProgramClip, String, u64, bool, bool)> = active
             .iter()
             .filter_map(|&idx| {
                 self.clips.get(idx).map(|clip| {
                     let c = clip.clone();
-                    let path = self.effective_source_path_for_clip(&c);
+                    let (path, source_is_proxy, _) = self.resolve_source_path_for_clip(&c);
                     let source_ns = c.source_pos_ns(segment_start_ns);
                     let has_audio = self.has_audio_for_path_fast(&path, c.has_embedded_audio());
-                    (c, path, source_ns, has_audio)
+                    (c, path, source_ns, has_audio, source_is_proxy)
                 })
             })
             .collect();
@@ -7312,7 +7312,7 @@ impl ProgramPlayer {
 
     fn render_prerender_segment_video_file(
         output_path: &str,
-        inputs: &[(ProgramClip, String, u64, bool)],
+        inputs: &[(ProgramClip, String, u64, bool, bool)],
         duration_ns: u64,
         out_w: u32,
         out_h: u32,
@@ -7333,7 +7333,7 @@ impl ProgramPlayer {
             .arg("-loglevel")
             .arg("error")
             .arg("-nostats");
-        for (clip, path, source_ns, _) in inputs {
+        for (clip, path, source_ns, _, _) in inputs {
             let source_s = *source_ns as f64 / 1_000_000_000.0;
             let clip_max_s = clip.source_duration_ns() as f64 / 1_000_000_000.0;
             let t = duration_s.min(clip_max_s).max(0.05);
@@ -7349,7 +7349,7 @@ impl ProgramPlayer {
             .map(|spec| inputs.len() == 2 && spec.outgoing_input < 2 && spec.incoming_input < 2)
             .unwrap_or(false);
         let mut nodes: Vec<String> = Vec::new();
-        for (i, (clip, _, _, _)) in inputs.iter().enumerate() {
+        for (i, (clip, _, _, _, source_is_proxy)) in inputs.iter().enumerate() {
             if use_transition_xfade {
                 nodes.push(format!(
                     "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}[pv{i}]",
@@ -7362,7 +7362,7 @@ impl ProgramPlayer {
                         i,
                     ),
                     fps.max(1),
-                    Self::prerender_build_lut_filter(clip),
+                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_color_filter(clip),
                     Self::prerender_build_temperature_tint_filter(clip),
                     Self::prerender_build_grading_filter(clip),
@@ -7378,7 +7378,7 @@ impl ProgramPlayer {
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
                         fps.max(1),
-                        Self::prerender_build_lut_filter(clip),
+                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_color_filter(clip),
                         Self::prerender_build_temperature_tint_filter(clip),
                         Self::prerender_build_grading_filter(clip),
@@ -7393,7 +7393,7 @@ impl ProgramPlayer {
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
                         fps.max(1),
-                        Self::prerender_build_lut_filter(clip),
+                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_color_filter(clip),
                         Self::prerender_build_temperature_tint_filter(clip),
                         Self::prerender_build_grading_filter(clip),
@@ -7408,7 +7408,7 @@ impl ProgramPlayer {
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
                     Self::prerender_build_rotation_filter(clip, true),
-                    Self::prerender_build_lut_filter(clip),
+                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_color_filter(clip),
                     Self::prerender_build_temperature_tint_filter(clip),
                     Self::prerender_build_grading_filter(clip),
@@ -7440,7 +7440,7 @@ impl ProgramPlayer {
             }
         }
         let mut audio_labels: Vec<String> = Vec::new();
-        for (i, (clip, _, _, has_audio)) in inputs.iter().enumerate() {
+        for (i, (clip, _, _, has_audio, _)) in inputs.iter().enumerate() {
             if !*has_audio {
                 continue;
             }
@@ -7606,7 +7606,10 @@ impl ProgramPlayer {
         }
     }
 
-    fn prerender_build_lut_filter(clip: &ProgramClip) -> String {
+    fn prerender_build_lut_filter(clip: &ProgramClip, source_is_proxy: bool) -> String {
+        if source_is_proxy {
+            return String::new();
+        }
         if let Some(path) = clip.lut_path.as_deref() {
             if !path.is_empty() && Path::new(path).exists() {
                 let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
@@ -9899,6 +9902,23 @@ mod tests {
             ProgramPlayer::segment_distance_to_timeline_ns(3_500, 2_000, 3_000),
             500
         );
+    }
+
+    #[test]
+    fn prerender_lut_filter_skips_when_source_is_proxy() {
+        let mut clip = make_clip();
+        let lut_path = format!(
+            "/tmp/ultimateslice-prerender-lut-{}-{}.cube",
+            std::process::id(),
+            clip.id
+        );
+        std::fs::write(&lut_path, "LUT_3D_SIZE 2\n0 0 0\n1 1 1\n").expect("write LUT test file");
+        clip.lut_path = Some(lut_path.clone());
+        let with_original = ProgramPlayer::prerender_build_lut_filter(&clip, false);
+        let with_proxy = ProgramPlayer::prerender_build_lut_filter(&clip, true);
+        assert!(with_original.contains("lut3d="));
+        assert_eq!(with_proxy, "");
+        let _ = std::fs::remove_file(lut_path);
     }
 
     fn cache_entry(
