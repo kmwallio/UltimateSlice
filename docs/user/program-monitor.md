@@ -104,6 +104,8 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Program Monitor logs now include periodic transition prerender hit/miss summaries by transition kind, which helps profiling runs identify where prerender is being generated but not consumed.
 - Smooth-mode transition prewarm depth/lookahead is also auto-tuned from recent prerender hit/miss history: if hit rate stays low after enough samples, prewarm temporarily expands (bounded by queue-pressure guardrails) to improve prerender availability.
 - Transition prerender windows include a small frame padding around overlap boundaries; incoming transition input is held through pre-overlap padding so source timing stays correct while reducing edge handoff misses.
+- When Smooth-mode queue budget is tight, transition prewarm scheduling prioritizes boundaries with the worst observed prerender hit rates first, improving the odds that limited background prerender work helps the most problematic transitions.
+- Transition prerender overlap padding now includes incoming audio timing parity: incoming transition audio is delayed until the overlap boundary, avoiding early incoming-audio bleed during the pre-padding window.
 
 ## Seeking
 

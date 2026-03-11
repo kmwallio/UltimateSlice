@@ -293,6 +293,8 @@ Tracking docs:
              - [x] Transition prerender telemetry counters: log per-transition prerender hit/miss outcomes to guide future prewarm/priority tuning
              - [x] Transition prerender hit-rate auto-tune: when accumulated transition prerender hit rate is low (after minimum samples), temporarily expand Smooth-mode prewarm depth/lookahead while keeping busy-queue guardrails
              - [x] Transition prerender overlap padding: add small frame padding around overlap boundaries (with incoming pre-overlap `tpad` hold) to reduce edge handoff misses at transition entry/exit
+             - [x] Transition-priority prewarm scheduling: when Smooth-mode queue budget is tight, prioritize worst hit-rate transition boundaries first so limited prewarm slots target highest-risk misses
+             - [x] Transition overlap audio-padding parity: delay incoming transition audio during prerender pre-padding so overlap audio starts at boundary (no early incoming bleed)
            - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
            - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at

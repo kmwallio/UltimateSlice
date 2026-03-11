@@ -3848,6 +3848,49 @@ impl ProgramPlayer {
             && hits.saturating_mul(100) < LOW_HITRATE_PERCENT.saturating_mul(total_samples)
     }
 
+    fn transition_prerender_priority_score_at(&self, boundary_ns: u64, active: &[usize]) -> u64 {
+        let Some(spec) = self.transition_overlap_prerender_spec_at(boundary_ns, active) else {
+            return 0;
+        };
+        let kind = Self::transition_kind_for_prerender_metric(&spec.xfade_transition);
+        let Some((hit, miss)) = self.transition_prerender_metrics.get(kind) else {
+            // Unseen transition kinds should still be sampled proactively.
+            return 550;
+        };
+        let total = hit.saturating_add(*miss);
+        if total == 0 {
+            return 550;
+        }
+        let miss_rate_per_mille = miss.saturating_mul(1000) / total;
+        // Prioritize confident poor performers first while still allowing low-sample
+        // transitions to receive attention.
+        let confidence_bonus = total.min(50);
+        miss_rate_per_mille.saturating_mul(10) + confidence_bonus
+    }
+
+    fn collect_upcoming_prerender_boundaries(
+        &self,
+        timeline_pos_ns: u64,
+        lookahead_ns: u64,
+        max_candidates: usize,
+    ) -> Vec<(u64, Vec<usize>, u64)> {
+        let mut candidates = Vec::new();
+        let mut cursor = timeline_pos_ns;
+        for _ in 0..max_candidates {
+            let Some(boundary_ns) = self.next_video_boundary_after(cursor) else {
+                break;
+            };
+            if boundary_ns.saturating_sub(timeline_pos_ns) > lookahead_ns {
+                break;
+            }
+            let active = self.clips_active_at(boundary_ns);
+            let priority = self.transition_prerender_priority_score_at(boundary_ns, &active);
+            candidates.push((boundary_ns, active, priority));
+            cursor = boundary_ns.saturating_add(self.frame_duration_ns.max(1));
+        }
+        candidates
+    }
+
     fn ordered_rebuild_history_ms(&self) -> Vec<u64> {
         let n = self.rebuild_history_count;
         if n == 0 {
@@ -4378,6 +4421,8 @@ impl ProgramPlayer {
         const BACKGROUND_PLAYING_MAX_BOUNDARIES: usize = 2;
         const BACKGROUND_PLAYING_MAX_BOUNDARIES_SMOOTH: usize = 3;
         const BACKGROUND_PLAYING_MAX_BOUNDARIES_LOW_HITRATE: usize = 4;
+        const TRANSITION_PRIORITY_QUEUE_TIGHT_PENDING: usize = 2;
+        const TRANSITION_PRIORITY_SCAN_EXTRA: usize = 3;
         let prerender_playback_active = self.slots.iter().any(|s| s.is_prerender_slot);
         if self.state != PlayerState::Playing {
             self.prewarmed_boundary_ns = None;
@@ -4414,17 +4459,20 @@ impl ProgramPlayer {
             } else {
                 BACKGROUND_PLAYING_LOOKAHEAD_NS
             };
-            let mut cursor = timeline_pos_ns;
-            for _ in 0..max_boundaries {
-                let Some(scan_boundary_ns) = self.next_video_boundary_after(cursor) else {
-                    break;
-                };
-                if scan_boundary_ns.saturating_sub(timeline_pos_ns) > lookahead_ns {
-                    break;
-                }
-                let scan_active = self.clips_active_at(scan_boundary_ns);
+            let mut candidates = self.collect_upcoming_prerender_boundaries(
+                timeline_pos_ns,
+                lookahead_ns,
+                max_boundaries + TRANSITION_PRIORITY_SCAN_EXTRA,
+            );
+            let queue_budget_tight =
+                smooth_mode && queued_jobs >= TRANSITION_PRIORITY_QUEUE_TIGHT_PENDING;
+            if queue_budget_tight {
+                candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+            } else {
+                candidates.sort_by_key(|entry| entry.0);
+            }
+            for (scan_boundary_ns, scan_active, _) in candidates.into_iter().take(max_boundaries) {
                 self.maybe_request_background_prerender_segment(scan_boundary_ns, &scan_active);
-                cursor = scan_boundary_ns.saturating_add(self.frame_duration_ns.max(1));
             }
         }
         let prewarm_window_ns = if self.background_prerender {
@@ -4511,6 +4559,8 @@ impl ProgramPlayer {
         const IDLE_MAX_BOUNDARIES: usize = 2;
         const IDLE_MAX_BOUNDARIES_SMOOTH: usize = 3;
         const IDLE_MAX_BOUNDARIES_LOW_HITRATE: usize = 4;
+        const TRANSITION_PRIORITY_QUEUE_TIGHT_PENDING: usize = 2;
+        const TRANSITION_PRIORITY_SCAN_EXTRA: usize = 3;
 
         if !self.background_prerender {
             self.last_idle_prerender_scan_at = None;
@@ -4552,18 +4602,20 @@ impl ProgramPlayer {
 
         let active_now = self.clips_active_at(self.timeline_pos_ns);
         self.maybe_request_background_prerender_segment(self.timeline_pos_ns, &active_now);
-
-        let mut cursor = self.timeline_pos_ns;
-        for _ in 0..idle_max_boundaries {
-            let Some(boundary_ns) = self.next_video_boundary_after(cursor) else {
-                break;
-            };
-            if boundary_ns.saturating_sub(self.timeline_pos_ns) > idle_lookahead_ns {
-                break;
-            }
-            let boundary_active = self.clips_active_at(boundary_ns);
+        let mut candidates = self.collect_upcoming_prerender_boundaries(
+            self.timeline_pos_ns,
+            idle_lookahead_ns,
+            idle_max_boundaries + TRANSITION_PRIORITY_SCAN_EXTRA,
+        );
+        let queue_budget_tight =
+            smooth_mode && queued_jobs >= TRANSITION_PRIORITY_QUEUE_TIGHT_PENDING;
+        if queue_budget_tight {
+            candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        } else {
+            candidates.sort_by_key(|entry| entry.0);
+        }
+        for (boundary_ns, boundary_active, _) in candidates.into_iter().take(idle_max_boundaries) {
             self.maybe_request_background_prerender_segment(boundary_ns, &boundary_active);
-            cursor = boundary_ns.saturating_add(self.frame_duration_ns.max(1));
         }
     }
 
@@ -7126,6 +7178,11 @@ impl ProgramPlayer {
                 continue;
             }
             let mut chain = format!("[{i}:a]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0");
+            chain.push_str(&Self::prerender_build_transition_adelay_filter(
+                transition_spec,
+                transition_offset_ns,
+                i,
+            ));
             let vol = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
             if (vol - 1.0).abs() > 0.001 {
                 chain.push_str(&format!(",volume={vol:.4}"));
@@ -7203,6 +7260,26 @@ impl ProgramPlayer {
         // Keep incoming transition source parked on its first frame until the
         // overlap boundary, so pre-padding does not advance incoming content.
         format!(",tpad=start_duration={offset_s:.6}:start_mode=clone")
+    }
+
+    fn prerender_build_transition_adelay_filter(
+        transition_spec: Option<&TransitionPrerenderSpec>,
+        transition_offset_ns: u64,
+        input_index: usize,
+    ) -> String {
+        let Some(spec) = transition_spec else {
+            return String::new();
+        };
+        if input_index != spec.incoming_input {
+            return String::new();
+        }
+        if transition_offset_ns == 0 {
+            return String::new();
+        }
+        // Keep incoming transition audio silent until overlap boundary so
+        // prerender pre-padding does not introduce early incoming-audio bleed.
+        let delay_ms = ((transition_offset_ns + 999_999) / 1_000_000).max(1);
+        format!(",adelay={delay_ms}:all=1")
     }
 
     fn prerender_build_color_filter(clip: &ProgramClip) -> String {
@@ -9310,7 +9387,7 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
 mod tests {
     use super::{
         clip_can_fully_occlude, CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame,
-        ShortFrameCache, VideoSlot,
+        ShortFrameCache, TransitionPrerenderSpec, VideoSlot,
     };
     use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
     use gstreamer as gst;
@@ -9411,6 +9488,36 @@ mod tests {
             "Internal data stream error.",
             Some("...reason eos...")
         ));
+    }
+
+    #[test]
+    fn transition_audio_delay_filter_applies_to_incoming_input() {
+        let spec = TransitionPrerenderSpec {
+            outgoing_input: 0,
+            incoming_input: 1,
+            xfade_transition: "fade".to_string(),
+            duration_ns: 500_000_000,
+        };
+        let f = ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 83_333_333, 1);
+        assert_eq!(f, ",adelay=84:all=1");
+    }
+
+    #[test]
+    fn transition_audio_delay_filter_skips_non_incoming_or_zero_offset() {
+        let spec = TransitionPrerenderSpec {
+            outgoing_input: 0,
+            incoming_input: 1,
+            xfade_transition: "fade".to_string(),
+            duration_ns: 500_000_000,
+        };
+        assert_eq!(
+            ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 0, 1),
+            ""
+        );
+        assert_eq!(
+            ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 83_333_333, 0),
+            ""
+        );
     }
 
     fn cache_entry(
