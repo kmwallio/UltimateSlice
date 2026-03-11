@@ -700,7 +700,35 @@ pub fn export_project(
 }
 
 fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
-    if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
+    let has_keyframes = !clip.brightness_keyframes.is_empty()
+        || !clip.contrast_keyframes.is_empty()
+        || !clip.saturation_keyframes.is_empty();
+    if has_keyframes {
+        let brightness_expr = build_keyframed_property_expression(
+            &clip.brightness_keyframes,
+            clip.brightness as f64,
+            -1.0,
+            1.0,
+            "t",
+        );
+        let contrast_expr = build_keyframed_property_expression(
+            &clip.contrast_keyframes,
+            clip.contrast as f64,
+            0.0,
+            2.0,
+            "t",
+        );
+        let saturation_expr = build_keyframed_property_expression(
+            &clip.saturation_keyframes,
+            clip.saturation as f64,
+            0.0,
+            2.0,
+            "t",
+        );
+        format!(
+            ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
+        )
+    } else if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
         format!(
             ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
             clip.brightness.clamp(-1.0, 1.0),
@@ -848,14 +876,44 @@ fn append_pan_filter_chain(
 fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
     let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
     let has_tint = clip.tint.abs() > 0.001;
+    let has_temp_keyframes = !clip.temperature_keyframes.is_empty();
+    let has_tint_keyframes = !clip.tint_keyframes.is_empty();
     let mut f = String::new();
-    if has_temp {
+    if has_temp_keyframes {
+        let temp_expr = build_keyframed_property_expression(
+            &clip.temperature_keyframes,
+            clip.temperature as f64,
+            2000.0,
+            10000.0,
+            "t",
+        );
+        f.push_str(&format!(
+            ",colortemperature=temperature='{temp_expr}':eval=frame"
+        ));
+    } else if has_temp {
         f.push_str(&format!(
             ",colortemperature=temperature={:.0}",
             clip.temperature.clamp(2000.0, 10000.0)
         ));
     }
-    if has_tint {
+    if has_tint_keyframes {
+        // Map tint to green channel offset via colorbalance midtones.
+        // Negative tint = boost green (positive gm), positive tint = cut green (negative gm)
+        // and complementary red+blue boost.
+        let tint_expr = build_keyframed_property_expression(
+            &clip.tint_keyframes,
+            clip.tint as f64,
+            -1.0,
+            1.0,
+            "t",
+        );
+        let gm_expr = format!("(-({tint_expr}))*0.5");
+        let rm_expr = format!("({tint_expr})*0.25");
+        let bm_expr = format!("({tint_expr})*0.25");
+        f.push_str(&format!(
+            ",colorbalance=rm='{rm_expr}':gm='{gm_expr}':bm='{bm_expr}':eval=frame"
+        ));
+    } else if has_tint {
         // Map tint to green channel offset via colorbalance midtones.
         // Negative tint = boost green (positive gm), positive tint = cut green (negative gm)
         // and complementary red+blue boost.
@@ -952,6 +1010,15 @@ fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -
         return format!(
             ",trim=duration={frame_s:.6},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={pad_s:.6},trim=duration={hold_s:.6},setpts=PTS-STARTPTS"
         );
+    }
+    if !clip.speed_keyframes.is_empty() {
+        let speed_expr =
+            build_keyframed_property_expression(&clip.speed_keyframes, clip.speed, 0.05, 16.0, "T");
+        return if clip.reverse {
+            format!(",reverse,setpts=PTS/({speed_expr})")
+        } else {
+            format!(",setpts=PTS/({speed_expr})")
+        };
     }
     let has_speed = (clip.speed - 1.0).abs() > 0.001;
     match (clip.reverse, has_speed) {
@@ -1422,11 +1489,12 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 mod tests {
     use super::{
         append_pan_filter_chain, audio_crossfade_curve_name, build_audio_crossfade_filters,
-        build_crop_filter, build_keyframed_property_expression, build_pan_expression,
-        build_rotation_filter, build_timing_filter, build_volume_filter,
-        clamped_primary_xfade_duration_s, compute_clip_audio_fades, estimate_export_size_bytes,
-        has_linked_audio_peer, has_transform_keyframes, parse_progress_line,
-        video_input_seek_and_duration, AudioCodec, ClipAudioFade, ExportOptions, VideoCodec,
+        build_color_filter, build_crop_filter, build_keyframed_property_expression,
+        build_pan_expression, build_rotation_filter, build_temperature_tint_filter,
+        build_timing_filter, build_volume_filter, clamped_primary_xfade_duration_s,
+        compute_clip_audio_fades, estimate_export_size_bytes, has_linked_audio_peer,
+        has_transform_keyframes, parse_progress_line, video_input_seek_and_duration, AudioCodec,
+        ClipAudioFade, ExportOptions, VideoCodec,
     };
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
@@ -1824,5 +1892,58 @@ mod tests {
         assert!(f.contains(",geq=lum='lum(X,Y)'"));
         assert!(f.contains("alpha(X,Y)"));
         assert!(f.contains("between(X,("));
+    }
+
+    #[test]
+    fn build_color_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.brightness_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.25,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_color_filter(&clip);
+        assert!(f.contains("eq=brightness='if(lt(t,"));
+        assert!(f.contains(":eval=frame"));
+    }
+
+    #[test]
+    fn build_temperature_tint_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.temperature_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 3200.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 7800.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        clip.tint_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_temperature_tint_filter(&clip);
+        assert!(f.contains("colortemperature=temperature='if(lt(t,"));
+        assert!(f.contains(",colorbalance=rm='("));
+        assert!(f.contains(":eval=frame"));
     }
 }

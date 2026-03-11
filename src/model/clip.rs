@@ -144,8 +144,14 @@ pub enum Phase1KeyframeProperty {
     PositionY,
     Scale,
     Opacity,
+    Brightness,
+    Contrast,
+    Saturation,
+    Temperature,
+    Tint,
     Volume,
     Pan,
+    Speed,
     Rotate,
     CropLeft,
     CropRight,
@@ -160,8 +166,14 @@ impl Phase1KeyframeProperty {
             Self::PositionY => "position_y",
             Self::Scale => "scale",
             Self::Opacity => "opacity",
+            Self::Brightness => "brightness",
+            Self::Contrast => "contrast",
+            Self::Saturation => "saturation",
+            Self::Temperature => "temperature",
+            Self::Tint => "tint",
             Self::Volume => "volume",
             Self::Pan => "pan",
+            Self::Speed => "speed",
             Self::Rotate => "rotate",
             Self::CropLeft => "crop_left",
             Self::CropRight => "crop_right",
@@ -176,8 +188,14 @@ impl Phase1KeyframeProperty {
             "position_y" | "position-y" => Some(Self::PositionY),
             "scale" => Some(Self::Scale),
             "opacity" => Some(Self::Opacity),
+            "brightness" => Some(Self::Brightness),
+            "contrast" => Some(Self::Contrast),
+            "saturation" => Some(Self::Saturation),
+            "temperature" => Some(Self::Temperature),
+            "tint" => Some(Self::Tint),
             "volume" => Some(Self::Volume),
             "pan" => Some(Self::Pan),
+            "speed" => Some(Self::Speed),
             "rotate" => Some(Self::Rotate),
             "crop_left" | "crop-left" => Some(Self::CropLeft),
             "crop_right" | "crop-right" => Some(Self::CropRight),
@@ -268,6 +286,21 @@ pub struct Clip {
     /// Tint shift on the green–magenta axis: −1.0 (green) to 1.0 (magenta), default 0.0.
     #[serde(default)]
     pub tint: f32,
+    /// Optional brightness keyframes over clip-local timeline.
+    #[serde(default)]
+    pub brightness_keyframes: Vec<NumericKeyframe>,
+    /// Optional contrast keyframes over clip-local timeline.
+    #[serde(default)]
+    pub contrast_keyframes: Vec<NumericKeyframe>,
+    /// Optional saturation keyframes over clip-local timeline.
+    #[serde(default)]
+    pub saturation_keyframes: Vec<NumericKeyframe>,
+    /// Optional color-temperature keyframes over clip-local timeline.
+    #[serde(default)]
+    pub temperature_keyframes: Vec<NumericKeyframe>,
+    /// Optional tint keyframes over clip-local timeline.
+    #[serde(default)]
+    pub tint_keyframes: Vec<NumericKeyframe>,
     /// Denoise strength: 0.0 (off) to 1.0 (heavy), default 0.0
     #[serde(default)]
     pub denoise: f32,
@@ -302,6 +335,9 @@ pub struct Clip {
     /// Values > 1.0 speed up (clip takes less time on timeline); < 1.0 slow down.
     #[serde(default = "default_speed")]
     pub speed: f64,
+    /// Optional variable speed keyframes over clip-local timeline.
+    #[serde(default)]
+    pub speed_keyframes: Vec<NumericKeyframe>,
     #[serde(default)]
     pub crop_left: i32,
     #[serde(default)]
@@ -439,6 +475,74 @@ pub struct Clip {
 }
 
 impl Clip {
+    fn remove_keyframes_at_local_time(
+        keyframes: &mut Vec<NumericKeyframe>,
+        local_time_ns: u64,
+    ) -> usize {
+        let before = keyframes.len();
+        keyframes.retain(|kf| kf.time_ns != local_time_ns);
+        before.saturating_sub(keyframes.len())
+    }
+
+    fn set_keyframe_interpolation_at_local_time(
+        keyframes: &mut [NumericKeyframe],
+        local_time_ns: u64,
+        interpolation: KeyframeInterpolation,
+    ) -> usize {
+        let mut updated = 0usize;
+        for kf in keyframes.iter_mut() {
+            if kf.time_ns == local_time_ns {
+                kf.interpolation = interpolation;
+                updated += 1;
+            }
+        }
+        updated
+    }
+
+    fn move_keyframes_by_time_map(
+        keyframes: &mut Vec<NumericKeyframe>,
+        move_map: &[(u64, u64)],
+    ) -> usize {
+        if keyframes.is_empty() || move_map.is_empty() {
+            return 0;
+        }
+        let mut changed = 0usize;
+        let original = keyframes.clone();
+        let mut rebuilt = Vec::with_capacity(original.len());
+        let mut destination_times = Vec::with_capacity(move_map.len());
+        for (_, to) in move_map {
+            destination_times.push(*to);
+        }
+
+        for kf in &original {
+            let is_moved_source = move_map.iter().any(|(from, _)| kf.time_ns == *from);
+            let is_moved_destination = destination_times.contains(&kf.time_ns);
+            if !is_moved_source && !is_moved_destination {
+                rebuilt.push(kf.clone());
+            }
+        }
+
+        for (from, to) in move_map {
+            let mut moved_from = original
+                .iter()
+                .filter(|kf| kf.time_ns == *from)
+                .cloned()
+                .collect::<Vec<_>>();
+            if moved_from.is_empty() {
+                continue;
+            }
+            changed += moved_from.len();
+            for kf in &mut moved_from {
+                kf.time_ns = *to;
+            }
+            rebuilt.extend(moved_from);
+        }
+
+        rebuilt.sort_by_key(|kf| kf.time_ns);
+        *keyframes = rebuilt;
+        changed
+    }
+
     pub fn new(
         source_path: impl Into<String>,
         source_out: u64,
@@ -465,6 +569,11 @@ impl Clip {
             saturation: 1.0,
             temperature: 6500.0,
             tint: 0.0,
+            brightness_keyframes: Vec::new(),
+            contrast_keyframes: Vec::new(),
+            saturation_keyframes: Vec::new(),
+            temperature_keyframes: Vec::new(),
+            tint_keyframes: Vec::new(),
             denoise: 0.0,
             sharpness: 0.0,
             volume: 1.0,
@@ -477,6 +586,7 @@ impl Clip {
             crop_top_keyframes: Vec::new(),
             crop_bottom_keyframes: Vec::new(),
             speed: 1.0,
+            speed_keyframes: Vec::new(),
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
@@ -575,8 +685,14 @@ impl Clip {
             Phase1KeyframeProperty::PositionY => &self.position_y_keyframes,
             Phase1KeyframeProperty::Scale => &self.scale_keyframes,
             Phase1KeyframeProperty::Opacity => &self.opacity_keyframes,
+            Phase1KeyframeProperty::Brightness => &self.brightness_keyframes,
+            Phase1KeyframeProperty::Contrast => &self.contrast_keyframes,
+            Phase1KeyframeProperty::Saturation => &self.saturation_keyframes,
+            Phase1KeyframeProperty::Temperature => &self.temperature_keyframes,
+            Phase1KeyframeProperty::Tint => &self.tint_keyframes,
             Phase1KeyframeProperty::Volume => &self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &self.pan_keyframes,
+            Phase1KeyframeProperty::Speed => &self.speed_keyframes,
             Phase1KeyframeProperty::Rotate => &self.rotate_keyframes,
             Phase1KeyframeProperty::CropLeft => &self.crop_left_keyframes,
             Phase1KeyframeProperty::CropRight => &self.crop_right_keyframes,
@@ -594,8 +710,14 @@ impl Clip {
             Phase1KeyframeProperty::PositionY => &mut self.position_y_keyframes,
             Phase1KeyframeProperty::Scale => &mut self.scale_keyframes,
             Phase1KeyframeProperty::Opacity => &mut self.opacity_keyframes,
+            Phase1KeyframeProperty::Brightness => &mut self.brightness_keyframes,
+            Phase1KeyframeProperty::Contrast => &mut self.contrast_keyframes,
+            Phase1KeyframeProperty::Saturation => &mut self.saturation_keyframes,
+            Phase1KeyframeProperty::Temperature => &mut self.temperature_keyframes,
+            Phase1KeyframeProperty::Tint => &mut self.tint_keyframes,
             Phase1KeyframeProperty::Volume => &mut self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &mut self.pan_keyframes,
+            Phase1KeyframeProperty::Speed => &mut self.speed_keyframes,
             Phase1KeyframeProperty::Rotate => &mut self.rotate_keyframes,
             Phase1KeyframeProperty::CropLeft => &mut self.crop_left_keyframes,
             Phase1KeyframeProperty::CropRight => &mut self.crop_right_keyframes,
@@ -610,8 +732,14 @@ impl Clip {
             Phase1KeyframeProperty::PositionY => self.position_y,
             Phase1KeyframeProperty::Scale => self.scale,
             Phase1KeyframeProperty::Opacity => self.opacity,
+            Phase1KeyframeProperty::Brightness => self.brightness as f64,
+            Phase1KeyframeProperty::Contrast => self.contrast as f64,
+            Phase1KeyframeProperty::Saturation => self.saturation as f64,
+            Phase1KeyframeProperty::Temperature => self.temperature as f64,
+            Phase1KeyframeProperty::Tint => self.tint as f64,
             Phase1KeyframeProperty::Volume => self.volume as f64,
             Phase1KeyframeProperty::Pan => self.pan as f64,
+            Phase1KeyframeProperty::Speed => self.speed,
             Phase1KeyframeProperty::Rotate => self.rotate as f64,
             Phase1KeyframeProperty::CropLeft => self.crop_left as f64,
             Phase1KeyframeProperty::CropRight => self.crop_right as f64,
@@ -627,8 +755,14 @@ impl Clip {
             }
             Phase1KeyframeProperty::Scale => value.clamp(0.1, 4.0),
             Phase1KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
+            Phase1KeyframeProperty::Brightness => value.clamp(-1.0, 1.0),
+            Phase1KeyframeProperty::Contrast => value.clamp(0.0, 2.0),
+            Phase1KeyframeProperty::Saturation => value.clamp(0.0, 2.0),
+            Phase1KeyframeProperty::Temperature => value.clamp(2000.0, 10000.0),
+            Phase1KeyframeProperty::Tint => value.clamp(-1.0, 1.0),
             Phase1KeyframeProperty::Volume => value.clamp(0.0, 4.0),
             Phase1KeyframeProperty::Pan => value.clamp(-1.0, 1.0),
+            Phase1KeyframeProperty::Speed => value.clamp(0.05, 16.0),
             Phase1KeyframeProperty::Rotate => value.clamp(-180.0, 180.0),
             Phase1KeyframeProperty::CropLeft
             | Phase1KeyframeProperty::CropRight
@@ -699,16 +833,175 @@ impl Clip {
         keyframes.len() != before
     }
 
+    pub fn remove_all_phase1_keyframes_at_timeline_ns(&mut self, timeline_pos_ns: u64) -> usize {
+        let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        self.remove_all_phase1_keyframes_at_local_ns(local_time_ns)
+    }
+
+    pub fn remove_all_phase1_keyframes_at_local_ns(&mut self, local_time_ns: u64) -> usize {
+        let mut removed = 0usize;
+        removed += Self::remove_keyframes_at_local_time(&mut self.scale_keyframes, local_time_ns);
+        removed += Self::remove_keyframes_at_local_time(&mut self.opacity_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.brightness_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.contrast_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.saturation_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.temperature_keyframes, local_time_ns);
+        removed += Self::remove_keyframes_at_local_time(&mut self.tint_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.position_x_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.position_y_keyframes, local_time_ns);
+        removed += Self::remove_keyframes_at_local_time(&mut self.volume_keyframes, local_time_ns);
+        removed += Self::remove_keyframes_at_local_time(&mut self.pan_keyframes, local_time_ns);
+        removed += Self::remove_keyframes_at_local_time(&mut self.speed_keyframes, local_time_ns);
+        removed += Self::remove_keyframes_at_local_time(&mut self.rotate_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.crop_left_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.crop_right_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.crop_top_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.crop_bottom_keyframes, local_time_ns);
+        removed
+    }
+
+    pub fn set_phase1_keyframe_interpolation_at_local_ns(
+        &mut self,
+        local_time_ns: u64,
+        interpolation: KeyframeInterpolation,
+    ) -> usize {
+        let mut updated = 0usize;
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.scale_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.opacity_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.brightness_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.contrast_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.saturation_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.temperature_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.tint_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.position_x_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.position_y_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.volume_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.pan_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.speed_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.rotate_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.crop_left_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.crop_right_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.crop_top_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.crop_bottom_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated
+    }
+
+    pub fn move_all_phase1_keyframes_local_ns(&mut self, move_map: &[(u64, u64)]) -> usize {
+        let mut changed = 0usize;
+        changed += Self::move_keyframes_by_time_map(&mut self.scale_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.opacity_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.brightness_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.contrast_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.saturation_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.temperature_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.tint_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.position_x_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.position_y_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.volume_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.pan_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.speed_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.rotate_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.crop_left_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.crop_right_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.crop_top_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.crop_bottom_keyframes, move_map);
+        changed
+    }
+
     /// Collect all unique keyframe times across every phase-1 property, sorted.
     fn all_keyframe_local_times_ns(&self) -> Vec<u64> {
         let mut times: Vec<u64> = self
             .scale_keyframes
             .iter()
             .chain(&self.opacity_keyframes)
+            .chain(&self.brightness_keyframes)
+            .chain(&self.contrast_keyframes)
+            .chain(&self.saturation_keyframes)
+            .chain(&self.temperature_keyframes)
+            .chain(&self.tint_keyframes)
             .chain(&self.position_x_keyframes)
             .chain(&self.position_y_keyframes)
             .chain(&self.volume_keyframes)
             .chain(&self.pan_keyframes)
+            .chain(&self.speed_keyframes)
             .chain(&self.rotate_keyframes)
             .chain(&self.crop_left_keyframes)
             .chain(&self.crop_right_keyframes)
@@ -824,6 +1117,52 @@ impl Clip {
         )
     }
 
+    pub fn speed_at_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+        Self::evaluate_keyframed_value(&self.speed_keyframes, local_timeline_ns, self.speed)
+            .clamp(0.05, 16.0)
+    }
+
+    pub fn speed_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        let local_ns = timeline_pos_ns
+            .saturating_sub(self.timeline_start)
+            .min(self.duration());
+        self.speed_at_local_timeline_ns(local_ns)
+    }
+
+    fn integrated_source_distance_for_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+        if local_timeline_ns == 0 {
+            return 0.0;
+        }
+        if self.speed_keyframes.is_empty() {
+            return local_timeline_ns as f64 * self.speed.clamp(0.05, 16.0);
+        }
+        const MAX_SAMPLES: u64 = 4096;
+        const STEP_NS: u64 = 8_333_333; // ~120Hz
+        let sample_count = (local_timeline_ns / STEP_NS).max(1).min(MAX_SAMPLES);
+        let mut integrated = 0.0f64;
+        for i in 0..sample_count {
+            let t0 =
+                (u128::from(local_timeline_ns) * u128::from(i) / u128::from(sample_count)) as u64;
+            let t1 = (u128::from(local_timeline_ns) * u128::from(i + 1) / u128::from(sample_count))
+                as u64;
+            let dt = t1.saturating_sub(t0);
+            if dt == 0 {
+                continue;
+            }
+            let mid = t0.saturating_add(dt / 2);
+            integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
+        }
+        integrated
+    }
+
+    fn min_effective_speed_hint(&self) -> f64 {
+        let mut min_speed = self.speed.clamp(0.05, 16.0);
+        for kf in &self.speed_keyframes {
+            min_speed = min_speed.min(kf.value.clamp(0.05, 16.0));
+        }
+        min_speed
+    }
+
     fn playback_duration_from_speed(&self) -> u64 {
         let src = self.source_duration();
         if self.speed > 0.0 {
@@ -868,6 +1207,13 @@ mod tests {
         assert_eq!(clip.brightness, 0.0);
         assert_eq!(clip.contrast, 1.0);
         assert_eq!(clip.saturation, 1.0);
+        assert_eq!(clip.temperature, 6500.0);
+        assert_eq!(clip.tint, 0.0);
+        assert!(clip.brightness_keyframes.is_empty());
+        assert!(clip.contrast_keyframes.is_empty());
+        assert!(clip.saturation_keyframes.is_empty());
+        assert!(clip.temperature_keyframes.is_empty());
+        assert!(clip.tint_keyframes.is_empty());
         assert_eq!(clip.color_label, ClipColorLabel::None);
         assert_eq!(clip.volume, 1.0);
         assert!(clip.volume_keyframes.is_empty());
@@ -877,6 +1223,7 @@ mod tests {
         assert!(clip.crop_top_keyframes.is_empty());
         assert!(clip.crop_bottom_keyframes.is_empty());
         assert_eq!(clip.speed, 1.0);
+        assert!(clip.speed_keyframes.is_empty());
         assert!(!clip.reverse);
         assert!(!clip.chroma_key_enabled);
         assert_eq!(clip.chroma_key_color, 0x00FF00);
@@ -1178,6 +1525,11 @@ mod tests {
         assert!(clip.opacity_keyframes.is_empty());
         assert!(clip.position_x_keyframes.is_empty());
         assert!(clip.position_y_keyframes.is_empty());
+        assert!(clip.brightness_keyframes.is_empty());
+        assert!(clip.contrast_keyframes.is_empty());
+        assert!(clip.saturation_keyframes.is_empty());
+        assert!(clip.temperature_keyframes.is_empty());
+        assert!(clip.tint_keyframes.is_empty());
         assert!(clip.volume_keyframes.is_empty());
         assert!(clip.pan_keyframes.is_empty());
         assert!(clip.rotate_keyframes.is_empty());
@@ -1394,6 +1746,26 @@ mod tests {
     #[test]
     fn test_rotate_crop_phase1_clamp_ranges() {
         assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Brightness, 5.0),
+            1.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Contrast, -3.0),
+            0.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Saturation, 5.0),
+            2.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Temperature, 1200.0),
+            2000.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Tint, -4.0),
+            -1.0
+        );
+        assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Rotate, 500.0),
             180.0
         );
@@ -1545,5 +1917,87 @@ mod tests {
         // Round-trip
         let de: KeyframeInterpolation = serde_json::from_str("\"ease_in_out\"").unwrap();
         assert_eq!(de, KeyframeInterpolation::EaseInOut);
+    }
+
+    #[test]
+    fn test_remove_all_phase1_keyframes_at_local_ns() {
+        let mut clip = make_test_clip(4_000_000_000, 0);
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.2,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.8,
+            interpolation: KeyframeInterpolation::EaseOut,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 2_000_000_000,
+            value: 0.3,
+            interpolation: KeyframeInterpolation::EaseIn,
+        });
+
+        let removed = clip.remove_all_phase1_keyframes_at_local_ns(1_000_000_000);
+        assert_eq!(removed, 2);
+        assert!(clip.scale_keyframes.is_empty());
+        assert!(clip.opacity_keyframes.is_empty());
+        assert_eq!(clip.position_x_keyframes.len(), 1);
+    }
+
+    #[test]
+    fn test_set_phase1_keyframe_interpolation_at_local_ns() {
+        let mut clip = make_test_clip(4_000_000_000, 0);
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 500_000_000,
+            value: 1.1,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.volume_keyframes.push(NumericKeyframe {
+            time_ns: 500_000_000,
+            value: 0.6,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+
+        let updated = clip.set_phase1_keyframe_interpolation_at_local_ns(
+            500_000_000,
+            KeyframeInterpolation::EaseInOut,
+        );
+        assert_eq!(updated, 2);
+        assert_eq!(
+            clip.scale_keyframes[0].interpolation,
+            KeyframeInterpolation::EaseInOut
+        );
+        assert_eq!(
+            clip.volume_keyframes[0].interpolation,
+            KeyframeInterpolation::EaseInOut
+        );
+    }
+
+    #[test]
+    fn test_move_all_phase1_keyframes_local_ns_overwrites_destination() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.4,
+            interpolation: KeyframeInterpolation::EaseOut,
+        });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 2_000_000_000,
+            value: 2.2,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.75,
+            interpolation: KeyframeInterpolation::EaseIn,
+        });
+
+        let moved = clip.move_all_phase1_keyframes_local_ns(&[(1_000_000_000, 2_000_000_000)]);
+        assert_eq!(moved, 2);
+        assert_eq!(clip.scale_keyframes.len(), 1);
+        assert_eq!(clip.scale_keyframes[0].time_ns, 2_000_000_000);
+        assert!((clip.scale_keyframes[0].value - 1.4).abs() < 1e-9);
+        assert_eq!(clip.opacity_keyframes[0].time_ns, 2_000_000_000);
     }
 }

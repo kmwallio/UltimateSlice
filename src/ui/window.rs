@@ -16,6 +16,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+thread_local! {
+    static MCP_MAIN_DISPATCH: RefCell<Option<Box<dyn FnMut(crate::mcp::McpCommand)>>> =
+        RefCell::new(None);
+}
+
 fn flash_window_status_title(
     window: &gtk::ApplicationWindow,
     project: &Rc<RefCell<Project>>,
@@ -267,8 +272,9 @@ fn lookup_source_placement_info(
 
     if item.is_none() || (!has_audio && !is_audio_only) {
         let uri = format!("file://{source_path}");
-        is_audio_only = media_browser::probe_is_audio_only(&uri);
-        has_audio = media_browser::probe_has_audio(&uri);
+        let metadata = media_browser::probe_media_metadata(&uri);
+        is_audio_only = metadata.is_audio_only;
+        has_audio = metadata.has_audio;
     }
 
     SourcePlacementInfo {
@@ -1613,6 +1619,7 @@ pub fn build_window(
     timeline_state.borrow_mut().show_track_audio_levels = initial_show_track_audio_levels;
     let pending_program_seek_ticket = Rc::new(Cell::new(0u64));
     let pending_reload_ticket = Rc::new(Cell::new(0u64));
+    let mcp_light_refresh_next = Rc::new(Cell::new(false));
     let suppress_resume_on_next_reload = Rc::new(Cell::new(false));
     let clear_media_browser_on_next_reload = Rc::new(Cell::new(false));
 
@@ -3628,10 +3635,12 @@ pub fn build_window(
         let picture_a = picture_a.clone();
         let picture_b = picture_b.clone();
         let pending_reload_ticket = pending_reload_ticket.clone();
+        let mcp_light_refresh_next = mcp_light_refresh_next.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
+            let use_light_refresh = mcp_light_refresh_next.replace(false);
             if clear_media_browser_on_next_reload.replace(false) {
                 on_close_preview();
                 library.borrow_mut().clear();
@@ -3713,6 +3722,11 @@ pub fn build_window(
                             saturation: c.saturation as f64,
                             temperature: c.temperature as f64,
                             tint: c.tint as f64,
+                            brightness_keyframes: c.brightness_keyframes.clone(),
+                            contrast_keyframes: c.contrast_keyframes.clone(),
+                            saturation_keyframes: c.saturation_keyframes.clone(),
+                            temperature_keyframes: c.temperature_keyframes.clone(),
+                            tint_keyframes: c.tint_keyframes.clone(),
                             denoise: c.denoise as f64,
                             sharpness: c.sharpness as f64,
                             volume: c.volume as f64,
@@ -3737,6 +3751,7 @@ pub fn build_window(
                             title_x: c.title_x,
                             title_y: c.title_y,
                             speed: c.speed,
+                            speed_keyframes: c.speed_keyframes.clone(),
                             reverse: c.reverse,
                             freeze_frame: c.freeze_frame,
                             freeze_frame_source_ns: c.freeze_frame_source_ns,
@@ -3850,77 +3865,79 @@ pub fn build_window(
                 let phase1_started = std::time::Instant::now();
                 const NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS: u64 = 8_000_000_000;
                 const NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES: usize = 8;
-                // Resolve proxy paths BEFORE load_clips so the first
-                // rebuild_pipeline_at() uses proxies instead of originals.
-                {
-                    let proxy_mode = preferences_state_reload.borrow().proxy_mode.clone();
-                    let manual_proxy_mode = proxy_mode.is_enabled();
-                    if manual_proxy_mode {
-                        let manual_scale = proxy_scale_for_mode(&proxy_mode);
-                        let near_playhead_sources: Vec<(String, Option<String>)> = {
-                            let proj = project_reload.borrow();
-                            collect_near_playhead_clip_sources(
-                                &proj,
-                                prev_pos,
-                                NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS,
-                                NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES,
-                            )
-                        };
-                        {
-                            let mut cache = proxy_cache_reload.borrow_mut();
-                            for (path, lut) in &near_playhead_sources {
-                                cache.request(path, manual_scale, lut.as_deref());
+                if !use_light_refresh {
+                    // Resolve proxy paths BEFORE load_clips so the first
+                    // rebuild_pipeline_at() uses proxies instead of originals.
+                    {
+                        let proxy_mode = preferences_state_reload.borrow().proxy_mode.clone();
+                        let manual_proxy_mode = proxy_mode.is_enabled();
+                        if manual_proxy_mode {
+                            let manual_scale = proxy_scale_for_mode(&proxy_mode);
+                            let near_playhead_sources: Vec<(String, Option<String>)> = {
+                                let proj = project_reload.borrow();
+                                collect_near_playhead_clip_sources(
+                                    &proj,
+                                    prev_pos,
+                                    NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS,
+                                    NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES,
+                                )
+                            };
+                            {
+                                let mut cache = proxy_cache_reload.borrow_mut();
+                                for (path, lut) in &near_playhead_sources {
+                                    cache.request(path, manual_scale, lut.as_deref());
+                                }
+                            }
+                            let clip_sources: Vec<(String, Option<String>)> = {
+                                let proj = project_reload.borrow();
+                                let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+                                proj.tracks
+                                    .iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .filter_map(|c| {
+                                        let key = (c.source_path.clone(), c.lut_path.clone());
+                                        if seen.insert(key.clone()) {
+                                            Some(key)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect()
+                            };
+                            {
+                                let mut cache = proxy_cache_reload.borrow_mut();
+                                for (path, lut) in &clip_sources {
+                                    cache.request(path, manual_scale, lut.as_deref());
+                                }
+                            }
+                            if !near_playhead_sources.is_empty() {
+                                log::debug!(
+                                    "window:on_project_changed primed {} near-playhead proxy source(s) around {}ns",
+                                    near_playhead_sources.len(),
+                                    prev_pos
+                                );
                             }
                         }
-                        let clip_sources: Vec<(String, Option<String>)> = {
-                            let proj = project_reload.borrow();
-                            let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-                            proj.tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter_map(|c| {
-                                    let key = (c.source_path.clone(), c.lut_path.clone());
-                                    if seen.insert(key.clone()) {
-                                        Some(key)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect()
-                        };
-                        {
-                            let mut cache = proxy_cache_reload.borrow_mut();
-                            for (path, lut) in &clip_sources {
-                                cache.request(path, manual_scale, lut.as_deref());
-                            }
-                        }
-                        if !near_playhead_sources.is_empty() {
-                            log::debug!(
-                                "window:on_project_changed primed {} near-playhead proxy source(s) around {}ns",
-                                near_playhead_sources.len(),
-                                prev_pos
-                            );
-                        }
+                        let paths = proxy_cache_reload.borrow().proxies.clone();
+                        prog_player_reload.borrow_mut().update_proxy_paths(paths);
                     }
-                    let paths = proxy_cache_reload.borrow().proxies.clone();
-                    prog_player_reload.borrow_mut().update_proxy_paths(paths);
-                }
 
-                // Request bg-removal for clips that have it enabled.
-                {
-                    let proj = project_reload.borrow();
-                    let mut cache = bg_removal_cache_reload.borrow_mut();
-                    for track in &proj.tracks {
-                        for clip in &track.clips {
-                            if clip.bg_removal_enabled {
-                                cache.request(&clip.source_path, clip.bg_removal_threshold);
+                    // Request bg-removal for clips that have it enabled.
+                    {
+                        let proj = project_reload.borrow();
+                        let mut cache = bg_removal_cache_reload.borrow_mut();
+                        for track in &proj.tracks {
+                            for clip in &track.clips {
+                                if clip.bg_removal_enabled {
+                                    cache.request(&clip.source_path, clip.bg_removal_threshold);
+                                }
                             }
                         }
+                        let paths = cache.paths.clone();
+                        prog_player_reload
+                            .borrow_mut()
+                            .update_bg_removal_paths(paths);
                     }
-                    let paths = cache.paths.clone();
-                    prog_player_reload
-                        .borrow_mut()
-                        .update_bg_removal_paths(paths);
                 }
 
                 {
@@ -4329,12 +4346,43 @@ pub fn build_window(
         let on_close_preview = on_close_preview.clone();
         let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
+        let mcp_light_refresh_next = mcp_light_refresh_next.clone();
+        let on_project_changed_mcp_debounced: Rc<dyn Fn()> = {
+            let on_project_changed = on_project_changed.clone();
+            let refresh_pending = Rc::new(Cell::new(false));
+            Rc::new(move || {
+                if refresh_pending.replace(true) {
+                    return;
+                }
+                let refresh_pending = refresh_pending.clone();
+                let on_project_changed = on_project_changed.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(30), move || {
+                    refresh_pending.set(false);
+                    on_project_changed();
+                });
+            })
+        };
+        let on_project_changed_mcp_light: Rc<dyn Fn()> = {
+            let on_project_changed_mcp_debounced = on_project_changed_mcp_debounced.clone();
+            let mcp_light_refresh_next = mcp_light_refresh_next.clone();
+            Rc::new(move || {
+                mcp_light_refresh_next.set(true);
+                on_project_changed_mcp_debounced();
+            })
+        };
+        let on_project_changed_mcp_full: Rc<dyn Fn()> = {
+            let on_project_changed_mcp_debounced = on_project_changed_mcp_debounced.clone();
+            let mcp_light_refresh_next = mcp_light_refresh_next.clone();
+            Rc::new(move || {
+                mcp_light_refresh_next.set(false);
+                on_project_changed_mcp_debounced();
+            })
+        };
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
         let window_weak = window.downgrade();
-        // Poll the mpsc channel every 10 ms on the GTK main thread.
-        glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
-            while let Ok(cmd) = mcp_receiver.try_recv() {
+        MCP_MAIN_DISPATCH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
                     handle_mcp_command(
                         cmd,
@@ -4349,13 +4397,26 @@ pub fn build_window(
                         &bg_removal_cache,
                         &on_close_preview,
                         &on_source_selected,
-                        &on_project_changed,
+                        &on_project_changed_mcp_light,
+                        &on_project_changed_mcp_full,
                         &suppress_resume_on_next_reload,
                         &clear_media_browser_on_next_reload,
                     );
                 }
+            }));
+        });
+
+        let main_ctx = glib::MainContext::default();
+        std::thread::spawn(move || {
+            while let Ok(cmd) = mcp_receiver.recv() {
+                main_ctx.invoke(move || {
+                    MCP_MAIN_DISPATCH.with(|slot| {
+                        if let Some(dispatch) = slot.borrow_mut().as_mut() {
+                            dispatch(cmd);
+                        }
+                    });
+                });
             }
-            glib::ControlFlow::Continue
         });
     }
 
@@ -4745,6 +4806,7 @@ fn handle_mcp_command(
     on_close_preview: &Rc<dyn Fn()>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
+    on_project_changed_full: &Rc<dyn Fn()>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -4758,34 +4820,43 @@ fn handle_mcp_command(
             reply.send(v).ok();
         }
 
-        McpCommand::ListTracks { reply } => {
+        McpCommand::ListTracks { compact, reply } => {
             let proj = project.borrow();
             let tracks: Vec<_> = proj
                 .tracks
                 .iter()
                 .enumerate()
                 .map(|(i, t)| {
-                    json!({
-                        "index":      i,
-                        "id":         t.id,
-                        "label":      t.label,
-                        "kind":       format!("{:?}", t.kind),
-                        "clip_count": t.clips.len(),
-                        "muted":      t.muted,
-                        "locked":     t.locked,
-                        "soloed":     t.soloed,
-                        "height_preset": match t.height_preset {
-                            crate::model::track::TrackHeightPreset::Small => "small",
-                            crate::model::track::TrackHeightPreset::Medium => "medium",
-                            crate::model::track::TrackHeightPreset::Large => "large",
-                        },
-                    })
+                    if compact {
+                        json!({
+                            "index":      i,
+                            "id":         t.id,
+                            "kind":       format!("{:?}", t.kind),
+                            "clip_count": t.clips.len(),
+                        })
+                    } else {
+                        json!({
+                            "index":      i,
+                            "id":         t.id,
+                            "label":      t.label,
+                            "kind":       format!("{:?}", t.kind),
+                            "clip_count": t.clips.len(),
+                            "muted":      t.muted,
+                            "locked":     t.locked,
+                            "soloed":     t.soloed,
+                            "height_preset": match t.height_preset {
+                                crate::model::track::TrackHeightPreset::Small => "small",
+                                crate::model::track::TrackHeightPreset::Medium => "medium",
+                                crate::model::track::TrackHeightPreset::Large => "large",
+                            },
+                        })
+                    }
                 })
                 .collect();
             reply.send(json!(tracks)).ok();
         }
 
-        McpCommand::ListClips { reply } => {
+        McpCommand::ListClips { compact, reply } => {
             let proj = project.borrow();
             let clips: Vec<_> = proj
                 .tracks
@@ -4793,59 +4864,81 @@ fn handle_mcp_command(
                 .enumerate()
                 .flat_map(|(ti, track)| {
                     track.clips.iter().map(move |c| {
-                        json!({
-                            "id":               c.id,
-                            "label":            c.label,
-                            "source_path":      c.source_path,
-                            "track_index":      ti,
-                            "track_id":         track.id,
-                            "group_id":         c.group_id,
-                            "link_group_id":    c.link_group_id,
-                            "source_timecode_base_ns": c.source_timecode_base_ns,
-                            "source_timecode_start_ns": c.source_timecode_start_ns(),
-                            "timeline_start_ns": c.timeline_start,
-                            "source_in_ns":     c.source_in,
-                            "source_out_ns":    c.source_out,
-                            "duration_ns":      c.duration(),
-                            "color_label":      match c.color_label {
-                                crate::model::clip::ClipColorLabel::None => "none",
-                                crate::model::clip::ClipColorLabel::Red => "red",
-                                crate::model::clip::ClipColorLabel::Orange => "orange",
-                                crate::model::clip::ClipColorLabel::Yellow => "yellow",
-                                crate::model::clip::ClipColorLabel::Green => "green",
-                                crate::model::clip::ClipColorLabel::Teal => "teal",
-                                crate::model::clip::ClipColorLabel::Blue => "blue",
-                                crate::model::clip::ClipColorLabel::Purple => "purple",
-                                crate::model::clip::ClipColorLabel::Magenta => "magenta",
-                            },
-                            "brightness":       c.brightness,
-                            "contrast":         c.contrast,
-                            "saturation":       c.saturation,
-                            "denoise":          c.denoise,
-                            "sharpness":        c.sharpness,
-                            "shadows":          c.shadows,
-                            "midtones":         c.midtones,
-                            "highlights":       c.highlights,
-                            "volume":           c.volume,
-                            "pan":              c.pan,
-                            "scale":            c.scale,
-                            "opacity":          c.opacity,
-                            "position_x":       c.position_x,
-                            "position_y":       c.position_y,
-                            "scale_keyframes":      c.scale_keyframes,
-                            "opacity_keyframes":    c.opacity_keyframes,
-                            "position_x_keyframes": c.position_x_keyframes,
-                            "position_y_keyframes": c.position_y_keyframes,
-                            "volume_keyframes":     c.volume_keyframes,
-                            "pan_keyframes":        c.pan_keyframes,
-                            "rotate_keyframes":     c.rotate_keyframes,
-                            "crop_left_keyframes":  c.crop_left_keyframes,
-                            "crop_right_keyframes": c.crop_right_keyframes,
-                            "crop_top_keyframes":   c.crop_top_keyframes,
-                            "crop_bottom_keyframes": c.crop_bottom_keyframes,
-                            "bg_removal_enabled":   c.bg_removal_enabled,
-                            "bg_removal_threshold": c.bg_removal_threshold,
-                        })
+                        if compact {
+                            json!({
+                                "id":               c.id,
+                                "source_path":      c.source_path,
+                                "track_index":      ti,
+                                "track_id":         track.id,
+                                "timeline_start_ns": c.timeline_start,
+                                "source_in_ns":     c.source_in,
+                                "source_out_ns":    c.source_out,
+                                "duration_ns":      c.duration(),
+                            })
+                        } else {
+                            json!({
+                                "id":               c.id,
+                                "label":            c.label,
+                                "source_path":      c.source_path,
+                                "track_index":      ti,
+                                "track_id":         track.id,
+                                "group_id":         c.group_id,
+                                "link_group_id":    c.link_group_id,
+                                "source_timecode_base_ns": c.source_timecode_base_ns,
+                                "source_timecode_start_ns": c.source_timecode_start_ns(),
+                                "timeline_start_ns": c.timeline_start,
+                                "source_in_ns":     c.source_in,
+                                "source_out_ns":    c.source_out,
+                                "duration_ns":      c.duration(),
+                                "color_label":      match c.color_label {
+                                    crate::model::clip::ClipColorLabel::None => "none",
+                                    crate::model::clip::ClipColorLabel::Red => "red",
+                                    crate::model::clip::ClipColorLabel::Orange => "orange",
+                                    crate::model::clip::ClipColorLabel::Yellow => "yellow",
+                                    crate::model::clip::ClipColorLabel::Green => "green",
+                                    crate::model::clip::ClipColorLabel::Teal => "teal",
+                                    crate::model::clip::ClipColorLabel::Blue => "blue",
+                                    crate::model::clip::ClipColorLabel::Purple => "purple",
+                                    crate::model::clip::ClipColorLabel::Magenta => "magenta",
+                                },
+                                "brightness":       c.brightness,
+                                "contrast":         c.contrast,
+                                "saturation":       c.saturation,
+                                "temperature":      c.temperature,
+                                "tint":             c.tint,
+                                "denoise":          c.denoise,
+                                "sharpness":        c.sharpness,
+                                "shadows":          c.shadows,
+                                "midtones":         c.midtones,
+                                "highlights":       c.highlights,
+                                "volume":           c.volume,
+                                "pan":              c.pan,
+                                "scale":            c.scale,
+                                "opacity":          c.opacity,
+                                "position_x":       c.position_x,
+                                "position_y":       c.position_y,
+                                "speed":            c.speed,
+                                "scale_keyframes":      c.scale_keyframes,
+                                "opacity_keyframes":    c.opacity_keyframes,
+                                "brightness_keyframes": c.brightness_keyframes,
+                                "contrast_keyframes":   c.contrast_keyframes,
+                                "saturation_keyframes": c.saturation_keyframes,
+                                "temperature_keyframes": c.temperature_keyframes,
+                                "tint_keyframes":       c.tint_keyframes,
+                                "position_x_keyframes": c.position_x_keyframes,
+                                "position_y_keyframes": c.position_y_keyframes,
+                                "volume_keyframes":     c.volume_keyframes,
+                                "pan_keyframes":        c.pan_keyframes,
+                                "speed_keyframes":      c.speed_keyframes,
+                                "rotate_keyframes":     c.rotate_keyframes,
+                                "crop_left_keyframes":  c.crop_left_keyframes,
+                                "crop_right_keyframes": c.crop_right_keyframes,
+                                "crop_top_keyframes":   c.crop_top_keyframes,
+                                "crop_bottom_keyframes": c.crop_bottom_keyframes,
+                                "bg_removal_enabled":   c.bg_removal_enabled,
+                                "bg_removal_threshold": c.bg_removal_threshold,
+                            })
+                        }
                     })
                 })
                 .collect();
@@ -5368,7 +5461,7 @@ fn handle_mcp_command(
                             "link_group_id": link_group_id
                         }))
                         .ok();
-                    on_project_changed();
+                    on_project_changed_full();
                 }
                 Err(e) => {
                     reply.send(json!({"success": false, "error": e})).ok();
@@ -5788,7 +5881,7 @@ fn handle_mcp_command(
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
-                on_project_changed();
+                on_project_changed_full();
             }
         }
 
@@ -5830,7 +5923,7 @@ fn handle_mcp_command(
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
-                on_project_changed();
+                on_project_changed_full();
             }
         }
 
@@ -6036,7 +6129,7 @@ fn handle_mcp_command(
         } => {
             let Some(property) = Phase1KeyframeProperty::parse(&property) else {
                 reply
-                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom"}))
+                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom"}))
                     .ok();
                 return;
             };
@@ -6096,7 +6189,7 @@ fn handle_mcp_command(
         } => {
             let Some(property) = Phase1KeyframeProperty::parse(&property) else {
                 reply
-                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom"}))
+                    .send(json!({"success": false, "error": "property must be one of: position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, rotate, crop_left, crop_right, crop_top, crop_bottom"}))
                     .ok();
                 return;
             };
@@ -6181,7 +6274,7 @@ fn handle_mcp_command(
             timeline_state.borrow_mut().loading = true;
             let project = project.clone();
             let timeline_state = timeline_state.clone();
-            let on_project_changed = on_project_changed.clone();
+            let on_project_changed = on_project_changed_full.clone();
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
             let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
@@ -6460,10 +6553,10 @@ fn handle_mcp_command(
 
         McpCommand::ImportMedia { path, reply } => {
             let uri = format!("file://{path}");
-            let duration_ns =
-                crate::ui::media_browser::probe_duration(&uri).unwrap_or(10 * 1_000_000_000);
-            let audio_only = crate::ui::media_browser::probe_is_audio_only(&uri);
-            let has_audio = crate::ui::media_browser::probe_has_audio(&uri);
+            let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
+            let duration_ns = metadata.duration_ns.unwrap_or(10 * 1_000_000_000);
+            let audio_only = metadata.is_audio_only;
+            let has_audio = metadata.has_audio;
             let source_timecode_base_ns = {
                 let lib = library.borrow();
                 let proj = project.borrow();
@@ -6595,7 +6688,7 @@ fn handle_mcp_command(
                     "duration_ns": new_duration_ns
                 }))
                 .ok();
-            on_project_changed();
+            on_project_changed_full();
         }
 
         McpCommand::CreateProject { title, reply } => {
@@ -6612,7 +6705,7 @@ fn handle_mcp_command(
             reply.send(json!({"success": true, "title": title})).ok();
             suppress_resume_on_next_reload.set(true);
             clear_media_browser_on_next_reload.set(true);
-            on_project_changed();
+            on_project_changed_full();
         }
 
         McpCommand::InsertClip {
@@ -6620,6 +6713,7 @@ fn handle_mcp_command(
             source_in_ns,
             source_out_ns,
             track_index,
+            timeline_pos_ns,
             reply,
         } => {
             let clip_duration = source_out_ns.saturating_sub(source_in_ns);
@@ -6629,7 +6723,7 @@ fn handle_mcp_command(
                     .ok();
                 return;
             }
-            let playhead = timeline_state.borrow().playhead_ns;
+            let playhead = timeline_pos_ns.unwrap_or_else(|| timeline_state.borrow().playhead_ns);
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let source_monitor_auto_link_av =
                 preferences_state.borrow().source_monitor_auto_link_av;
@@ -6710,7 +6804,7 @@ fn handle_mcp_command(
                             "link_group_id": link_group_id
                         }))
                         .ok();
-                    on_project_changed();
+                    on_project_changed_full();
                 }
                 Err(e) => {
                     reply.send(json!({"error": e})).ok();
@@ -6723,6 +6817,7 @@ fn handle_mcp_command(
             source_in_ns,
             source_out_ns,
             track_index,
+            timeline_pos_ns,
             reply,
         } => {
             let clip_duration = source_out_ns.saturating_sub(source_in_ns);
@@ -6732,7 +6827,7 @@ fn handle_mcp_command(
                     .ok();
                 return;
             }
-            let playhead = timeline_state.borrow().playhead_ns;
+            let playhead = timeline_pos_ns.unwrap_or_else(|| timeline_state.borrow().playhead_ns);
             let magnetic_mode = timeline_state.borrow().magnetic_mode;
             let source_monitor_auto_link_av =
                 preferences_state.borrow().source_monitor_auto_link_av;
@@ -6816,7 +6911,7 @@ fn handle_mcp_command(
                             "link_group_id": link_group_id
                         }))
                         .ok();
-                    on_project_changed();
+                    on_project_changed_full();
                 }
                 Err(e) => {
                     reply.send(json!({"error": e})).ok();

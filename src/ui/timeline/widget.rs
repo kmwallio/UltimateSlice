@@ -1,4 +1,4 @@
-use crate::model::clip::{Clip, ClipKind};
+use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation};
 use crate::model::project::Project;
 use crate::model::through_edit::detect_track_through_edit_boundaries;
 use crate::model::track::TrackKind;
@@ -141,6 +141,14 @@ enum DragOp {
         track_idx: usize,
         target_idx: usize,
     },
+    /// Moving one or more keyframe time-columns (all lanes at selected times) on a clip.
+    MoveKeyframeColumns {
+        clip_id: String,
+        track_id: String,
+        original_track_clips: Vec<Clip>,
+        original_selected_local_times: Vec<u64>,
+        anchor_local_ns: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +167,16 @@ struct MarqueeSelection {
     base_ids: HashSet<String>,
     base_primary: Option<String>,
     base_track_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct KeyframeMarqueeSelection {
+    clip_id: String,
+    track_id: String,
+    start_local_ns: u64,
+    current_local_ns: u64,
+    additive: bool,
+    base_times: HashSet<u64>,
 }
 
 /// Shared state for the timeline widget
@@ -212,6 +230,10 @@ pub struct TimelineState {
     selection_anchor_clip_id: Option<String>,
     /// Active marquee-selection drag state.
     marquee_selection: Option<MarqueeSelection>,
+    /// Active keyframe-column selection keyed by clip id.
+    selected_keyframe_local_times: HashMap<String, HashSet<u64>>,
+    /// Active keyframe-column marquee selection drag state.
+    keyframe_marquee_selection: Option<KeyframeMarqueeSelection>,
     /// Callback fired when the active tool changes (via keyboard shortcut).
     pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
 }
@@ -247,6 +269,8 @@ impl TimelineState {
             selected_clip_ids: HashSet::new(),
             selection_anchor_clip_id: None,
             marquee_selection: None,
+            selected_keyframe_local_times: HashMap::new(),
+            keyframe_marquee_selection: None,
             on_tool_changed: None,
         }
     }
@@ -1250,6 +1274,7 @@ impl TimelineState {
         self.selected_clip_id = None;
         self.selected_clip_ids.clear();
         self.selection_anchor_clip_id = None;
+        self.clear_keyframe_selection();
     }
 
     fn set_single_clip_selection(&mut self, clip_id: String, track_id: String) {
@@ -1278,6 +1303,167 @@ impl TimelineState {
         self.selected_clip_id = Some(primary_clip_id.clone());
         self.selection_anchor_clip_id = Some(primary_clip_id);
         self.selected_track_id = Some(track_id);
+        self.clear_keyframe_selection();
+    }
+
+    fn clear_keyframe_selection(&mut self) {
+        self.selected_keyframe_local_times.clear();
+    }
+
+    fn selected_keyframe_local_times_for_clip(&self, clip_id: &str) -> HashSet<u64> {
+        self.selected_keyframe_local_times
+            .get(clip_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn has_selected_keyframes(&self) -> bool {
+        self.selected_keyframe_local_times
+            .values()
+            .any(|times| !times.is_empty())
+    }
+
+    fn set_single_keyframe_selection(&mut self, clip_id: String, local_time_ns: u64) {
+        self.clear_keyframe_selection();
+        let mut times = HashSet::new();
+        times.insert(local_time_ns);
+        self.selected_keyframe_local_times.insert(clip_id, times);
+    }
+
+    fn is_keyframe_local_time_selected(&self, clip_id: &str, local_time_ns: u64) -> bool {
+        self.selected_keyframe_local_times
+            .get(clip_id)
+            .map(|times| times.contains(&local_time_ns))
+            .unwrap_or(false)
+    }
+
+    fn toggle_keyframe_selection(&mut self, clip_id: &str, local_time_ns: u64) {
+        let times = self
+            .selected_keyframe_local_times
+            .entry(clip_id.to_string())
+            .or_default();
+        if !times.insert(local_time_ns) {
+            times.remove(&local_time_ns);
+        }
+        if times.is_empty() {
+            self.selected_keyframe_local_times.remove(clip_id);
+        }
+    }
+
+    fn begin_keyframe_marquee_selection(
+        &mut self,
+        clip_id: String,
+        track_id: String,
+        start_local_ns: u64,
+        additive: bool,
+    ) {
+        let base_times = if additive {
+            self.selected_keyframe_local_times_for_clip(&clip_id)
+        } else {
+            HashSet::new()
+        };
+        self.keyframe_marquee_selection = Some(KeyframeMarqueeSelection {
+            clip_id,
+            track_id,
+            start_local_ns,
+            current_local_ns: start_local_ns,
+            additive,
+            base_times,
+        });
+    }
+
+    fn update_keyframe_marquee_selection(&mut self, current_local_ns: u64) -> bool {
+        let Some(mut marquee) = self.keyframe_marquee_selection.clone() else {
+            return false;
+        };
+        marquee.current_local_ns = current_local_ns;
+        let low = marquee.start_local_ns.min(current_local_ns);
+        let high = marquee.start_local_ns.max(current_local_ns);
+        let times_in_range = {
+            let proj = self.project.borrow();
+            proj.tracks
+                .iter()
+                .find(|t| t.id == marquee.track_id)
+                .and_then(|track| track.clips.iter().find(|c| c.id == marquee.clip_id))
+                .map(|clip| collect_keyframe_local_times_in_range(clip, low, high))
+                .unwrap_or_default()
+        };
+        let mut next_times = if marquee.additive {
+            marquee.base_times.clone()
+        } else {
+            HashSet::new()
+        };
+        next_times.extend(times_in_range);
+        if next_times.is_empty() {
+            self.selected_keyframe_local_times.remove(&marquee.clip_id);
+        } else {
+            self.selected_keyframe_local_times
+                .insert(marquee.clip_id.clone(), next_times);
+        }
+        self.keyframe_marquee_selection = Some(marquee);
+        true
+    }
+
+    fn end_keyframe_marquee_selection(&mut self) {
+        self.keyframe_marquee_selection = None;
+    }
+
+    fn delete_selected_keyframes(&mut self) -> bool {
+        if self.selected_keyframe_local_times.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        let mut proj = self.project.borrow_mut();
+        for track in &mut proj.tracks {
+            for clip in &mut track.clips {
+                let Some(times) = self.selected_keyframe_local_times.get(&clip.id) else {
+                    continue;
+                };
+                let mut ordered_times = times.iter().copied().collect::<Vec<_>>();
+                ordered_times.sort_unstable();
+                for local_time_ns in ordered_times {
+                    if clip.remove_all_phase1_keyframes_at_local_ns(local_time_ns) > 0 {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            proj.dirty = true;
+        }
+        changed
+    }
+
+    fn set_selected_keyframe_interpolation(
+        &mut self,
+        interpolation: KeyframeInterpolation,
+    ) -> bool {
+        if self.selected_keyframe_local_times.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        let mut proj = self.project.borrow_mut();
+        for track in &mut proj.tracks {
+            for clip in &mut track.clips {
+                let Some(times) = self.selected_keyframe_local_times.get(&clip.id) else {
+                    continue;
+                };
+                let mut ordered_times = times.iter().copied().collect::<Vec<_>>();
+                ordered_times.sort_unstable();
+                for local_time_ns in ordered_times {
+                    if clip
+                        .set_phase1_keyframe_interpolation_at_local_ns(local_time_ns, interpolation)
+                        > 0
+                    {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            proj.dirty = true;
+        }
+        changed
     }
 
     fn is_clip_selected(&self, clip_id: &str) -> bool {
@@ -1799,13 +1985,6 @@ impl TimelineState {
         }
     }
 
-    /// Hit-test keyframe markers on clip bodies.
-    /// Returns (clip_id, track_id, timeline_ns) if a marker was clicked.
-    fn hit_test_keyframe_marker(&self, x: f64, y: f64) -> Option<(String, String, u64)> {
-        self.keyframe_marker_hit(x, y)
-            .map(|hit| (hit.clip_id, hit.track_id, hit.timeline_ns))
-    }
-
     fn keyframe_marker_hit(&self, x: f64, y: f64) -> Option<KeyframeMarkerHit> {
         let track_idx = self.track_index_at_y(y)?;
         let proj = self.project.borrow();
@@ -1849,6 +2028,7 @@ impl TimelineState {
                             clip_id: clip.id.clone(),
                             track_id: track.id.clone(),
                             clip_label: clip.label.clone(),
+                            local_time_ns,
                             timeline_ns,
                             impacted_properties: collect_keyframe_property_labels_at_local_time(
                                 clip,
@@ -2593,23 +2773,27 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                             || mods.contains(gtk::gdk::ModifierType::META_MASK);
                         // Select clip
-                        // First, check if a keyframe marker was clicked
-                        if let Some((kf_clip_id, kf_track_id, kf_timeline_ns)) =
-                            st.hit_test_keyframe_marker(x, y)
-                        {
-                            st.select_clip_with_modifiers(
-                                &kf_clip_id,
-                                &kf_track_id,
-                                shift,
-                                ctrl_or_meta,
+                        // First, check if a keyframe marker was clicked.
+                        if let Some(kf_hit) = st.keyframe_marker_hit(x, y) {
+                            st.set_single_clip_selection(
+                                kf_hit.clip_id.clone(),
+                                kf_hit.track_id.clone(),
                             );
-                            st.playhead_ns = kf_timeline_ns;
+                            if ctrl_or_meta {
+                                st.toggle_keyframe_selection(&kf_hit.clip_id, kf_hit.local_time_ns);
+                            } else {
+                                st.set_single_keyframe_selection(
+                                    kf_hit.clip_id.clone(),
+                                    kf_hit.local_time_ns,
+                                );
+                            }
+                            st.playhead_ns = kf_hit.timeline_ns;
                             let seek_cb = st.on_seek.clone();
                             let sel_cb = st.on_clip_selected.clone();
                             let new_sel = st.selected_clip_id.clone();
                             drop(st);
                             if let Some(cb) = seek_cb {
-                                cb(kf_timeline_ns);
+                                cb(kf_hit.timeline_ns);
                             }
                             if let Some(cb) = sel_cb {
                                 cb(new_sel);
@@ -2617,6 +2801,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             return;
                         }
                         let hit = st.hit_test(x, y);
+                        st.clear_keyframe_selection();
                         match hit {
                             Some(h) => {
                                 st.select_clip_with_modifiers(
@@ -2822,12 +3007,81 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     return;
                 }
 
+                let mods = gesture.current_event_state();
+                let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                    || mods.contains(gtk::gdk::ModifierType::META_MASK);
+                let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+
+                if st.active_tool == ActiveTool::Select {
+                    if let Some(kf_hit) = st.keyframe_marker_hit(x, y) {
+                        let mut selected_times =
+                            st.selected_keyframe_local_times_for_clip(&kf_hit.clip_id);
+                        if selected_times.is_empty()
+                            || !(ctrl_or_meta || shift)
+                            || !st.is_keyframe_local_time_selected(
+                                &kf_hit.clip_id,
+                                kf_hit.local_time_ns,
+                            )
+                        {
+                            selected_times.clear();
+                            selected_times.insert(kf_hit.local_time_ns);
+                        }
+                        let track_snapshot = {
+                            let proj = st.project.borrow();
+                            proj.tracks
+                                .iter()
+                                .find(|t| t.id == kf_hit.track_id)
+                                .map(|t| t.clips.clone())
+                                .unwrap_or_default()
+                        };
+                        st.set_single_clip_selection(
+                            kf_hit.clip_id.clone(),
+                            kf_hit.track_id.clone(),
+                        );
+                        st.selected_keyframe_local_times
+                            .insert(kf_hit.clip_id.clone(), selected_times.clone());
+                        let mut ordered_times = selected_times.into_iter().collect::<Vec<_>>();
+                        ordered_times.sort_unstable();
+                        st.drag_op = DragOp::MoveKeyframeColumns {
+                            clip_id: kf_hit.clip_id,
+                            track_id: kf_hit.track_id,
+                            original_track_clips: track_snapshot,
+                            original_selected_local_times: ordered_times,
+                            anchor_local_ns: kf_hit.local_time_ns,
+                        };
+                        return;
+                    }
+
+                    if alt {
+                        let hit = st.hit_test(x, y);
+                        if let Some(h) = hit {
+                            if h.zone == HitZone::Body {
+                                let local_ns = {
+                                    let timeline_ns = st.x_to_ns(x);
+                                    let proj = st.project.borrow();
+                                    proj.tracks
+                                        .iter()
+                                        .flat_map(|t| t.clips.iter())
+                                        .find(|c| c.id == h.clip_id)
+                                        .map(|clip| clip.local_timeline_position_ns(timeline_ns))
+                                        .unwrap_or(0)
+                                };
+                                st.set_single_clip_selection(h.clip_id.clone(), h.track_id.clone());
+                                st.begin_keyframe_marquee_selection(
+                                    h.clip_id,
+                                    h.track_id,
+                                    local_ns,
+                                    ctrl_or_meta,
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 let hit = st.hit_test(x, y);
                 if let Some(h) = hit {
-                    let mods = gesture.current_event_state();
-                    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-                    let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
-                        || mods.contains(gtk::gdk::ModifierType::META_MASK);
                     // Extract clip data before mutating st (avoids borrow conflict)
                     let (clip_data, track_snapshot) = {
                         let proj = st.project.borrow();
@@ -3563,9 +3817,75 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             *target_idx = new_target;
                         }
                     }
+                    DragOp::MoveKeyframeColumns {
+                        ref clip_id,
+                        ref track_id,
+                        ref original_track_clips,
+                        ref original_selected_local_times,
+                        anchor_local_ns,
+                    } => {
+                        let Some(original_clip) = original_track_clips
+                            .iter()
+                            .find(|c| &c.id == clip_id)
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        let clip_duration = original_clip.duration();
+                        if clip_duration == 0 {
+                            return;
+                        }
+                        let raw_local_ns = current_ns
+                            .saturating_sub(original_clip.timeline_start)
+                            .min(clip_duration);
+                        let delta = i128::from(raw_local_ns) - i128::from(anchor_local_ns);
+                        let mut source_times = original_selected_local_times.clone();
+                        source_times.sort_unstable();
+                        source_times.dedup();
+                        let move_map = source_times
+                            .into_iter()
+                            .map(|from| {
+                                let to = (i128::from(from) + delta)
+                                    .clamp(0, i128::from(clip_duration))
+                                    as u64;
+                                (from, to)
+                            })
+                            .collect::<Vec<_>>();
+                        let moved_times = move_map.iter().map(|(_, to)| *to).collect::<Vec<_>>();
+                        let mut proj = st.project.borrow_mut();
+                        if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
+                            if let Some(pos) = track.clips.iter().position(|c| &c.id == clip_id) {
+                                let mut moved = original_clip;
+                                moved.move_all_phase1_keyframes_local_ns(&move_map);
+                                track.clips[pos] = moved;
+                            }
+                        }
+                        drop(proj);
+                        let selected_times = st
+                            .selected_keyframe_local_times
+                            .entry(clip_id.clone())
+                            .or_default();
+                        selected_times.clear();
+                        selected_times.extend(moved_times);
+                    }
                     DragOp::None => {
                         if st.marquee_selection.is_some() {
                             st.update_marquee_selection(current_x, current_y);
+                        }
+                        if let Some(marquee) = st.keyframe_marquee_selection.clone() {
+                            let timeline_ns = st.x_to_ns(current_x);
+                            let current_local_ns = {
+                                let proj = st.project.borrow();
+                                proj.tracks
+                                    .iter()
+                                    .find(|t| t.id == marquee.track_id)
+                                    .and_then(|track| {
+                                        track.clips.iter().find(|c| c.id == marquee.clip_id)
+                                    })
+                                    .map(|clip| clip.local_timeline_position_ns(timeline_ns))
+                                    .unwrap_or(marquee.start_local_ns)
+                            };
+                            st.update_keyframe_marquee_selection(current_local_ns);
                         }
                     }
                 }
@@ -3585,6 +3905,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let had_marquee = st.marquee_selection.is_some();
                 if had_marquee {
                     st.end_marquee_selection();
+                }
+                let had_keyframe_marquee = st.keyframe_marquee_selection.is_some();
+                if had_keyframe_marquee {
+                    st.end_keyframe_marquee_selection();
                 }
                 let magnetic_mode = st.magnetic_mode;
 
@@ -4024,6 +4348,31 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
+                    DragOp::MoveKeyframeColumns {
+                        ref track_id,
+                        ref original_track_clips,
+                        ..
+                    } => {
+                        let new_track_clips = {
+                            let proj = st.project.borrow();
+                            proj.tracks
+                                .iter()
+                                .find(|t| &t.id == track_id)
+                                .map(|t| t.clips.clone())
+                                .unwrap_or_default()
+                        };
+                        if &new_track_clips != original_track_clips {
+                            let cmd = SetTrackClipsCommand {
+                                track_id: track_id.clone(),
+                                old_clips: original_track_clips.clone(),
+                                new_clips: new_track_clips,
+                                label: "Move keyframe columns".to_string(),
+                            };
+                            let project = st.project.clone();
+                            let mut proj = project.borrow_mut();
+                            st.history.execute(Box::new(cmd), &mut proj);
+                        }
+                    }
                     DragOp::None => {}
                 }
 
@@ -4032,7 +4381,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 } else {
                     None
                 };
-                let sel_cb = if had_marquee {
+                let sel_cb = if had_marquee || had_keyframe_marquee {
                     st.on_clip_selected.clone()
                 } else {
                     None
@@ -4140,9 +4489,50 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     true
                 }
                 Key::Delete | Key::BackSpace => {
-                    st.delete_selected();
-                    notify_project = true;
-                    true
+                    if st.has_selected_keyframes() {
+                        let changed = st.delete_selected_keyframes();
+                        if changed {
+                            st.clear_keyframe_selection();
+                            notify_project = true;
+                        }
+                        changed
+                    } else {
+                        st.delete_selected();
+                        notify_project = true;
+                        true
+                    }
+                }
+                Key::_1 | Key::KP_1 if !ctrl => {
+                    let changed =
+                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::Linear);
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::_2 | Key::KP_2 if !ctrl => {
+                    let changed =
+                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseIn);
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::_3 | Key::KP_3 if !ctrl => {
+                    let changed =
+                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseOut);
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::_4 | Key::KP_4 if !ctrl => {
+                    let changed =
+                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseInOut);
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
                 }
                 Key::Right if ctrl && shift => {
                     let changed = st.select_clips_forward_from_playhead();
@@ -4626,6 +5016,38 @@ fn draw_timeline(
             cr.set_line_width(1.5);
             cr.rectangle(left, top, right - left, bottom - top);
             cr.stroke().ok();
+        }
+    }
+
+    if let Some(km) = &st.keyframe_marquee_selection {
+        if let Some((track_idx, track)) = proj
+            .tracks
+            .iter()
+            .enumerate()
+            .find(|(_, t)| t.id == km.track_id)
+        {
+            if let Some(clip) = track.clips.iter().find(|c| c.id == km.clip_id) {
+                let duration_ns = clip.duration();
+                if duration_ns > 0 {
+                    let cx = st.ns_to_x(clip.timeline_start);
+                    let cw = (duration_ns as f64 / NS_PER_SECOND) * st.pixels_per_second;
+                    let x0 = cx + (km.start_local_ns as f64 / duration_ns as f64) * cw;
+                    let x1 = cx + (km.current_local_ns as f64 / duration_ns as f64) * cw;
+                    let left = x0.min(x1).max(TRACK_LABEL_WIDTH);
+                    let right = x0.max(x1);
+                    let top = track_row_top(&proj, track_idx) + 2.0;
+                    let bottom = top + track_row_height(track) - 4.0;
+                    if right > left && bottom > top {
+                        cr.set_source_rgba(1.0, 0.75, 0.22, 0.20);
+                        cr.rectangle(left, top, right - left, bottom - top);
+                        cr.fill().ok();
+                        cr.set_source_rgba(1.0, 0.85, 0.40, 0.95);
+                        cr.set_line_width(1.3);
+                        cr.rectangle(left, top, right - left, bottom - top);
+                        cr.stroke().ok();
+                    }
+                }
+            }
         }
     }
 }
@@ -5246,7 +5668,18 @@ fn draw_clip(
         cr.stroke().ok();
     }
 
-    draw_clip_keyframe_markers(cr, clip, cx, cy, cw, ch, view_width, is_selected);
+    let selected_keyframe_times = st.selected_keyframe_local_times_for_clip(&clip.id);
+    draw_clip_keyframe_markers(
+        cr,
+        clip,
+        cx,
+        cy,
+        cw,
+        ch,
+        view_width,
+        is_selected,
+        &selected_keyframe_times,
+    );
 
     if cw > 30.0 {
         let keyframe_count = clip_phase1_keyframe_count(clip);
@@ -5359,6 +5792,7 @@ fn draw_clip(
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ClipKeyframeMarkerGeometry {
     x: f64,
+    local_time_ns: u64,
     row: usize,
     color: (f64, f64, f64),
 }
@@ -5368,6 +5802,7 @@ struct KeyframeMarkerHit {
     clip_id: String,
     track_id: String,
     clip_label: String,
+    local_time_ns: u64,
     timeline_ns: u64,
     impacted_properties: Vec<&'static str>,
 }
@@ -5378,7 +5813,7 @@ fn clip_keyframe_lanes(
     &[crate::model::clip::NumericKeyframe],
     &'static str,
     (f64, f64, f64),
-); 11] {
+); 12] {
     [
         (&clip.scale_keyframes, "Scale", (1.0, 0.83, 0.30)),
         (&clip.opacity_keyframes, "Opacity", (0.94, 0.94, 0.94)),
@@ -5386,6 +5821,7 @@ fn clip_keyframe_lanes(
         (&clip.position_y_keyframes, "Position Y", (0.82, 0.62, 1.0)),
         (&clip.volume_keyframes, "Volume", (0.55, 1.0, 0.62)),
         (&clip.pan_keyframes, "Pan", (1.0, 0.66, 0.36)),
+        (&clip.speed_keyframes, "Speed", (0.98, 0.82, 0.35)),
         (&clip.rotate_keyframes, "Rotate", (1.0, 0.55, 0.85)),
         (&clip.crop_left_keyframes, "Crop Left", (1.0, 0.76, 0.36)),
         (&clip.crop_right_keyframes, "Crop Right", (1.0, 0.72, 0.33)),
@@ -5418,6 +5854,34 @@ fn collect_keyframe_property_labels_at_local_time(
         .collect()
 }
 
+fn collect_keyframe_local_times_in_range(
+    clip: &Clip,
+    low_local_ns: u64,
+    high_local_ns: u64,
+) -> HashSet<u64> {
+    let duration_ns = clip.duration();
+    if duration_ns == 0 {
+        return HashSet::new();
+    }
+    let low = low_local_ns.min(duration_ns);
+    let high = high_local_ns.min(duration_ns);
+    let (min_t, max_t) = if low <= high {
+        (low, high)
+    } else {
+        (high, low)
+    };
+    let mut times = HashSet::new();
+    for (keyframes, _label, _color) in clip_keyframe_lanes(clip) {
+        for kf in keyframes {
+            let t = kf.time_ns.min(duration_ns);
+            if t >= min_t && t <= max_t {
+                times.insert(t);
+            }
+        }
+    }
+    times
+}
+
 fn clip_keyframe_marker_geometry(
     clip: &Clip,
     cx: f64,
@@ -5446,6 +5910,7 @@ fn clip_keyframe_marker_geometry(
             if x >= view_left && x <= view_right {
                 markers.push(ClipKeyframeMarkerGeometry {
                     x,
+                    local_time_ns,
                     row,
                     color: *color,
                 });
@@ -5464,6 +5929,7 @@ fn draw_clip_keyframe_markers(
     ch: f64,
     view_width: f64,
     is_selected: bool,
+    selected_local_times: &HashSet<u64>,
 ) {
     if cw <= 10.0 || ch <= 10.0 {
         return;
@@ -5493,31 +5959,50 @@ fn draw_clip_keyframe_markers(
         if marker_y + marker_h > cy + ch - 1.0 {
             continue;
         }
+        let marker_selected = selected_local_times.contains(&marker.local_time_ns);
         let diamond_mid_y = cy + 4.5;
         cr.set_source_rgba(marker.color.0, marker.color.1, marker.color.2, alpha);
-        cr.move_to(marker.x, diamond_mid_y - 3.0);
-        cr.line_to(marker.x + 3.0, diamond_mid_y);
-        cr.line_to(marker.x, diamond_mid_y + 3.0);
-        cr.line_to(marker.x - 3.0, diamond_mid_y);
+        let diamond_half = if marker_selected { 4.2 } else { 3.0 };
+        cr.move_to(marker.x, diamond_mid_y - diamond_half);
+        cr.line_to(marker.x + diamond_half, diamond_mid_y);
+        cr.line_to(marker.x, diamond_mid_y + diamond_half);
+        cr.line_to(marker.x - diamond_half, diamond_mid_y);
         cr.close_path();
         cr.fill().ok();
-        cr.set_source_rgba(0.05, 0.05, 0.05, 0.65);
-        cr.set_line_width(0.9);
-        cr.move_to(marker.x, diamond_mid_y - 3.0);
-        cr.line_to(marker.x + 3.0, diamond_mid_y);
-        cr.line_to(marker.x, diamond_mid_y + 3.0);
-        cr.line_to(marker.x - 3.0, diamond_mid_y);
+        cr.set_source_rgba(
+            if marker_selected { 1.0 } else { 0.05 },
+            if marker_selected { 0.92 } else { 0.05 },
+            if marker_selected { 0.28 } else { 0.05 },
+            if marker_selected { 0.95 } else { 0.65 },
+        );
+        cr.set_line_width(if marker_selected { 1.2 } else { 0.9 });
+        cr.move_to(marker.x, diamond_mid_y - diamond_half);
+        cr.line_to(marker.x + diamond_half, diamond_mid_y);
+        cr.line_to(marker.x, diamond_mid_y + diamond_half);
+        cr.line_to(marker.x - diamond_half, diamond_mid_y);
         cr.close_path();
         cr.stroke().ok();
-        cr.set_source_rgba(1.0, 1.0, 1.0, if is_selected { 0.28 } else { 0.22 });
+        cr.set_source_rgba(
+            1.0,
+            1.0,
+            1.0,
+            if marker_selected {
+                0.52
+            } else if is_selected {
+                0.28
+            } else {
+                0.22
+            },
+        );
         cr.rectangle(marker.x - 0.5, cy + 1.0, 1.0, (ch - 2.0).max(1.0));
         cr.fill().ok();
         cr.set_source_rgba(marker.color.0, marker.color.1, marker.color.2, alpha);
-        cr.rectangle(marker.x - 1.5, marker_y, 3.0, marker_h);
+        let lane_w = if marker_selected { 4.0 } else { 3.0 };
+        cr.rectangle(marker.x - lane_w * 0.5, marker_y, lane_w, marker_h);
         cr.fill().ok();
         cr.set_source_rgba(0.05, 0.05, 0.05, 0.45);
         cr.set_line_width(0.8);
-        cr.rectangle(marker.x - 1.5, marker_y, 3.0, marker_h);
+        cr.rectangle(marker.x - lane_w * 0.5, marker_y, lane_w, marker_h);
         cr.stroke().ok();
     }
     cr.restore().ok();
@@ -5530,6 +6015,7 @@ fn clip_phase1_keyframe_count(clip: &Clip) -> usize {
         + clip.position_y_keyframes.len()
         + clip.volume_keyframes.len()
         + clip.pan_keyframes.len()
+        + clip.speed_keyframes.len()
         + clip.rotate_keyframes.len()
         + clip.crop_left_keyframes.len()
         + clip.crop_right_keyframes.len()
@@ -5801,10 +6287,25 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
             "Join selected through-edit boundary into one clip",
         ),
         ("Escape", "Switch to Select tool"),
-        ("Delete / Bksp", "Delete selected clip(s)"),
+        (
+            "Delete / Bksp",
+            "Delete selected clip(s), or selected keyframe column(s)",
+        ),
         (
             "Shift+Delete / Shift+Bksp",
             "Ripple delete selected clip(s)",
+        ),
+        (
+            "Drag keyframe marker",
+            "Move selected keyframe column(s) on the clip",
+        ),
+        (
+            "Alt+Drag clip body",
+            "Box-select keyframe columns within that clip",
+        ),
+        (
+            "1 / 2 / 3 / 4",
+            "Set selected keyframe interpolation (L/In/Out/InOut)",
         ),
         (
             "Shift+Click (Timeline)",
@@ -7286,13 +7787,14 @@ mod tests {
         clip.position_y_keyframes = vec![mk(0)];
         clip.volume_keyframes = vec![mk(0)];
         clip.pan_keyframes = vec![mk(0)];
+        clip.speed_keyframes = vec![mk(0)];
         clip.rotate_keyframes = vec![mk(0)];
         clip.crop_left_keyframes = vec![mk(0)];
         clip.crop_right_keyframes = vec![mk(0)];
         clip.crop_top_keyframes = vec![mk(0)];
         clip.crop_bottom_keyframes = vec![mk(0)];
 
-        assert_eq!(clip_phase1_keyframe_count(&clip), 11);
+        assert_eq!(clip_phase1_keyframe_count(&clip), 12);
     }
 
     #[test]
@@ -7326,5 +7828,39 @@ mod tests {
 
         let labels = collect_keyframe_property_labels_at_local_time(&clip, 1_000_000_000);
         assert_eq!(labels, vec!["Opacity", "Crop Bottom"]);
+    }
+
+    #[test]
+    fn collect_keyframe_local_times_in_range_merges_and_dedups_lanes() {
+        let mut clip = Clip::new("clip.mov", 2_000_000_000, 0, ClipKind::Video);
+        let mk = |time_ns| NumericKeyframe {
+            time_ns,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+        };
+        clip.scale_keyframes = vec![mk(100_000_000), mk(500_000_000), mk(1_200_000_000)];
+        clip.opacity_keyframes = vec![mk(500_000_000), mk(900_000_000)];
+        clip.pan_keyframes = vec![mk(1_900_000_000)];
+
+        let times = collect_keyframe_local_times_in_range(&clip, 400_000_000, 1_000_000_000);
+        assert_eq!(times.len(), 2);
+        assert!(times.contains(&500_000_000));
+        assert!(times.contains(&900_000_000));
+    }
+
+    #[test]
+    fn collect_keyframe_local_times_in_range_clamps_to_duration() {
+        let mut clip = Clip::new("clip.mov", 1_000_000_000, 0, ClipKind::Video);
+        let mk = |time_ns| NumericKeyframe {
+            time_ns,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+        };
+        clip.crop_left_keyframes = vec![mk(1_500_000_000)];
+        clip.crop_right_keyframes = vec![mk(2_500_000_000)];
+
+        let times = collect_keyframe_local_times_in_range(&clip, 900_000_000, 3_000_000_000);
+        assert_eq!(times.len(), 1);
+        assert!(times.contains(&1_000_000_000));
     }
 }

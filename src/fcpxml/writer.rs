@@ -153,6 +153,46 @@ pub fn write_fcpxml(project: &Project) -> Result<String> {
             asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
             asset_clip.push_attribute(("us:temperature", clip.temperature.to_string().as_str()));
             asset_clip.push_attribute(("us:tint", clip.tint.to_string().as_str()));
+            let brightness_keyframes_json = if clip.brightness_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.brightness_keyframes).ok()
+            };
+            if let Some(value) = brightness_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:brightness-keyframes", value));
+            }
+            let contrast_keyframes_json = if clip.contrast_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.contrast_keyframes).ok()
+            };
+            if let Some(value) = contrast_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:contrast-keyframes", value));
+            }
+            let saturation_keyframes_json = if clip.saturation_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.saturation_keyframes).ok()
+            };
+            if let Some(value) = saturation_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:saturation-keyframes", value));
+            }
+            let temperature_keyframes_json = if clip.temperature_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.temperature_keyframes).ok()
+            };
+            if let Some(value) = temperature_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:temperature-keyframes", value));
+            }
+            let tint_keyframes_json = if clip.tint_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.tint_keyframes).ok()
+            };
+            if let Some(value) = tint_keyframes_json.as_deref() {
+                asset_clip.push_attribute(("us:tint-keyframes", value));
+            }
             asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
             asset_clip.push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
             asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
@@ -620,6 +660,11 @@ fn patch_asset_clip_block_transform(
     updated_start = next;
 
     for (attr, value) in [
+        ("us:brightness", clip.brightness.to_string()),
+        ("us:contrast", clip.contrast.to_string()),
+        ("us:saturation", clip.saturation.to_string()),
+        ("us:temperature", clip.temperature.to_string()),
+        ("us:tint", clip.tint.to_string()),
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
@@ -633,7 +678,47 @@ fn patch_asset_clip_block_transform(
         updated_start = next;
     }
 
-    let keyframe_attrs: [(&str, Option<String>); 11] = [
+    let keyframe_attrs: [(&str, Option<String>); 16] = [
+        (
+            "us:brightness-keyframes",
+            if clip.brightness_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.brightness_keyframes).ok()
+            },
+        ),
+        (
+            "us:contrast-keyframes",
+            if clip.contrast_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.contrast_keyframes).ok()
+            },
+        ),
+        (
+            "us:saturation-keyframes",
+            if clip.saturation_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.saturation_keyframes).ok()
+            },
+        ),
+        (
+            "us:temperature-keyframes",
+            if clip.temperature_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.temperature_keyframes).ok()
+            },
+        ),
+        (
+            "us:tint-keyframes",
+            if clip.tint_keyframes.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&clip.tint_keyframes).ok()
+            },
+        ),
         (
             "us:scale-keyframes",
             if clip.scale_keyframes.is_empty() {
@@ -1305,6 +1390,13 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:brightness"
             | "us:contrast"
             | "us:saturation"
+            | "us:temperature"
+            | "us:tint"
+            | "us:brightness-keyframes"
+            | "us:contrast-keyframes"
+            | "us:saturation-keyframes"
+            | "us:temperature-keyframes"
+            | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
             | "us:volume"
@@ -1651,6 +1743,31 @@ mod tests {
             value: -0.25,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
         }];
+        clip.brightness_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 0,
+            value: -0.2,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.contrast_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.4,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.saturation_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.7,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.temperature_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 7500.0,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        clip.tint_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.3,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
@@ -1666,6 +1783,11 @@ mod tests {
         assert!(written.contains("us:position-x-keyframes="));
         assert!(written.contains("us:position-y-keyframes="));
         assert!(written.contains("us:volume-keyframes="));
+        assert!(written.contains("us:brightness-keyframes="));
+        assert!(written.contains("us:contrast-keyframes="));
+        assert!(written.contains("us:saturation-keyframes="));
+        assert!(written.contains("us:temperature-keyframes="));
+        assert!(written.contains("us:tint-keyframes="));
         assert!(written.contains("us:position-y=\"-0.5\""));
         assert!(written.contains("adjust-transform position=\"-16.666666"));
         assert!(written.contains(" scale=\"1.75 1.75\" rotation=\"0\""));

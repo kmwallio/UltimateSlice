@@ -801,6 +801,26 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:tint") {
                 clip.tint = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:brightness-keyframes") {
+                clip.brightness_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:contrast-keyframes") {
+                clip.contrast_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:saturation-keyframes") {
+                clip.saturation_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:temperature-keyframes") {
+                clip.temperature_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:tint-keyframes") {
+                clip.tint_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:denoise") {
                 clip.denoise = v.parse().unwrap_or(0.0);
             }
@@ -1667,6 +1687,13 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:brightness"
             | "us:contrast"
             | "us:saturation"
+            | "us:temperature"
+            | "us:tint"
+            | "us:brightness-keyframes"
+            | "us:contrast-keyframes"
+            | "us:saturation-keyframes"
+            | "us:temperature-keyframes"
+            | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
             | "us:volume"
@@ -2120,7 +2147,12 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
 }
 
 fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
-    const KEYFRAME_ATTR_PREFIXES: [&str; 11] = [
+    const KEYFRAME_ATTR_PREFIXES: [&str; 16] = [
+        "us:brightness-keyframes=\"",
+        "us:contrast-keyframes=\"",
+        "us:saturation-keyframes=\"",
+        "us:temperature-keyframes=\"",
+        "us:tint-keyframes=\"",
         "us:scale-keyframes=\"",
         "us:opacity-keyframes=\"",
         "us:position-x-keyframes=\"",
@@ -2436,7 +2468,13 @@ mod tests {
             <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s"
                         name="footage" us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
                         us:brightness="0.5" us:contrast="1.2" us:saturation="0.8"
+                        us:temperature="7200" us:tint="0.2"
                         us:opacity="0.9" us:speed="2.0"
+                        us:brightness-keyframes='[{"time_ns":0,"value":0.1,"interpolation":"linear"},{"time_ns":1000000000,"value":0.6,"interpolation":"linear"}]'
+                        us:contrast-keyframes='[{"time_ns":0,"value":1.0,"interpolation":"linear"},{"time_ns":1000000000,"value":1.8,"interpolation":"linear"}]'
+                        us:saturation-keyframes='[{"time_ns":0,"value":0.8,"interpolation":"linear"},{"time_ns":1000000000,"value":1.4,"interpolation":"linear"}]'
+                        us:temperature-keyframes='[{"time_ns":0,"value":3000.0,"interpolation":"linear"},{"time_ns":1000000000,"value":8200.0,"interpolation":"linear"}]'
+                        us:tint-keyframes='[{"time_ns":0,"value":-0.3,"interpolation":"linear"},{"time_ns":1000000000,"value":0.4,"interpolation":"linear"}]'
                         us:scale-keyframes='[{"time_ns":0,"value":1.0,"interpolation":"linear"},{"time_ns":1000000000,"value":1.5,"interpolation":"linear"}]'
                         us:opacity-keyframes='[{"time_ns":0,"value":1.0,"interpolation":"linear"},{"time_ns":500000000,"value":0.4,"interpolation":"linear"}]'
                         us:position-x-keyframes='[{"time_ns":0,"value":-0.5,"interpolation":"linear"},{"time_ns":1000000000,"value":0.5,"interpolation":"linear"}]'
@@ -2456,8 +2494,15 @@ mod tests {
         assert!((clip.brightness - 0.5).abs() < 1e-5);
         assert!((clip.contrast - 1.2).abs() < 1e-5);
         assert!((clip.saturation - 0.8).abs() < 1e-5);
+        assert!((clip.temperature - 7200.0).abs() < 1e-5);
+        assert!((clip.tint - 0.2).abs() < 1e-5);
         assert!((clip.opacity - 0.9).abs() < 1e-5);
         assert!((clip.speed - 2.0).abs() < 1e-5);
+        assert_eq!(clip.brightness_keyframes.len(), 2);
+        assert_eq!(clip.contrast_keyframes.len(), 2);
+        assert_eq!(clip.saturation_keyframes.len(), 2);
+        assert_eq!(clip.temperature_keyframes.len(), 2);
+        assert_eq!(clip.tint_keyframes.len(), 2);
         assert_eq!(clip.scale_keyframes.len(), 2);
         assert_eq!(clip.opacity_keyframes.len(), 2);
         assert_eq!(clip.position_x_keyframes.len(), 2);

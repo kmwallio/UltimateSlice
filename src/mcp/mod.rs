@@ -12,9 +12,11 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     ListTracks {
+        compact: bool,
         reply: SyncSender<Value>,
     },
     ListClips {
+        compact: bool,
         reply: SyncSender<Value>,
     },
     GetTimelineSettings {
@@ -289,6 +291,7 @@ pub enum McpCommand {
         source_in_ns: u64,
         source_out_ns: u64,
         track_index: Option<usize>,
+        timeline_pos_ns: Option<u64>,
         reply: SyncSender<Value>,
     },
     OverwriteClip {
@@ -296,6 +299,7 @@ pub enum McpCommand {
         source_in_ns: u64,
         source_out_ns: u64,
         track_index: Option<usize>,
+        timeline_pos_ns: Option<u64>,
         reply: SyncSender<Value>,
     },
     TakeScreenshot {

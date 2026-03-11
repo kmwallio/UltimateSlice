@@ -739,10 +739,10 @@ fn transcode_proxy(
         let proxy_dir = Path::new(&proxy_path).parent().unwrap_or(Path::new("."));
         if std::fs::create_dir_all(proxy_dir).is_err() {
             if owned_local {
-                log::warn!(
-                    "ProxyCache: local cache path unavailable, falling back to alongside-media cache for {}",
-                    source_path
-                );
+                log::info!(
+                        "ProxyCache: local cache path unavailable, falling back to alongside-media cache for {}",
+                        source_path
+                    );
             }
             continue;
         }
@@ -773,7 +773,7 @@ fn transcode_proxy(
         }
         let _ = std::fs::remove_file(&temp_proxy_path);
         if owned_local {
-            log::warn!(
+            log::info!(
                 "ProxyCache: local cache transcode failed, retrying alongside-media cache for {}",
                 source_path
             );

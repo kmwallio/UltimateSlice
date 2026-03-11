@@ -387,6 +387,7 @@ impl InspectorView {
                         &c.position_y_keyframes[..],
                         &c.volume_keyframes[..],
                         &c.pan_keyframes[..],
+                        &c.speed_keyframes[..],
                         &c.rotate_keyframes[..],
                         &c.crop_left_keyframes[..],
                         &c.crop_right_keyframes[..],
