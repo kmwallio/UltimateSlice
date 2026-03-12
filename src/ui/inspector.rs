@@ -1048,7 +1048,7 @@ pub fn build_inspector(
             cr.set_line_width(2.0);
             cr.stroke().ok();
             // Needle
-            let rad = (rotate_value.get() - 90.0).to_radians();
+            let rad = (-rotate_value.get() - 90.0).to_radians();
             let nx = cx + rad.cos() * (r - 8.0);
             let ny = cy + rad.sin() * (r - 8.0);
             cr.move_to(cx, cy);
@@ -3028,7 +3028,7 @@ fn dial_point_to_degrees(x: f64, y: f64, width: f64, height: f64) -> i32 {
     if deg > 180.0 {
         deg -= 360.0;
     }
-    deg.round().clamp(-180.0, 180.0) as i32
+    -(deg.round().clamp(-180.0, 180.0) as i32)
 }
 
 fn row_label(parent: &GBox, text: &str) {

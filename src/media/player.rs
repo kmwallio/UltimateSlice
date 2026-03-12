@@ -745,9 +745,9 @@ impl Player {
         }
         if let Some(ref vfr) = self.videoflip_rotate {
             let method = match rotate {
-                90 => "clockwise",
-                180 => "rotate-180",
-                270 => "counterclockwise",
+                90 => "counterclockwise",
+                -90 | 270 => "clockwise",
+                180 | -180 => "rotate-180",
                 _ => "none",
             };
             vfr.set_property_from_str("method", method);

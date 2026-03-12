@@ -5604,13 +5604,13 @@ impl ProgramPlayer {
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
             if vfr.find_property("angle").is_some() {
-                // UI positive rotation is clockwise; GstRotate positive is counterclockwise.
-                vfr.set_property("angle", -(rotate as f64).to_radians());
+                // UI positive rotation is counterclockwise, matching GstRotate.
+                vfr.set_property("angle", (rotate as f64).to_radians());
             } else {
                 let method = match rotate.rem_euclid(360) {
-                    90 => "clockwise",
+                    90 => "counterclockwise",
                     180 => "rotate-180",
-                    270 => "counterclockwise",
+                    270 => "clockwise",
                     _ => "none",
                 };
                 vfr.set_property_from_str("method", method);

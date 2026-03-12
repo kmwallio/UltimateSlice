@@ -203,7 +203,7 @@ impl TransformOverlay {
                 let s = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
-                let rot_rad = rotation.get().to_radians();
+                let rot_rad = (-rotation.get()).to_radians();
 
                 // Clip bounding box in widget space (same formula as draw_overlay)
                 let cx = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
@@ -405,7 +405,7 @@ impl TransformOverlay {
                 let Some(ref ds) = *ds_borrow else {
                     return;
                 };
-                let rot_rad = rotation_for_drag.get().to_radians();
+                let rot_rad = (-rotation_for_drag.get()).to_radians();
                 let local_dx = off_x * rot_rad.cos() + off_y * rot_rad.sin();
                 let local_dy = -off_x * rot_rad.sin() + off_y * rot_rad.cos();
 
@@ -425,7 +425,7 @@ impl TransformOverlay {
                         if deg > 180.0 {
                             deg -= 360.0;
                         }
-                        let deg = deg.round().clamp(-180.0, 180.0);
+                        let deg = -(deg.round().clamp(-180.0, 180.0));
                         rotation_for_drag.set(deg);
                         on_rotate_change(deg as i32);
                     }
@@ -918,7 +918,7 @@ fn draw_overlay(
     let right = cx + hw;
     let top = cy - hh;
     let bottom = cy + hh;
-    let rot_rad = rotation_deg.to_radians();
+    let rot_rad = (-rotation_deg).to_radians();
     let (crop_l_px, crop_r_px, crop_t_px, crop_b_px) = crop_insets_to_overlay_px(
         crop_left,
         crop_right,

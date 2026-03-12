@@ -271,7 +271,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 } else {
                     format_ref
                 };
-                let clip_tc = if clip_has_video {
+                let clip_tc = if clip_has_video || clip_is_audio_only {
                     clip_media.and_then(|m| m.timecode_ns)
                 } else {
                     None
@@ -318,8 +318,22 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
 
                 // Asset-clip start: position in the asset's source timeline.
                 let start = if clip_is_audio_only {
-                    // Audio-only: use audio time base (48kHz).
-                    ns_to_fcpxml_time(clip.source_in, clip_fps)
+                    // Audio-only: BWF timecode + source_in, in 48kHz time base.
+                    let source_start = clip_tc
+                        .map(|tc| {
+                            let tc_samples = (tc * clip_fps.numerator as u64
+                                + clip_fps.denominator as u64 * 500_000_000)
+                                / (clip_fps.denominator as u64 * 1_000_000_000);
+                            let in_samples = (clip.source_in * clip_fps.numerator as u64
+                                + clip_fps.denominator as u64 * 500_000_000)
+                                / (clip_fps.denominator as u64 * 1_000_000_000);
+                            (tc_samples + in_samples)
+                                * clip_fps.denominator as u64
+                                * 1_000_000_000
+                                / clip_fps.numerator as u64
+                        })
+                        .unwrap_or(clip.source_in);
+                    ns_to_fcpxml_time(source_start, clip_fps)
                 } else {
                     let source_start = clip_tc
                         .or(clip.source_timecode_base_ns)
@@ -1840,6 +1854,8 @@ fn build_export_context(project: &Project) -> ExportContext {
                     id
                 });
                 let duration_ns = probe_audio_duration(source);
+                // BWF time_reference (in samples) → nanoseconds for asset start.
+                let timecode_ns = probe_audio_time_reference(source);
                 media_map.insert(
                     source.to_string(),
                     MediaExportInfo {
@@ -1848,7 +1864,7 @@ fn build_export_context(project: &Project) -> ExportContext {
                             numerator: 48000,
                             denominator: 1,
                         },
-                        timecode_ns: None,
+                        timecode_ns,
                         width: 0,
                         height: 0,
                         is_audio_only: true,
@@ -1931,6 +1947,29 @@ fn probe_audio_duration(path: &str) -> Option<u64> {
     let text = String::from_utf8_lossy(&output.stdout);
     let secs: f64 = text.trim().parse().ok()?;
     Some((secs * 1_000_000_000.0) as u64)
+}
+
+/// Probe an audio file for BWF time_reference (sample offset timecode).
+/// Returns the timecode in nanoseconds (at 48kHz: samples * 1e9 / 48000).
+fn probe_audio_time_reference(path: &str) -> Option<u64> {
+    use std::process::Command;
+    let output = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-show_entries", "format_tags=time_reference",
+            "-of", "csv=p=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let samples: u64 = text.trim().parse().ok()?;
+    if samples == 0 {
+        return None;
+    }
+    // Convert samples at 48kHz to nanoseconds.
+    // Use integer division that round-trips through ns_to_fcpxml_time.
+    Some(samples * 1_000_000_000 / 48000)
 }
 
 /// Probe a media file with ffprobe to get native frame rate, resolution, and embedded timecode.
@@ -2148,7 +2187,11 @@ fn write_resources(
                 .map(|m| m.format_id.as_str())
                 .unwrap_or("r1");
             let asset_start = if is_audio_only {
-                "0s".to_string()
+                // Audio-only: use BWF time_reference if available.
+                media_info
+                    .and_then(|m| m.timecode_ns)
+                    .map(|ns| ns_to_fcpxml_time(ns, asset_fps))
+                    .unwrap_or_else(|| "0s".to_string())
             } else {
                 media_info
                     .and_then(|m| m.timecode_ns)
