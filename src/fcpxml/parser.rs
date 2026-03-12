@@ -358,6 +358,14 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         let attrs = parse_attrs(e)?;
                         apply_adjust_crop(&attrs, clip_stack.last(), &mut track_map);
                     }
+                    "audio-channel-source" if in_spine && clip_stack.last().is_some() => {
+                        // FCP nests volume/pan keyframes inside audio-channel-source.
+                        let native = parse_audio_channel_source_children(&mut reader)?;
+                        if let Some(ctx) = clip_stack.last() {
+                            apply_native_volume_keyframes(&native, ctx, &mut track_map);
+                            apply_native_pan_keyframes(&native, ctx, &mut track_map);
+                        }
+                    }
                     "marker" | "chapter-marker" if in_selected_sequence => {
                         let attrs = parse_attrs(e)?;
                         parse_sequence_marker(
@@ -1683,6 +1691,55 @@ fn parse_adjust_blend_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyfr
                 depth = depth.saturating_sub(1);
             }
             Event::Eof => bail!("Unexpected EOF inside <adjust-blend>"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(result)
+}
+
+/// Parse children of `<audio-channel-source>`.
+/// FCP nests `<adjust-volume>` and `<adjust-panner>` (with keyframes) inside this element.
+fn parse_audio_channel_source_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyframeParams> {
+    let mut result = NativeKeyframeParams::default();
+    let mut buf = Vec::new();
+    let mut depth = 1usize;
+
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                match name {
+                    "adjust-volume" if depth == 1 => {
+                        let child = parse_adjust_volume_children(reader)?;
+                        result.volume_keyframes.extend(child.volume_keyframes);
+                    }
+                    "adjust-panner" if depth == 1 => {
+                        let child = parse_adjust_panner_children(reader)?;
+                        result.pan_keyframes.extend(child.pan_keyframes);
+                    }
+                    _ => {
+                        // Skip unknown child element entirely
+                        let mut skip_depth = 1usize;
+                        let mut skip_buf = Vec::new();
+                        while skip_depth > 0 {
+                            match reader.read_event_into(&mut skip_buf)? {
+                                Event::Start(_) => skip_depth += 1,
+                                Event::End(_) => skip_depth -= 1,
+                                Event::Eof => bail!("Unexpected EOF skipping inside <audio-channel-source>"),
+                                _ => {}
+                            }
+                            skip_buf.clear();
+                        }
+                    }
+                }
+            }
+            Event::Empty(_) => {}
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => bail!("Unexpected EOF inside <audio-channel-source>"),
             _ => {}
         }
         buf.clear();
@@ -4484,5 +4541,52 @@ mod tests {
             .find(|c| c.label == "ConnectedAudio")
             .expect("connected audio clip");
         assert_eq!(connected_a.timeline_start, 0);
+    }
+
+    #[test]
+    fn test_parse_volume_keyframes_inside_audio_channel_source() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s" hasAudio="1"/>
+  </resources>
+  <project name="FCP AudioChannelSource">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <audio-channel-source srcCh="1, 2" role="dialogue.dialogue-1">
+            <adjust-volume>
+              <param name="amount">
+                <keyframeAnimation>
+                  <keyframe time="0s" value="0dB"/>
+                  <keyframe time="3s" value="-14.5dB"/>
+                  <keyframe time="5s" value="-96dB"/>
+                </keyframeAnimation>
+              </param>
+            </adjust-volume>
+          </audio-channel-source>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let track = project.tracks.iter().find(|t| !t.clips.is_empty()).unwrap();
+        let clip = &track.clips[0];
+
+        assert_eq!(
+            clip.volume_keyframes.len(),
+            3,
+            "expected 3 volume keyframes from audio-channel-source"
+        );
+        assert_eq!(clip.volume_keyframes[0].time_ns, 0);
+        assert!((clip.volume_keyframes[0].value - 1.0).abs() < 0.01);
+        assert_eq!(clip.volume_keyframes[1].time_ns, 3_000_000_000);
+        // -14.5dB ≈ 0.1884 linear
+        assert!(clip.volume_keyframes[1].value > 0.1 && clip.volume_keyframes[1].value < 0.3);
+        assert_eq!(clip.volume_keyframes[2].time_ns, 5_000_000_000);
+        assert!((clip.volume_keyframes[2].value - 0.0).abs() < 0.01);
     }
 }
