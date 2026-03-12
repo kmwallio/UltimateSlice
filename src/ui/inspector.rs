@@ -637,6 +637,14 @@ pub fn build_inspector(
     let color_inner = GBox::new(Orientation::Vertical, 8);
     color_expander.set_child(Some(&color_inner));
 
+    row_label(&color_inner, "Exposure");
+    let exposure_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    exposure_slider.set_value(0.0);
+    exposure_slider.set_draw_value(true);
+    exposure_slider.set_digits(2);
+    exposure_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&exposure_slider);
+
     row_label(&color_inner, "Brightness");
     let brightness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     brightness_slider.set_value(0.0);
@@ -676,6 +684,14 @@ pub fn build_inspector(
     tint_slider.set_digits(2);
     tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&tint_slider);
+
+    row_label(&color_inner, "Black Point");
+    let black_point_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    black_point_slider.set_value(0.0);
+    black_point_slider.set_draw_value(true);
+    black_point_slider.set_digits(2);
+    black_point_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&black_point_slider);
 
     let ds_title = Label::new(Some("Denoise / Sharpness"));
     ds_title.set_halign(gtk::Align::Start);
@@ -726,22 +742,6 @@ pub fn build_inspector(
     highlights_slider.set_digits(2);
     highlights_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&highlights_slider);
-
-    row_label(&color_inner, "Exposure");
-    let exposure_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
-    exposure_slider.set_value(0.0);
-    exposure_slider.set_draw_value(true);
-    exposure_slider.set_digits(2);
-    exposure_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&exposure_slider);
-
-    row_label(&color_inner, "Black Point");
-    let black_point_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
-    black_point_slider.set_value(0.0);
-    black_point_slider.set_draw_value(true);
-    black_point_slider.set_digits(2);
-    black_point_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&black_point_slider);
 
     row_label(&color_inner, "Highlights Warmth");
     let highlights_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);

@@ -26,12 +26,12 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 
 | Slider | Range | Default | Effect |
 |---|---|---|---|
+| **Exposure** | −1.0 → 1.0 | 0.0 | Overall exposure compensation |
 | **Brightness** | −1.0 → 1.0 | 0.0 | Additive luminance shift |
 | **Contrast** | 0.0 → 2.0 | 1.0 | Contrast multiplier |
 | **Saturation** | 0.0 → 2.0 | 1.0 | 0 = greyscale, 2 = vivid |
 | **Temperature** | 2000 → 10000 K | 6500 | Color temperature: low = warm/amber, high = cool/blue |
 | **Tint** | −1.0 → 1.0 | 0.0 | Green–magenta axis: negative = green, positive = magenta |
-| **Exposure** | −1.0 → 1.0 | 0.0 | Overall exposure compensation |
 | **Black Point** | −1.0 → 1.0 | 0.0 | Lifts or crushes black levels |
 | **Highlights Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in highlights (left = cooler, right = warmer) |
 | **Highlights Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in highlights |
