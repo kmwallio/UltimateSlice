@@ -164,6 +164,11 @@ Tracking docs:
 - [x] MCP parity retry hardening: calibration/smoke tools now support median-attempt sample + neutral-baseline retries (`--sample-retries`, `--neutral-baseline-retries`) to reduce stale-frame outlier noise
 - [x] MCP parity LUT coverage: calibration/smoke tools now support `--lut-path` so parity sweeps can include clip-level `.cube` LUT processing in both preview and export
 - [x] MCP parity LUT/proxy correctness: calibration/smoke tools now support `--proxy-mode`, and LUT runs auto-switch to proxy-backed capture when proxy mode is Off
+- [x] MCP parity signed-bias telemetry: calibration reports now include signed per-channel bias (`export - preview`) for neutral/sample captures and slider-level mean signed-bias summaries for direction-aware fitting
+- [x] MCP parity baseline-vs-candidate comparator: `tools/compare_mcp_parity_reports.py` scores retune candidates and enforces endpoint regression guardrails for risky controls
+- [x] MCP parity multi-profile comparator: `tools/compare_mcp_parity_profiles.py` gates candidates across multiple baseline/candidate report pairs with per-profile + aggregate scoring
+- [x] MCP parity cool-side temperature harmonization: export coloradj bridge now applies a conservative cool-only gain via `ProgramPlayer::export_temperature_parity_gain`
+- [x] MCP parity retune-cycle wrapper: `tools/run_mcp_parity_retune_cycle.py` runs sweep + single-profile compare + multi-profile compare in one command, with optional profile weights and automatic temperature endpoint guardrails
 - [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach

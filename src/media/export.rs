@@ -1118,7 +1118,7 @@ fn build_grading_filter_with_caps(
         || clip.shadows_tint != 0.0;
     if has_grading {
         if let Some(module) = &caps.three_point_frei0r_module {
-            let p = ProgramPlayer::compute_3point_params(
+            let p = ProgramPlayer::compute_export_3point_params(
                 clip.shadows as f64,
                 clip.midtones as f64,
                 clip.highlights as f64,
@@ -1198,7 +1198,7 @@ fn compute_export_coloradj_params(
     // FFmpeg frei0r implementations can diverge from preview at stronger
     // temperature/tint settings; apply a conservative attenuation of deltas
     // from neutral to better align cross-runtime behavior.
-    let temp_gain = 1.0;
+    let temp_gain = ProgramPlayer::export_temperature_parity_gain(temperature);
     let tint_gain = if tint < 0.0 {
         0.60
     } else if tint > 0.0 {

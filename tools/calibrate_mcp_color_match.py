@@ -198,6 +198,16 @@ def compute_rmse(a: np.ndarray, b: np.ndarray) -> dict:
     }
 
 
+def compute_signed_bias(preview_rgb: np.ndarray, export_rgb: np.ndarray) -> dict:
+    diff = export_rgb.astype(np.float64) - preview_rgb.astype(np.float64)
+    return {
+        "r": float(np.mean(diff[..., 0])),
+        "g": float(np.mean(diff[..., 1])),
+        "b": float(np.mean(diff[..., 2])),
+        "total_mean_abs": float(np.mean(np.abs(diff))),
+    }
+
+
 def extract_export_frame(export_video_path: Path, out_png: Path, seek_seconds: float) -> None:
     run(
         [
@@ -564,7 +574,8 @@ def main() -> int:
                 dtype=np.float32,
             )
         neutral_rmse = compute_rmse(neutral_preview_img, neutral_export_img)
-        neutral_candidates.append({"attempt": attempt, "rmse": neutral_rmse})
+        neutral_bias = compute_signed_bias(neutral_preview_img, neutral_export_img)
+        neutral_candidates.append({"attempt": attempt, "rmse": neutral_rmse, "bias": neutral_bias})
         if neutral_rmse["total"] <= 40.0:
             break
         if attempt <= args.neutral_baseline_retries:
@@ -580,6 +591,7 @@ def main() -> int:
         "attempt": best_neutral["attempt"],
         "attempts_considered": neutral_candidates,
         "rmse": neutral_rmse,
+        "bias": best_neutral["bias"],
         "pass_absolute": neutral_rmse_total <= args.threshold_total_rmse,
         "pass_delta": True,
         "pass": neutral_rmse_total <= args.threshold_total_rmse,
@@ -638,7 +650,8 @@ def main() -> int:
                     )
 
                 rmse = compute_rmse(preview_img, export_img)
-                attempts.append({"attempt": attempt, "rmse": rmse})
+                bias = compute_signed_bias(preview_img, export_img)
+                attempts.append({"attempt": attempt, "rmse": rmse, "bias": bias})
                 if attempt < max_attempts:
                     print(
                         f"{slider:18s} {value:+.3f}  retry {attempt}/{max_attempts-1} "
@@ -647,6 +660,7 @@ def main() -> int:
 
             best = select_median_attempt(attempts)
             rmse = best["rmse"]
+            bias = best["bias"]
             selected_attempt = best["attempt"]
             print(
                 f"{slider:18s} {value:+.3f}  rmse={rmse['total']:.3f}"
@@ -659,6 +673,7 @@ def main() -> int:
                 {
                     "value": value,
                     "rmse": rmse,
+                    "bias": bias,
                     "delta_from_neutral_total_rmse": delta_total,
                     "attempts": max_attempts,
                     "selected_attempt": selected_attempt,
@@ -676,6 +691,12 @@ def main() -> int:
                 "mean_total_rmse": float(np.mean([r["rmse"]["total"] for r in slider_rows])),
                 "max_total_rmse": float(np.max([r["rmse"]["total"] for r in slider_rows])),
                 "min_total_rmse": float(np.min([r["rmse"]["total"] for r in slider_rows])),
+                "mean_signed_bias_r": float(np.mean([r["bias"]["r"] for r in slider_rows])),
+                "mean_signed_bias_g": float(np.mean([r["bias"]["g"] for r in slider_rows])),
+                "mean_signed_bias_b": float(np.mean([r["bias"]["b"] for r in slider_rows])),
+                "mean_total_mean_abs_bias": float(
+                    np.mean([r["bias"]["total_mean_abs"] for r in slider_rows])
+                ),
                 "mean_abs_delta_from_neutral_total_rmse": float(
                     np.mean([abs(r["delta_from_neutral_total_rmse"]) for r in slider_rows])
                 ),

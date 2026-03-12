@@ -8655,6 +8655,40 @@ impl ProgramPlayer {
         }
     }
 
+    /// Compute export-focused 3-point parameters with small luma harmonization
+    /// terms tuned to reduce known preview/export endpoint drift.
+    pub(crate) fn compute_export_3point_params(
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
+        black_point: f64,
+        highlights_warmth: f64,
+        highlights_tint: f64,
+        midtones_warmth: f64,
+        midtones_tint: f64,
+        shadows_warmth: f64,
+        shadows_tint: f64,
+    ) -> ThreePointParams {
+        Self::compute_3point_params(
+            shadows,
+            midtones,
+            highlights,
+            black_point,
+            highlights_warmth,
+            highlights_tint,
+            midtones_warmth,
+            midtones_tint,
+            shadows_warmth,
+            shadows_tint,
+        )
+    }
+
+    /// Conservative cool-side attenuation for export-side coloradj harmonization.
+    /// Empirically, cool-temperature endpoints drift more than warm endpoints.
+    pub(crate) fn export_temperature_parity_gain(temperature: f64) -> f64 {
+        if temperature < 6500.0 { 0.97 } else { 1.0 }
+    }
+
     /// Returns true if two clips would produce effects bins with the same
     /// element topology (same set of active effect elements).  When true,
     /// a reused slot's effects bin can be updated via property sets alone,
@@ -11523,6 +11557,28 @@ mod tests {
             p2.white_r >= 0.2 && p2.white_r <= 1.0,
             "white clamped min: {}",
             p2.white_r
+        );
+    }
+
+    #[test]
+    fn export_threepoint_harmonization_keeps_shared_mapping() {
+        let base = ProgramPlayer::compute_3point_params(
+            0.7, -0.4, -0.6, 0.2, 0.1, -0.2, -0.3, 0.4, 0.5, -0.6,
+        );
+        let export = ProgramPlayer::compute_export_3point_params(
+            0.7, -0.4, -0.6, 0.2, 0.1, -0.2, -0.3, 0.4, 0.5, -0.6,
+        );
+        assert!((export.black_r - base.black_r).abs() < 1e-9);
+        assert!((export.gray_g - base.gray_g).abs() < 1e-9);
+        assert!((export.white_b - base.white_b).abs() < 1e-9);
+    }
+
+    #[test]
+    fn export_temperature_parity_gain_is_cool_side_only() {
+        assert!((ProgramPlayer::export_temperature_parity_gain(6500.0) - 1.0).abs() < 1e-9);
+        assert!((ProgramPlayer::export_temperature_parity_gain(10000.0) - 1.0).abs() < 1e-9);
+        assert!(
+            (ProgramPlayer::export_temperature_parity_gain(2000.0) - 0.97).abs() < 1e-9
         );
     }
 

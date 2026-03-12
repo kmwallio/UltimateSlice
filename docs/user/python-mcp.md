@@ -62,6 +62,7 @@ printf '%s\n' \
   - Supports export capture modes: default `--export-mode mp4` or low-loss `--export-mode prores_mov` (via MCP export preset).
   - Uses repeated seek/settle stabilization (configurable with `--seek-repeats`) and re-applies each sample state before export capture to reduce stale-frame races.
   - Captures a neutral baseline RMSE first, then records per-sample deltas from neutral to help separate global baseline offset from control-specific divergence.
+  - Reports now include signed preview/export bias (`bias`) per sample and neutral baseline (`export - preview`) to support direction-aware calibration fitting.
   - Writes three pass signals per sample: `pass_absolute` (`--threshold-total-rmse`), `pass_delta` (`--threshold-delta-rmse`), and combined `pass`.
   - Includes default-sample stale-frame retry protection (`--default-sample-retries`) and reports frei0r compatibility diagnostics (`three_point_balance` naming on FFmpeg).
 - `python3 tools/mcp_parity_smoke_check.py --media Sample-Media/calibration_chart.mp4`
@@ -70,6 +71,18 @@ printf '%s\n' \
   - Supports `--sliders ...` passthrough for targeted smoke checks on specific controls.
   - Also forwards `--sample-retries`, `--neutral-baseline-retries`, `--lut-path`, and `--proxy-mode`.
   - Supports multiple media clips in one pass by repeating `--media`; each run writes a per-media report and one aggregate summary (`smoke_aggregate_report.json`) with mean guardrails.
+- `python3 tools/compare_mcp_parity_reports.py --baseline <report-or-dir> --candidate <report-or-dir>`
+  - Compares two calibration reports with weighted improvement scoring (`mean_abs_delta` + `max_abs_delta`) and endpoint guardrails.
+  - Default guardrails protect historically fragile endpoints: `shadows +1`, `midtones -1`, `highlights -1`.
+  - Use repeatable `--guardrail slider:value:max_regression` for custom thresholds and `--out` to save a JSON decision artifact.
+- `python3 tools/compare_mcp_parity_profiles.py --profile chart <base> <cand> --profile natural <base> <cand>`
+  - Runs the same comparator logic across multiple media profiles and computes weighted aggregate score.
+  - Candidate passes only if each profile passes its score/guardrails and aggregate weighted score meets threshold.
+  - Optional `--profile-weight name=weight` supports profile weighting (for example, bias toward natural-footage parity).
+- `python3 tools/run_mcp_parity_retune_cycle.py --profile-media chart=... --baseline-report chart=... --profile-media natural=... --baseline-report natural=... --out /tmp/us_retune_cycle`
+  - One-command loop: runs focused calibration sweeps per profile, single-profile comparison gates, then multi-profile aggregate gate.
+  - Automatically adds temperature endpoint guardrails (`temperature@2000`, `temperature@10000`) unless `--no-temperature-guardrails` is set.
+  - Writes per-profile compare artifacts plus `retune_cycle_summary.json`.
 
 Example multi-media smoke run:
 
