@@ -234,13 +234,29 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     .as_deref()
                     .unwrap_or(&clip.source_path);
                 let clip_media = export_ctx.as_ref().and_then(|ctx| ctx.media.get(clip_source));
-                let clip_fps = clip_media
-                    .map(|m| &m.fps)
-                    .unwrap_or(&project.frame_rate);
-                let clip_format = clip_media
-                    .map(|m| m.format_id.as_str())
-                    .unwrap_or(format_ref);
-                let clip_tc = clip_media.and_then(|m| m.timecode_ns);
+                let clip_has_video = clip_media
+                    .map(|m| m.width > 0 && m.height > 0)
+                    .unwrap_or(clip.kind != crate::model::clip::ClipKind::Audio);
+                // Audio-only assets have no video format; use sequence format for timing.
+                let clip_fps = if clip_has_video {
+                    clip_media
+                        .map(|m| &m.fps)
+                        .unwrap_or(&project.frame_rate)
+                } else {
+                    &project.frame_rate
+                };
+                let clip_format = if clip_has_video {
+                    clip_media
+                        .map(|m| m.format_id.as_str())
+                        .unwrap_or(format_ref)
+                } else {
+                    format_ref
+                };
+                let clip_tc = if clip_has_video {
+                    clip_media.and_then(|m| m.timecode_ns)
+                } else {
+                    None
+                };
 
                 let offset = if let Some(parent) = parent_clip {
                     // Connected clip: offset in parent's source time space.
@@ -1778,13 +1794,24 @@ fn build_export_context(project: &Project) -> ExportContext {
             }
 
             let probed = probe_media_format(source);
-            let (fps_num, fps_den, media_w, media_h, probed_tc) = probed.unwrap_or((
-                project.frame_rate.numerator,
-                project.frame_rate.denominator,
-                project.width,
-                project.height,
-                None,
-            ));
+            let (fps_num, fps_den, media_w, media_h, probed_tc) = match probed {
+                Some(result) => result,
+                None => {
+                    // Probe failed — use clip kind to infer media type.
+                    let (w, h) = if clip.kind == crate::model::clip::ClipKind::Audio {
+                        (0, 0) // Audio-only: no video dimensions.
+                    } else {
+                        (project.width, project.height)
+                    };
+                    (
+                        project.frame_rate.numerator,
+                        project.frame_rate.denominator,
+                        w,
+                        h,
+                        None,
+                    )
+                }
+            };
 
             let fps_key = (fps_num, fps_den);
             let format_id = fps_to_format
