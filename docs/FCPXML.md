@@ -1963,13 +1963,13 @@ FCP wraps keyframed volume and pan adjustments inside `<audio-channel-source>` e
 
 **FCP's format**:
 ```xml
-<asset-clip ref="a1" offset="0s" duration="10s">
+<asset-clip ref="a1" offset="0s" start="1734122390/24000s" duration="10s">
   <audio-channel-source srcCh="1, 2" role="dialogue">
     <adjust-volume>
       <param name="amount">
         <keyframeAnimation>
-          <keyframe time="0s" value="0dB"/>
-          <keyframe time="3s" value="-14.5dB"/>
+          <keyframe time="52023671700/720000s" value="0dB"/>
+          <keyframe time="52024956360/720000s" value="-14.5dB"/>
         </keyframeAnimation>
       </param>
     </adjust-volume>
@@ -1981,7 +1981,32 @@ FCP wraps keyframed volume and pan adjustments inside `<audio-channel-source>` e
 
 **Export (strict)**: When a clip has volume or pan keyframes, the strict writer wraps them in `<audio-channel-source srcCh="1, 2" role="dialogue">`. Flat (non-keyframed) volume and pan are emitted as direct `<adjust-volume amount="..."/>` and `<adjust-panner amount="..."/>` children of the asset-clip.
 
-### 20.8 Strict Writer Element Order
+### 20.8 Keyframe Time Coordinate Space
+
+FCP emits keyframe `time` values in **absolute source media time** — the same coordinate space as the asset-clip's `start` attribute. This means keyframes for a clip whose media starts at timecode `20:13:33:07` will have times around 72813 seconds, not 0.
+
+UltimateSlice stores keyframes in **clip-local time** (0 = clip start). The conversion is:
+
+**Import (FCP → UltimateSlice)**:
+```
+clip_local_time = keyframe_time - source_in
+```
+Where `source_in` is the clip's source in-point parsed from the `start` attribute.
+
+**Export (UltimateSlice → FCP)**:
+```
+fcpxml_time = clip_local_time + source_start_ns
+```
+Where `source_start_ns` is the same value written to the asset-clip's `start` attribute (timecode + source_in, frame-aligned).
+
+**Example**: GoPro clip with embedded timecode `20:13:33:07` at 23.976 fps:
+- Asset-clip `start="1734122390/24000s"` ≈ 72255.1s
+- FCP keyframes at `52023671700/720000s` (≈72255.1s), `52024956360/720000s` (≈72256.9s)
+- After subtracting `source_in`: clip-local keyframes at 0s, 1.784s — within the clip's duration
+
+> **Overflow note**: FCP uses very large numerators (e.g., `52335350310/720000s`). The parser must use `u128` intermediate math when multiplying by 10⁹ to convert to nanoseconds, as `u64` overflows.
+
+### 20.9 Strict Writer Element Order
 
 The strict writer emits intrinsic parameters in DTD order within each `<asset-clip>`:
 
@@ -1994,7 +2019,7 @@ The strict writer emits intrinsic parameters in DTD order within each `<asset-cl
 7. `<adjust-panner>` (flat, only when no pan keyframes)
 8. Connected clips (lane ≠ 0, nested inside)
 
-### 20.9 Attributes Omitted in Strict Mode
+### 20.10 Attributes Omitted in Strict Mode
 
 The strict writer omits several attributes and elements that are present in the rich `.uspxml` format:
 
