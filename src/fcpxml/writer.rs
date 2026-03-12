@@ -243,10 +243,18 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     .map(|m| m.width > 0 && m.height > 0)
                     .unwrap_or(clip.kind != crate::model::clip::ClipKind::Audio);
                 // Audio-only clips use the FFVideoFormatRateUndefined format.
+                // Their start/duration should use the audio time base (48kHz),
+                // not the video frame rate.
+                static AUDIO_FPS: FrameRate = FrameRate {
+                    numerator: 48000,
+                    denominator: 1,
+                };
                 let clip_fps = if clip_has_video {
                     clip_media
                         .map(|m| &m.fps)
                         .unwrap_or(&project.frame_rate)
+                } else if clip_is_audio_only {
+                    &AUDIO_FPS
                 } else {
                     &project.frame_rate
                 };
@@ -300,12 +308,16 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 } else {
                     ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate)
                 };
-                let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
+                let duration = if clip_is_audio_only {
+                    ns_to_fcpxml_time(clip.duration(), clip_fps)
+                } else {
+                    ns_to_fcpxml_time(clip.duration(), &project.frame_rate)
+                };
 
                 // Asset-clip start: position in the asset's source timeline.
                 let start = if clip_is_audio_only {
-                    // Audio-only: start from beginning of audio file.
-                    ns_to_fcpxml_time(clip.source_in, &project.frame_rate)
+                    // Audio-only: use audio time base (48kHz).
+                    ns_to_fcpxml_time(clip.source_in, clip_fps)
                 } else {
                     let source_start = clip_tc
                         .or(clip.source_timecode_base_ns)
