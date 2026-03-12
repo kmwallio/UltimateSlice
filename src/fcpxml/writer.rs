@@ -337,6 +337,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 if !clip_is_audio_only {
                     elem.push_attribute(("format", clip_format));
                     elem.push_attribute(("tcFormat", "NDF"));
+                } else {
+                    elem.push_attribute(("format", clip_format));
                 }
                 elem.push_attribute(("audioRole", "dialogue"));
                 writer.write_event(Event::Start(elem))?;
