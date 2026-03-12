@@ -2013,6 +2013,10 @@ FCP wraps keyframed volume and pan adjustments inside `<audio-channel-source>` e
 
 **Export (strict)**: When a clip has volume or pan keyframes, the strict writer wraps them in `<audio-channel-source srcCh="1, 2" role="dialogue">`. Flat (non-keyframed) volume and pan are emitted as direct `<adjust-volume amount="..."/>` and `<adjust-panner amount="..."/>` children of the asset-clip.
 
+> **FCP compatibility note**: FCP does not support the `interp` attribute on `<keyframe>` elements inside volume/pan `<param>` containers. The strict writer omits `interp` on these keyframes to avoid FCP's "does not support the interpolation attribute" warning. The rich (.uspxml) writer retains `interp` for lossless round-trip.
+
+> **Format colorSpace**: FCP expects a `colorSpace` attribute on `<format>` resources. The strict writer emits `colorSpace="1-1-1 (Rec. 709)"` as a default for Rec. 709 SDR content. Without this, FCP may warn "Encountered an unexpected value" for the sequence format reference.
+
 ### 20.8 Keyframe Time Coordinate Space
 
 FCP emits keyframe `time` values in **absolute source media time** — the same coordinate space as the asset-clip's `start` attribute. This means keyframes for a clip whose media starts at timecode `20:13:33:07` will have times around 72813 seconds, not 0.

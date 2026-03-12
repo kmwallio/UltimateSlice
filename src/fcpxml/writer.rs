@@ -848,7 +848,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 ));
                 if !clip.volume_keyframes.is_empty() {
                     writer.write_event(Event::Start(adjust_volume))?;
-                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate, 0)?;
+                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate, 0, false)?;
                     writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
                 } else {
                     writer.write_event(Event::Empty(adjust_volume))?;
@@ -861,7 +861,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 ));
                 if !clip.pan_keyframes.is_empty() {
                     writer.write_event(Event::Start(adjust_panner))?;
-                    write_pan_keyframe_params(&mut writer, clip, &project.frame_rate, 0)?;
+                    write_pan_keyframe_params(&mut writer, clip, &project.frame_rate, 0, false)?;
                     writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
                 } else {
                     writer.write_event(Event::Empty(adjust_panner))?;
@@ -1450,7 +1450,7 @@ fn write_strict_audio_channel_sources(
             linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
         ));
         writer.write_event(Event::Start(adjust_volume))?;
-        write_volume_keyframe_params(writer, clip, fps, source_start_ns)?;
+        write_volume_keyframe_params(writer, clip, fps, source_start_ns, true)?;
         writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
     }
 
@@ -1461,7 +1461,7 @@ fn write_strict_audio_channel_sources(
             format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
         ));
         writer.write_event(Event::Start(adjust_panner))?;
-        write_pan_keyframe_params(writer, clip, fps, source_start_ns)?;
+        write_pan_keyframe_params(writer, clip, fps, source_start_ns, true)?;
         writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
     }
 
@@ -2260,6 +2260,10 @@ fn write_resources(
     ));
     fmt.push_attribute(("width", project.width.to_string().as_str()));
     fmt.push_attribute(("height", project.height.to_string().as_str()));
+    // FCP expects colorSpace on format resources; emit Rec. 709 default in strict mode.
+    if strip_unknown_fields {
+        fmt.push_attribute(("colorSpace", "1-1-1 (Rec. 709)"));
+    }
     if !strip_unknown_fields {
         for (k, v) in &project.fcpxml_unknown_format.attrs {
             if !is_writer_managed_format_attr(k) {
@@ -2296,6 +2300,9 @@ fn write_resources(
             ));
             extra_fmt.push_attribute(("width", w.to_string().as_str()));
             extra_fmt.push_attribute(("height", h.to_string().as_str()));
+            if strip_unknown_fields {
+                extra_fmt.push_attribute(("colorSpace", "1-1-1 (Rec. 709)"));
+            }
             writer.write_event(Event::Empty(extra_fmt))?;
         }
 
@@ -2796,6 +2803,7 @@ fn write_volume_keyframe_params(
     clip: &crate::model::clip::Clip,
     fps: &crate::model::project::FrameRate,
     source_start_ns: u64,
+    strict: bool,
 ) -> Result<()> {
     if clip.volume_keyframes.is_empty() {
         return Ok(());
@@ -2821,7 +2829,10 @@ fn write_volume_keyframe_params(
         // Offset clip-local time back to source time for FCP
         kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str()));
         kf_elem.push_attribute(("value", linear_volume_to_fcpxml_db(kf.value).as_str()));
-        kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+        // FCP ignores interp on volume param keyframes — omit in strict mode.
+        if !strict {
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+        }
         writer.write_event(Event::Empty(kf_elem))?;
     }
 
@@ -2837,6 +2848,7 @@ fn write_pan_keyframe_params(
     clip: &crate::model::clip::Clip,
     fps: &crate::model::project::FrameRate,
     source_start_ns: u64,
+    strict: bool,
 ) -> Result<()> {
     if clip.pan_keyframes.is_empty() {
         return Ok(());
@@ -2864,7 +2876,10 @@ fn write_pan_keyframe_params(
             "value",
             format!("{:.6}", kf.value.clamp(-1.0, 1.0)).as_str(),
         ));
-        kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+        // FCP ignores interp on pan param keyframes — omit in strict mode.
+        if !strict {
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+        }
         writer.write_event(Event::Empty(kf_elem))?;
     }
 
@@ -3759,6 +3774,11 @@ mod tests {
         assert!(
             !before_acs.contains("<adjust-volume"),
             "no flat adjust-volume when volume is keyframed"
+        );
+        // FCP doesn't support interp on volume param keyframes — strict mode omits it.
+        assert!(
+            !acs_block.contains("interp="),
+            "strict mode should omit interp on volume keyframes"
         );
     }
 
