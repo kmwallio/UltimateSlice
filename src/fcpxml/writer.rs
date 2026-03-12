@@ -19,6 +19,7 @@ struct MediaExportInfo {
     timecode_ns: Option<u64>,
     width: u32,
     height: u32,
+    is_audio_only: bool,
 }
 
 /// Context built from probing media files before writing strict FCPXML.
@@ -27,6 +28,8 @@ struct ExportContext {
     media: HashMap<String, MediaExportInfo>,
     /// Additional format elements beyond r1: (format_id, fps, width, height).
     extra_formats: Vec<(String, FrameRate, u32, u32)>,
+    /// Format ID for the FFVideoFormatRateUndefined audio format, if needed.
+    audio_format_id: Option<String>,
 }
 
 /// Serialize a `Project` to FCPXML format.
@@ -234,10 +237,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     .as_deref()
                     .unwrap_or(&clip.source_path);
                 let clip_media = export_ctx.as_ref().and_then(|ctx| ctx.media.get(clip_source));
+                let clip_is_audio_only =
+                    clip_media.map(|m| m.is_audio_only).unwrap_or(false);
                 let clip_has_video = clip_media
                     .map(|m| m.width > 0 && m.height > 0)
                     .unwrap_or(clip.kind != crate::model::clip::ClipKind::Audio);
-                // Audio-only assets have no video format; use sequence format for timing.
+                // Audio-only clips use the FFVideoFormatRateUndefined format.
                 let clip_fps = if clip_has_video {
                     clip_media
                         .map(|m| &m.fps)
@@ -245,7 +250,11 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 } else {
                     &project.frame_rate
                 };
-                let clip_format = if clip_has_video {
+                let clip_format = if clip_is_audio_only {
+                    clip_media
+                        .map(|m| m.format_id.as_str())
+                        .unwrap_or(format_ref)
+                } else if clip_has_video {
                     clip_media
                         .map(|m| m.format_id.as_str())
                         .unwrap_or(format_ref)
@@ -294,35 +303,42 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
 
                 // Asset-clip start: position in the asset's source timeline.
-                let source_start = clip_tc
-                    .or(clip.source_timecode_base_ns)
-                    .map(|tc| {
-                        let tc_frames = (tc * clip_fps.numerator as u64
-                            + clip_fps.denominator as u64 * 500_000_000)
-                            / (clip_fps.denominator as u64 * 1_000_000_000);
-                        let in_frames = (clip.source_in * clip_fps.numerator as u64
-                            + clip_fps.denominator as u64 * 500_000_000)
-                            / (clip_fps.denominator as u64 * 1_000_000_000);
-                        (tc_frames + in_frames)
-                            * clip_fps.denominator as u64
-                            * 1_000_000_000
-                            / clip_fps.numerator as u64
-                    })
-                    .unwrap_or(clip.source_in);
-                let start = ns_to_fcpxml_time(source_start, clip_fps);
+                let start = if clip_is_audio_only {
+                    // Audio-only: start from beginning of audio file.
+                    ns_to_fcpxml_time(clip.source_in, &project.frame_rate)
+                } else {
+                    let source_start = clip_tc
+                        .or(clip.source_timecode_base_ns)
+                        .map(|tc| {
+                            let tc_frames = (tc * clip_fps.numerator as u64
+                                + clip_fps.denominator as u64 * 500_000_000)
+                                / (clip_fps.denominator as u64 * 1_000_000_000);
+                            let in_frames = (clip.source_in * clip_fps.numerator as u64
+                                + clip_fps.denominator as u64 * 500_000_000)
+                                / (clip_fps.denominator as u64 * 1_000_000_000);
+                            (tc_frames + in_frames)
+                                * clip_fps.denominator as u64
+                                * 1_000_000_000
+                                / clip_fps.numerator as u64
+                        })
+                        .unwrap_or(clip.source_in);
+                    ns_to_fcpxml_time(source_start, clip_fps)
+                };
 
                 let mut elem = BytesStart::new("asset-clip");
                 elem.push_attribute(("ref", asset_ref.as_str()));
-                elem.push_attribute(("offset", offset.as_str()));
-                elem.push_attribute(("duration", duration.as_str()));
-                elem.push_attribute(("start", start.as_str()));
-                elem.push_attribute(("name", clip.label.as_str()));
-                elem.push_attribute(("format", clip_format));
-                elem.push_attribute(("tcFormat", "NDF"));
-                elem.push_attribute(("audioRole", "dialogue"));
                 if let Some(l) = lane {
                     elem.push_attribute(("lane", l.to_string().as_str()));
                 }
+                elem.push_attribute(("offset", offset.as_str()));
+                elem.push_attribute(("name", clip.label.as_str()));
+                elem.push_attribute(("start", start.as_str()));
+                elem.push_attribute(("duration", duration.as_str()));
+                if !clip_is_audio_only {
+                    elem.push_attribute(("format", clip_format));
+                    elem.push_attribute(("tcFormat", "NDF"));
+                }
+                elem.push_attribute(("audioRole", "dialogue"));
                 writer.write_event(Event::Start(elem))?;
                 Ok(())
             };
@@ -1782,6 +1798,7 @@ fn build_export_context(project: &Project) -> ExportContext {
     fps_to_format.insert(project_fps_key, "r1".to_string());
     let mut next_format_id = 2u32;
     let mut extra_formats = Vec::new();
+    let mut audio_format_id: Option<String> = None;
 
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
@@ -1794,23 +1811,44 @@ fn build_export_context(project: &Project) -> ExportContext {
             }
 
             let probed = probe_media_format(source);
+            let is_audio_only = match &probed {
+                Some((_, _, w, h, _)) => *w == 0 && *h == 0,
+                None => clip.kind == crate::model::clip::ClipKind::Audio,
+            };
+
+            if is_audio_only {
+                // Audio-only: use FFVideoFormatRateUndefined with 48kHz time base.
+                let fmt_id = audio_format_id.get_or_insert_with(|| {
+                    let id = format!("r{next_format_id}");
+                    next_format_id += 1;
+                    id
+                });
+                media_map.insert(
+                    source.to_string(),
+                    MediaExportInfo {
+                        format_id: fmt_id.clone(),
+                        fps: FrameRate {
+                            numerator: 48000,
+                            denominator: 1,
+                        },
+                        timecode_ns: None,
+                        width: 0,
+                        height: 0,
+                        is_audio_only: true,
+                    },
+                );
+                continue;
+            }
+
             let (fps_num, fps_den, media_w, media_h, probed_tc) = match probed {
                 Some(result) => result,
-                None => {
-                    // Probe failed — use clip kind to infer media type.
-                    let (w, h) = if clip.kind == crate::model::clip::ClipKind::Audio {
-                        (0, 0) // Audio-only: no video dimensions.
-                    } else {
-                        (project.width, project.height)
-                    };
-                    (
-                        project.frame_rate.numerator,
-                        project.frame_rate.denominator,
-                        w,
-                        h,
-                        None,
-                    )
-                }
+                None => (
+                    project.frame_rate.numerator,
+                    project.frame_rate.denominator,
+                    project.width,
+                    project.height,
+                    None,
+                ),
             };
 
             let fps_key = (fps_num, fps_den);
@@ -1846,6 +1884,7 @@ fn build_export_context(project: &Project) -> ExportContext {
                     timecode_ns,
                     width: media_w,
                     height: media_h,
+                    is_audio_only: false,
                 },
             );
         }
@@ -1854,6 +1893,7 @@ fn build_export_context(project: &Project) -> ExportContext {
     ExportContext {
         media: media_map,
         extra_formats,
+        audio_format_id,
     }
 }
 
@@ -2040,6 +2080,14 @@ fn write_resources(
             extra_fmt.push_attribute(("height", h.to_string().as_str()));
             writer.write_event(Event::Empty(extra_fmt))?;
         }
+
+        // Audio-only format: FFVideoFormatRateUndefined (no frameDuration/dimensions).
+        if let Some(ref audio_fmt_id) = ctx.audio_format_id {
+            let mut audio_fmt = BytesStart::new("format");
+            audio_fmt.push_attribute(("id", audio_fmt_id.as_str()));
+            audio_fmt.push_attribute(("name", "FFVideoFormatRateUndefined"));
+            writer.write_event(Event::Empty(audio_fmt))?;
+        }
     }
 
     // Asset resources for each unique clip.
@@ -2056,23 +2104,27 @@ fn write_resources(
 
             // Use export context for accurate timecode and format, with fallbacks.
             let media_info = export_ctx.and_then(|ctx| ctx.media.get(export_source_path));
+            let is_audio_only = media_info.map(|m| m.is_audio_only).unwrap_or(false);
             let asset_fps = media_info
                 .map(|m| &m.fps)
                 .unwrap_or(&project.frame_rate);
             let asset_format_id = media_info
                 .map(|m| m.format_id.as_str())
                 .unwrap_or("r1");
-            let asset_start = media_info
-                .and_then(|m| m.timecode_ns)
-                .or(clip.source_timecode_base_ns)
-                .map(|ns| ns_to_fcpxml_time(ns, asset_fps))
-                .unwrap_or_else(|| "0s".to_string());
+            let asset_start = if is_audio_only {
+                "0s".to_string()
+            } else {
+                media_info
+                    .and_then(|m| m.timecode_ns)
+                    .or(clip.source_timecode_base_ns)
+                    .map(|ns| ns_to_fcpxml_time(ns, asset_fps))
+                    .unwrap_or_else(|| "0s".to_string())
+            };
 
             // Determine hasVideo from probe: if media has non-zero resolution it has video.
             let media_has_video = media_info
                 .map(|m| m.width > 0 && m.height > 0)
                 .unwrap_or(clip.kind != crate::model::clip::ClipKind::Audio);
-            let has_video = if media_has_video { "1" } else { "0" };
             let has_audio = "1";
 
             let mut asset = BytesStart::new("asset");
@@ -2082,12 +2134,14 @@ fn write_resources(
             // Omit duration — FCP will probe the actual media file.
             // Declaring a duration that exceeds the real media (even by a
             // fraction of a frame) triggers a setClippedRange: assertion.
-            // Always include format — even audio-only assets need a time base
-            // for FCP to interpret start/duration correctly.
-            asset.push_attribute(("format", asset_format_id));
-            asset.push_attribute(("hasVideo", has_video));
+            if media_has_video {
+                asset.push_attribute(("format", asset_format_id));
+            }
+            if media_has_video {
+                asset.push_attribute(("hasVideo", "1"));
+            }
             asset.push_attribute(("hasAudio", has_audio));
-            if !media_has_video {
+            if is_audio_only {
                 asset.push_attribute(("audioSources", "1"));
                 asset.push_attribute(("audioChannels", "2"));
                 asset.push_attribute(("audioRate", "48000"));
@@ -3329,9 +3383,10 @@ mod tests {
         //   start = 10s. Connected video: timeline_start=0.5s →
         //   offset should be 10 + (0.5 - 0) = 10.5s = 10500000000ns.
         // At 24fps (denom=1): 10.5s = 252 frames → "252/24s".
-        let connected_video_start = inner.find("lane=\"1\"").expect("connected video lane");
-        let connected_video_tag =
-            &inner[inner[..connected_video_start].rfind("<asset-clip").unwrap()..connected_video_start];
+        let connected_video_lane = inner.find("lane=\"1\"").expect("connected video lane");
+        let tag_start = inner[..connected_video_lane].rfind("<asset-clip").unwrap();
+        let tag_end = inner[connected_video_lane..].find('>').unwrap() + connected_video_lane;
+        let connected_video_tag = &inner[tag_start..=tag_end];
         assert!(
             connected_video_tag.contains("offset=\"252/24s\""),
             "connected video offset should be in parent source time space: {connected_video_tag}"
