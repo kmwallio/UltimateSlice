@@ -2015,7 +2015,9 @@ fn write_resources(
         }
     }
 
-    // Asset resources for each unique clip (correct hasVideo/hasAudio per clip kind)
+    // Asset resources for each unique clip.
+    // hasVideo/hasAudio describe the MEDIA FILE capabilities, not which
+    // track the clip lives on, so we use probed resolution to decide.
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
             let asset_id = format!("a_{}", sanitize_id(&clip.id));
@@ -2024,12 +2026,6 @@ fn write_resources(
                 .as_deref()
                 .unwrap_or(&clip.source_path);
             let uri = fcpxml_media_src_uri(export_source_path);
-            let has_video = if clip.kind == crate::model::clip::ClipKind::Audio {
-                "0"
-            } else {
-                "1"
-            };
-            let has_audio = "1";
 
             // Use export context for accurate timecode and format, with fallbacks.
             let media_info = export_ctx.and_then(|ctx| ctx.media.get(export_source_path));
@@ -2045,6 +2041,13 @@ fn write_resources(
                 .map(|ns| ns_to_fcpxml_time(ns, asset_fps))
                 .unwrap_or_else(|| "0s".to_string());
 
+            // Determine hasVideo from probe: if media has non-zero resolution it has video.
+            let media_has_video = media_info
+                .map(|m| m.width > 0 && m.height > 0)
+                .unwrap_or(clip.kind != crate::model::clip::ClipKind::Audio);
+            let has_video = if media_has_video { "1" } else { "0" };
+            let has_audio = "1";
+
             let mut asset = BytesStart::new("asset");
             asset.push_attribute(("id", asset_id.as_str()));
             asset.push_attribute(("name", clip.label.as_str()));
@@ -2052,7 +2055,7 @@ fn write_resources(
             // Omit duration — FCP will probe the actual media file.
             // Declaring a duration that exceeds the real media (even by a
             // fraction of a frame) triggers a setClippedRange: assertion.
-            if has_video == "1" {
+            if media_has_video {
                 asset.push_attribute(("format", asset_format_id));
             }
             asset.push_attribute(("hasVideo", has_video));
