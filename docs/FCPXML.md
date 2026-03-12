@@ -13,6 +13,10 @@ This document provides a technical overview of the FCPXML (Final Cut Pro XML) fo
 > - native spine `transition` import/export (mapped to UltimateSlice transition fields)
 > - native `timeMap`/`timept` import/export for 2-point constant retimes plus representable multi-point monotonic ramps (mapped to speed keyframes), including `smooth2` easing mapping; unsupported imported maps (for example with `inTime`/`outTime`) are preserved and re-emitted
 > - `adjust-transform`, `adjust-compositing`, and `adjust-crop`/`crop-rect` mappings used by Inspector fields
+> - `adjust-volume` / `adjust-panner` keyframe import from `<audio-channel-source>` containers; strict export wraps keyframed volume/pan in `<audio-channel-source>` for FCP compatibility
+> - per-asset format generation with embedded timecode extraction (video via ffprobe stream tags, audio via BWF `time_reference`)
+> - audio-only asset handling with `FFVideoFormatRateUndefined` format, 48 kHz time base, and probed duration
+> - connected clips nested inside primary storyline clips with offset in parent source time space
 > - unknown-field preservation for imported FCPXML in clean-save and dirty-save flows
 
 ---
@@ -1847,3 +1851,154 @@ The `<import-options>` element appears as an optional first child of `<fcpxml>`,
 
 ### **Important Note**
 FCPXML is an **interchange/import** format, not an export-configuration format. There are no elements for controlling export settings, share destinations, or render settings. Export configuration is handled by FCP's share destinations system or the Compressor application. The `renderFormat` attribute on `<sequence>` specifies the codec used for preview render files within FCP's library, but does **not** control export format.
+
+---
+
+## 20. UltimateSlice ↔ Final Cut Pro Compatibility
+
+This section documents the specific requirements and implementation details for producing `.fcpxml` files that Final Cut Pro can import without errors. These rules were discovered through iterative testing against FCP 12 and are implemented in the strict writer (`write_fcpxml_strict`).
+
+### 20.1 Save Routing
+
+| Extension | Writer | Description |
+|---|---|---|
+| `.fcpxml` | `write_fcpxml_strict` | Strict DTD-compliant output for FCP import. Omits `us:*` vendor attributes, unknown passthrough fields, and sequence markers. |
+| `.uspxml` | `write_fcpxml` | Feature-rich output with vendor extensions for lossless UltimateSlice round-trip. |
+
+The packaged export (`export_project_with_media`) always uses the strict writer.
+
+### 20.2 Rational Time Format
+
+FCPXML uses rational numbers for time, expressed as `numerator/denominator s` (result in seconds).
+
+**Integer frame rates** (24, 25, 30, 50, 60 fps): `frames / fps s`
+```
+Frame 48 at 24fps → 48/24s
+```
+
+**NTSC frame rates** (23.976, 29.97, 59.94 fps): `frames × denom / (fps_num) s`, where the rate is `fps_num / denom` (e.g., 24000/1001). The frame count must be multiplied by `denom`:
+```
+Frame 119 at 23.976fps → 119 × 1001 / 24000 = 119119/24000s
+```
+
+**Rounding**: When converting nanoseconds to FCPXML time at NTSC rates, round to the nearest frame (not truncate):
+```
+frames = (ns × timebase + denom × 500_000_000) / (denom × 1_000_000_000)
+```
+
+### 20.3 Asset `start` Must Match Embedded Timecode
+
+FCP validates that each asset's `start` attribute matches the media file's embedded timecode. A mismatch produces: *"Invalid edit with no respective media."*
+
+**Video files**: Extract timecode via ffprobe:
+```bash
+ffprobe -v quiet -select_streams v:0 -show_entries stream_tags=timecode -of csv=p=0 file.mp4
+# Output: 20:13:33:07
+```
+Convert `HH:MM:SS:FF` to nanoseconds using the media's frame rate, then to FCPXML rational time.
+
+**Audio files (WAV/BWF)**: Extract the BWF `time_reference` tag (sample offset):
+```bash
+ffprobe -v quiet -show_entries format_tags=time_reference -of csv=p=0 file.wav
+# Output: 172910769
+```
+Convert samples to nanoseconds: `time_reference × 1_000_000_000 / sample_rate`. Use a 48 kHz time base (e.g., `samples/48000s`), not the video frame rate.
+
+**Fallback**: When no embedded timecode is found, use `start="0s"`.
+
+### 20.4 Per-Asset Format Generation
+
+FCP requires each asset's `format` to match the media's actual frame rate and resolution. A 24 fps project containing 23.976 fps GoPro media must emit separate `<format>` elements:
+
+```xml
+<format id="r1" frameDuration="100/2400s" width="1920" height="1080"/>   <!-- project: 24fps -->
+<format id="r2" frameDuration="1001/24000s" width="1920" height="1080"/> <!-- GoPro: 23.976fps -->
+```
+
+The strict writer probes each media file at export time (`build_export_context`) and assigns per-asset format IDs. Known FCP format names (e.g., `FFVideoFormat1080p2398`) are used when the resolution and frame rate match a standard.
+
+> **Note**: GoPro cameras labelled "24 fps" actually record at 24000/1001 (23.976 fps).
+
+### 20.5 Audio-Only Assets
+
+Audio-only files (WAV, MP3, etc.) require special handling:
+
+| Attribute | Value |
+|---|---|
+| Format | `FFVideoFormatRateUndefined` — a special `<format>` with no `frameDuration`, `width`, or `height` |
+| `hasAudio` | `"1"` |
+| `hasVideo` | Omitted entirely (not `"0"`) |
+| `audioSources` | `"1"` |
+| `audioChannels` | `"2"` (stereo) |
+| `audioRate` | `"48000"` or actual sample rate |
+| `start` | Derived from BWF `time_reference` (Section 20.3) in 48 kHz time base |
+| `duration` | Probed via ffprobe, expressed in 48 kHz time base |
+| Asset-clip `format` | Must reference the `FFVideoFormatRateUndefined` format ID |
+| Asset-clip `tcFormat` | Omitted |
+| Asset-clip `start`/`duration` | Expressed in 48 kHz time base (e.g., `0/48000s`), NOT video frame rate |
+
+**Critical**: Audio time values must NOT use video frame denominators. For example, `0/24s` will fail for a `FFVideoFormatRateUndefined` format.
+
+### 20.6 Connected Clips
+
+FCP requires connected clips (lane ≠ 0) to be **nested inside** the primary storyline clip they connect to, not as flat siblings in the spine:
+
+```xml
+<spine>
+  <asset-clip ref="a1" offset="0s" duration="10s">       <!-- primary -->
+    <asset-clip ref="a2" lane="-1" offset="3s" .../>      <!-- connected (audio below) -->
+    <asset-clip ref="a3" lane="1" offset="5s" .../>       <!-- connected (video above) -->
+  </asset-clip>
+</spine>
+```
+
+The connected clip's `offset` is in the **parent clip's source time space**, not the timeline. Given a connected clip at timeline position `T`, nested inside a primary clip with timeline start `P_timeline` and source start `P_source`:
+```
+offset = P_source + (T - P_timeline)
+```
+
+### 20.7 Volume & Pan Keyframes in `<audio-channel-source>`
+
+FCP wraps keyframed volume and pan adjustments inside `<audio-channel-source>` elements. This structure is required for FCP to recognize the keyframes on import.
+
+**FCP's format**:
+```xml
+<asset-clip ref="a1" offset="0s" duration="10s">
+  <audio-channel-source srcCh="1, 2" role="dialogue">
+    <adjust-volume>
+      <param name="amount">
+        <keyframeAnimation>
+          <keyframe time="0s" value="0dB"/>
+          <keyframe time="3s" value="-14.5dB"/>
+        </keyframeAnimation>
+      </param>
+    </adjust-volume>
+  </audio-channel-source>
+</asset-clip>
+```
+
+**Import**: The parser extracts `<adjust-volume>` and `<adjust-panner>` keyframes from inside `<audio-channel-source>` and applies them to the clip model.
+
+**Export (strict)**: When a clip has volume or pan keyframes, the strict writer wraps them in `<audio-channel-source srcCh="1, 2" role="dialogue">`. Flat (non-keyframed) volume and pan are emitted as direct `<adjust-volume amount="..."/>` and `<adjust-panner amount="..."/>` children of the asset-clip.
+
+### 20.8 Strict Writer Element Order
+
+The strict writer emits intrinsic parameters in DTD order within each `<asset-clip>`:
+
+1. `<timeMap>` (if present)
+2. `<adjust-crop>` / `<crop-rect>` (video only)
+3. `<adjust-transform>` (video only)
+4. `<adjust-blend>` (video only, with opacity keyframes if present)
+5. `<audio-channel-source>` (only when volume/pan keyframes exist)
+6. `<adjust-volume>` (flat, only when no volume keyframes)
+7. `<adjust-panner>` (flat, only when no pan keyframes)
+8. Connected clips (lane ≠ 0, nested inside)
+
+### 20.9 Attributes Omitted in Strict Mode
+
+The strict writer omits several attributes and elements that are present in the rich `.uspxml` format:
+
+- `us:*` vendor namespace attributes (speed keyframes, clip metadata)
+- `fcpxml_unknown_*` passthrough fragments
+- Sequence markers (not supported by FCP's `<spine>` import)
+- Asset `duration` (optional per DTD; omitting avoids GStreamer duration rounding exceeding actual media length)

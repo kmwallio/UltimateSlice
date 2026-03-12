@@ -1369,31 +1369,61 @@ fn write_strict_clip_body(
         }
     }
 
-    // adjust-volume
-    let mut adjust_volume = BytesStart::new("adjust-volume");
-    adjust_volume.push_attribute((
-        "amount",
-        linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
-    ));
-    if !clip.volume_keyframes.is_empty() {
-        writer.write_event(Event::Start(adjust_volume))?;
-        write_volume_keyframe_params(writer, clip, &project.frame_rate)?;
-        writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
-    } else {
+    // audio-channel-source with volume/pan keyframes (FCP wraps these)
+    let has_vol_kf = !clip.volume_keyframes.is_empty();
+    let has_pan_kf = !clip.pan_keyframes.is_empty();
+
+    if has_vol_kf || has_pan_kf {
+        // FCP expects keyframed volume/pan inside <audio-channel-source>
+        let mut acs = BytesStart::new("audio-channel-source");
+        acs.push_attribute(("srcCh", "1, 2"));
+        acs.push_attribute(("role", "dialogue"));
+        writer.write_event(Event::Start(acs))?;
+
+        // adjust-volume (keyframed)
+        if has_vol_kf {
+            let mut adjust_volume = BytesStart::new("adjust-volume");
+            adjust_volume.push_attribute((
+                "amount",
+                linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
+            ));
+            writer.write_event(Event::Start(adjust_volume))?;
+            write_volume_keyframe_params(writer, clip, &project.frame_rate)?;
+            writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+        }
+
+        // adjust-panner (keyframed)
+        if has_pan_kf {
+            let mut adjust_panner = BytesStart::new("adjust-panner");
+            adjust_panner.push_attribute((
+                "amount",
+                format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
+            ));
+            writer.write_event(Event::Start(adjust_panner))?;
+            write_pan_keyframe_params(writer, clip, &project.frame_rate)?;
+            writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
+        }
+
+        writer.write_event(Event::End(BytesEnd::new("audio-channel-source")))?;
+    }
+
+    // Flat adjust-volume (no keyframes)
+    if !has_vol_kf {
+        let mut adjust_volume = BytesStart::new("adjust-volume");
+        adjust_volume.push_attribute((
+            "amount",
+            linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
+        ));
         writer.write_event(Event::Empty(adjust_volume))?;
     }
 
-    // adjust-panner
-    let mut adjust_panner = BytesStart::new("adjust-panner");
-    adjust_panner.push_attribute((
-        "amount",
-        format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
-    ));
-    if !clip.pan_keyframes.is_empty() {
-        writer.write_event(Event::Start(adjust_panner))?;
-        write_pan_keyframe_params(writer, clip, &project.frame_rate)?;
-        writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
-    } else {
+    // Flat adjust-panner (no keyframes)
+    if !has_pan_kf {
+        let mut adjust_panner = BytesStart::new("adjust-panner");
+        adjust_panner.push_attribute((
+            "amount",
+            format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
+        ));
         writer.write_event(Event::Empty(adjust_panner))?;
     }
 
@@ -3537,6 +3567,72 @@ mod tests {
         assert!(
             !xml.contains("<marker "),
             "strict output should omit sequence markers"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_wraps_volume_keyframes_in_audio_channel_source() {
+        let mut project = Project::new("VolKF");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.volume_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        assert!(
+            xml.contains("<audio-channel-source"),
+            "keyframed volume should be wrapped in audio-channel-source"
+        );
+        // The keyframed adjust-volume should be inside audio-channel-source
+        let acs_start = xml.find("<audio-channel-source").unwrap();
+        let acs_end = xml.find("</audio-channel-source>").unwrap();
+        let acs_block = &xml[acs_start..acs_end];
+        assert!(
+            acs_block.contains("<adjust-volume"),
+            "adjust-volume should be inside audio-channel-source"
+        );
+        assert!(
+            acs_block.contains("<keyframeAnimation"),
+            "keyframe animation should be inside audio-channel-source"
+        );
+        // No flat adjust-volume outside audio-channel-source
+        let after_acs = &xml[acs_end..];
+        assert!(
+            !after_acs.contains("<adjust-volume"),
+            "no duplicate adjust-volume after audio-channel-source"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_flat_volume_no_audio_channel_source() {
+        let mut project = Project::new("FlatVol");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        assert!(
+            !xml.contains("<audio-channel-source"),
+            "flat volume should NOT use audio-channel-source"
+        );
+        assert!(
+            xml.contains("<adjust-volume"),
+            "flat volume should still emit adjust-volume"
         );
     }
 
