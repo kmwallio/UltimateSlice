@@ -276,7 +276,12 @@ class SessionContext:
     source_out_ns: int
 
 
-def setup_session(media_path: Path, clip_duration_ns: int) -> SessionContext:
+def setup_session(
+    media_path: Path,
+    clip_duration_ns: int,
+    lut_path: Path | None = None,
+    proxy_mode: str = "off",
+) -> SessionContext:
     payload = tool_payload(call_tool("create_project", {"title": "MCP Calibration"}))
     ensure_ok("create_project", payload)
 
@@ -301,9 +306,21 @@ def setup_session(media_path: Path, clip_duration_ns: int) -> SessionContext:
     if not clip_id:
         raise RuntimeError(f"add_clip did not return clip_id: {payload}")
 
+    if lut_path is not None:
+        payload = tool_payload(
+            call_tool(
+                "set_clip_lut",
+                {
+                    "clip_id": clip_id,
+                    "lut_path": str(lut_path),
+                },
+            )
+        )
+        ensure_ok("set_clip_lut", payload)
+
     # Stabilize preview behavior.
     for tool_name, args in (
-        ("set_proxy_mode", {"mode": "off"}),
+        ("set_proxy_mode", {"mode": proxy_mode}),
         ("set_preview_quality", {"quality": "full"}),
         ("set_realtime_preview", {"enabled": False}),
     ):
@@ -328,8 +345,27 @@ def parse_args() -> argparse.Namespace:
         default=str(Path("Sample-Media") / "calibration_chart.mp4"),
         help="Calibration source media path.",
     )
+    parser.add_argument(
+        "--lut-path",
+        default="",
+        help="Optional absolute/relative path to a .cube LUT applied to the test clip during sweeps.",
+    )
+    parser.add_argument(
+        "--proxy-mode",
+        choices=["off", "half_res", "quarter_res"],
+        default="off",
+        help="Proxy mode used during preview capture. LUT workflows generally require non-off proxy mode.",
+    )
     parser.add_argument("--out", default="/tmp/us_mcp_color_calib", help="Output directory.")
     parser.add_argument("--steps", type=int, default=9, help="Sweep samples per slider.")
+    parser.add_argument(
+        "--sliders",
+        default="",
+        help=(
+            "Optional comma-separated slider names to sweep. "
+            "Default: all sliders."
+        ),
+    )
     parser.add_argument(
         "--seek-ns",
         type=int,
@@ -372,6 +408,24 @@ def parse_args() -> argparse.Namespace:
         help="Retries for default-value samples when RMSE is far from neutral baseline.",
     )
     parser.add_argument(
+        "--sample-retries",
+        type=int,
+        default=0,
+        help=(
+            "Extra attempts for every sample; best (lowest RMSE) attempt is kept. "
+            "Useful for noisy/stale-frame environments."
+        ),
+    )
+    parser.add_argument(
+        "--neutral-baseline-retries",
+        type=int,
+        default=2,
+        help=(
+            "Extra neutral baseline capture attempts; best (lowest RMSE) is used "
+            "to reduce stale-frame outliers."
+        ),
+    )
+    parser.add_argument(
         "--export-mode",
         choices=["mp4", "prores_mov"],
         default="mp4",
@@ -383,6 +437,32 @@ def parse_args() -> argparse.Namespace:
         help="Preset name used when --export-mode=prores_mov.",
     )
     return parser.parse_args()
+
+
+def parse_slider_filter(raw: str) -> list[str]:
+    if not raw.strip():
+        return list(SLIDERS.keys())
+    requested = [s.strip() for s in raw.split(",") if s.strip()]
+    unknown = [s for s in requested if s not in SLIDERS]
+    if unknown:
+        raise ValueError(
+            f"Unknown slider(s): {', '.join(unknown)}. "
+            f"Valid sliders: {', '.join(SLIDERS.keys())}"
+        )
+    # Preserve order while deduplicating.
+    return list(dict.fromkeys(requested))
+
+
+def select_median_attempt(attempts: list[dict]) -> dict:
+    if not attempts:
+        raise ValueError("attempts cannot be empty")
+    totals = sorted(a["rmse"]["total"] for a in attempts)
+    mid = len(totals) // 2
+    if len(totals) % 2 == 0:
+        median_total = (totals[mid - 1] + totals[mid]) / 2.0
+    else:
+        median_total = totals[mid]
+    return min(attempts, key=lambda a: abs(a["rmse"]["total"] - median_total))
 
 
 def main() -> int:
@@ -403,8 +483,17 @@ def main() -> int:
         "export_mode": args.export_mode,
         "media": str(Path(args.media).resolve()),
         "seek_ns": args.seek_ns,
+        "proxy_mode": args.proxy_mode,
         "sliders": {},
     }
+    if args.lut_path.strip():
+        report["lut_path"] = str(Path(args.lut_path).resolve())
+    try:
+        selected_sliders = parse_slider_filter(args.sliders)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    report["slider_filter"] = selected_sliders
     if args.export_mode == "prores_mov":
         report["export_preset_name"] = args.export_preset_name
     if args.check_plugins_only:
@@ -422,7 +511,27 @@ def main() -> int:
             f"MCP socket not found at {mcp_socket_path()}. Start UltimateSlice with --mcp first."
         )
 
-    ctx = setup_session(media_path, clip_duration_ns=2_000_000_000)
+    lut_path: Path | None = None
+    effective_proxy_mode = args.proxy_mode
+    if args.lut_path.strip():
+        lut_path = Path(args.lut_path).resolve()
+        if not lut_path.exists():
+            raise FileNotFoundError(f"LUT not found: {lut_path}")
+        if lut_path.suffix.lower() != ".cube":
+            raise ValueError(f"LUT must be a .cube file: {lut_path}")
+        if effective_proxy_mode == "off":
+            effective_proxy_mode = "quarter_res"
+            print(
+                "note: --lut-path provided with --proxy-mode=off; using --proxy-mode=quarter_res so LUT is applied.",
+                file=sys.stderr,
+            )
+    report["proxy_mode"] = effective_proxy_mode
+    ctx = setup_session(
+        media_path,
+        clip_duration_ns=2_000_000_000,
+        lut_path=lut_path,
+        proxy_mode=effective_proxy_mode,
+    )
     if args.export_mode == "prores_mov":
         ensure_lowloss_preset(args.export_preset_name)
 
@@ -431,30 +540,45 @@ def main() -> int:
     export_ext = export_mode_extension(args.export_mode)
     neutral_rmse_total = None
 
-    # Capture neutral baseline once so downstream analysis can separate a global
-    # preview/export floor from per-control divergence.
-    set_color_state(ctx.clip_id, seek_ns, args.settle_ms, args.seek_repeats, {})
-    neutral_preview_ppm = out_dir / "preview_neutral_baseline.ppm"
-    neutral_export_file = out_dir / f"export_neutral_baseline{export_ext}"
-    neutral_export_png = out_dir / "export_neutral_baseline.png"
-    payload = tool_payload(call_tool("export_displayed_frame", {"path": str(neutral_preview_ppm)}))
-    ensure_ok("export_displayed_frame", payload)
-    set_color_state(ctx.clip_id, seek_ns, args.settle_ms, args.seek_repeats, {})
-    export_timeline(neutral_export_file, args.export_mode, args.export_preset_name)
-    extract_export_frame(neutral_export_file, neutral_export_png, seek_s)
-    neutral_preview_img = np.array(Image.open(neutral_preview_ppm).convert("RGB"), dtype=np.float32)
-    neutral_export_img = np.array(Image.open(neutral_export_png).convert("RGB"), dtype=np.float32)
-    if neutral_preview_img.shape != neutral_export_img.shape:
-        neutral_export_img = np.array(
-            Image.fromarray(neutral_export_img.astype(np.uint8)).resize(
-                (neutral_preview_img.shape[1], neutral_preview_img.shape[0]),
-                Image.Resampling.LANCZOS,
-            ),
-            dtype=np.float32,
-        )
-    neutral_rmse = compute_rmse(neutral_preview_img, neutral_export_img)
+    # Capture a neutral baseline with retry protection; keep the best (lowest RMSE)
+    # candidate to reduce occasional stale-frame outliers.
+    neutral_candidates = []
+    for attempt in range(1, max(1, args.neutral_baseline_retries) + 2):
+        set_color_state(ctx.clip_id, seek_ns, args.settle_ms, args.seek_repeats, {})
+        neutral_preview_ppm = out_dir / f"preview_neutral_baseline_attempt{attempt}.ppm"
+        neutral_export_file = out_dir / f"export_neutral_baseline_attempt{attempt}{export_ext}"
+        neutral_export_png = out_dir / f"export_neutral_baseline_attempt{attempt}.png"
+        payload = tool_payload(call_tool("export_displayed_frame", {"path": str(neutral_preview_ppm)}))
+        ensure_ok("export_displayed_frame", payload)
+        set_color_state(ctx.clip_id, seek_ns, args.settle_ms, args.seek_repeats, {})
+        export_timeline(neutral_export_file, args.export_mode, args.export_preset_name)
+        extract_export_frame(neutral_export_file, neutral_export_png, seek_s)
+        neutral_preview_img = np.array(Image.open(neutral_preview_ppm).convert("RGB"), dtype=np.float32)
+        neutral_export_img = np.array(Image.open(neutral_export_png).convert("RGB"), dtype=np.float32)
+        if neutral_preview_img.shape != neutral_export_img.shape:
+            neutral_export_img = np.array(
+                Image.fromarray(neutral_export_img.astype(np.uint8)).resize(
+                    (neutral_preview_img.shape[1], neutral_preview_img.shape[0]),
+                    Image.Resampling.LANCZOS,
+                ),
+                dtype=np.float32,
+            )
+        neutral_rmse = compute_rmse(neutral_preview_img, neutral_export_img)
+        neutral_candidates.append({"attempt": attempt, "rmse": neutral_rmse})
+        if neutral_rmse["total"] <= 40.0:
+            break
+        if attempt <= args.neutral_baseline_retries:
+            print(
+                f"{'neutral_baseline':18s} +0.000  retry {attempt}/{args.neutral_baseline_retries} "
+                f"(rmse={neutral_rmse['total']:.3f})"
+            )
+
+    best_neutral = select_median_attempt(neutral_candidates)
+    neutral_rmse = best_neutral["rmse"]
     neutral_rmse_total = neutral_rmse["total"]
     report["neutral_baseline"] = {
+        "attempt": best_neutral["attempt"],
+        "attempts_considered": neutral_candidates,
         "rmse": neutral_rmse,
         "pass_absolute": neutral_rmse_total <= args.threshold_total_rmse,
         "pass_delta": True,
@@ -462,13 +586,18 @@ def main() -> int:
     }
     print(f"{'neutral_baseline':18s} +0.000  rmse={neutral_rmse_total:.3f}")
 
-    for slider, (vmin, vmax, default, _default_steps) in SLIDERS.items():
+    for slider in selected_sliders:
+        vmin, vmax, default, _default_steps = SLIDERS[slider]
         vals = slider_values(vmin, vmax, default, args.steps)
         slider_rows = []
         for value in vals:
-            attempt = 0
-            while True:
-                attempt += 1
+            is_default_sample = abs(value - default) <= 1e-6
+            max_attempts = max(
+                1 + max(0, args.sample_retries),
+                1 + (max(0, args.default_sample_retries) if is_default_sample else 0),
+            )
+            attempts: list[dict] = []
+            for attempt in range(1, max_attempts + 1):
                 set_color_state(
                     ctx.clip_id,
                     seek_ns,
@@ -509,23 +638,20 @@ def main() -> int:
                     )
 
                 rmse = compute_rmse(preview_img, export_img)
-
-                is_default_sample = abs(value - default) <= 1e-6
-                should_retry_default = (
-                    is_default_sample
-                    and neutral_rmse_total is not None
-                    and abs(rmse["total"] - neutral_rmse_total) > 2.0
-                    and attempt <= args.default_sample_retries
-                )
-                if should_retry_default:
+                attempts.append({"attempt": attempt, "rmse": rmse})
+                if attempt < max_attempts:
                     print(
-                        f"{slider:18s} {value:+.3f}  retry {attempt}/{args.default_sample_retries} "
+                        f"{slider:18s} {value:+.3f}  retry {attempt}/{max_attempts-1} "
                         f"(rmse={rmse['total']:.3f}, neutral={neutral_rmse_total:.3f})"
                     )
-                    continue
-                break
 
-            print(f"{slider:18s} {value:+.3f}  rmse={rmse['total']:.3f}")
+            best = select_median_attempt(attempts)
+            rmse = best["rmse"]
+            selected_attempt = best["attempt"]
+            print(
+                f"{slider:18s} {value:+.3f}  rmse={rmse['total']:.3f}"
+                + (f" (best attempt {selected_attempt}/{max_attempts})" if max_attempts > 1 else "")
+            )
             delta_total = rmse["total"] - neutral_rmse_total
             pass_absolute = rmse["total"] <= args.threshold_total_rmse
             pass_delta = abs(delta_total) <= args.threshold_delta_rmse
@@ -534,7 +660,9 @@ def main() -> int:
                     "value": value,
                     "rmse": rmse,
                     "delta_from_neutral_total_rmse": delta_total,
-                    "attempts": attempt,
+                    "attempts": max_attempts,
+                    "selected_attempt": selected_attempt,
+                    "attempt_results": attempts,
                     "pass_absolute": pass_absolute,
                     "pass_delta": pass_delta,
                     "pass": pass_absolute and pass_delta,

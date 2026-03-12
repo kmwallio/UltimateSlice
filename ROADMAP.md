@@ -158,6 +158,12 @@ Tracking docs:
 - [x] MCP parity metrics normalization: calibration report now tracks absolute RMSE and delta-from-neutral pass metrics (`pass_absolute`, `pass_delta`, combined `pass`) plus per-slider delta summaries
 - [x] MCP parity low-loss export mode: calibration harness now supports preset-based ProRes/MOV capture (`--export-mode prores_mov`) to reduce compression artifacts during parity evaluation
 - [x] MCP parity smoke-check helper: `tools/mcp_parity_smoke_check.py` wraps low-sample calibration and enforces broad guardrails for normalized focus-slider regressions in automation/CI
+- [x] MCP parity smoke-check multi-media profile: `tools/mcp_parity_smoke_check.py` supports repeated `--media` inputs and writes aggregate cross-media pass/fail summaries (`smoke_aggregate_report.json`)
+- [x] MCP parity tint retune (frei0r bridge): export `coloradj_RGB` path now attenuates tint deltas for closer preview/export matching on chart and natural-footage sweeps
+- [x] MCP parity targeted slider sweeps: calibration/smoke tools now support `--sliders` so retune iterations can focus on selected high-residual controls
+- [x] MCP parity retry hardening: calibration/smoke tools now support median-attempt sample + neutral-baseline retries (`--sample-retries`, `--neutral-baseline-retries`) to reduce stale-frame outlier noise
+- [x] MCP parity LUT coverage: calibration/smoke tools now support `--lut-path` so parity sweeps can include clip-level `.cube` LUT processing in both preview and export
+- [x] MCP parity LUT/proxy correctness: calibration/smoke tools now support `--proxy-mode`, and LUT runs auto-switch to proxy-backed capture when proxy mode is Off
 - [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach

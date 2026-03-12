@@ -953,7 +953,7 @@ fn build_temperature_tint_filter_with_caps(
         && !has_temp_keyframes
         && !has_tint_keyframes
     {
-        let cp = ProgramPlayer::compute_coloradj_params(clip.temperature as f64, clip.tint as f64);
+        let cp = compute_export_coloradj_params(clip.temperature as f64, clip.tint as f64);
         return format!(
             ",frei0r=filter_name=coloradj_RGB:filter_params={:.6}|{:.6}|{:.6}|0.333",
             cp.r, cp.g, cp.b
@@ -1186,6 +1186,37 @@ fn build_grading_filter_with_caps(
         String::new()
     }
 }
+
+fn compute_export_coloradj_params(
+    temperature: f64,
+    tint: f64,
+) -> crate::media::program_player::ColorAdjRGBParams {
+    let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
+    let temp_only = ProgramPlayer::compute_coloradj_params(temperature, 0.0);
+    let tint_only = ProgramPlayer::compute_coloradj_params(6500.0, tint);
+
+    // FFmpeg frei0r implementations can diverge from preview at stronger
+    // temperature/tint settings; apply a conservative attenuation of deltas
+    // from neutral to better align cross-runtime behavior.
+    let temp_gain = 1.0;
+    let tint_gain = if tint < 0.0 {
+        0.60
+    } else if tint > 0.0 {
+        0.72
+    } else {
+        1.0
+    };
+
+    let apply = |n: f64, t: f64, ti: f64| {
+        (n + (t - n) * temp_gain + (ti - n) * tint_gain).clamp(0.0, 1.0)
+    };
+    crate::media::program_player::ColorAdjRGBParams {
+        r: apply(neutral.r, temp_only.r, tint_only.r),
+        g: apply(neutral.g, temp_only.g, tint_only.g),
+        b: apply(neutral.b, temp_only.b, tint_only.b),
+    }
+}
+
 
 fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.chroma_key_enabled {
@@ -1761,10 +1792,12 @@ mod tests {
         build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
         build_temperature_tint_filter, build_timing_filter, build_title_filter,
         build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
+        compute_export_coloradj_params,
         estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
         parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
         ExportOptions, VideoCodec,
     };
+    use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
     use crate::ui_state::CrossfadeCurve;
@@ -2353,6 +2386,35 @@ mod tests {
         assert!(green_rm < 0.0, "negative tint should cut red");
         assert!(green_gm > 0.0, "negative tint should boost green");
         assert!(green_bm < 0.0, "negative tint should cut blue");
+    }
+
+    #[test]
+    fn export_coloradj_compensation_preserves_neutral_and_tunes_tint_delta() {
+        let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
+        let preview_temp = ProgramPlayer::compute_coloradj_params(2000.0, 0.0);
+        let export_temp = compute_export_coloradj_params(2000.0, 0.0);
+        let preview_tint = ProgramPlayer::compute_coloradj_params(6500.0, -1.0);
+        let export_tint = compute_export_coloradj_params(6500.0, -1.0);
+        let export_neutral = compute_export_coloradj_params(6500.0, 0.0);
+
+        let magnitude = |a: &crate::media::program_player::ColorAdjRGBParams,
+                         b: &crate::media::program_player::ColorAdjRGBParams| {
+            (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
+        };
+        assert!(
+            (export_neutral.r - neutral.r).abs() < 1e-9
+                && (export_neutral.g - neutral.g).abs() < 1e-9
+                && (export_neutral.b - neutral.b).abs() < 1e-9,
+            "neutral mapping should remain unchanged"
+        );
+        assert!(
+            magnitude(&export_temp, &neutral) <= magnitude(&preview_temp, &neutral),
+            "temperature mapping should not amplify preview delta"
+        );
+        assert!(
+            magnitude(&export_tint, &neutral) < magnitude(&preview_tint, &neutral),
+            "tint compensation should attenuate delta from neutral"
+        );
     }
 
     #[test]

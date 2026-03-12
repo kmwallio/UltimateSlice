@@ -55,6 +55,10 @@ printf '%s\n' \
   - Runs the 2x2x2 hardware/occlusion/realtime perf matrix and writes per-run `perf stat` artifacts.
 - `python3 tools/calibrate_mcp_color_match.py --media Sample-Media/calibration_chart.mp4 --out /tmp/us_mcp_color_calib`
   - Sweeps full clip color controls (primary + extended grading) via MCP and measures Program Monitor preview vs exported frame RMSE.
+  - Use `--sliders temperature,tint,shadows,midtones,highlights` to run focused retune sweeps on a subset of controls.
+  - Use `--lut-path /absolute/path/look.cube` to include a clip LUT in preview/export parity sweeps.
+  - Use `--proxy-mode half_res|quarter_res` to force proxy-backed preview capture; if `--lut-path` is set while `--proxy-mode off`, calibration auto-switches to `quarter_res` so LUT processing is active.
+  - Optional stability hardening: `--sample-retries <N>` runs each sample multiple times and keeps the median-attempt RMSE; `--neutral-baseline-retries <N>` retries neutral baseline capture and selects the median-attempt baseline.
   - Supports export capture modes: default `--export-mode mp4` or low-loss `--export-mode prores_mov` (via MCP export preset).
   - Uses repeated seek/settle stabilization (configurable with `--seek-repeats`) and re-applies each sample state before export capture to reduce stale-frame races.
   - Captures a neutral baseline RMSE first, then records per-sample deltas from neutral to help separate global baseline offset from control-specific divergence.
@@ -63,6 +67,18 @@ printf '%s\n' \
 - `python3 tools/mcp_parity_smoke_check.py --media Sample-Media/calibration_chart.mp4`
   - Runs a low-sample parity sweep wrapper intended for CI/automation smoke checks.
   - Defaults to low-loss export mode (`prores_mov`) and fails fast on large normalized deltas for focus sliders (`contrast`, `saturation`) or unusually high neutral baseline RMSE.
+  - Supports `--sliders ...` passthrough for targeted smoke checks on specific controls.
+  - Also forwards `--sample-retries`, `--neutral-baseline-retries`, `--lut-path`, and `--proxy-mode`.
+  - Supports multiple media clips in one pass by repeating `--media`; each run writes a per-media report and one aggregate summary (`smoke_aggregate_report.json`) with mean guardrails.
+
+Example multi-media smoke run:
+
+```bash
+python3 tools/mcp_parity_smoke_check.py \
+  --media Sample-Media/calibration_chart.mp4 \
+  --media Sample-Media/GX010426.MP4 \
+  --out /tmp/us_mcp_parity_smoke_multi
+```
 
 Useful playback-tuning toggles:
 
