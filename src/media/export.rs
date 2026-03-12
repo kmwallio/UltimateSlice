@@ -757,16 +757,43 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
         format!(
             ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
         )
-    } else if clip.brightness != 0.0
-        || clip.contrast != 1.0
-        || clip.saturation != 1.0
-        || has_exposure
+    } else if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 || has_exposure
     {
+        // For static (non-keyframed) primaries, align export with Program Monitor
+        // by reusing the calibrated videobalance mapping used in preview.
+        // Temperature/tint and tonal grading are excluded here because export
+        // applies them through dedicated filters later in the chain.
+        let preview_params = ProgramPlayer::compute_videobalance_params(
+            clip.brightness as f64,
+            clip.contrast as f64,
+            clip.saturation as f64,
+            6500.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            clip.exposure as f64,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            true,
+            true,
+        );
+        // FFmpeg `eq` contrast pivots around Y=0.5 differently than preview's
+        // GStreamer videobalance path. Add a calibrated brightness bias around
+        // neutral contrast to keep low/high contrast looks closer to preview.
+        let contrast_t = clip.contrast.clamp(0.0, 2.0) as f64;
+        let contrast_delta = contrast_t - 1.0;
+        let contrast_brightness_bias = 0.26 * contrast_delta - 0.08 * contrast_delta * contrast_delta;
         format!(
             ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
-            (clip.brightness as f64 + exposure_brightness_delta).clamp(-1.0, 1.0),
-            (clip.contrast as f64 + exposure_contrast_delta).clamp(0.0, 2.0),
-            clip.saturation.clamp(0.0, 2.0)
+            (preview_params.brightness + contrast_brightness_bias).clamp(-1.0, 1.0),
+            preview_params.contrast,
+            preview_params.saturation
         )
     } else {
         String::new()
@@ -1754,6 +1781,19 @@ mod tests {
             .unwrap_or_else(|e| panic!("invalid `{key}` value in `{filter}`: {e}"))
     }
 
+    fn extract_eq_component(filter: &str, key: &str) -> f32 {
+        let needle = format!("{key}=");
+        let start = filter
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing eq component `{key}` in `{filter}`"));
+        let rest = &filter[start + needle.len()..];
+        let end = rest.find(':').unwrap_or(rest.len());
+        rest[..end]
+            .trim_matches('\'')
+            .parse::<f32>()
+            .unwrap_or_else(|e| panic!("invalid `{key}` value in `{filter}`: {e}"))
+    }
+
     #[test]
     fn total_size_progress_uses_estimate_and_caps() {
         let p = parse_progress_line("total_size=500", 1_000_000, Some(1_000)).unwrap();
@@ -2176,6 +2216,36 @@ mod tests {
         assert!(f.contains(",eq=brightness="));
         assert!(f.contains(":contrast="));
         assert!(!f.contains(":gamma="));
+    }
+
+    #[test]
+    fn build_color_filter_static_uses_preview_calibrated_primary_mapping() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.contrast = 0.0;
+        let f = build_color_filter(&clip);
+        let brightness = extract_eq_component(&f, "brightness");
+        let contrast = extract_eq_component(&f, "contrast");
+        let saturation = extract_eq_component(&f, "saturation");
+        assert!(
+            brightness < -0.2,
+            "low contrast should include negative brightness bias for preview parity; got {brightness}"
+        );
+        assert!(
+            contrast < 0.5,
+            "preview-calibrated contrast=0 mapping should stay low; got {contrast}"
+        );
+        assert!(
+            saturation > 1.5,
+            "preview-calibrated contrast=0 mapping should include saturation compensation; got {saturation}"
+        );
+
+        clip.contrast = 2.0;
+        let f_hi = build_color_filter(&clip);
+        let brightness_hi = extract_eq_component(&f_hi, "brightness");
+        assert!(
+            brightness_hi > 0.1,
+            "high contrast should include positive brightness bias for preview parity; got {brightness_hi}"
+        );
     }
 
     #[test]

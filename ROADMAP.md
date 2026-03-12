@@ -104,6 +104,7 @@ Tracking docs:
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
 - [x] Extended grading parity bridge: export prefers FFmpeg frei0r (`coloradj_RGB`, `three_point_balance`) using the same calibrated mapping as Program Monitor preview, with automatic native-filter fallback when frei0r modules are unavailable
 - [x] Exposure parity alignment: export exposure now follows preview-calibrated brightness/contrast delta mapping to reduce preview/export mismatch on extreme values
+- [x] Primary static-control parity retune: export `brightness`/`contrast`/`saturation` now follows preview-calibrated mapping (plus calibrated contrast-brightness bias) for closer Program Monitor/export match on flat/high-contrast looks
 - [x] Tonal warmth/tint creative boost: highlights/midtones/shadows warmth+tint now use a non-linear response with stronger endpoint effect and gentle center control, while keeping preview/export mapping aligned
 - [x] Warmth slider direction consistency: midtones/highlights warmth now follow standard grading direction (left cooler, right warmer) in both preview and export
 - [x] Shadows warmth deep-shadow direction consistency: 3-point mapping now inverts shadows warmth in curve-space so slider direction remains conventional (left cooler, right warmer) in preview/export bridge
@@ -153,6 +154,7 @@ Tracking docs:
 - [x] MCP performance profiling tool `get_performance_snapshot` (prerender queue/transition hit-rate/rebuild telemetry snapshot)
 - [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
 - [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
+- [x] MCP color parity calibration harness hardening: `tools/calibrate_mcp_color_match.py` now covers full clip color controls, uses repeated seek/settle stabilization + sample re-apply before export capture, and reports threshold-based pass/fail summaries
 - [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach

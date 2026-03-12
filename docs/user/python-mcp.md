@@ -54,7 +54,10 @@ printf '%s\n' \
 - `tools/proxy_perf_matrix.sh <app-pid> <project.fcpxml>`
   - Runs the 2x2x2 hardware/occlusion/realtime perf matrix and writes per-run `perf stat` artifacts.
 - `python3 tools/calibrate_mcp_color_match.py --media Sample-Media/calibration_chart.mp4 --out /tmp/us_mcp_color_calib`
-  - Sweeps extended color sliders via MCP and measures Program Monitor preview vs exported MP4 frame RMSE; also reports frei0r plugin compatibility (`three_point_balance` naming on FFmpeg).
+  - Sweeps full clip color controls (primary + extended grading) via MCP and measures Program Monitor preview vs exported MP4 frame RMSE.
+  - Uses repeated seek/settle stabilization (configurable with `--seek-repeats`) and re-applies each sample state before export capture to reduce stale-frame races.
+  - Captures a neutral baseline RMSE first, then records per-sample deltas from neutral to help separate global baseline offset from control-specific divergence.
+  - Writes pass/fail per sample using `--threshold-total-rmse` (default `3.0`), includes default-sample stale-frame retry protection (`--default-sample-retries`), and reports frei0r compatibility diagnostics (`three_point_balance` naming on FFmpeg).
 
 Useful playback-tuning toggles:
 

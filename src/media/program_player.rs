@@ -131,11 +131,11 @@ impl ShortFrameCache {
 /// Calibrated videobalance output parameters (brightness, contrast,
 /// saturation, hue) computed from clip colour settings by
 /// `ProgramPlayer::compute_videobalance_params`.
-struct VBParams {
-    brightness: f64,
-    contrast: f64,
-    saturation: f64,
-    hue: f64,
+pub(crate) struct VBParams {
+    pub(crate) brightness: f64,
+    pub(crate) contrast: f64,
+    pub(crate) saturation: f64,
+    pub(crate) hue: f64,
 }
 
 /// Per-channel RGB gains for frei0r `coloradj_RGB` element.
@@ -8331,7 +8331,7 @@ impl ProgramPlayer {
     /// frei0r `coloradj_RGB` element and excluded from videobalance.
     /// When `has_3point` is true, shadows/midtones/highlights are handled
     /// by the frei0r `3-point-color-balance` element.
-    fn compute_videobalance_params(
+    pub(crate) fn compute_videobalance_params(
         brightness: f64,
         contrast: f64,
         saturation: f64,
