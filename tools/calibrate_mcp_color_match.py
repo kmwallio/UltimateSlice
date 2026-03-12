@@ -4,7 +4,7 @@
 This script drives UltimateSlice through MCP, sweeps clip color sliders, and
 compares:
   - Program preview frame (`export_displayed_frame`)
-  - Exported MP4 frame (via `export_mp4` + ffmpeg frame extraction)
+  - Exported frame (via `export_mp4` or preset export + ffmpeg extraction)
 
 It writes a JSON report with per-slider/per-value RMSE metrics and plugin
 availability checks for GStreamer and FFmpeg frei0r modules.
@@ -198,7 +198,7 @@ def compute_rmse(a: np.ndarray, b: np.ndarray) -> dict:
     }
 
 
-def extract_export_frame(export_mp4: Path, out_png: Path, seek_seconds: float) -> None:
+def extract_export_frame(export_video_path: Path, out_png: Path, seek_seconds: float) -> None:
     run(
         [
             "ffmpeg",
@@ -208,12 +208,49 @@ def extract_export_frame(export_mp4: Path, out_png: Path, seek_seconds: float) -
             "-ss",
             f"{seek_seconds:.6f}",
             "-i",
-            str(export_mp4),
+            str(export_video_path),
             "-frames:v",
             "1",
             str(out_png),
         ]
     )
+
+
+def export_mode_extension(export_mode: str) -> str:
+    return ".mov" if export_mode == "prores_mov" else ".mp4"
+
+
+def ensure_lowloss_preset(preset_name: str) -> None:
+    payload = tool_payload(
+        call_tool(
+            "save_export_preset",
+            {
+                "name": preset_name,
+                "video_codec": "prores",
+                "container": "mov",
+                "output_width": 0,
+                "output_height": 0,
+                "crf": 0,
+                "audio_codec": "pcm",
+                "audio_bitrate_kbps": 192,
+            },
+        )
+    )
+    ensure_ok("save_export_preset", payload)
+
+
+def export_timeline(path: Path, export_mode: str, preset_name: str) -> None:
+    if export_mode == "prores_mov":
+        payload = tool_payload(
+            call_tool(
+                "export_with_preset",
+                {"path": str(path), "preset_name": preset_name},
+            )
+        )
+        ensure_ok("export_with_preset", payload)
+    else:
+        payload = tool_payload(call_tool("export_mp4", {"path": str(path)}))
+        ensure_ok("export_mp4", payload)
 
 
 def stabilize_seek(seek_ns: int, settle_ms: int, repeats: int) -> None:
@@ -317,6 +354,12 @@ def parse_args() -> argparse.Namespace:
         help="Pass threshold for total RMSE.",
     )
     parser.add_argument(
+        "--threshold-delta-rmse",
+        type=float,
+        default=3.0,
+        help="Pass threshold for absolute delta-from-neutral total RMSE.",
+    )
+    parser.add_argument(
         "--seek-repeats",
         type=int,
         default=2,
@@ -327,6 +370,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=2,
         help="Retries for default-value samples when RMSE is far from neutral baseline.",
+    )
+    parser.add_argument(
+        "--export-mode",
+        choices=["mp4", "prores_mov"],
+        default="mp4",
+        help="Export path used for parity capture. `prores_mov` reduces compression effects.",
+    )
+    parser.add_argument(
+        "--export-preset-name",
+        default="mcp-parity-prores",
+        help="Preset name used when --export-mode=prores_mov.",
     )
     return parser.parse_args()
 
@@ -345,10 +399,14 @@ def main() -> int:
     report: dict = {
         "plugins": plugin_report(),
         "threshold_total_rmse": args.threshold_total_rmse,
+        "threshold_delta_rmse": args.threshold_delta_rmse,
+        "export_mode": args.export_mode,
         "media": str(Path(args.media).resolve()),
         "seek_ns": args.seek_ns,
         "sliders": {},
     }
+    if args.export_mode == "prores_mov":
+        report["export_preset_name"] = args.export_preset_name
     if args.check_plugins_only:
         out_path = out_dir / "mcp_plugin_report.json"
         out_path.write_text(json.dumps(report, indent=2))
@@ -365,22 +423,25 @@ def main() -> int:
         )
 
     ctx = setup_session(media_path, clip_duration_ns=2_000_000_000)
+    if args.export_mode == "prores_mov":
+        ensure_lowloss_preset(args.export_preset_name)
+
     seek_ns = min(max(0, args.seek_ns), max(0, ctx.source_out_ns - 1_000_000))
     seek_s = seek_ns / 1_000_000_000.0
+    export_ext = export_mode_extension(args.export_mode)
     neutral_rmse_total = None
 
     # Capture neutral baseline once so downstream analysis can separate a global
     # preview/export floor from per-control divergence.
     set_color_state(ctx.clip_id, seek_ns, args.settle_ms, args.seek_repeats, {})
     neutral_preview_ppm = out_dir / "preview_neutral_baseline.ppm"
-    neutral_export_mp4 = out_dir / "export_neutral_baseline.mp4"
+    neutral_export_file = out_dir / f"export_neutral_baseline{export_ext}"
     neutral_export_png = out_dir / "export_neutral_baseline.png"
     payload = tool_payload(call_tool("export_displayed_frame", {"path": str(neutral_preview_ppm)}))
     ensure_ok("export_displayed_frame", payload)
     set_color_state(ctx.clip_id, seek_ns, args.settle_ms, args.seek_repeats, {})
-    payload = tool_payload(call_tool("export_mp4", {"path": str(neutral_export_mp4)}))
-    ensure_ok("export_mp4", payload)
-    extract_export_frame(neutral_export_mp4, neutral_export_png, seek_s)
+    export_timeline(neutral_export_file, args.export_mode, args.export_preset_name)
+    extract_export_frame(neutral_export_file, neutral_export_png, seek_s)
     neutral_preview_img = np.array(Image.open(neutral_preview_ppm).convert("RGB"), dtype=np.float32)
     neutral_export_img = np.array(Image.open(neutral_export_png).convert("RGB"), dtype=np.float32)
     if neutral_preview_img.shape != neutral_export_img.shape:
@@ -395,6 +456,8 @@ def main() -> int:
     neutral_rmse_total = neutral_rmse["total"]
     report["neutral_baseline"] = {
         "rmse": neutral_rmse,
+        "pass_absolute": neutral_rmse_total <= args.threshold_total_rmse,
+        "pass_delta": True,
         "pass": neutral_rmse_total <= args.threshold_total_rmse,
     }
     print(f"{'neutral_baseline':18s} +0.000  rmse={neutral_rmse_total:.3f}")
@@ -415,7 +478,7 @@ def main() -> int:
                 )
 
                 preview_ppm = out_dir / f"preview_{slider}_{value:+.3f}.ppm"
-                export_mp4 = out_dir / f"export_{slider}_{value:+.3f}.mp4"
+                export_file = out_dir / f"export_{slider}_{value:+.3f}{export_ext}"
                 export_png = out_dir / f"export_{slider}_{value:+.3f}.png"
 
                 payload = tool_payload(
@@ -431,10 +494,9 @@ def main() -> int:
                     args.seek_repeats,
                     {slider: value},
                 )
-                payload = tool_payload(call_tool("export_mp4", {"path": str(export_mp4)}))
-                ensure_ok("export_mp4", payload)
+                export_timeline(export_file, args.export_mode, args.export_preset_name)
 
-                extract_export_frame(export_mp4, export_png, seek_s)
+                extract_export_frame(export_file, export_png, seek_s)
 
                 preview_img = np.array(Image.open(preview_ppm).convert("RGB"), dtype=np.float32)
                 export_img = np.array(Image.open(export_png).convert("RGB"), dtype=np.float32)
@@ -464,13 +526,18 @@ def main() -> int:
                 break
 
             print(f"{slider:18s} {value:+.3f}  rmse={rmse['total']:.3f}")
+            delta_total = rmse["total"] - neutral_rmse_total
+            pass_absolute = rmse["total"] <= args.threshold_total_rmse
+            pass_delta = abs(delta_total) <= args.threshold_delta_rmse
             slider_rows.append(
                 {
                     "value": value,
                     "rmse": rmse,
-                    "delta_from_neutral_total_rmse": rmse["total"] - neutral_rmse_total,
+                    "delta_from_neutral_total_rmse": delta_total,
                     "attempts": attempt,
-                    "pass": rmse["total"] <= args.threshold_total_rmse,
+                    "pass_absolute": pass_absolute,
+                    "pass_delta": pass_delta,
+                    "pass": pass_absolute and pass_delta,
                 }
             )
 
@@ -481,6 +548,16 @@ def main() -> int:
                 "mean_total_rmse": float(np.mean([r["rmse"]["total"] for r in slider_rows])),
                 "max_total_rmse": float(np.max([r["rmse"]["total"] for r in slider_rows])),
                 "min_total_rmse": float(np.min([r["rmse"]["total"] for r in slider_rows])),
+                "mean_abs_delta_from_neutral_total_rmse": float(
+                    np.mean([abs(r["delta_from_neutral_total_rmse"]) for r in slider_rows])
+                ),
+                "max_abs_delta_from_neutral_total_rmse": float(
+                    np.max([abs(r["delta_from_neutral_total_rmse"]) for r in slider_rows])
+                ),
+                "pass_absolute_count": int(sum(1 for r in slider_rows if r["pass_absolute"])),
+                "fail_absolute_count": int(sum(1 for r in slider_rows if not r["pass_absolute"])),
+                "pass_delta_count": int(sum(1 for r in slider_rows if r["pass_delta"])),
+                "fail_delta_count": int(sum(1 for r in slider_rows if not r["pass_delta"])),
                 "pass_count": int(sum(1 for r in slider_rows if r["pass"])),
                 "fail_count": int(sum(1 for r in slider_rows if not r["pass"])),
             },

@@ -155,6 +155,9 @@ Tracking docs:
 - [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
 - [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
 - [x] MCP color parity calibration harness hardening: `tools/calibrate_mcp_color_match.py` now covers full clip color controls, uses repeated seek/settle stabilization + sample re-apply before export capture, and reports threshold-based pass/fail summaries
+- [x] MCP parity metrics normalization: calibration report now tracks absolute RMSE and delta-from-neutral pass metrics (`pass_absolute`, `pass_delta`, combined `pass`) plus per-slider delta summaries
+- [x] MCP parity low-loss export mode: calibration harness now supports preset-based ProRes/MOV capture (`--export-mode prores_mov`) to reduce compression artifacts during parity evaluation
+- [x] MCP parity smoke-check helper: `tools/mcp_parity_smoke_check.py` wraps low-sample calibration and enforces broad guardrails for normalized focus-slider regressions in automation/CI
 - [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
