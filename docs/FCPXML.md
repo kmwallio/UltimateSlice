@@ -235,6 +235,7 @@ Unlike most graphics engines where `(0,0)` is the top-left, FCPXML uses the **ce
     *   **`position`**: Translation from the center, expressed as **percentages of the frame height**. (e.g., `10 10` is 10% right and 10% up).
     *   **`scale`**: Multiplier (e.g., `1 1` is 100%, `2 2` is 200%).
     *   **`rotation`**: Spinning the clip in degrees. **Positive is counter-clockwise**, negative is clockwise.
+        > **Rotation convention note:** UltimateSlice stores rotation using this same convention (positive = counter-clockwise), matching FCP. When exporting via FFmpeg, the stored angle must be **negated** because FFmpeg's `rotate` filter treats positive angles as clockwise (screen-coordinate Y-down convention). GStreamer's `GstRotate` element uses counter-clockwise-positive and needs no negation; the `videoflip` fallback (90°-increment only) must map `+90` → `counterclockwise` and `+270`/`-90` → `clockwise`.
     *   **`anchor`**: The point on the clip that "sticks" to the position, expressed as **percentages of the frame height** (relative to the clip's center).
     *   **`tracking`**: An IDREF linking to an object tracker for automated motion tracking integration.
 *   **`<adjust-conform>`**: 
