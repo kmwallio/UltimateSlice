@@ -31,6 +31,16 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 | **Saturation** | 0.0 → 2.0 | 1.0 | 0 = greyscale, 2 = vivid |
 | **Temperature** | 2000 → 10000 K | 6500 | Color temperature: low = warm/amber, high = cool/blue |
 | **Tint** | −1.0 → 1.0 | 0.0 | Green–magenta axis: negative = green, positive = magenta |
+| **Exposure** | −1.0 → 1.0 | 0.0 | Overall exposure compensation |
+| **Black Point** | −1.0 → 1.0 | 0.0 | Lifts or crushes black levels |
+| **Highlights Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in highlights |
+| **Highlights Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in highlights |
+| **Midtones Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in midtones |
+| **Midtones Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in midtones |
+| **Shadows Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in shadows |
+| **Shadows Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in shadows |
+
+> **Note:** Exposure, Black Point, and per-tone Warmth/Tint are stored and round-tripped through FCPXML (mapped from/to FCP's "Color Adjustments" filter-video params) but are not yet applied in real-time preview or export. Brightness, Contrast, Saturation, Temperature, and Tint are fully applied.
 
 ---
 

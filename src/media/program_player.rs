@@ -272,6 +272,22 @@ pub struct ProgramClip {
     pub midtones: f64,
     /// Highlight grading: −1.0 (pull down) to 1.0 (boost). Default 0.0.
     pub highlights: f64,
+    /// Exposure adjustment: −1.0 to 1.0. Default 0.0.
+    pub exposure: f64,
+    /// Black point adjustment: −1.0 to 1.0. Default 0.0.
+    pub black_point: f64,
+    /// Highlights warmth (orange–blue): −1.0 to 1.0. Default 0.0.
+    pub highlights_warmth: f64,
+    /// Highlights tint (green–magenta): −1.0 to 1.0. Default 0.0.
+    pub highlights_tint: f64,
+    /// Midtones warmth (orange–blue): −1.0 to 1.0. Default 0.0.
+    pub midtones_warmth: f64,
+    /// Midtones tint (green–magenta): −1.0 to 1.0. Default 0.0.
+    pub midtones_tint: f64,
+    /// Shadows warmth (orange–blue): −1.0 to 1.0. Default 0.0.
+    pub shadows_warmth: f64,
+    /// Shadows tint (green–magenta): −1.0 to 1.0. Default 0.0.
+    pub shadows_tint: f64,
     /// Whether the source file contains an audio stream.
     pub has_audio: bool,
     /// Chroma key enabled flag.
@@ -2888,6 +2904,7 @@ impl ProgramPlayer {
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
         self.update_current_effects(
             brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
     }
 
@@ -2903,6 +2920,14 @@ impl ProgramPlayer {
         shadows: f64,
         midtones: f64,
         highlights: f64,
+        exposure: f64,
+        black_point: f64,
+        highlights_warmth: f64,
+        highlights_tint: f64,
+        midtones_warmth: f64,
+        midtones_tint: f64,
+        shadows_warmth: f64,
+        shadows_tint: f64,
     ) {
         // Check whether the required effect elements exist.  If the slider
         // values moved away from defaults but the slot was built without the
@@ -2945,6 +2970,14 @@ impl ProgramPlayer {
                 clip.shadows = shadows;
                 clip.midtones = midtones;
                 clip.highlights = highlights;
+                clip.exposure = exposure;
+                clip.black_point = black_point;
+                clip.highlights_warmth = highlights_warmth;
+                clip.highlights_tint = highlights_tint;
+                clip.midtones_warmth = midtones_warmth;
+                clip.midtones_tint = midtones_tint;
+                clip.shadows_warmth = shadows_warmth;
+                clip.shadows_tint = shadows_tint;
             }
             let pos = self.timeline_pos_ns;
             self.rebuild_pipeline_at(pos);
@@ -3010,6 +3043,14 @@ impl ProgramPlayer {
             clip.shadows = shadows;
             clip.midtones = midtones;
             clip.highlights = highlights;
+            clip.exposure = exposure;
+            clip.black_point = black_point;
+            clip.highlights_warmth = highlights_warmth;
+            clip.highlights_tint = highlights_tint;
+            clip.midtones_warmth = midtones_warmth;
+            clip.midtones_tint = midtones_tint;
+            clip.shadows_warmth = shadows_warmth;
+            clip.shadows_tint = shadows_tint;
         }
         // Force frame redraw when paused.
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
@@ -9765,6 +9806,14 @@ mod tests {
             shadows: 0.0,
             midtones: 0.0,
             highlights: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
             has_audio: true,
             chroma_key_enabled: false,
             chroma_key_color: 0x00FF00,

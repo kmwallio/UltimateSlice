@@ -1837,7 +1837,8 @@ pub fn build_window(
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |b, c, s, temp, tnt, d, sh, shd, mid, hil| {
+            move |b, c, s, temp, tnt, d, sh, shd, mid, hil,
+                  exp, bp, hw, ht, mw, mt, sw, st| {
                 prog_player.borrow_mut().update_current_effects(
                     b as f64,
                     c as f64,
@@ -1849,6 +1850,14 @@ pub fn build_window(
                     shd as f64,
                     mid as f64,
                     hil as f64,
+                    exp as f64,
+                    bp as f64,
+                    hw as f64,
+                    ht as f64,
+                    mw as f64,
+                    mt as f64,
+                    sw as f64,
+                    st as f64,
                 );
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {
@@ -3779,6 +3788,14 @@ pub fn build_window(
                             shadows: c.shadows as f64,
                             midtones: c.midtones as f64,
                             highlights: c.highlights as f64,
+                            exposure: c.exposure as f64,
+                            black_point: c.black_point as f64,
+                            highlights_warmth: c.highlights_warmth as f64,
+                            highlights_tint: c.highlights_tint as f64,
+                            midtones_warmth: c.midtones_warmth as f64,
+                            midtones_tint: c.midtones_tint as f64,
+                            shadows_warmth: c.shadows_warmth as f64,
+                            shadows_tint: c.shadows_tint as f64,
                             has_audio: !c.is_freeze_frame()
                                 && !suppress_embedded_audio_ids.contains(&c.id),
                             chroma_key_enabled: c.chroma_key_enabled,
@@ -4927,6 +4944,14 @@ fn handle_mcp_command(
                                 "shadows":          c.shadows,
                                 "midtones":         c.midtones,
                                 "highlights":       c.highlights,
+                                "exposure":         c.exposure,
+                                "black_point":      c.black_point,
+                                "highlights_warmth": c.highlights_warmth,
+                                "highlights_tint":  c.highlights_tint,
+                                "midtones_warmth":  c.midtones_warmth,
+                                "midtones_tint":    c.midtones_tint,
+                                "shadows_warmth":   c.shadows_warmth,
+                                "shadows_tint":     c.shadows_tint,
                                 "volume":           c.volume,
                                 "pan":              c.pan,
                                 "scale":            c.scale,
@@ -5958,6 +5983,14 @@ fn handle_mcp_command(
             shadows,
             midtones,
             highlights,
+            exposure,
+            black_point,
+            highlights_warmth,
+            highlights_tint,
+            midtones_warmth,
+            midtones_tint,
+            shadows_warmth,
+            shadows_tint,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -5975,6 +6008,14 @@ fn handle_mcp_command(
                         clip.shadows = shadows as f32;
                         clip.midtones = midtones as f32;
                         clip.highlights = highlights as f32;
+                        clip.exposure = exposure as f32;
+                        clip.black_point = black_point as f32;
+                        clip.highlights_warmth = highlights_warmth as f32;
+                        clip.highlights_tint = highlights_tint as f32;
+                        clip.midtones_warmth = midtones_warmth as f32;
+                        clip.midtones_tint = midtones_tint as f32;
+                        clip.shadows_warmth = shadows_warmth as f32;
+                        clip.shadows_tint = shadows_tint as f32;
                         proj.dirty = true;
                         found = true;
                         break 'outer;

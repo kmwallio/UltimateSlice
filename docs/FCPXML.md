@@ -14,6 +14,7 @@ This document provides a technical overview of the FCPXML (Final Cut Pro XML) fo
 > - native `timeMap`/`timept` import/export for 2-point constant retimes plus representable multi-point monotonic ramps (mapped to speed keyframes), including `smooth2` easing mapping; unsupported imported maps (for example with `inTime`/`outTime`) are preserved and re-emitted
 > - `adjust-transform`, `adjust-compositing`, and `adjust-crop`/`crop-rect` mappings used by Inspector fields
 > - `adjust-volume` / `adjust-panner` keyframe import from `<audio-channel-source>` containers; strict export wraps keyframed volume/pan in `<audio-channel-source>` for FCP compatibility
+> - `filter-video` "Color Adjustments" import/export: 13 FCP params mapped to clip color fields with round-trip value conversion
 > - per-asset format generation with embedded timecode extraction (video via ffprobe stream tags, audio via BWF `time_reference`)
 > - audio-only asset handling with `FFVideoFormatRateUndefined` format, 48 kHz time base, and probed duration
 > - connected clips nested inside primary storyline clips with offset in parent source time space
@@ -676,6 +677,37 @@ If you are writing code to parse FCPXML, follow these steps:
     *   **`nameOverride`**: Overrides the display name.
     *   **`enabled`**: `0` | `1` (default: `1`).
     *   Can contain `<data>` and `<param>` children.
+
+    #### FCP "Color Adjustments" Filter
+
+    FCP's built-in **Color Adjustments** effect (`uid="FxPlug:7E2022A5-202B-4EEB-A311-AC2B585D01B0"`) is emitted as a `<filter-video>` with 13 `<param>` children keyed by integer `key` attributes. UltimateSlice parses these natively into clip color fields and re-emits them in strict `.fcpxml` export.
+
+    | FCP Param | `key` | FCP Range | US Field | US Range | Conversion |
+    |-----------|-------|-----------|----------|----------|------------|
+    | Exposure | `3` | −100..100 | `exposure` | −1.0..1.0 | /100 |
+    | Brightness | `2` | −100..100 | `brightness` | −1.0..1.0 | /100 |
+    | Contrast | `17` | −100..100 | `contrast` | 0.0..2.0 | /100+1.0 |
+    | Saturation | `16` | −100..100 | `saturation` | 0.0..2.0 | /100+1.0 |
+    | Highlights | `7` | −100..100 | `highlights` | −1.0..1.0 | /100 |
+    | Black Point | `1` | −100..100 | `black_point` | −1.0..1.0 | /100 |
+    | Shadows | `4` | −100..100 | `shadows` | −1.0..1.0 | /100 |
+    | Highlights Warmth | `10` | −100..100 | `highlights_warmth` | −1.0..1.0 | /100 |
+    | Highlights Tint | `11` | −100..100 | `highlights_tint` | −1.0..1.0 | /100 |
+    | Midtones Warmth | `12` | −100..100 | `midtones_warmth` | −1.0..1.0 | /100 |
+    | Midtones Tint | `13` | −100..100 | `midtones_tint` | −1.0..1.0 | /100 |
+    | Shadows Warmth | `14` | −100..100 | `shadows_warmth` | −1.0..1.0 | /100 |
+    | Shadows Tint | `15` | −100..100 | `shadows_tint` | −1.0..1.0 | /100 |
+
+    **Import notes:**
+    - The `<data key="effectConfig">` binary blob and `<param>` with empty names (OXML blobs for keys 20, 23) are skipped.
+    - `<param name="trigger Enhance" key="18">` is also skipped (FCP auto-enhance trigger).
+    - Non-"Color Adjustments" `<filter-video>` elements are preserved as unknown XML passthrough.
+
+    **Export notes:**
+    - Strict `.fcpxml` emits `<filter-video>` only when at least one color field differs from its default.
+    - The `<effect>` resource is emitted with `id="r_fcp_color_adj"` and the canonical FCP uid.
+    - Values are rounded to 4 decimal places to avoid f32 precision artifacts.
+    - Rich `.uspxml` stores the 8 new fields as vendor attrs (`us:exposure`, `us:black-point`, etc.).
 *   **`<filter-audio>`**: An audio effect applied to its parent element.
     *   **`ref`** (required): Reference to an `<effect>` ID.
     *   **`name`**: Display name.

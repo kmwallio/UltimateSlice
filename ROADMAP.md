@@ -362,12 +362,14 @@ Tracking docs:
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
+- [x] Extended color grading — exposure, black point, highlights/midtones/shadows warmth & tint; Inspector sliders, FCPXML round-trip (FCP `filter-video` "Color Adjustments" import/export), MCP `set_clip_color` support
+- [ ] Extended color grading preview/export — apply exposure, black_point, per-tone warmth/tint in GStreamer preview and FFmpeg export pipelines
+- [x] Shadows and Highlights — imported from FCP `<filter-video>` params, Inspector sliders, MCP support
 - [x] Denoise filter per clip (GStreamer `gaussianblur` positive sigma; ffmpeg `hqdn3d` on export)
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [x] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
-- [ ] Shadows and Highlights
 - [ ] Advanced color grading
 - [ ] Color management pipeline via OpenColorIO (OCIO)
   - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)

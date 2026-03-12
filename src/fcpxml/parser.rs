@@ -374,6 +374,20 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             &mut project,
                         );
                     }
+                    "filter-video" if in_spine && clip_stack.last().is_some() => {
+                        let fv_attrs = parse_attrs(e)?;
+                        let fv_name = fv_attrs.get("name").map(|s| s.as_str()).unwrap_or("");
+                        if fv_name == "Color Adjustments" {
+                            parse_fcp_color_adjustments_filter(
+                                &mut reader,
+                                clip_stack.last(),
+                                &mut track_map,
+                            )?;
+                        } else {
+                            let fragment = collect_unknown_start_fragment(&mut reader, e)?;
+                            append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
+                        }
+                    }
                     _ if in_spine && clip_stack.last().is_some() => {
                         let fragment = collect_unknown_start_fragment(&mut reader, e)?;
                         append_unknown_clip_child(fragment, clip_stack.last(), &mut track_map);
@@ -1068,6 +1082,30 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:highlights") {
                 clip.highlights = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:exposure") {
+                clip.exposure = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:black-point") {
+                clip.black_point = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:highlights-warmth") {
+                clip.highlights_warmth = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:highlights-tint") {
+                clip.highlights_tint = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:midtones-warmth") {
+                clip.midtones_warmth = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:midtones-tint") {
+                clip.midtones_tint = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:shadows-warmth") {
+                clip.shadows_warmth = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:shadows-tint") {
+                clip.shadows_tint = v.parse().unwrap_or(0.0);
+            }
             if let Some(v) = attrs.get("us:chroma-key-enabled") {
                 clip.chroma_key_enabled = v == "true" || v == "1";
             }
@@ -1151,6 +1189,84 @@ fn append_unknown_clip_child(
     if let Some(clip) = current_clip_mut(track_map, active_ctx) {
         clip.fcpxml_unknown_children.push(fragment);
     }
+}
+
+/// Parse FCP's `<filter-video name="Color Adjustments">` and apply param values
+/// to the active clip's color fields. FCP values are −100..100; UltimateSlice
+/// uses −1.0..1.0 for most fields, 0.0..2.0 for contrast/saturation.
+fn parse_fcp_color_adjustments_filter(
+    reader: &mut Reader<&[u8]>,
+    active_ctx: Option<&ActiveClipContext>,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) -> Result<()> {
+    let mut buf = Vec::new();
+    let mut depth = 1usize;
+    // Collect param key→value pairs first, then apply to clip.
+    let mut params: HashMap<String, f32> = HashMap::new();
+    while depth > 0 {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Empty(ref e) => {
+                let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if tag == "param" {
+                    let attrs = parse_attrs(e)?;
+                    if let (Some(key), Some(val)) = (attrs.get("key"), attrs.get("value")) {
+                        if let Ok(v) = val.parse::<f32>() {
+                            params.insert(key.clone(), v);
+                        }
+                    }
+                }
+            }
+            Event::Eof => bail!("Unexpected EOF in filter-video Color Adjustments"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    if let Some(clip) = current_clip_mut(track_map, active_ctx) {
+        // Map FCP params by key number to clip fields.
+        // FCP range: −100..100; US range: /100 (most) or /100+1 (contrast, saturation).
+        if let Some(&v) = params.get("3") {
+            clip.exposure = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("2") {
+            clip.brightness = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("17") {
+            clip.contrast = (v / 100.0 + 1.0).clamp(0.0, 2.0);
+        }
+        if let Some(&v) = params.get("16") {
+            clip.saturation = (v / 100.0 + 1.0).clamp(0.0, 2.0);
+        }
+        if let Some(&v) = params.get("7") {
+            clip.highlights = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("1") {
+            clip.black_point = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("4") {
+            clip.shadows = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("10") {
+            clip.highlights_warmth = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("11") {
+            clip.highlights_tint = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("12") {
+            clip.midtones_warmth = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("13") {
+            clip.midtones_tint = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("14") {
+            clip.shadows_warmth = (v / 100.0).clamp(-1.0, 1.0);
+        }
+        if let Some(&v) = params.get("15") {
+            clip.shadows_tint = (v / 100.0).clamp(-1.0, 1.0);
+        }
+    }
+    Ok(())
 }
 
 fn apply_adjust_transform(
@@ -2155,6 +2271,14 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:shadows"
             | "us:midtones"
             | "us:highlights"
+            | "us:exposure"
+            | "us:black-point"
+            | "us:highlights-warmth"
+            | "us:highlights-tint"
+            | "us:midtones-warmth"
+            | "us:midtones-tint"
+            | "us:shadows-warmth"
+            | "us:shadows-tint"
             | "us:chroma-key-enabled"
             | "us:chroma-key-color"
             | "us:chroma-key-tolerance"
@@ -4665,5 +4789,136 @@ mod tests {
         assert_eq!(clip.volume_keyframes[0].time_ns, 0);
         assert_eq!(clip.volume_keyframes[1].time_ns, 3_000_000_000);
         assert_eq!(clip.volume_keyframes[2].time_ns, 5_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_fcp_filter_video_color_adjustments() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.11">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+    <effect id="r4" name="Color Adjustments" uid="FxPlug:7E2022A5-202B-4EEB-A311-AC2B585D01B0"/>
+  </resources>
+  <library>
+    <event>
+      <project name="ColorAdj">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s" name="footage" format="r1" tcFormat="NDF">
+              <filter-video ref="r4" name="Color Adjustments">
+                <param name="Exposure" key="3" value="-7.5"/>
+                <param name="Brightness" key="2" value="10"/>
+                <param name="Contrast" key="17" value="25"/>
+                <param name="Saturation" key="16" value="-50"/>
+                <param name="Highlights" key="7" value="-20"/>
+                <param name="Black Point" key="1" value="15"/>
+                <param name="Shadows" key="4" value="30"/>
+                <param name="Highlights Warmth" key="10" value="40"/>
+                <param name="Highlights Tint" key="11" value="-10"/>
+                <param name="Midtones Warmth" key="12" value="60"/>
+                <param name="Midtones Tint" key="13" value="5"/>
+                <param name="Shadows Warmth" key="14" value="-25"/>
+                <param name="Shadows Tint" key="15" value="80"/>
+              </filter-video>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert!((clip.exposure - (-0.075)).abs() < 1e-5, "exposure");
+        assert!((clip.brightness - 0.1).abs() < 1e-5, "brightness");
+        assert!((clip.contrast - 1.25).abs() < 1e-5, "contrast: /100+1");
+        assert!((clip.saturation - 0.5).abs() < 1e-5, "saturation: /100+1");
+        assert!((clip.highlights - (-0.2)).abs() < 1e-5, "highlights");
+        assert!((clip.black_point - 0.15).abs() < 1e-5, "black_point");
+        assert!((clip.shadows - 0.3).abs() < 1e-5, "shadows");
+        assert!((clip.highlights_warmth - 0.4).abs() < 1e-5, "highlights_warmth");
+        assert!((clip.highlights_tint - (-0.1)).abs() < 1e-5, "highlights_tint");
+        assert!((clip.midtones_warmth - 0.6).abs() < 1e-5, "midtones_warmth");
+        assert!((clip.midtones_tint - 0.05).abs() < 1e-5, "midtones_tint");
+        assert!((clip.shadows_warmth - (-0.25)).abs() < 1e-5, "shadows_warmth");
+        assert!((clip.shadows_tint - 0.8).abs() < 1e-5, "shadows_tint");
+    }
+
+    #[test]
+    fn test_parse_fcp_filter_video_non_color_adj_preserved_as_unknown() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.11">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+    <effect id="r5" name="Gaussian Blur" uid="FxPlug:AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"/>
+  </resources>
+  <library>
+    <event>
+      <project name="OtherFilter">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s" name="footage" format="r1" tcFormat="NDF">
+              <filter-video ref="r5" name="Gaussian Blur">
+                <param name="Amount" key="1" value="50"/>
+              </filter-video>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        // Non-Color-Adjustments filter-video should be preserved as unknown XML
+        assert!(
+            clip.fcpxml_unknown_children.iter().any(|s: &String| s.contains("Gaussian Blur")),
+            "Non-Color-Adjustments filter-video should be preserved as unknown XML"
+        );
+        // Color fields should remain at defaults
+        assert!((clip.exposure - 0.0).abs() < 1e-5);
+        assert!((clip.brightness - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_parse_uspxml_color_adjustment_vendor_attrs() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///footage.mp4" name="footage" duration="240/24s"/>
+  </resources>
+  <library>
+    <event>
+      <project name="VendorColor">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0/24s" duration="240/24s" start="0/24s"
+                        name="footage" us:track-idx="0" us:track-kind="video" us:track-name="V1"
+                        us:exposure="0.5" us:black-point="-0.3"
+                        us:highlights-warmth="0.2" us:highlights-tint="-0.1"
+                        us:midtones-warmth="0.4" us:midtones-tint="0.15"
+                        us:shadows-warmth="-0.6" us:shadows-tint="0.7"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert!((clip.exposure - 0.5).abs() < 1e-5, "exposure");
+        assert!((clip.black_point - (-0.3)).abs() < 1e-5, "black_point");
+        assert!((clip.highlights_warmth - 0.2).abs() < 1e-5, "highlights_warmth");
+        assert!((clip.highlights_tint - (-0.1)).abs() < 1e-5, "highlights_tint");
+        assert!((clip.midtones_warmth - 0.4).abs() < 1e-5, "midtones_warmth");
+        assert!((clip.midtones_tint - 0.15).abs() < 1e-5, "midtones_tint");
+        assert!((clip.shadows_warmth - (-0.6)).abs() < 1e-5, "shadows_warmth");
+        assert!((clip.shadows_tint - 0.7).abs() < 1e-5, "shadows_tint");
     }
 }

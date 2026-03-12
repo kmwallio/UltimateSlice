@@ -409,6 +409,38 @@ pub struct Clip {
     /// Highlight grading: −1.0 (pull down highlights) to 1.0 (boost highlights). Default 0.0.
     #[serde(default)]
     pub highlights: f32,
+    /// Exposure adjustment: −1.0 (darken) to 1.0 (brighten). Default 0.0.
+    /// Maps to FCP "Exposure" param (key 3, range −100..100).
+    #[serde(default)]
+    pub exposure: f32,
+    /// Black point adjustment: −1.0 (lower) to 1.0 (raise). Default 0.0.
+    /// Maps to FCP "Black Point" param (key 1, range −100..100).
+    #[serde(default)]
+    pub black_point: f32,
+    /// Highlights warmth (orange–blue): −1.0 to 1.0. Default 0.0.
+    /// Maps to FCP "Highlights Warmth" param (key 10, range −100..100).
+    #[serde(default)]
+    pub highlights_warmth: f32,
+    /// Highlights tint (green–magenta): −1.0 to 1.0. Default 0.0.
+    /// Maps to FCP "Highlights Tint" param (key 11, range −100..100).
+    #[serde(default)]
+    pub highlights_tint: f32,
+    /// Midtones warmth (orange–blue): −1.0 to 1.0. Default 0.0.
+    /// Maps to FCP "Midtones Warmth" param (key 12, range −100..100).
+    #[serde(default)]
+    pub midtones_warmth: f32,
+    /// Midtones tint (green–magenta): −1.0 to 1.0. Default 0.0.
+    /// Maps to FCP "Midtones Tint" param (key 13, range −100..100).
+    #[serde(default)]
+    pub midtones_tint: f32,
+    /// Shadows warmth (orange–blue): −1.0 to 1.0. Default 0.0.
+    /// Maps to FCP "Shadows Warmth" param (key 14, range −100..100).
+    #[serde(default)]
+    pub shadows_warmth: f32,
+    /// Shadows tint (green–magenta): −1.0 to 1.0. Default 0.0.
+    /// Maps to FCP "Shadows Tint" param (key 15, range −100..100).
+    #[serde(default)]
+    pub shadows_tint: f32,
     /// Play the clip in reverse (backwards). Default false.
     /// Applied as `reverse`/`areverse` filters on export; preview shows reversed playback
     /// indicator on the timeline clip.
@@ -613,6 +645,14 @@ impl Clip {
             shadows: 0.0,
             midtones: 0.0,
             highlights: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
             reverse: false,
             freeze_frame: false,
             freeze_frame_source_ns: None,

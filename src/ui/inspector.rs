@@ -63,6 +63,15 @@ pub struct InspectorView {
     pub shadows_slider: Scale,
     pub midtones_slider: Scale,
     pub highlights_slider: Scale,
+    // FCP Color Adjustments extended fields
+    pub exposure_slider: Scale,
+    pub black_point_slider: Scale,
+    pub highlights_warmth_slider: Scale,
+    pub highlights_tint_slider: Scale,
+    pub midtones_warmth_slider: Scale,
+    pub midtones_tint_slider: Scale,
+    pub shadows_warmth_slider: Scale,
+    pub shadows_tint_slider: Scale,
     // Audio sliders
     pub volume_slider: Scale,
     pub pan_slider: Scale,
@@ -198,6 +207,14 @@ impl InspectorView {
                 self.shadows_slider.set_value(c.shadows as f64);
                 self.midtones_slider.set_value(c.midtones as f64);
                 self.highlights_slider.set_value(c.highlights as f64);
+                self.exposure_slider.set_value(c.exposure as f64);
+                self.black_point_slider.set_value(c.black_point as f64);
+                self.highlights_warmth_slider.set_value(c.highlights_warmth as f64);
+                self.highlights_tint_slider.set_value(c.highlights_tint as f64);
+                self.midtones_warmth_slider.set_value(c.midtones_warmth as f64);
+                self.midtones_tint_slider.set_value(c.midtones_tint as f64);
+                self.shadows_warmth_slider.set_value(c.shadows_warmth as f64);
+                self.shadows_tint_slider.set_value(c.shadows_tint as f64);
                 // For keyframed properties, show the evaluated value at the playhead
                 let vol_val = c.value_for_phase1_property_at_timeline_ns(
                     Phase1KeyframeProperty::Volume,
@@ -520,7 +537,7 @@ impl InspectorView {
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
+    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
@@ -704,6 +721,70 @@ pub fn build_inspector(
     highlights_slider.set_digits(2);
     highlights_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&highlights_slider);
+
+    row_label(&color_inner, "Exposure");
+    let exposure_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    exposure_slider.set_value(0.0);
+    exposure_slider.set_draw_value(true);
+    exposure_slider.set_digits(2);
+    exposure_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&exposure_slider);
+
+    row_label(&color_inner, "Black Point");
+    let black_point_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    black_point_slider.set_value(0.0);
+    black_point_slider.set_draw_value(true);
+    black_point_slider.set_digits(2);
+    black_point_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&black_point_slider);
+
+    row_label(&color_inner, "Highlights Warmth");
+    let highlights_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    highlights_warmth_slider.set_value(0.0);
+    highlights_warmth_slider.set_draw_value(true);
+    highlights_warmth_slider.set_digits(2);
+    highlights_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&highlights_warmth_slider);
+
+    row_label(&color_inner, "Highlights Tint");
+    let highlights_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    highlights_tint_slider.set_value(0.0);
+    highlights_tint_slider.set_draw_value(true);
+    highlights_tint_slider.set_digits(2);
+    highlights_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&highlights_tint_slider);
+
+    row_label(&color_inner, "Midtones Warmth");
+    let midtones_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    midtones_warmth_slider.set_value(0.0);
+    midtones_warmth_slider.set_draw_value(true);
+    midtones_warmth_slider.set_digits(2);
+    midtones_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&midtones_warmth_slider);
+
+    row_label(&color_inner, "Midtones Tint");
+    let midtones_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    midtones_tint_slider.set_value(0.0);
+    midtones_tint_slider.set_draw_value(true);
+    midtones_tint_slider.set_digits(2);
+    midtones_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&midtones_tint_slider);
+
+    row_label(&color_inner, "Shadows Warmth");
+    let shadows_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    shadows_warmth_slider.set_value(0.0);
+    shadows_warmth_slider.set_draw_value(true);
+    shadows_warmth_slider.set_digits(2);
+    shadows_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&shadows_warmth_slider);
+
+    row_label(&color_inner, "Shadows Tint");
+    let shadows_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    shadows_tint_slider.set_value(0.0);
+    shadows_tint_slider.set_draw_value(true);
+    shadows_tint_slider.set_digits(2);
+    shadows_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&shadows_tint_slider);
 
     // ── Chroma Key section (Video + Image only) ──────────────────────────────
     let chroma_key_section = GBox::new(Orientation::Vertical, 8);
@@ -1177,7 +1258,7 @@ pub fn build_inspector(
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed: Rc<dyn Fn()> = Rc::new(on_clip_changed);
-    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)> =
+    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)> =
         Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
@@ -1223,13 +1304,13 @@ pub fn build_inspector(
     }
 
     // Helper: connect an effects slider — updates the model field then fires on_color_changed
-    // with all ten current values so the program player can update its filters directly.
+    // with all current values so the program player can update its filters directly.
     fn connect_color_slider(
         slider: &Scale,
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>,
+        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>,
         brightness_slider: Scale,
         contrast_slider: Scale,
         saturation_slider: Scale,
@@ -1240,6 +1321,14 @@ pub fn build_inspector(
         shadows_slider: Scale,
         midtones_slider: Scale,
         highlights_slider: Scale,
+        exposure_slider: Scale,
+        black_point_slider: Scale,
+        highlights_warmth_slider: Scale,
+        highlights_tint_slider: Scale,
+        midtones_warmth_slider: Scale,
+        midtones_tint_slider: Scale,
+        shadows_warmth_slider: Scale,
+        shadows_tint_slider: Scale,
         apply: fn(&mut crate::model::clip::Clip, f32),
     ) {
         slider.connect_value_changed(move |s| {
@@ -1269,7 +1358,16 @@ pub fn build_inspector(
                 let shd = shadows_slider.value() as f32;
                 let mid = midtones_slider.value() as f32;
                 let hil = highlights_slider.value() as f32;
-                on_color_changed(b, c, sat, temp, tnt, d, sh, shd, mid, hil);
+                let exp = exposure_slider.value() as f32;
+                let bp = black_point_slider.value() as f32;
+                let hw = highlights_warmth_slider.value() as f32;
+                let ht = highlights_tint_slider.value() as f32;
+                let mw = midtones_warmth_slider.value() as f32;
+                let mt = midtones_tint_slider.value() as f32;
+                let sw = shadows_warmth_slider.value() as f32;
+                let st = shadows_tint_slider.value() as f32;
+                on_color_changed(b, c, sat, temp, tnt, d, sh, shd, mid, hil,
+                                 exp, bp, hw, ht, mw, mt, sw, st);
             }
         });
     }
@@ -1292,6 +1390,14 @@ pub fn build_inspector(
                 shadows_slider.clone(),
                 midtones_slider.clone(),
                 highlights_slider.clone(),
+                exposure_slider.clone(),
+                black_point_slider.clone(),
+                highlights_warmth_slider.clone(),
+                highlights_tint_slider.clone(),
+                midtones_warmth_slider.clone(),
+                midtones_tint_slider.clone(),
+                shadows_warmth_slider.clone(),
+                shadows_tint_slider.clone(),
                 $apply,
             );
         };
@@ -1307,6 +1413,14 @@ pub fn build_inspector(
     wire_color_slider!(shadows_slider, |clip, v| clip.shadows = v);
     wire_color_slider!(midtones_slider, |clip, v| clip.midtones = v);
     wire_color_slider!(highlights_slider, |clip, v| clip.highlights = v);
+    wire_color_slider!(exposure_slider, |clip, v| clip.exposure = v);
+    wire_color_slider!(black_point_slider, |clip, v| clip.black_point = v);
+    wire_color_slider!(highlights_warmth_slider, |clip, v| clip.highlights_warmth = v);
+    wire_color_slider!(highlights_tint_slider, |clip, v| clip.highlights_tint = v);
+    wire_color_slider!(midtones_warmth_slider, |clip, v| clip.midtones_warmth = v);
+    wire_color_slider!(midtones_tint_slider, |clip, v| clip.midtones_tint = v);
+    wire_color_slider!(shadows_warmth_slider, |clip, v| clip.shadows_warmth = v);
+    wire_color_slider!(shadows_tint_slider, |clip, v| clip.shadows_tint = v);
 
     // Wire audio sliders
     {
@@ -2968,6 +3082,14 @@ pub fn build_inspector(
         shadows_slider,
         midtones_slider,
         highlights_slider,
+        exposure_slider,
+        black_point_slider,
+        highlights_warmth_slider,
+        highlights_tint_slider,
+        midtones_warmth_slider,
+        midtones_tint_slider,
+        shadows_warmth_slider,
+        shadows_tint_slider,
         volume_slider,
         pan_slider,
         crop_left_slider,

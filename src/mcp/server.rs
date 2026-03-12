@@ -442,7 +442,15 @@ fn tools_list() -> Value {
                     "sharpness":  { "type": "number",  "description": "Sharpness: -1.0 (soften) to 1.0 (sharpen). Default 0.0." },
                     "shadows":    { "type": "number",  "description": "Shadow grading: -1.0 (crush) to 1.0 (lift). Default 0.0." },
                     "midtones":   { "type": "number",  "description": "Midtone grading: -1.0 (darken) to 1.0 (brighten). Default 0.0." },
-                    "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." }
+                    "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." },
+                    "exposure":   { "type": "number",  "description": "Exposure adjustment: -1.0 to 1.0. Default 0.0." },
+                    "black_point":{ "type": "number",  "description": "Black point adjustment: -1.0 to 1.0. Default 0.0." },
+                    "highlights_warmth": { "type": "number", "description": "Highlights warmth (orange-blue): -1.0 to 1.0. Default 0.0." },
+                    "highlights_tint":   { "type": "number", "description": "Highlights tint (green-magenta): -1.0 to 1.0. Default 0.0." },
+                    "midtones_warmth":   { "type": "number", "description": "Midtones warmth (orange-blue): -1.0 to 1.0. Default 0.0." },
+                    "midtones_tint":     { "type": "number", "description": "Midtones tint (green-magenta): -1.0 to 1.0. Default 0.0." },
+                    "shadows_warmth":    { "type": "number", "description": "Shadows warmth (orange-blue): -1.0 to 1.0. Default 0.0." },
+                    "shadows_tint":      { "type": "number", "description": "Shadows tint (green-magenta): -1.0 to 1.0. Default 0.0." }
                 },
                 "required": ["clip_id"]
             }
@@ -1117,6 +1125,14 @@ fn dispatch_tool_payload(
             shadows: args["shadows"].as_f64().unwrap_or(0.0),
             midtones: args["midtones"].as_f64().unwrap_or(0.0),
             highlights: args["highlights"].as_f64().unwrap_or(0.0),
+            exposure: args["exposure"].as_f64().unwrap_or(0.0),
+            black_point: args["black_point"].as_f64().unwrap_or(0.0),
+            highlights_warmth: args["highlights_warmth"].as_f64().unwrap_or(0.0),
+            highlights_tint: args["highlights_tint"].as_f64().unwrap_or(0.0),
+            midtones_warmth: args["midtones_warmth"].as_f64().unwrap_or(0.0),
+            midtones_tint: args["midtones_tint"].as_f64().unwrap_or(0.0),
+            shadows_warmth: args["shadows_warmth"].as_f64().unwrap_or(0.0),
+            shadows_tint: args["shadows_tint"].as_f64().unwrap_or(0.0),
             reply: tx,
         },
         "set_clip_color_label" => McpCommand::SetClipColorLabel {

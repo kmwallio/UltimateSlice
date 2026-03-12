@@ -406,6 +406,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             write_strict_audio_channel_sources(
                                 &mut writer, conn_clip, &project.frame_rate, conn_source_start,
                             )?;
+                            write_strict_filter_video_color(
+                                &mut writer, conn_clip, COLOR_ADJUSTMENTS_EFFECT_ID,
+                            )?;
                             writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                         }
                     }
@@ -414,6 +417,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 // audio-channel-source after connected clips (per DTD order)
                 write_strict_audio_channel_sources(
                     &mut writer, clip, &project.frame_rate, source_start,
+                )?;
+                // filter-video after audio-channel-source (per DTD order)
+                write_strict_filter_video_color(
+                    &mut writer, clip, COLOR_ADJUSTMENTS_EFFECT_ID,
                 )?;
 
                 writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
@@ -462,6 +469,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     write_strict_clip_body(&mut writer, clip, project)?;
                     write_strict_audio_channel_sources(
                         &mut writer, clip, &project.frame_rate, source_start,
+                    )?;
+                    write_strict_filter_video_color(
+                        &mut writer, clip, COLOR_ADJUSTMENTS_EFFECT_ID,
                     )?;
                     writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                 }
@@ -737,6 +747,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
                 asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
                 asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
+                asset_clip.push_attribute(("us:exposure", clip.exposure.to_string().as_str()));
+                asset_clip.push_attribute(("us:black-point", clip.black_point.to_string().as_str()));
+                asset_clip.push_attribute(("us:highlights-warmth", clip.highlights_warmth.to_string().as_str()));
+                asset_clip.push_attribute(("us:highlights-tint", clip.highlights_tint.to_string().as_str()));
+                asset_clip.push_attribute(("us:midtones-warmth", clip.midtones_warmth.to_string().as_str()));
+                asset_clip.push_attribute(("us:midtones-tint", clip.midtones_tint.to_string().as_str()));
+                asset_clip.push_attribute(("us:shadows-warmth", clip.shadows_warmth.to_string().as_str()));
+                asset_clip.push_attribute(("us:shadows-tint", clip.shadows_tint.to_string().as_str()));
                 if clip.chroma_key_enabled {
                     asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
                     asset_clip.push_attribute((
@@ -1448,6 +1466,80 @@ fn write_strict_audio_channel_sources(
     }
 
     writer.write_event(Event::End(BytesEnd::new("audio-channel-source")))?;
+    Ok(())
+}
+
+/// FCP "Color Adjustments" effect UID (built-in FxPlug).
+const FCP_COLOR_ADJUSTMENTS_UID: &str = "FxPlug:7E2022A5-202B-4EEB-A311-AC2B585D01B0";
+/// Resource ID used for the Color Adjustments effect in strict FCPXML.
+const COLOR_ADJUSTMENTS_EFFECT_ID: &str = "r_fcp_color_adj";
+
+/// Check whether a clip has any non-default color adjustment values that need
+/// a `<filter-video name="Color Adjustments">` element.
+fn clip_has_color_adjustments(clip: &crate::model::clip::Clip) -> bool {
+    clip.exposure != 0.0
+        || clip.brightness != 0.0
+        || clip.contrast != 1.0
+        || clip.saturation != 1.0
+        || clip.highlights != 0.0
+        || clip.black_point != 0.0
+        || clip.shadows != 0.0
+        || clip.highlights_warmth != 0.0
+        || clip.highlights_tint != 0.0
+        || clip.midtones_warmth != 0.0
+        || clip.midtones_tint != 0.0
+        || clip.shadows_warmth != 0.0
+        || clip.shadows_tint != 0.0
+}
+
+/// Emit `<filter-video ref="..." name="Color Adjustments">` with `<param>` children.
+/// Per DTD, filter-video comes AFTER audio-channel-source*.
+fn write_strict_filter_video_color(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    clip: &crate::model::clip::Clip,
+    color_effect_id: &str,
+) -> Result<()> {
+    if !clip_has_color_adjustments(clip) {
+        return Ok(());
+    }
+    let mut fv = BytesStart::new("filter-video");
+    fv.push_attribute(("ref", color_effect_id));
+    fv.push_attribute(("name", "Color Adjustments"));
+    writer.write_event(Event::Start(fv))?;
+
+    // Helper: emit <param name="..." key="..." value="..." />
+    // Round to 4 decimal places to avoid f32 precision artifacts.
+    fn write_param(
+        writer: &mut Writer<Cursor<Vec<u8>>>,
+        name: &str,
+        key: &str,
+        value: f32,
+    ) -> Result<()> {
+        let rounded = (value * 10000.0).round() / 10000.0;
+        let mut p = BytesStart::new("param");
+        p.push_attribute(("name", name));
+        p.push_attribute(("key", key));
+        p.push_attribute(("value", format!("{}", rounded).as_str()));
+        writer.write_event(Event::Empty(p))?;
+        Ok(())
+    }
+
+    // Convert UltimateSlice internal values back to FCP −100..100 range.
+    write_param(writer, "Exposure", "3", clip.exposure * 100.0)?;
+    write_param(writer, "Contrast", "17", (clip.contrast - 1.0) * 100.0)?;
+    write_param(writer, "Brightness", "2", clip.brightness * 100.0)?;
+    write_param(writer, "Highlights", "7", clip.highlights * 100.0)?;
+    write_param(writer, "Black Point", "1", clip.black_point * 100.0)?;
+    write_param(writer, "Shadows", "4", clip.shadows * 100.0)?;
+    write_param(writer, "Saturation", "16", (clip.saturation - 1.0) * 100.0)?;
+    write_param(writer, "Highlights Warmth", "10", clip.highlights_warmth * 100.0)?;
+    write_param(writer, "Highlights Tint", "11", clip.highlights_tint * 100.0)?;
+    write_param(writer, "Midtones Warmth", "12", clip.midtones_warmth * 100.0)?;
+    write_param(writer, "Midtones Tint", "13", clip.midtones_tint * 100.0)?;
+    write_param(writer, "Shadows Warmth", "14", clip.shadows_warmth * 100.0)?;
+    write_param(writer, "Shadows Tint", "15", clip.shadows_tint * 100.0)?;
+
+    writer.write_event(Event::End(BytesEnd::new("filter-video")))?;
     Ok(())
 }
 
@@ -2310,6 +2402,22 @@ fn write_resources(
     if !strip_unknown_fields {
         for fragment in &project.fcpxml_unknown_resources.children {
             writer.get_mut().write_all(fragment.as_bytes())?;
+        }
+    }
+
+    // Emit <effect> for FCP Color Adjustments if any clip uses color grading.
+    if options.strict_dtd {
+        let needs_color_effect = project
+            .video_tracks()
+            .chain(project.audio_tracks())
+            .flat_map(|t| t.clips.iter())
+            .any(clip_has_color_adjustments);
+        if needs_color_effect {
+            let mut effect = BytesStart::new("effect");
+            effect.push_attribute(("id", COLOR_ADJUSTMENTS_EFFECT_ID));
+            effect.push_attribute(("name", "Color Adjustments"));
+            effect.push_attribute(("uid", FCP_COLOR_ADJUSTMENTS_UID));
+            writer.write_event(Event::Empty(effect))?;
         }
     }
 
@@ -4882,6 +4990,191 @@ mod tests {
         assert_eq!(
             known_fcpxml_format_name(&project),
             Some("FFVideoFormat1080p2398")
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_emits_filter_video_color_adjustments() {
+        let mut project = Project::new("ColorAdj");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.exposure = 0.5;
+        clip.brightness = -0.1;
+        clip.contrast = 1.25;
+        clip.saturation = 0.5;
+        clip.highlights = -0.2;
+        clip.black_point = 0.15;
+        clip.shadows = 0.3;
+        clip.highlights_warmth = 0.4;
+        clip.highlights_tint = -0.1;
+        clip.midtones_warmth = 0.6;
+        clip.midtones_tint = 0.05;
+        clip.shadows_warmth = -0.25;
+        clip.shadows_tint = 0.8;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+
+        // Should have the effect resource
+        assert!(
+            xml.contains(r#"<effect id="r_fcp_color_adj" name="Color Adjustments""#),
+            "should emit Color Adjustments effect resource"
+        );
+
+        // Should have filter-video element
+        assert!(
+            xml.contains(r#"<filter-video ref="r_fcp_color_adj" name="Color Adjustments">"#),
+            "should emit filter-video element"
+        );
+
+        // Verify param values (US → FCP: ×100, contrast/saturation: (v-1)*100)
+        assert!(xml.contains(r#"<param name="Exposure" key="3" value="50""#));
+        assert!(xml.contains(r#"<param name="Brightness" key="2" value="-10""#));
+        assert!(xml.contains(r#"<param name="Contrast" key="17" value="25""#));
+        assert!(xml.contains(r#"<param name="Saturation" key="16" value="-50""#));
+        assert!(xml.contains(r#"<param name="Highlights" key="7" value="-20""#));
+        assert!(xml.contains(r#"<param name="Black Point" key="1" value="15""#));
+        assert!(xml.contains(r#"<param name="Shadows" key="4" value="30""#));
+        assert!(xml.contains(r#"<param name="Highlights Warmth" key="10" value="40""#));
+        assert!(xml.contains(r#"<param name="Highlights Tint" key="11" value="-10""#));
+        assert!(xml.contains(r#"<param name="Midtones Warmth" key="12" value="60""#));
+        assert!(xml.contains(r#"<param name="Midtones Tint" key="13" value="5""#));
+        assert!(xml.contains(r#"<param name="Shadows Warmth" key="14" value="-25""#));
+        assert!(xml.contains(r#"<param name="Shadows Tint" key="15" value="80""#));
+
+        // filter-video should come after audio-channel-source if present
+        let clip_start = xml.find("<asset-clip ").unwrap();
+        let clip_end = xml[clip_start..].find("</asset-clip>").unwrap() + clip_start;
+        let clip_xml = &xml[clip_start..clip_end];
+        let fv_idx = clip_xml.find("<filter-video").expect("filter-video");
+        // No audio-channel-source in this clip, so filter-video just needs to exist
+        assert!(fv_idx > 0);
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_skips_filter_video_when_defaults() {
+        let mut project = Project::new("NoColor");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        assert!(
+            !xml.contains("filter-video"),
+            "should not emit filter-video when all color values are defaults"
+        );
+        assert!(
+            !xml.contains("Color Adjustments"),
+            "should not emit Color Adjustments effect when no color changes"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_filter_video_after_audio_channel_source() {
+        let mut project = Project::new("OrderTest");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.exposure = 0.5;
+        clip.volume_keyframes = vec![crate::model::clip::NumericKeyframe {
+            time_ns: 0,
+            value: 0.8,
+            interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+        }];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        let clip_start = xml.find("<asset-clip ").unwrap();
+        let clip_end = xml[clip_start..].find("</asset-clip>").unwrap() + clip_start;
+        let clip_xml = &xml[clip_start..clip_end];
+
+        let acs_idx = clip_xml
+            .find("<audio-channel-source")
+            .expect("audio-channel-source");
+        let fv_idx = clip_xml.find("<filter-video").expect("filter-video");
+        assert!(
+            acs_idx < fv_idx,
+            "filter-video must come after audio-channel-source per DTD"
+        );
+    }
+
+    #[test]
+    fn test_color_adjustments_round_trip() {
+        // Create a project with color adjustments, write strict, parse back, verify.
+        let mut project = Project::new("RoundTrip");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.exposure = 0.5;
+        clip.brightness = -0.1;
+        clip.contrast = 1.25;
+        clip.saturation = 0.5;
+        clip.highlights = -0.2;
+        clip.black_point = 0.15;
+        clip.shadows = 0.3;
+        clip.highlights_warmth = 0.4;
+        clip.highlights_tint = -0.1;
+        clip.midtones_warmth = 0.6;
+        clip.midtones_tint = 0.05;
+        clip.shadows_warmth = -0.25;
+        clip.shadows_tint = 0.8;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("write should succeed");
+        let parsed = crate::fcpxml::parser::parse_fcpxml(&xml).expect("parse should succeed");
+        let clip2 = &parsed.video_tracks().next().unwrap().clips[0];
+
+        assert!((clip2.exposure - 0.5).abs() < 1e-3, "exposure round-trip");
+        assert!(
+            (clip2.brightness - (-0.1)).abs() < 1e-3,
+            "brightness round-trip"
+        );
+        assert!(
+            (clip2.contrast - 1.25).abs() < 1e-3,
+            "contrast round-trip"
+        );
+        assert!(
+            (clip2.saturation - 0.5).abs() < 1e-3,
+            "saturation round-trip"
+        );
+        assert!(
+            (clip2.highlights - (-0.2)).abs() < 1e-3,
+            "highlights round-trip"
+        );
+        assert!(
+            (clip2.black_point - 0.15).abs() < 1e-3,
+            "black_point round-trip"
+        );
+        assert!((clip2.shadows - 0.3).abs() < 1e-3, "shadows round-trip");
+        assert!(
+            (clip2.highlights_warmth - 0.4).abs() < 1e-3,
+            "highlights_warmth round-trip"
+        );
+        assert!(
+            (clip2.highlights_tint - (-0.1)).abs() < 1e-3,
+            "highlights_tint round-trip"
+        );
+        assert!(
+            (clip2.midtones_warmth - 0.6).abs() < 1e-3,
+            "midtones_warmth round-trip"
+        );
+        assert!(
+            (clip2.midtones_tint - 0.05).abs() < 1e-3,
+            "midtones_tint round-trip"
+        );
+        assert!(
+            (clip2.shadows_warmth - (-0.25)).abs() < 1e-3,
+            "shadows_warmth round-trip"
+        );
+        assert!(
+            (clip2.shadows_tint - 0.8).abs() < 1e-3,
+            "shadows_tint round-trip"
         );
     }
 }
