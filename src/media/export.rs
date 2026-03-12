@@ -1869,7 +1869,7 @@ mod tests {
             },
         ];
         let f = build_rotation_filter(&clip, false);
-        assert!(f.contains("rotate='("));
+        assert!(f.contains("rotate='-(")); // negated for ffmpeg convention
         assert!(f.contains("*PI/180'"));
     }
 

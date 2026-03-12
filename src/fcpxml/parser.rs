@@ -2624,13 +2624,14 @@ fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
 fn parse_fcpxml_time(s: &str) -> Option<u64> {
     let s = s.trim_end_matches('s');
     if let Some((num, den)) = s.split_once('/') {
-        let num: u64 = num.parse().ok()?;
-        let den: u64 = den.parse().ok()?;
+        let num: u128 = num.parse().ok()?;
+        let den: u128 = den.parse().ok()?;
         if den == 0 {
             return None;
         }
-        // time_seconds = num / den; ns = time_seconds * 1_000_000_000
-        Some(num * 1_000_000_000 / den)
+        // Use u128 to avoid overflow with large FCP time values
+        let ns = num * 1_000_000_000 / den;
+        Some(ns as u64)
     } else {
         // Plain seconds
         let secs: f64 = s.parse().ok()?;
@@ -2695,6 +2696,18 @@ mod tests {
     fn test_parse_time_ntsc() {
         // 48048 / 24000 ≈ 2.002 seconds; integer math: 48048 * 1e9 / 24000 = 2_002_000_000
         assert_eq!(parse_fcpxml_time("48048/24000s"), Some(2_002_000_000));
+    }
+
+    #[test]
+    fn test_parse_time_large_fcp_keyframe_values() {
+        // FCP uses large numerators like 52335350310/720000s — must not overflow
+        let ns = parse_fcpxml_time("52335350310/720000s");
+        assert!(ns.is_some(), "large FCP time value should not overflow");
+        assert_eq!(ns.unwrap(), 72_687_986_541_666);
+
+        let ns2 = parse_fcpxml_time("1416023070/35280000s");
+        assert!(ns2.is_some());
+        assert_eq!(ns2.unwrap(), 40_136_708_333);
     }
 
     #[test]

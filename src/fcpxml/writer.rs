@@ -4370,7 +4370,12 @@ mod tests {
             3,
             "three clips should produce three media-rep refs"
         );
-        let library_uri_prefix = format!("file://{}/", library_dir.to_string_lossy());
+        let library_uri_prefix = format!(
+            "file://{}/",
+            std::fs::canonicalize(&library_dir)
+                .unwrap_or(library_dir.clone())
+                .to_string_lossy()
+        );
         assert!(
             srcs.iter().all(|src| src.starts_with(&library_uri_prefix)),
             "all media-rep sources should point into packaged library: {srcs:?}"
