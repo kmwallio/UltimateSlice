@@ -1,3 +1,4 @@
+use crate::media::program_player::ProgramPlayer;
 use crate::model::clip::{Clip, ClipKind, NumericKeyframe};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
@@ -12,6 +13,12 @@ pub enum ExportProgress {
     Progress(f64), // 0.0 – 1.0
     Done,
     Error(String),
+}
+
+#[derive(Debug, Clone, Default)]
+struct ColorFilterCapabilities {
+    use_coloradj_frei0r: bool,
+    three_point_frei0r_module: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,15 +232,17 @@ pub fn export_project(
     }
 
     let mut filter = String::new();
+    let color_caps = detect_color_filter_capabilities(&ffmpeg);
 
     // === Primary video track: scale/correct each clip then concatenate ===
     for (i, clip) in primary_clips.iter().enumerate() {
         let color_filter = build_color_filter(clip);
-        let temp_tint_filter = build_temperature_tint_filter(clip);
-        let grading_filter = build_grading_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter_with_caps(clip, &color_caps);
+        let grading_filter = build_grading_filter_with_caps(clip, &color_caps);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
+        let title_filter = build_title_filter(clip);
         let speed_filter = build_timing_filter(clip, frame_duration_s);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
@@ -271,7 +280,7 @@ pub fn export_project(
             );
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             filter.push_str(&format!(
-                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}\
+                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
@@ -283,13 +292,13 @@ pub fn export_project(
         } else if clip.chroma_key_enabled || clip.bg_removal_enabled {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             filter.push_str(&format!(
-                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
+                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             filter.push_str(&format!(
-                "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{title_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -364,11 +373,12 @@ pub fn export_project(
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         let color_filter = build_color_filter(clip);
-        let temp_tint_filter = build_temperature_tint_filter(clip);
-        let grading_filter = build_grading_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter_with_caps(clip, &color_caps);
+        let grading_filter = build_grading_filter_with_caps(clip, &color_caps);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
+        let title_filter = build_title_filter(clip);
         let speed_filter = build_timing_filter(clip, frame_duration_s);
         let lut_filter = build_lut_filter(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, true);
@@ -408,7 +418,7 @@ pub fn export_project(
             );
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             filter.push_str(&format!(
-                ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
@@ -419,7 +429,7 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
             let opacity = clip.opacity.clamp(0.0, 1.0);
             filter.push_str(&format!(
-                ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
             ));
         }
         // Delay PTS to timeline position so the overlay lands at the right time
@@ -703,12 +713,14 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     let has_keyframes = !clip.brightness_keyframes.is_empty()
         || !clip.contrast_keyframes.is_empty()
         || !clip.saturation_keyframes.is_empty();
-    // Exposure → gamma: gamma = 2^exposure gives a natural exposure curve.
+    // Keep exposure mapping aligned with preview parity:
+    // preview approximates exposure as a brightness lift + slight contrast boost.
     let has_exposure = clip.exposure.abs() > f32::EPSILON;
-    let gamma = if has_exposure {
-        2.0_f64.powf(clip.exposure as f64)
+    let (exposure_brightness_delta, exposure_contrast_delta) = if has_exposure {
+        let e = clip.exposure.clamp(-1.0, 1.0) as f64;
+        (e * 0.55, e * 0.12)
     } else {
-        1.0
+        (0.0, 0.0)
     };
     if has_keyframes {
         let brightness_expr = build_keyframed_property_expression(
@@ -732,32 +744,30 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
             2.0,
             "t",
         );
-        if has_exposure {
-            format!(
-                ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':gamma={gamma:.4}:eval=frame"
-            )
+        let brightness_expr = if has_exposure {
+            format!("({brightness_expr})+{exposure_brightness_delta:.6}")
         } else {
-            format!(
-                ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
-            )
-        }
-    } else if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 || has_exposure {
-        if has_exposure {
-            format!(
-                ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}:gamma={:.4}",
-                clip.brightness.clamp(-1.0, 1.0),
-                clip.contrast.clamp(0.0, 2.0),
-                clip.saturation.clamp(0.0, 2.0),
-                gamma,
-            )
+            brightness_expr
+        };
+        let contrast_expr = if has_exposure {
+            format!("({contrast_expr})+{exposure_contrast_delta:.6}")
         } else {
-            format!(
-                ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
-                clip.brightness.clamp(-1.0, 1.0),
-                clip.contrast.clamp(0.0, 2.0),
-                clip.saturation.clamp(0.0, 2.0)
-            )
-        }
+            contrast_expr
+        };
+        format!(
+            ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
+        )
+    } else if clip.brightness != 0.0
+        || clip.contrast != 1.0
+        || clip.saturation != 1.0
+        || has_exposure
+    {
+        format!(
+            ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
+            (clip.brightness as f64 + exposure_brightness_delta).clamp(-1.0, 1.0),
+            (clip.contrast as f64 + exposure_contrast_delta).clamp(0.0, 2.0),
+            clip.saturation.clamp(0.0, 2.0)
+        )
     } else {
         String::new()
     }
@@ -897,10 +907,32 @@ fn append_pan_filter_chain(
 }
 
 fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
+    build_temperature_tint_filter_with_caps(clip, &ColorFilterCapabilities::default())
+}
+
+fn build_temperature_tint_filter_with_caps(
+    clip: &crate::model::clip::Clip,
+    caps: &ColorFilterCapabilities,
+) -> String {
     let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
     let has_tint = clip.tint.abs() > 0.001;
     let has_temp_keyframes = !clip.temperature_keyframes.is_empty();
     let has_tint_keyframes = !clip.tint_keyframes.is_empty();
+
+    // FFmpeg frei0r bridge path: use the same calibrated coloradj mapping as preview
+    // when this is a static (non-keyframed) temp/tint adjustment.
+    if caps.use_coloradj_frei0r
+        && (has_temp || has_tint)
+        && !has_temp_keyframes
+        && !has_tint_keyframes
+    {
+        let cp = ProgramPlayer::compute_coloradj_params(clip.temperature as f64, clip.tint as f64);
+        return format!(
+            ",frei0r=filter_name=coloradj_RGB:filter_params={:.6}|{:.6}|{:.6}|0.333",
+            cp.r, cp.g, cp.b
+        );
+    }
+
     let mut f = String::new();
     if has_temp_keyframes {
         let temp_expr = build_keyframed_property_expression(
@@ -984,7 +1016,69 @@ fn build_lut_filter(clip: &crate::model::clip::Clip) -> String {
     String::new()
 }
 
+fn parse_title_font(font_desc: &str) -> (String, f64) {
+    let trimmed = font_desc.trim();
+    if trimmed.is_empty() {
+        return ("Sans".to_string(), 36.0);
+    }
+    let mut parts = trimmed.rsplitn(2, ' ');
+    let last = parts.next().unwrap_or_default();
+    if let Ok(size) = last.parse::<f64>() {
+        let family = parts.next().unwrap_or("Sans").trim();
+        if family.is_empty() {
+            ("Sans".to_string(), size.max(1.0))
+        } else {
+            (family.to_string(), size.max(1.0))
+        }
+    } else {
+        (trimmed.to_string(), 36.0)
+    }
+}
+
+fn escape_drawtext_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "\\'")
+        .replace('%', "\\%")
+}
+
+fn build_title_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.title_text.trim().is_empty() {
+        return String::new();
+    }
+
+    let text = escape_drawtext_value(&clip.title_text).replace('\n', "\\n");
+    let (font_name, font_size) = parse_title_font(&clip.title_font);
+    let font_name = escape_drawtext_value(&font_name);
+    let rel_x = clip.title_x.clamp(0.0, 1.0);
+    let rel_y = clip.title_y.clamp(0.0, 1.0);
+
+    let rgba = clip.title_color;
+    let r = ((rgba >> 24) & 0xFF) as u8;
+    let g = ((rgba >> 16) & 0xFF) as u8;
+    let b = ((rgba >> 8) & 0xFF) as u8;
+    let a = (rgba & 0xFF) as u8;
+    let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
+
+    format!(
+        ",drawtext=font='{font_name}':text='{text}':fontsize={font_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*(w-text_w)':y='({rel_y:.6})*(h-text_h)'"
+    )
+}
+
 fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
+    build_grading_filter_with_caps(clip, &ColorFilterCapabilities::default())
+}
+
+fn rgb_triplet_hex(r: f64, g: f64, b: f64) -> String {
+    let to_u8 = |v: f64| ((v.clamp(0.0, 1.0) * 255.0).round() as u8) as u32;
+    format!("0x{:02X}{:02X}{:02X}", to_u8(r), to_u8(g), to_u8(b))
+}
+
+fn build_grading_filter_with_caps(
+    clip: &crate::model::clip::Clip,
+    caps: &ColorFilterCapabilities,
+) -> String {
     let has_grading = clip.shadows != 0.0
         || clip.midtones != 0.0
         || clip.highlights != 0.0
@@ -996,6 +1090,25 @@ fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
         || clip.shadows_warmth != 0.0
         || clip.shadows_tint != 0.0;
     if has_grading {
+        if let Some(module) = &caps.three_point_frei0r_module {
+            let p = ProgramPlayer::compute_3point_params(
+                clip.shadows as f64,
+                clip.midtones as f64,
+                clip.highlights as f64,
+                clip.black_point as f64,
+                clip.highlights_warmth as f64,
+                clip.highlights_tint as f64,
+                clip.midtones_warmth as f64,
+                clip.midtones_tint as f64,
+                clip.shadows_warmth as f64,
+                clip.shadows_tint as f64,
+            );
+            let black = rgb_triplet_hex(p.black_r, p.black_g, p.black_b);
+            let gray = rgb_triplet_hex(p.gray_r, p.gray_g, p.gray_b);
+            let white = rgb_triplet_hex(p.white_r, p.white_g, p.white_b);
+            return format!(",frei0r=filter_name={module}:filter_params={black}|{gray}|{white}");
+        }
+
         let s = clip.shadows.clamp(-1.0, 1.0);
         let m = clip.midtones.clamp(-1.0, 1.0);
         let h = clip.highlights.clamp(-1.0, 1.0);
@@ -1006,13 +1119,22 @@ fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
         // Tint: positive = magenta (cut green), negative = green (boost green).
         let warmth_scale = 0.5_f32;
         let tint_scale = 0.4_f32;
+        let shadows_endpoint_boost = 1.30_f32;
 
-        let sw = clip.shadows_warmth.clamp(-1.0, 1.0) * warmth_scale;
-        let st = clip.shadows_tint.clamp(-1.0, 1.0) * tint_scale;
-        let mw = clip.midtones_warmth.clamp(-1.0, 1.0) * warmth_scale;
-        let mt = clip.midtones_tint.clamp(-1.0, 1.0) * tint_scale;
-        let hw = clip.highlights_warmth.clamp(-1.0, 1.0) * warmth_scale;
-        let ht = clip.highlights_tint.clamp(-1.0, 1.0) * tint_scale;
+        let sw = ProgramPlayer::compute_tonal_axis_response(clip.shadows_warmth as f64) as f32
+            * warmth_scale
+            * shadows_endpoint_boost;
+        let st = ProgramPlayer::compute_tonal_axis_response(clip.shadows_tint as f64) as f32
+            * tint_scale
+            * shadows_endpoint_boost;
+        let mw = ProgramPlayer::compute_tonal_axis_response(clip.midtones_warmth as f64) as f32
+            * warmth_scale;
+        let mt = ProgramPlayer::compute_tonal_axis_response(clip.midtones_tint as f64) as f32
+            * tint_scale;
+        let hw = ProgramPlayer::compute_tonal_axis_response(clip.highlights_warmth as f64) as f32
+            * warmth_scale;
+        let ht = ProgramPlayer::compute_tonal_axis_response(clip.highlights_tint as f64) as f32
+            * tint_scale;
 
         // FFmpeg colorbalance: rs/gs/bs = shadows, rm/gm/bm = midtones, rh/gh/bh = highlights.
         // Range -1..1. Positive boosts channel, negative cuts.
@@ -1178,7 +1300,10 @@ fn build_rotation_filter(clip: &crate::model::clip::Clip, transparent_pad: bool)
         return String::new();
     }
     let fill = if transparent_pad { "black@0" } else { "black" };
-    format!(",rotate={:.10}:fillcolor={fill}", -(rot as f64).to_radians())
+    format!(
+        ",rotate={:.10}:fillcolor={fill}",
+        -(rot as f64).to_radians()
+    )
 }
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.
@@ -1489,6 +1614,58 @@ fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
     })
 }
 
+fn check_frei0r_module_support(ffmpeg: &str, module_name: &str, probe_params: &str) -> bool {
+    let vf = format!("format=rgba,frei0r=filter_name={module_name}:filter_params={probe_params}");
+    Command::new(ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.04",
+            "-vf",
+            &vf,
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn detect_color_filter_capabilities(ffmpeg: &str) -> ColorFilterCapabilities {
+    if !check_filter_support(ffmpeg, "frei0r") {
+        return ColorFilterCapabilities::default();
+    }
+
+    let use_coloradj_frei0r =
+        check_frei0r_module_support(ffmpeg, "coloradj_RGB", "0.5|0.5|0.5|0.333");
+
+    // FFmpeg module naming differs across builds; prefer the common underscore form.
+    let three_point_frei0r_module =
+        if check_frei0r_module_support(ffmpeg, "three_point_balance", "0x000000|0x808080|0xFFFFFF")
+        {
+            Some("three_point_balance".to_string())
+        } else if check_frei0r_module_support(
+            ffmpeg,
+            "3-point-color-balance",
+            "0x000000|0x808080|0xFFFFFF",
+        ) {
+            Some("3-point-color-balance".to_string())
+        } else {
+            None
+        };
+
+    ColorFilterCapabilities {
+        use_coloradj_frei0r,
+        three_point_frei0r_module,
+    }
+}
+
 fn has_linked_audio_peer(clip: &Clip, audio_clips: &[&Clip]) -> bool {
     audio_clips
         .iter()
@@ -1553,16 +1730,29 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 mod tests {
     use super::{
         append_pan_filter_chain, audio_crossfade_curve_name, build_audio_crossfade_filters,
-        build_color_filter, build_crop_filter, build_keyframed_property_expression,
-        build_pan_expression, build_rotation_filter, build_temperature_tint_filter,
-        build_timing_filter, build_volume_filter, clamped_primary_xfade_duration_s,
-        compute_clip_audio_fades, estimate_export_size_bytes, has_linked_audio_peer,
-        has_transform_keyframes, parse_progress_line, video_input_seek_and_duration, AudioCodec,
-        ClipAudioFade, ExportOptions, VideoCodec,
+        build_color_filter, build_crop_filter, build_grading_filter,
+        build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
+        build_temperature_tint_filter, build_timing_filter, build_title_filter,
+        build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
+        estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
+        parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
+        ExportOptions, VideoCodec,
     };
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
     use crate::ui_state::CrossfadeCurve;
+
+    fn extract_colorbalance_component(filter: &str, key: &str) -> f32 {
+        let needle = format!("{key}=");
+        let start = filter
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing colorbalance component `{key}` in `{filter}`"));
+        let rest = &filter[start + needle.len()..];
+        let end = rest.find(':').unwrap_or(rest.len());
+        rest[..end]
+            .parse::<f32>()
+            .unwrap_or_else(|e| panic!("invalid `{key}` value in `{filter}`: {e}"))
+    }
 
     #[test]
     fn total_size_progress_uses_estimate_and_caps() {
@@ -1979,6 +2169,16 @@ mod tests {
     }
 
     #[test]
+    fn build_color_filter_exposure_uses_preview_aligned_deltas() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.exposure = 1.0;
+        let f = build_color_filter(&clip);
+        assert!(f.contains(",eq=brightness="));
+        assert!(f.contains(":contrast="));
+        assert!(!f.contains(":gamma="));
+    }
+
+    #[test]
     fn build_temperature_tint_filter_uses_eval_frame_when_keyframed() {
         let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
         clip.temperature_keyframes = vec![
@@ -2009,5 +2209,158 @@ mod tests {
         assert!(f.contains("colortemperature=temperature='if(lt(t,"));
         assert!(f.contains(",colorbalance=rm='("));
         assert!(f.contains(":eval=frame"));
+    }
+
+    #[test]
+    fn build_grading_filter_emits_colorbalance_when_active() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.shadows = 0.25;
+        let f = build_grading_filter(&clip);
+        assert!(f.contains(",colorbalance="));
+        assert!(f.contains("rs="));
+        assert!(f.contains("rh="));
+    }
+
+    #[test]
+    fn build_grading_filter_boosts_tonal_warmth_at_slider_extremes() {
+        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        shadows.shadows_warmth = 1.0;
+        let f_sh = build_grading_filter(&shadows);
+        let shadows_rs = extract_colorbalance_component(&f_sh, "rs");
+        let shadows_bs = extract_colorbalance_component(&f_sh, "bs");
+        assert!(shadows_rs > 0.0 && shadows_bs < 0.0);
+
+        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        midtones.midtones_warmth = 1.0;
+        let f_mid = build_grading_filter(&midtones);
+        let midtones_rm = extract_colorbalance_component(&f_mid, "rm").abs();
+        assert!(
+            shadows_rs.abs() > midtones_rm + 0.15,
+            "shadows warmth endpoints should be stronger than midtones: shadows_rs={} midtones_rm={}",
+            shadows_rs,
+            midtones_rm
+        );
+    }
+
+    #[test]
+    fn build_grading_filter_boosts_shadows_tint_at_slider_extremes() {
+        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        shadows.shadows_tint = 1.0;
+        let f_sh = build_grading_filter(&shadows);
+        let shadows_gs = extract_colorbalance_component(&f_sh, "gs");
+
+        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        midtones.midtones_tint = 1.0;
+        let f_mid = build_grading_filter(&midtones);
+        let midtones_gm = extract_colorbalance_component(&f_mid, "gm").abs();
+
+        assert!(shadows_gs < 0.0, "positive shadows tint should cut green");
+        assert!(
+            shadows_gs.abs() > midtones_gm + 0.15,
+            "shadows tint endpoints should be stronger than midtones: shadows_gs={} midtones_gm={}",
+            shadows_gs,
+            midtones_gm
+        );
+    }
+
+    #[test]
+    fn build_temperature_tint_filter_preserves_green_magenta_direction() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.tint = 0.8;
+        let magenta = build_temperature_tint_filter(&clip);
+        let magenta_rm = extract_colorbalance_component(&magenta, "rm");
+        let magenta_gm = extract_colorbalance_component(&magenta, "gm");
+        let magenta_bm = extract_colorbalance_component(&magenta, "bm");
+        assert!(magenta_rm > 0.0, "positive tint should boost red");
+        assert!(magenta_gm < 0.0, "positive tint should cut green");
+        assert!(magenta_bm > 0.0, "positive tint should boost blue");
+
+        clip.tint = -0.8;
+        let green = build_temperature_tint_filter(&clip);
+        let green_rm = extract_colorbalance_component(&green, "rm");
+        let green_gm = extract_colorbalance_component(&green, "gm");
+        let green_bm = extract_colorbalance_component(&green, "bm");
+        assert!(green_rm < 0.0, "negative tint should cut red");
+        assert!(green_gm > 0.0, "negative tint should boost green");
+        assert!(green_bm < 0.0, "negative tint should cut blue");
+    }
+
+    #[test]
+    fn build_grading_filter_warmth_direction_is_consistent_per_tonal_region() {
+        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        shadows.shadows_warmth = 1.0;
+        let f_sh = build_grading_filter(&shadows);
+        assert!(
+            extract_colorbalance_component(&f_sh, "rs") > 0.0
+                && extract_colorbalance_component(&f_sh, "bs") < 0.0
+        );
+
+        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        midtones.midtones_warmth = 1.0;
+        let f_mid = build_grading_filter(&midtones);
+        assert!(
+            extract_colorbalance_component(&f_mid, "rm") > 0.0
+                && extract_colorbalance_component(&f_mid, "bm") < 0.0
+        );
+
+        let mut highlights = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        highlights.highlights_warmth = 1.0;
+        let f_hi = build_grading_filter(&highlights);
+        assert!(
+            extract_colorbalance_component(&f_hi, "rh") > 0.0
+                && extract_colorbalance_component(&f_hi, "bh") < 0.0
+        );
+    }
+
+    #[test]
+    fn build_grading_filter_tint_direction_is_consistent_per_tonal_region() {
+        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        shadows.shadows_tint = 1.0;
+        let f_sh = build_grading_filter(&shadows);
+        assert!(
+            extract_colorbalance_component(&f_sh, "gs") < 0.0,
+            "positive shadows tint should cut green"
+        );
+
+        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        midtones.midtones_tint = 1.0;
+        let f_mid = build_grading_filter(&midtones);
+        assert!(
+            extract_colorbalance_component(&f_mid, "gm") < 0.0,
+            "positive midtones tint should cut green"
+        );
+
+        let mut highlights = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        highlights.highlights_tint = 1.0;
+        let f_hi = build_grading_filter(&highlights);
+        assert!(
+            extract_colorbalance_component(&f_hi, "gh") < 0.0,
+            "positive highlights tint should cut green"
+        );
+    }
+
+    #[test]
+    fn build_title_filter_empty_when_no_title_text() {
+        let clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        assert!(build_title_filter(&clip).is_empty());
+    }
+
+    #[test]
+    fn build_title_filter_emits_drawtext_with_position_and_color() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "Hello: world".to_string();
+        clip.title_font = "Sans Bold 48".to_string();
+        clip.title_x = 0.25;
+        clip.title_y = 0.75;
+        clip.title_color = 0xFF3366CC;
+
+        let f = build_title_filter(&clip);
+        assert!(f.contains(",drawtext="));
+        assert!(f.contains("text='Hello\\: world'"));
+        assert!(f.contains("font='Sans Bold'"));
+        assert!(f.contains("fontsize=48.00"));
+        assert!(f.contains("fontcolor=ff3366@0.8000"));
+        assert!(f.contains("x='(0.250000)*(w-text_w)'"));
+        assert!(f.contains("y='(0.750000)*(h-text_h)'"));
     }
 }

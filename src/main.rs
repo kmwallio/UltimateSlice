@@ -234,11 +234,7 @@ fn ensure_gsettings_schemas() {
 /// Copy schema XMLs to `cache_dir`, compile them, and return whether the
 /// resulting `gschemas.compiled` exists.
 #[cfg(target_os = "macos")]
-fn compile_schemas_to_cache(
-    compiler: &str,
-    schema_dir: &str,
-    cache_dir: &std::path::Path,
-) -> bool {
+fn compile_schemas_to_cache(compiler: &str, schema_dir: &str, cache_dir: &std::path::Path) -> bool {
     if std::fs::create_dir_all(cache_dir).is_err() {
         return false;
     }

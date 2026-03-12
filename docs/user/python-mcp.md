@@ -53,6 +53,8 @@ printf '%s\n' \
   - Runs a relative FPS regression check (optimized config vs baseline) using playhead-speed measurement.
 - `tools/proxy_perf_matrix.sh <app-pid> <project.fcpxml>`
   - Runs the 2x2x2 hardware/occlusion/realtime perf matrix and writes per-run `perf stat` artifacts.
+- `python3 tools/calibrate_mcp_color_match.py --media Sample-Media/calibration_chart.mp4 --out /tmp/us_mcp_color_calib`
+  - Sweeps extended color sliders via MCP and measures Program Monitor preview vs exported MP4 frame RMSE; also reports frei0r plugin compatibility (`three_point_balance` naming on FFmpeg).
 
 Useful playback-tuning toggles:
 

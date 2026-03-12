@@ -33,14 +33,14 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 | **Tint** | −1.0 → 1.0 | 0.0 | Green–magenta axis: negative = green, positive = magenta |
 | **Exposure** | −1.0 → 1.0 | 0.0 | Overall exposure compensation |
 | **Black Point** | −1.0 → 1.0 | 0.0 | Lifts or crushes black levels |
-| **Highlights Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in highlights |
+| **Highlights Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in highlights (left = cooler, right = warmer) |
 | **Highlights Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in highlights |
-| **Midtones Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in midtones |
+| **Midtones Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in midtones (left = cooler, right = warmer) |
 | **Midtones Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in midtones |
-| **Shadows Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in shadows |
+| **Shadows Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in shadows (left = cooler, right = warmer) |
 | **Shadows Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in shadows |
 
-> **Note:** Exposure is applied as gamma correction in both GStreamer preview (`videobalance` brightness approximation) and FFmpeg export (`eq` filter gamma). Black Point and per-tone Warmth/Tint are applied via frei0r `3-point-color-balance` in preview (per-channel RGB offsets) and FFmpeg `colorbalance` in export (per-range per-channel shifts).
+> **Note:** Exposure uses preview-aligned brightness/contrast deltas in both Program Monitor and export (not gamma-only mapping). Per-tone Warmth/Tint now uses a non-linear response: fine control near `0.0`, stronger effect near slider ends (for creative looks like cooler/blue shadows), while export remains aligned with preview through the shared grading mapping. The 3-point grading path also applies a shadows-warmth curve-space inversion so deep-shadow direction stays conventional (left cooler, right warmer), and shadows warmth/tint endpoints are intentionally stronger for more pronounced creative looks at slider extremes.
 
 ---
 

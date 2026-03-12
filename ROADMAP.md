@@ -102,6 +102,12 @@ Tracking docs:
 - [x] Progress estimate based on ffmpeg `total_size` versus largest imported library file, capped to 99% until completion (100% only on successful finish)
 - [x] Audio from embedded video-clip streams and standalone audio-track clips included in export
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
+- [x] Extended grading parity bridge: export prefers FFmpeg frei0r (`coloradj_RGB`, `three_point_balance`) using the same calibrated mapping as Program Monitor preview, with automatic native-filter fallback when frei0r modules are unavailable
+- [x] Exposure parity alignment: export exposure now follows preview-calibrated brightness/contrast delta mapping to reduce preview/export mismatch on extreme values
+- [x] Tonal warmth/tint creative boost: highlights/midtones/shadows warmth+tint now use a non-linear response with stronger endpoint effect and gentle center control, while keeping preview/export mapping aligned
+- [x] Warmth slider direction consistency: midtones/highlights warmth now follow standard grading direction (left cooler, right warmer) in both preview and export
+- [x] Shadows warmth deep-shadow direction consistency: 3-point mapping now inverts shadows warmth in curve-space so slider direction remains conventional (left cooler, right warmer) in preview/export bridge
+- [x] Stronger shadows endpoint range: shadows warmth/tint endpoint gain increased to allow more pronounced blue/gold shadow looks near slider extremes while preserving directional semantics
 
 ### FCPXML
 - [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
@@ -152,6 +158,7 @@ Tracking docs:
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
 - [x] Local perf tooling scripts: `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py`
+- [x] MCP color parity calibration script: `tools/calibrate_mcp_color_match.py` (slider sweeps + preview/export RMSE report + frei0r cross-runtime probe)
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
 - [x] `select_library_item`, `source_play`, `source_pause` tools — select media in the library and control Source Monitor playback via MCP
 - [x] `save_project_with_media` tool — package-save the project (`.uspxml` + `ProjectName.Library` media copy with rewritten XML media paths)
@@ -362,7 +369,7 @@ Tracking docs:
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
-- [x] Extended color grading — exposure, black point, highlights/midtones/shadows warmth & tint; Inspector sliders, FCPXML round-trip (FCP `filter-video` "Color Adjustments" import/export), MCP `set_clip_color` support; GStreamer preview via videobalance + frei0r 3-point-color-balance, FFmpeg export via eq gamma + colorbalance per-channel
+- [x] Extended color grading — exposure, black point, highlights/midtones/shadows warmth & tint; Inspector sliders, FCPXML round-trip (FCP `filter-video` "Color Adjustments" import/export), MCP `set_clip_color` support; preview/export parity improved by reusing calibrated preview mapping in export with FFmpeg frei0r bridge (`coloradj_RGB`, `three_point_balance`) and native-filter fallback
 - [x] Shadows and Highlights — imported from FCP `<filter-video>` params, Inspector sliders, MCP support
 - [x] Denoise filter per clip (GStreamer `gaussianblur` positive sigma; ffmpeg `hqdn3d` on export)
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)

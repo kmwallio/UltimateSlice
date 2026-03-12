@@ -140,25 +140,25 @@ struct VBParams {
 
 /// Per-channel RGB gains for frei0r `coloradj_RGB` element.
 /// Values are in frei0r's [0,1] range where 0.5 = neutral (gain 1.0).
-struct ColorAdjRGBParams {
-    r: f64,
-    g: f64,
-    b: f64,
+pub(crate) struct ColorAdjRGBParams {
+    pub(crate) r: f64,
+    pub(crate) g: f64,
+    pub(crate) b: f64,
 }
 
 /// Parameters for frei0r `3-point-color-balance` element.
 /// Maps shadows/midtones/highlights to the black/gray/white reference
 /// points of a piecewise-linear transfer curve.
-struct ThreePointParams {
-    black_r: f64,
-    black_g: f64,
-    black_b: f64,
-    gray_r: f64,
-    gray_g: f64,
-    gray_b: f64,
-    white_r: f64,
-    white_g: f64,
-    white_b: f64,
+pub(crate) struct ThreePointParams {
+    pub(crate) black_r: f64,
+    pub(crate) black_g: f64,
+    pub(crate) black_b: f64,
+    pub(crate) gray_r: f64,
+    pub(crate) gray_g: f64,
+    pub(crate) gray_b: f64,
+    pub(crate) white_r: f64,
+    pub(crate) white_g: f64,
+    pub(crate) white_b: f64,
 }
 
 /// Role of a clip within a transition overlap region.
@@ -2903,8 +2903,8 @@ impl ProgramPlayer {
     #[allow(dead_code)]
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
         self.update_current_effects(
-            brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0,
         );
     }
 
@@ -2933,7 +2933,9 @@ impl ProgramPlayer {
         // values moved away from defaults but the slot was built without the
         // element (because values were at defaults when the slot was created),
         // we must do a one-time pipeline rebuild so the element gets created.
-        let need_balance = brightness != 0.0 || contrast != 1.0 || saturation != 1.0
+        let need_balance = brightness != 0.0
+            || contrast != 1.0
+            || saturation != 1.0
             || exposure.abs() > f64::EPSILON;
         let need_coloradj = (temperature - 6500.0).abs() > 1.0 || tint.abs() > 0.001;
         let need_3point = shadows.abs() > f64::EPSILON
@@ -3006,6 +3008,13 @@ impl ProgramPlayer {
                     midtones,
                     highlights,
                     exposure,
+                    black_point,
+                    highlights_warmth,
+                    highlights_tint,
+                    midtones_warmth,
+                    midtones_tint,
+                    shadows_warmth,
+                    shadows_tint,
                     has_coloradj,
                     has_3point,
                 );
@@ -3022,10 +3031,16 @@ impl ProgramPlayer {
             }
             if let Some(ref tp) = slot.colorbalance_3pt {
                 let p = Self::compute_3point_params(
-                    shadows, midtones, highlights, black_point,
-                    highlights_warmth, highlights_tint,
-                    midtones_warmth, midtones_tint,
-                    shadows_warmth, shadows_tint,
+                    shadows,
+                    midtones,
+                    highlights,
+                    black_point,
+                    highlights_warmth,
+                    highlights_tint,
+                    midtones_warmth,
+                    midtones_tint,
+                    shadows_warmth,
+                    shadows_tint,
                 );
                 tp.set_property("black-color-r", p.black_r as f32);
                 tp.set_property("black-color-g", p.black_g as f32);
@@ -3669,6 +3684,13 @@ impl ProgramPlayer {
                     clip.midtones,
                     clip.highlights,
                     clip.exposure,
+                    clip.black_point,
+                    clip.highlights_warmth,
+                    clip.highlights_tint,
+                    clip.midtones_warmth,
+                    clip.midtones_tint,
+                    clip.shadows_warmth,
+                    clip.shadows_tint,
                     has_coloradj,
                     has_3point,
                 );
@@ -6618,6 +6640,13 @@ impl ProgramPlayer {
                 clip.midtones,
                 clip.highlights,
                 clip.exposure,
+                clip.black_point,
+                clip.highlights_warmth,
+                clip.highlights_tint,
+                clip.midtones_warmth,
+                clip.midtones_tint,
+                clip.shadows_warmth,
+                clip.shadows_tint,
                 has_coloradj,
                 has_3point,
             );
@@ -6637,10 +6666,16 @@ impl ProgramPlayer {
         }
         if let Some(ref tp) = colorbalance_3pt {
             let p = Self::compute_3point_params(
-                clip.shadows, clip.midtones, clip.highlights, clip.black_point,
-                clip.highlights_warmth, clip.highlights_tint,
-                clip.midtones_warmth, clip.midtones_tint,
-                clip.shadows_warmth, clip.shadows_tint,
+                clip.shadows,
+                clip.midtones,
+                clip.highlights,
+                clip.black_point,
+                clip.highlights_warmth,
+                clip.highlights_tint,
+                clip.midtones_warmth,
+                clip.midtones_tint,
+                clip.shadows_warmth,
+                clip.shadows_tint,
             );
             tp.set_property("black-color-r", p.black_r as f32);
             tp.set_property("black-color-g", p.black_g as f32);
@@ -8306,6 +8341,13 @@ impl ProgramPlayer {
         midtones: f64,
         highlights: f64,
         exposure: f64,
+        black_point: f64,
+        highlights_warmth: f64,
+        highlights_tint: f64,
+        midtones_warmth: f64,
+        midtones_tint: f64,
+        shadows_warmth: f64,
+        shadows_tint: f64,
         has_coloradj: bool,
         has_3point: bool,
     ) -> VBParams {
@@ -8421,6 +8463,20 @@ impl ProgramPlayer {
             s += Self::poly4(t, &H_S) - H_S[0];
         }
 
+        if !has_3point {
+            // Fallback approximation when frei0r 3-point-color-balance is
+            // unavailable.  videobalance cannot target luminance zones, so we
+            // map these controls to a small global lift/hue response.
+            let bp = black_point.clamp(-1.0, 1.0);
+            b += bp * 0.18;
+            c += bp * 0.10;
+
+            let warmth_avg =
+                (highlights_warmth + midtones_warmth + shadows_warmth).clamp(-3.0, 3.0) / 3.0;
+            let tint_avg = (highlights_tint + midtones_tint + shadows_tint).clamp(-3.0, 3.0) / 3.0;
+            h += (tint_avg * 0.08 - warmth_avg * 0.06).clamp(-0.20, 0.20);
+        }
+
         VBParams {
             brightness: b.clamp(-1.0, 1.0),
             contrast: c.clamp(0.0, 2.0),
@@ -8438,7 +8494,7 @@ impl ProgramPlayer {
     ///
     /// Tint is applied as a green-channel shift with complementary R/B
     /// boost, matching FFmpeg's `colorbalance` midtones approach.
-    fn compute_coloradj_params(temperature: f64, tint: f64) -> ColorAdjRGBParams {
+    pub(crate) fn compute_coloradj_params(temperature: f64, tint: f64) -> ColorAdjRGBParams {
         // Calibrated polynomial mapping: frei0r coloradj_RGB params that best
         // approximate the FFmpeg colortemperature + colorbalance tint export.
         // Coefficients derived from empirical calibration (tools/calibrate_frei0r.py).
@@ -8477,6 +8533,14 @@ impl ProgramPlayer {
         }
     }
 
+    /// Non-linear response used by tonal warmth/tint controls.
+    ///
+    /// Keeps precision near 0.0 while boosting creative range near slider ends.
+    pub(crate) fn compute_tonal_axis_response(value: f64) -> f64 {
+        let v = value.clamp(-1.0, 1.0);
+        v * (1.0 + 0.35 * v * v)
+    }
+
     /// Compute frei0r `3-point-color-balance` parameters from
     /// shadows/midtones/highlights sliders.
     ///
@@ -8487,7 +8551,7 @@ impl ProgramPlayer {
     /// (tools/calibrate_frei0r.py).
     ///
     /// Each slider contributes a delta from neutral via fitted polynomials.
-    fn compute_3point_params(
+    pub(crate) fn compute_3point_params(
         shadows: f64,
         midtones: f64,
         highlights: f64,
@@ -8551,13 +8615,19 @@ impl ProgramPlayer {
         // Scale factor chosen to give visible but non-destructive shifts.
         let warmth_scale = 0.12;
         let tint_scale = 0.10;
+        let shadows_endpoint_boost = 1.30;
 
-        let sw = shadows_warmth.clamp(-1.0, 1.0) * warmth_scale;
-        let st = shadows_tint.clamp(-1.0, 1.0) * tint_scale;
-        let mw = midtones_warmth.clamp(-1.0, 1.0) * warmth_scale;
-        let mt = midtones_tint.clamp(-1.0, 1.0) * tint_scale;
-        let hw = highlights_warmth.clamp(-1.0, 1.0) * warmth_scale;
-        let ht = highlights_tint.clamp(-1.0, 1.0) * tint_scale;
+        // In 3-point curve space, all warmth axes are inverted relative to
+        // the UI's visual semantics. Negate so UI remains conventional:
+        // slider right = warmer, slider left = cooler.
+        let sw =
+            -Self::compute_tonal_axis_response(shadows_warmth) * warmth_scale * shadows_endpoint_boost;
+        let st =
+            Self::compute_tonal_axis_response(shadows_tint) * tint_scale * shadows_endpoint_boost;
+        let mw = -Self::compute_tonal_axis_response(midtones_warmth) * warmth_scale;
+        let mt = Self::compute_tonal_axis_response(midtones_tint) * tint_scale;
+        let hw = -Self::compute_tonal_axis_response(highlights_warmth) * warmth_scale;
+        let ht = Self::compute_tonal_axis_response(highlights_tint) * tint_scale;
 
         // Per-channel: warmth shifts R↔B, tint shifts G↔(R+B).
         let black_r = (black + bp + sw - st * 0.5).clamp(0.0, 0.95);
@@ -8786,6 +8856,13 @@ impl ProgramPlayer {
                 clip.midtones,
                 clip.highlights,
                 clip.exposure,
+                clip.black_point,
+                clip.highlights_warmth,
+                clip.highlights_tint,
+                clip.midtones_warmth,
+                clip.midtones_tint,
+                clip.shadows_warmth,
+                clip.shadows_tint,
                 has_coloradj,
                 has_3point,
             );
@@ -8806,10 +8883,16 @@ impl ProgramPlayer {
         // frei0r 3-point-color-balance (shadows/midtones/highlights)
         if let Some(ref tp) = slot.colorbalance_3pt {
             let p = Self::compute_3point_params(
-                clip.shadows, clip.midtones, clip.highlights, clip.black_point,
-                clip.highlights_warmth, clip.highlights_tint,
-                clip.midtones_warmth, clip.midtones_tint,
-                clip.shadows_warmth, clip.shadows_tint,
+                clip.shadows,
+                clip.midtones,
+                clip.highlights,
+                clip.black_point,
+                clip.highlights_warmth,
+                clip.highlights_tint,
+                clip.midtones_warmth,
+                clip.midtones_tint,
+                clip.shadows_warmth,
+                clip.shadows_tint,
             );
             tp.set_property("black-color-r", p.black_r as f32);
             tp.set_property("black-color-g", p.black_g as f32);
@@ -10735,6 +10818,13 @@ mod tests {
             midtones,
             highlights,
             0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             true,
             true,
         )
@@ -10760,6 +10850,13 @@ mod tests {
             midtones,
             highlights,
             0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             false,
             true,
         )
@@ -10784,6 +10881,13 @@ mod tests {
             shadows,
             midtones,
             highlights,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             0.0,
             true,
             false,
@@ -10978,6 +11082,115 @@ mod tests {
             "midtones lift should increase brightness: b={}",
             p.brightness
         );
+    }
+
+    #[test]
+    fn vb_black_point_fallback_affects_brightness_without_3point() {
+        let base = vb_no_3point(0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0);
+        let adjusted = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            true, false,
+        );
+        assert!(
+            adjusted.brightness > base.brightness + 0.05,
+            "positive black point should brighten fallback preview: base={} adjusted={}",
+            base.brightness,
+            adjusted.brightness
+        );
+    }
+
+    #[test]
+    fn vb_warmth_tint_fallback_shifts_hue_without_3point() {
+        let warm = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.8, 0.0, 0.8, 0.0,
+            true, false,
+        );
+        let cool = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8, 0.0, -0.8, 0.0, -0.8, 0.0,
+            true, false,
+        );
+        let magenta = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.8, 0.0, 0.8,
+            true, false,
+        );
+        let green = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8, 0.0, -0.8, 0.0, -0.8,
+            true, false,
+        );
+        assert!(
+            warm.hue < cool.hue,
+            "warm/cool should diverge in fallback hue"
+        );
+        assert!(
+            magenta.hue > green.hue,
+            "magenta/green tint should diverge in fallback hue"
+        );
+    }
+
+    #[test]
+    fn vb_warmth_fallback_keeps_direction_for_each_tonal_slider() {
+        let warm_shadows = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0,
+            true, false,
+        );
+        let cool_shadows = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8, 0.0, 0.0, 0.0, 0.0, 0.0,
+            true, false,
+        );
+        assert!(warm_shadows.hue < cool_shadows.hue);
+
+        let warm_midtones = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0,
+            true, false,
+        );
+        let cool_midtones = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8, 0.0, 0.0, 0.0,
+            true, false,
+        );
+        assert!(warm_midtones.hue < cool_midtones.hue);
+
+        let warm_highlights = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0,
+            true, false,
+        );
+        let cool_highlights = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8, 0.0,
+            true, false,
+        );
+        assert!(warm_highlights.hue < cool_highlights.hue);
+    }
+
+    #[test]
+    fn vb_tint_fallback_keeps_direction_for_each_tonal_slider() {
+        let magenta_shadows = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0,
+            true, false,
+        );
+        let green_shadows = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8, 0.0, 0.0, 0.0, 0.0,
+            true, false,
+        );
+        assert!(magenta_shadows.hue > green_shadows.hue);
+
+        let magenta_midtones = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0,
+            true, false,
+        );
+        let green_midtones = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8, 0.0, 0.0,
+            true, false,
+        );
+        assert!(magenta_midtones.hue > green_midtones.hue);
+
+        let magenta_highlights = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8,
+            true, false,
+        );
+        let green_highlights = ProgramPlayer::compute_videobalance_params(
+            0.0, 1.0, 1.0, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.8,
+            true, false,
+        );
+        assert!(magenta_highlights.hue > green_highlights.hue);
     }
 
     #[test]
@@ -11181,7 +11394,8 @@ mod tests {
 
     #[test]
     fn threepoint_neutral_at_defaults() {
-        let p = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!((p.black_r).abs() < 0.01, "neutral black_r={}", p.black_r);
         assert!((p.gray_r - 0.5).abs() < 0.01, "neutral gray_r={}", p.gray_r);
         assert!(
@@ -11195,8 +11409,10 @@ mod tests {
     fn threepoint_positive_shadows_lifts_black() {
         // Calibrated: positive shadows shift the curve to brighten shadow region.
         // Black point may stay near 0 while gray/white adjust.
-        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let p = ProgramPlayer::compute_3point_params(0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let neutral =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p =
+            ProgramPlayer::compute_3point_params(0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let changed = (p.black_r - neutral.black_r).abs() > 0.001
             || (p.gray_r - neutral.gray_r).abs() > 0.001
             || (p.white_r - neutral.white_r).abs() > 0.001;
@@ -11205,8 +11421,10 @@ mod tests {
 
     #[test]
     fn threepoint_negative_shadows_lowers_gray() {
-        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let neg = ProgramPlayer::compute_3point_params(-0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let neutral =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let neg =
+            ProgramPlayer::compute_3point_params(-0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(
             neg.gray_r < neutral.gray_r,
             "negative shadows should lower gray: gray_r={}",
@@ -11224,8 +11442,10 @@ mod tests {
         // In frei0r 3-point, a LOWER gray value brightens midtones
         // (the parabola's midpoint shifts left). Calibrated positive
         // midtones → lower gray to match FFmpeg's brighten behavior.
-        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let p = ProgramPlayer::compute_3point_params(0.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let neutral =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p =
+            ProgramPlayer::compute_3point_params(0.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(
             p.gray_r < neutral.gray_r,
             "positive midtones should lower gray (brighten): gray_r={}",
@@ -11235,7 +11455,8 @@ mod tests {
 
     #[test]
     fn threepoint_negative_highlights_pulls_white() {
-        let p = ProgramPlayer::compute_3point_params(0.0, 0.0, -0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, -0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(
             p.white_r < 1.0,
             "negative highlights should pull down white: white_r={}",
@@ -11247,8 +11468,10 @@ mod tests {
     fn threepoint_positive_highlights_raises_gray() {
         // Calibrated: positive highlights shift gray/white to brighten
         // the highlight region. Gray may move lower (frei0r parabola semantics).
-        let neutral = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let pos = ProgramPlayer::compute_3point_params(0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let neutral =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let pos =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let changed = (pos.gray_r - neutral.gray_r).abs() > 0.01
             || (pos.white_r - neutral.white_r).abs() > 0.01;
         assert!(changed, "positive highlights should alter the curve");
@@ -11256,7 +11479,8 @@ mod tests {
 
     #[test]
     fn threepoint_all_channels_equal() {
-        let p = ProgramPlayer::compute_3point_params(0.5, -0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p =
+            ProgramPlayer::compute_3point_params(0.5, -0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!((p.black_r - p.black_g).abs() < 1e-10, "R==G for black");
         assert!((p.black_r - p.black_b).abs() < 1e-10, "R==B for black");
         assert!((p.gray_r - p.gray_g).abs() < 1e-10, "R==G for gray");
@@ -11265,7 +11489,8 @@ mod tests {
 
     #[test]
     fn threepoint_params_clamped() {
-        let p = ProgramPlayer::compute_3point_params(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p =
+            ProgramPlayer::compute_3point_params(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(
             p.black_r >= 0.0 && p.black_r <= 0.8,
             "black clamped: {}",
@@ -11281,7 +11506,9 @@ mod tests {
             "white clamped: {}",
             p.white_r
         );
-        let p2 = ProgramPlayer::compute_3point_params(-1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p2 = ProgramPlayer::compute_3point_params(
+            -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
         assert!(
             p2.black_r >= 0.0 && p2.black_r <= 0.8,
             "black clamped min: {}",
@@ -11296,6 +11523,66 @@ mod tests {
             p2.white_r >= 0.2 && p2.white_r <= 1.0,
             "white clamped min: {}",
             p2.white_r
+        );
+    }
+
+    #[test]
+    fn tonal_axis_response_boosts_slider_ends_without_destabilizing_center() {
+        let center = ProgramPlayer::compute_tonal_axis_response(0.2);
+        let end = ProgramPlayer::compute_tonal_axis_response(1.0);
+
+        assert!(
+            (center - 0.2).abs() < 0.01,
+            "center should remain precise: {}",
+            center
+        );
+        assert!(
+            end > 1.3,
+            "ends should be substantially stronger than linear: {}",
+            end
+        );
+    }
+
+    #[test]
+    fn threepoint_negative_shadows_warmth_maps_to_curve_space_red() {
+        let p =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0);
+        assert!(
+            p.black_r > p.black_b + 0.20,
+            "negative shadows warmth should raise curve-space red control: black_r={}, black_b={}",
+            p.black_r,
+            p.black_b
+        );
+    }
+
+    #[test]
+    fn threepoint_positive_shadows_warmth_maps_to_curve_space_blue() {
+        let p =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+        assert!(
+            p.black_b > p.black_r + 0.20,
+            "positive shadows warmth should raise curve-space blue control: black_r={}, black_b={}",
+            p.black_r,
+            p.black_b
+        );
+    }
+
+    #[test]
+    fn threepoint_shadows_tint_changes_curve_space_channels() {
+        let magenta =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let green = ProgramPlayer::compute_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        );
+        assert!(
+            magenta.black_g > green.black_g,
+            "positive/negative tint should diverge in curve-space green control: magenta_g={}, green_g={}",
+            magenta.black_g,
+            green.black_g
+        );
+        assert!(
+            magenta.black_r < green.black_r && magenta.black_b < green.black_b,
+            "positive/negative tint should diverge in curve-space red/blue controls"
         );
     }
 

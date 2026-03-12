@@ -1837,8 +1837,7 @@ pub fn build_window(
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |b, c, s, temp, tnt, d, sh, shd, mid, hil,
-                  exp, bp, hw, ht, mw, mt, sw, st| {
+            move |b, c, s, temp, tnt, d, sh, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st| {
                 prog_player.borrow_mut().update_current_effects(
                     b as f64,
                     c as f64,

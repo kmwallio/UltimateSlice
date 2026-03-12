@@ -48,6 +48,8 @@ pub struct BgRemovalProgress {
 pub struct BgRemovalCache {
     /// Completed bg-removed file paths: **source_path → output_path**.
     pub paths: HashMap<String, String>,
+    /// Desired cache key for each source path (encodes threshold).
+    source_to_key: HashMap<String, String>,
     /// Currently processing keys (internal cache keys).
     pending: HashSet<String>,
     /// Failed keys (not retried).
@@ -107,6 +109,7 @@ impl BgRemovalCache {
 
         Self {
             paths: HashMap::new(),
+            source_to_key: HashMap::new(),
             pending: HashSet::new(),
             failed: HashSet::new(),
             key_to_source: HashMap::new(),
@@ -136,13 +139,24 @@ impl BgRemovalCache {
             return;
         };
         let key = cache_key(source_path, threshold);
-        // Already completed (keyed by source_path in self.paths)?
-        if self.paths.contains_key(source_path)
-            || self.pending.contains(&key)
-            || self.failed.contains(&key)
-        {
+        if self.pending.contains(&key) || self.failed.contains(&key) {
             return;
         }
+
+        if let Some(prev_key) = self.source_to_key.get(source_path) {
+            if prev_key == &key && self.paths.contains_key(source_path) {
+                return;
+            }
+            if prev_key != &key {
+                // Threshold changed for this source; drop the old resolved path
+                // so preview/export fall back to source media until the new
+                // threshold-specific output is ready.
+                self.paths.remove(source_path);
+            }
+        }
+        self.source_to_key
+            .insert(source_path.to_string(), key.clone());
+
         // Check disk for pre-existing result.
         let output_path = self.output_path_for_key(&key);
         if Path::new(&output_path).exists() {
@@ -181,13 +195,21 @@ impl BgRemovalCache {
                             .key_to_source
                             .remove(&result.cache_key)
                             .unwrap_or_else(|| result.cache_key.clone());
-                        log::info!(
-                            "BgRemovalCache: completed source={} path={}",
-                            source,
-                            result.output_path
-                        );
-                        self.paths.insert(source.clone(), result.output_path);
-                        resolved.push(source);
+                        if self.source_to_key.get(&source) == Some(&result.cache_key) {
+                            log::info!(
+                                "BgRemovalCache: completed source={} path={}",
+                                source,
+                                result.output_path
+                            );
+                            self.paths.insert(source.clone(), result.output_path);
+                            resolved.push(source);
+                        } else {
+                            log::info!(
+                                "BgRemovalCache: ignored stale result for source={} key={}",
+                                source,
+                                result.cache_key
+                            );
+                        }
                     } else {
                         log::warn!("BgRemovalCache: failed key={}", result.cache_key);
                         self.failed.insert(result.cache_key);
@@ -210,14 +232,20 @@ impl BgRemovalCache {
     /// Invalidate all cached results (e.g. when model or threshold changes).
     pub fn invalidate_all(&mut self) {
         self.paths.clear();
+        self.source_to_key.clear();
         self.failed.clear();
         self.key_to_source.clear();
         self.total_requested = 0;
     }
 
     /// Get the bg-removed file path for a source clip, if ready.
-    pub fn get_path(&self, source_path: &str, _threshold: f64) -> Option<&String> {
-        self.paths.get(source_path)
+    pub fn get_path(&self, source_path: &str, threshold: f64) -> Option<&String> {
+        let key = cache_key(source_path, threshold);
+        if self.source_to_key.get(source_path) == Some(&key) {
+            self.paths.get(source_path)
+        } else {
+            None
+        }
     }
 
     fn output_path_for_key(&self, key: &str) -> String {

@@ -1843,7 +1843,9 @@ fn parse_audio_channel_source_children(reader: &mut Reader<&[u8]>) -> Result<Nat
                             match reader.read_event_into(&mut skip_buf)? {
                                 Event::Start(_) => skip_depth += 1,
                                 Event::End(_) => skip_depth -= 1,
-                                Event::Eof => bail!("Unexpected EOF skipping inside <audio-channel-source>"),
+                                Event::Eof => {
+                                    bail!("Unexpected EOF skipping inside <audio-channel-source>")
+                                }
                                 _ => {}
                             }
                             skip_buf.clear();
@@ -4684,7 +4686,10 @@ mod tests {
             .expect("connected video clip");
         let expected_ns = 50050u64 * 1_000_000_000 / 24000;
         let delta = connected_v.timeline_start.abs_diff(expected_ns);
-        assert!(delta <= 1, "connected video timeline_start off by {delta}ns");
+        assert!(
+            delta <= 1,
+            "connected video timeline_start off by {delta}ns"
+        );
 
         // Connected audio (lane=-1): offset 1000000 = parent start → timeline = 0
         let connected_a = project
@@ -4838,11 +4843,20 @@ mod tests {
         assert!((clip.highlights - (-0.2)).abs() < 1e-5, "highlights");
         assert!((clip.black_point - 0.15).abs() < 1e-5, "black_point");
         assert!((clip.shadows - 0.3).abs() < 1e-5, "shadows");
-        assert!((clip.highlights_warmth - 0.4).abs() < 1e-5, "highlights_warmth");
-        assert!((clip.highlights_tint - (-0.1)).abs() < 1e-5, "highlights_tint");
+        assert!(
+            (clip.highlights_warmth - 0.4).abs() < 1e-5,
+            "highlights_warmth"
+        );
+        assert!(
+            (clip.highlights_tint - (-0.1)).abs() < 1e-5,
+            "highlights_tint"
+        );
         assert!((clip.midtones_warmth - 0.6).abs() < 1e-5, "midtones_warmth");
         assert!((clip.midtones_tint - 0.05).abs() < 1e-5, "midtones_tint");
-        assert!((clip.shadows_warmth - (-0.25)).abs() < 1e-5, "shadows_warmth");
+        assert!(
+            (clip.shadows_warmth - (-0.25)).abs() < 1e-5,
+            "shadows_warmth"
+        );
         assert!((clip.shadows_tint - 0.8).abs() < 1e-5, "shadows_tint");
     }
 
@@ -4876,7 +4890,9 @@ mod tests {
         let clip = &project.video_tracks().next().unwrap().clips[0];
         // Non-Color-Adjustments filter-video should be preserved as unknown XML
         assert!(
-            clip.fcpxml_unknown_children.iter().any(|s: &String| s.contains("Gaussian Blur")),
+            clip.fcpxml_unknown_children
+                .iter()
+                .any(|s: &String| s.contains("Gaussian Blur")),
             "Non-Color-Adjustments filter-video should be preserved as unknown XML"
         );
         // Color fields should remain at defaults
@@ -4914,11 +4930,20 @@ mod tests {
         let clip = &project.video_tracks().next().unwrap().clips[0];
         assert!((clip.exposure - 0.5).abs() < 1e-5, "exposure");
         assert!((clip.black_point - (-0.3)).abs() < 1e-5, "black_point");
-        assert!((clip.highlights_warmth - 0.2).abs() < 1e-5, "highlights_warmth");
-        assert!((clip.highlights_tint - (-0.1)).abs() < 1e-5, "highlights_tint");
+        assert!(
+            (clip.highlights_warmth - 0.2).abs() < 1e-5,
+            "highlights_warmth"
+        );
+        assert!(
+            (clip.highlights_tint - (-0.1)).abs() < 1e-5,
+            "highlights_tint"
+        );
         assert!((clip.midtones_warmth - 0.4).abs() < 1e-5, "midtones_warmth");
         assert!((clip.midtones_tint - 0.15).abs() < 1e-5, "midtones_tint");
-        assert!((clip.shadows_warmth - (-0.6)).abs() < 1e-5, "shadows_warmth");
+        assert!(
+            (clip.shadows_warmth - (-0.6)).abs() < 1e-5,
+            "shadows_warmth"
+        );
         assert!((clip.shadows_tint - 0.7).abs() < 1e-5, "shadows_tint");
     }
 }

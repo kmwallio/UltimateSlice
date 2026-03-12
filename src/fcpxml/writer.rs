@@ -225,152 +225,147 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         // Helper: write an asset-clip open tag with standard attributes.
         // `parent_clip` is set when writing connected clips to convert offset
         // from timeline space into the parent's source time space.
-        let write_asset_clip_start =
-            |writer: &mut Writer<Cursor<Vec<u8>>>,
-             clip: &crate::model::clip::Clip,
-             lane: Option<i32>,
-             parent_clip: Option<&crate::model::clip::Clip>|
-             -> Result<u64> {
-                let asset_ref = format!("a_{}", sanitize_id(&clip.id));
+        let write_asset_clip_start = |writer: &mut Writer<Cursor<Vec<u8>>>,
+                                      clip: &crate::model::clip::Clip,
+                                      lane: Option<i32>,
+                                      parent_clip: Option<&crate::model::clip::Clip>|
+         -> Result<u64> {
+            let asset_ref = format!("a_{}", sanitize_id(&clip.id));
 
-                // Look up probed media info for this clip and its parent.
-                let clip_source = clip
+            // Look up probed media info for this clip and its parent.
+            let clip_source = clip
+                .fcpxml_original_source_path
+                .as_deref()
+                .unwrap_or(&clip.source_path);
+            let clip_media = export_ctx
+                .as_ref()
+                .and_then(|ctx| ctx.media.get(clip_source));
+            let clip_is_audio_only = clip_media.map(|m| m.is_audio_only).unwrap_or(false);
+            let clip_has_video = clip_media
+                .map(|m| m.width > 0 && m.height > 0)
+                .unwrap_or(clip.kind != crate::model::clip::ClipKind::Audio);
+            // Audio-only clips use the FFVideoFormatRateUndefined format.
+            // Their start/duration should use the audio time base (48kHz),
+            // not the video frame rate.
+            static AUDIO_FPS: FrameRate = FrameRate {
+                numerator: 48000,
+                denominator: 1,
+            };
+            let clip_fps = if clip_has_video {
+                clip_media.map(|m| &m.fps).unwrap_or(&project.frame_rate)
+            } else if clip_is_audio_only {
+                &AUDIO_FPS
+            } else {
+                &project.frame_rate
+            };
+            let clip_format = if clip_is_audio_only {
+                clip_media
+                    .map(|m| m.format_id.as_str())
+                    .unwrap_or(format_ref)
+            } else if clip_has_video {
+                clip_media
+                    .map(|m| m.format_id.as_str())
+                    .unwrap_or(format_ref)
+            } else {
+                format_ref
+            };
+            let clip_tc = if clip_has_video || clip_is_audio_only {
+                clip_media.and_then(|m| m.timecode_ns)
+            } else {
+                None
+            };
+
+            let offset = if let Some(parent) = parent_clip {
+                // Connected clip: offset in parent's source time space.
+                let parent_source = parent
                     .fcpxml_original_source_path
                     .as_deref()
-                    .unwrap_or(&clip.source_path);
-                let clip_media = export_ctx.as_ref().and_then(|ctx| ctx.media.get(clip_source));
-                let clip_is_audio_only =
-                    clip_media.map(|m| m.is_audio_only).unwrap_or(false);
-                let clip_has_video = clip_media
-                    .map(|m| m.width > 0 && m.height > 0)
-                    .unwrap_or(clip.kind != crate::model::clip::ClipKind::Audio);
-                // Audio-only clips use the FFVideoFormatRateUndefined format.
-                // Their start/duration should use the audio time base (48kHz),
-                // not the video frame rate.
-                static AUDIO_FPS: FrameRate = FrameRate {
-                    numerator: 48000,
-                    denominator: 1,
-                };
-                let clip_fps = if clip_has_video {
-                    clip_media
-                        .map(|m| &m.fps)
-                        .unwrap_or(&project.frame_rate)
-                } else if clip_is_audio_only {
-                    &AUDIO_FPS
-                } else {
-                    &project.frame_rate
-                };
-                let clip_format = if clip_is_audio_only {
-                    clip_media
-                        .map(|m| m.format_id.as_str())
-                        .unwrap_or(format_ref)
-                } else if clip_has_video {
-                    clip_media
-                        .map(|m| m.format_id.as_str())
-                        .unwrap_or(format_ref)
-                } else {
-                    format_ref
-                };
-                let clip_tc = if clip_has_video || clip_is_audio_only {
-                    clip_media.and_then(|m| m.timecode_ns)
-                } else {
-                    None
-                };
-
-                let offset = if let Some(parent) = parent_clip {
-                    // Connected clip: offset in parent's source time space.
-                    let parent_source = parent
-                        .fcpxml_original_source_path
-                        .as_deref()
-                        .unwrap_or(&parent.source_path);
-                    let parent_media =
-                        export_ctx.as_ref().and_then(|ctx| ctx.media.get(parent_source));
-                    let parent_fps = parent_media
-                        .map(|m| &m.fps)
-                        .unwrap_or(&project.frame_rate);
-                    let parent_tc = parent_media.and_then(|m| m.timecode_ns);
-                    let parent_source_start = parent_tc
-                        .or(parent.source_timecode_base_ns)
-                        .map(|tc| {
-                            // Compute source_in in the media's time base
-                            let tc_frames = (tc * parent_fps.numerator as u64
-                                + parent_fps.denominator as u64 * 500_000_000)
-                                / (parent_fps.denominator as u64 * 1_000_000_000);
-                            let in_frames = (parent.source_in * parent_fps.numerator as u64
-                                + parent_fps.denominator as u64 * 500_000_000)
-                                / (parent_fps.denominator as u64 * 1_000_000_000);
-                            (tc_frames + in_frames)
-                                * parent_fps.denominator as u64
-                                * 1_000_000_000
-                                / parent_fps.numerator as u64
-                        })
-                        .unwrap_or(parent.source_timecode_start_ns().unwrap_or(parent.source_in));
-                    let delta = clip.timeline_start.saturating_sub(parent.timeline_start);
-                    ns_to_fcpxml_time(parent_source_start + delta, parent_fps)
-                } else {
-                    ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate)
-                };
-                let duration = if clip_is_audio_only {
-                    ns_to_fcpxml_time(clip.duration(), clip_fps)
-                } else {
-                    ns_to_fcpxml_time(clip.duration(), &project.frame_rate)
-                };
-
-                // Asset-clip start: position in the asset's source timeline.
-                let source_start_ns = if clip_is_audio_only {
-                    // Audio-only: BWF timecode + source_in, in 48kHz time base.
-                    clip_tc
-                        .map(|tc| {
-                            let tc_samples = (tc * clip_fps.numerator as u64
-                                + clip_fps.denominator as u64 * 500_000_000)
-                                / (clip_fps.denominator as u64 * 1_000_000_000);
-                            let in_samples = (clip.source_in * clip_fps.numerator as u64
-                                + clip_fps.denominator as u64 * 500_000_000)
-                                / (clip_fps.denominator as u64 * 1_000_000_000);
-                            (tc_samples + in_samples)
-                                * clip_fps.denominator as u64
-                                * 1_000_000_000
-                                / clip_fps.numerator as u64
-                        })
-                        .unwrap_or(clip.source_in)
-                } else {
-                    clip_tc
-                        .or(clip.source_timecode_base_ns)
-                        .map(|tc| {
-                            let tc_frames = (tc * clip_fps.numerator as u64
-                                + clip_fps.denominator as u64 * 500_000_000)
-                                / (clip_fps.denominator as u64 * 1_000_000_000);
-                            let in_frames = (clip.source_in * clip_fps.numerator as u64
-                                + clip_fps.denominator as u64 * 500_000_000)
-                                / (clip_fps.denominator as u64 * 1_000_000_000);
-                            (tc_frames + in_frames)
-                                * clip_fps.denominator as u64
-                                * 1_000_000_000
-                                / clip_fps.numerator as u64
-                        })
-                        .unwrap_or(clip.source_in)
-                };
-                let start = ns_to_fcpxml_time(source_start_ns, clip_fps);
-
-                let mut elem = BytesStart::new("asset-clip");
-                elem.push_attribute(("ref", asset_ref.as_str()));
-                if let Some(l) = lane {
-                    elem.push_attribute(("lane", l.to_string().as_str()));
-                }
-                elem.push_attribute(("offset", offset.as_str()));
-                elem.push_attribute(("name", clip.label.as_str()));
-                elem.push_attribute(("start", start.as_str()));
-                elem.push_attribute(("duration", duration.as_str()));
-                if !clip_is_audio_only {
-                    elem.push_attribute(("format", clip_format));
-                    elem.push_attribute(("tcFormat", "NDF"));
-                } else {
-                    elem.push_attribute(("format", clip_format));
-                }
-                elem.push_attribute(("audioRole", "dialogue"));
-                writer.write_event(Event::Start(elem))?;
-                Ok(source_start_ns)
+                    .unwrap_or(&parent.source_path);
+                let parent_media = export_ctx
+                    .as_ref()
+                    .and_then(|ctx| ctx.media.get(parent_source));
+                let parent_fps = parent_media.map(|m| &m.fps).unwrap_or(&project.frame_rate);
+                let parent_tc = parent_media.and_then(|m| m.timecode_ns);
+                let parent_source_start = parent_tc
+                    .or(parent.source_timecode_base_ns)
+                    .map(|tc| {
+                        // Compute source_in in the media's time base
+                        let tc_frames = (tc * parent_fps.numerator as u64
+                            + parent_fps.denominator as u64 * 500_000_000)
+                            / (parent_fps.denominator as u64 * 1_000_000_000);
+                        let in_frames = (parent.source_in * parent_fps.numerator as u64
+                            + parent_fps.denominator as u64 * 500_000_000)
+                            / (parent_fps.denominator as u64 * 1_000_000_000);
+                        (tc_frames + in_frames) * parent_fps.denominator as u64 * 1_000_000_000
+                            / parent_fps.numerator as u64
+                    })
+                    .unwrap_or(
+                        parent
+                            .source_timecode_start_ns()
+                            .unwrap_or(parent.source_in),
+                    );
+                let delta = clip.timeline_start.saturating_sub(parent.timeline_start);
+                ns_to_fcpxml_time(parent_source_start + delta, parent_fps)
+            } else {
+                ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate)
             };
+            let duration = if clip_is_audio_only {
+                ns_to_fcpxml_time(clip.duration(), clip_fps)
+            } else {
+                ns_to_fcpxml_time(clip.duration(), &project.frame_rate)
+            };
+
+            // Asset-clip start: position in the asset's source timeline.
+            let source_start_ns = if clip_is_audio_only {
+                // Audio-only: BWF timecode + source_in, in 48kHz time base.
+                clip_tc
+                    .map(|tc| {
+                        let tc_samples = (tc * clip_fps.numerator as u64
+                            + clip_fps.denominator as u64 * 500_000_000)
+                            / (clip_fps.denominator as u64 * 1_000_000_000);
+                        let in_samples = (clip.source_in * clip_fps.numerator as u64
+                            + clip_fps.denominator as u64 * 500_000_000)
+                            / (clip_fps.denominator as u64 * 1_000_000_000);
+                        (tc_samples + in_samples) * clip_fps.denominator as u64 * 1_000_000_000
+                            / clip_fps.numerator as u64
+                    })
+                    .unwrap_or(clip.source_in)
+            } else {
+                clip_tc
+                    .or(clip.source_timecode_base_ns)
+                    .map(|tc| {
+                        let tc_frames = (tc * clip_fps.numerator as u64
+                            + clip_fps.denominator as u64 * 500_000_000)
+                            / (clip_fps.denominator as u64 * 1_000_000_000);
+                        let in_frames = (clip.source_in * clip_fps.numerator as u64
+                            + clip_fps.denominator as u64 * 500_000_000)
+                            / (clip_fps.denominator as u64 * 1_000_000_000);
+                        (tc_frames + in_frames) * clip_fps.denominator as u64 * 1_000_000_000
+                            / clip_fps.numerator as u64
+                    })
+                    .unwrap_or(clip.source_in)
+            };
+            let start = ns_to_fcpxml_time(source_start_ns, clip_fps);
+
+            let mut elem = BytesStart::new("asset-clip");
+            elem.push_attribute(("ref", asset_ref.as_str()));
+            if let Some(l) = lane {
+                elem.push_attribute(("lane", l.to_string().as_str()));
+            }
+            elem.push_attribute(("offset", offset.as_str()));
+            elem.push_attribute(("name", clip.label.as_str()));
+            elem.push_attribute(("start", start.as_str()));
+            elem.push_attribute(("duration", duration.as_str()));
+            if !clip_is_audio_only {
+                elem.push_attribute(("format", clip_format));
+                elem.push_attribute(("tcFormat", "NDF"));
+            } else {
+                elem.push_attribute(("format", clip_format));
+            }
+            elem.push_attribute(("audioRole", "dialogue"));
+            writer.write_event(Event::Start(elem))?;
+            Ok(source_start_ns)
+        };
 
         if let Some(primary_idx) = primary_track_idx {
             let primary_track = &project.tracks[primary_idx];
@@ -404,10 +399,15 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             write_strict_clip_body(&mut writer, conn_clip, project)?;
                             // audio-channel-source after connected clip's own anchors (none here)
                             write_strict_audio_channel_sources(
-                                &mut writer, conn_clip, &project.frame_rate, conn_source_start,
+                                &mut writer,
+                                conn_clip,
+                                &project.frame_rate,
+                                conn_source_start,
                             )?;
                             write_strict_filter_video_color(
-                                &mut writer, conn_clip, COLOR_ADJUSTMENTS_EFFECT_ID,
+                                &mut writer,
+                                conn_clip,
+                                COLOR_ADJUSTMENTS_EFFECT_ID,
                             )?;
                             writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                         }
@@ -416,12 +416,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
 
                 // audio-channel-source after connected clips (per DTD order)
                 write_strict_audio_channel_sources(
-                    &mut writer, clip, &project.frame_rate, source_start,
+                    &mut writer,
+                    clip,
+                    &project.frame_rate,
+                    source_start,
                 )?;
                 // filter-video after audio-channel-source (per DTD order)
-                write_strict_filter_video_color(
-                    &mut writer, clip, COLOR_ADJUSTMENTS_EFFECT_ID,
-                )?;
+                write_strict_filter_video_color(&mut writer, clip, COLOR_ADJUSTMENTS_EFFECT_ID)?;
 
                 writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
 
@@ -465,461 +466,513 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             for ct in &connected_tracks {
                 let track = &project.tracks[ct.track_idx];
                 for clip in &track.clips {
-                    let source_start = write_asset_clip_start(&mut writer, clip, Some(ct.lane), None)?;
+                    let source_start =
+                        write_asset_clip_start(&mut writer, clip, Some(ct.lane), None)?;
                     write_strict_clip_body(&mut writer, clip, project)?;
                     write_strict_audio_channel_sources(
-                        &mut writer, clip, &project.frame_rate, source_start,
+                        &mut writer,
+                        clip,
+                        &project.frame_rate,
+                        source_start,
                     )?;
                     write_strict_filter_video_color(
-                        &mut writer, clip, COLOR_ADJUSTMENTS_EFFECT_ID,
+                        &mut writer,
+                        clip,
+                        COLOR_ADJUSTMENTS_EFFECT_ID,
                     )?;
                     writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                 }
             }
         }
     } else {
-    // Non-strict (rich) mode: flat spine structure with us:* vendor attributes.
-    let mut video_track_idx = 0usize;
-    let mut audio_track_idx = 0usize;
-    for (track_idx, track) in project.tracks.iter().enumerate() {
-        let track_kind_idx = match track.kind {
-            crate::model::track::TrackKind::Video => {
-                let idx = video_track_idx;
-                video_track_idx += 1;
-                idx
-            }
-            crate::model::track::TrackKind::Audio => {
-                let idx = audio_track_idx;
-                audio_track_idx += 1;
-                idx
-            }
-        };
-        let track_kind = match track.kind {
-            crate::model::track::TrackKind::Video => "video",
-            crate::model::track::TrackKind::Audio => "audio",
-        };
-        for (clip_idx, clip) in track.clips.iter().enumerate() {
-            let asset_ref = format!("a_{}", sanitize_id(&clip.id));
-            let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
-            let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
-            let start = ns_to_fcpxml_time(
-                clip.source_timecode_start_ns().unwrap_or(clip.source_in),
-                &project.frame_rate,
-            );
+        // Non-strict (rich) mode: flat spine structure with us:* vendor attributes.
+        let mut video_track_idx = 0usize;
+        let mut audio_track_idx = 0usize;
+        for (track_idx, track) in project.tracks.iter().enumerate() {
+            let track_kind_idx = match track.kind {
+                crate::model::track::TrackKind::Video => {
+                    let idx = video_track_idx;
+                    video_track_idx += 1;
+                    idx
+                }
+                crate::model::track::TrackKind::Audio => {
+                    let idx = audio_track_idx;
+                    audio_track_idx += 1;
+                    idx
+                }
+            };
+            let track_kind = match track.kind {
+                crate::model::track::TrackKind::Video => "video",
+                crate::model::track::TrackKind::Audio => "audio",
+            };
+            for (clip_idx, clip) in track.clips.iter().enumerate() {
+                let asset_ref = format!("a_{}", sanitize_id(&clip.id));
+                let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
+                let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
+                let start = ns_to_fcpxml_time(
+                    clip.source_timecode_start_ns().unwrap_or(clip.source_in),
+                    &project.frame_rate,
+                );
 
-            let mut asset_clip = BytesStart::new("asset-clip");
-            asset_clip.push_attribute(("ref", asset_ref.as_str()));
-            asset_clip.push_attribute(("offset", offset.as_str()));
-            asset_clip.push_attribute(("duration", duration.as_str()));
-            asset_clip.push_attribute(("start", start.as_str()));
-            asset_clip.push_attribute(("name", clip.label.as_str()));
-            if emit_vendor_extensions {
-                // Multi-track routing
-                asset_clip.push_attribute(("us:track-idx", track_idx.to_string().as_str()));
-                asset_clip.push_attribute(("us:track-kind", track_kind));
-                asset_clip.push_attribute(("us:track-name", track.label.as_str()));
-                asset_clip.push_attribute(("us:track-muted", track.muted.to_string().as_str()));
-                asset_clip.push_attribute(("us:track-locked", track.locked.to_string().as_str()));
-                asset_clip.push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
-                asset_clip.push_attribute((
-                    "us:track-height",
-                    match track.height_preset {
-                        crate::model::track::TrackHeightPreset::Small => "small",
-                        crate::model::track::TrackHeightPreset::Medium => "medium",
-                        crate::model::track::TrackHeightPreset::Large => "large",
-                    },
-                ));
-                asset_clip.push_attribute((
-                    "us:color-label",
-                    match clip.color_label {
-                        crate::model::clip::ClipColorLabel::None => "none",
-                        crate::model::clip::ClipColorLabel::Red => "red",
-                        crate::model::clip::ClipColorLabel::Orange => "orange",
-                        crate::model::clip::ClipColorLabel::Yellow => "yellow",
-                        crate::model::clip::ClipColorLabel::Green => "green",
-                        crate::model::clip::ClipColorLabel::Teal => "teal",
-                        crate::model::clip::ClipColorLabel::Blue => "blue",
-                        crate::model::clip::ClipColorLabel::Purple => "purple",
-                        crate::model::clip::ClipColorLabel::Magenta => "magenta",
-                    },
-                ));
-                // Store color/effects as custom vendor attributes (us: prefix).
-                // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
-                asset_clip.push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
-                asset_clip.push_attribute(("us:contrast", clip.contrast.to_string().as_str()));
-                asset_clip.push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
-                asset_clip
-                    .push_attribute(("us:temperature", clip.temperature.to_string().as_str()));
-                asset_clip.push_attribute(("us:tint", clip.tint.to_string().as_str()));
-                let brightness_keyframes_json = if clip.brightness_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.brightness_keyframes).ok()
-                };
-                if let Some(value) = brightness_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:brightness-keyframes", value));
-                }
-                let contrast_keyframes_json = if clip.contrast_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.contrast_keyframes).ok()
-                };
-                if let Some(value) = contrast_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:contrast-keyframes", value));
-                }
-                let saturation_keyframes_json = if clip.saturation_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.saturation_keyframes).ok()
-                };
-                if let Some(value) = saturation_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:saturation-keyframes", value));
-                }
-                let temperature_keyframes_json = if clip.temperature_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.temperature_keyframes).ok()
-                };
-                if let Some(value) = temperature_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:temperature-keyframes", value));
-                }
-                let tint_keyframes_json = if clip.tint_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.tint_keyframes).ok()
-                };
-                if let Some(value) = tint_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:tint-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
-                asset_clip.push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
-                asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
-                let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.volume_keyframes).ok()
-                };
-                if let Some(value) = volume_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:volume-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:pan", clip.pan.to_string().as_str()));
-                let pan_keyframes_json = if clip.pan_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.pan_keyframes).ok()
-                };
-                if let Some(value) = pan_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:pan-keyframes", value));
-                }
-                let rotate_keyframes_json = if clip.rotate_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.rotate_keyframes).ok()
-                };
-                if let Some(value) = rotate_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:rotate-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:crop-left", clip.crop_left.to_string().as_str()));
-                asset_clip.push_attribute(("us:crop-right", clip.crop_right.to_string().as_str()));
-                asset_clip.push_attribute(("us:crop-top", clip.crop_top.to_string().as_str()));
-                asset_clip
-                    .push_attribute(("us:crop-bottom", clip.crop_bottom.to_string().as_str()));
-                let crop_left_keyframes_json = if clip.crop_left_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.crop_left_keyframes).ok()
-                };
-                if let Some(value) = crop_left_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:crop-left-keyframes", value));
-                }
-                let crop_right_keyframes_json = if clip.crop_right_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.crop_right_keyframes).ok()
-                };
-                if let Some(value) = crop_right_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:crop-right-keyframes", value));
-                }
-                let crop_top_keyframes_json = if clip.crop_top_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.crop_top_keyframes).ok()
-                };
-                if let Some(value) = crop_top_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:crop-top-keyframes", value));
-                }
-                let crop_bottom_keyframes_json = if clip.crop_bottom_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.crop_bottom_keyframes).ok()
-                };
-                if let Some(value) = crop_bottom_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:crop-bottom-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:rotate", clip.rotate.to_string().as_str()));
-                asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
-                asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
-                asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
-                let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.scale_keyframes).ok()
-                };
-                if let Some(value) = scale_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:scale-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:opacity", clip.opacity.to_string().as_str()));
-                let opacity_keyframes_json = if clip.opacity_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.opacity_keyframes).ok()
-                };
-                if let Some(value) = opacity_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:opacity-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:position-x", clip.position_x.to_string().as_str()));
-                let position_x_keyframes_json = if clip.position_x_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.position_x_keyframes).ok()
-                };
-                if let Some(value) = position_x_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:position-x-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:position-y", clip.position_y.to_string().as_str()));
-                let position_y_keyframes_json = if clip.position_y_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.position_y_keyframes).ok()
-                };
-                if let Some(value) = position_y_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:position-y-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));
-                asset_clip.push_attribute(("us:title-font", clip.title_font.as_str()));
-                asset_clip.push_attribute((
-                    "us:title-color",
-                    format!("{:08X}", clip.title_color).as_str(),
-                ));
-                asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
-                asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
-                asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
-                let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&clip.speed_keyframes).ok()
-                };
-                if let Some(value) = speed_keyframes_json.as_deref() {
-                    asset_clip.push_attribute(("us:speed-keyframes", value));
-                }
-                asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
-                if clip.freeze_frame {
-                    asset_clip.push_attribute(("us:freeze-frame", "true"));
-                }
-                if let Some(freeze_source_ns) = clip.freeze_frame_source_ns {
-                    asset_clip.push_attribute((
-                        "us:freeze-source-ns",
-                        freeze_source_ns.to_string().as_str(),
-                    ));
-                }
-                if let Some(freeze_hold_duration_ns) = clip.freeze_frame_hold_duration_ns {
-                    asset_clip.push_attribute((
-                        "us:freeze-hold-duration-ns",
-                        freeze_hold_duration_ns.to_string().as_str(),
-                    ));
-                }
-                if let Some(ref gid) = clip.group_id {
-                    if !gid.is_empty() {
-                        asset_clip.push_attribute(("us:group-id", gid.as_str()));
-                    }
-                }
-                if let Some(ref link_gid) = clip.link_group_id {
-                    if !link_gid.is_empty() {
-                        asset_clip.push_attribute(("us:link-group-id", link_gid.as_str()));
-                    }
-                }
-                if let Some(source_timecode_base_ns) = clip.source_timecode_base_ns {
-                    asset_clip.push_attribute((
-                        "us:source-timecode-base-ns",
-                        source_timecode_base_ns.to_string().as_str(),
-                    ));
-                }
-                asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
-                asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
-                asset_clip.push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
-                asset_clip.push_attribute(("us:exposure", clip.exposure.to_string().as_str()));
-                asset_clip.push_attribute(("us:black-point", clip.black_point.to_string().as_str()));
-                asset_clip.push_attribute(("us:highlights-warmth", clip.highlights_warmth.to_string().as_str()));
-                asset_clip.push_attribute(("us:highlights-tint", clip.highlights_tint.to_string().as_str()));
-                asset_clip.push_attribute(("us:midtones-warmth", clip.midtones_warmth.to_string().as_str()));
-                asset_clip.push_attribute(("us:midtones-tint", clip.midtones_tint.to_string().as_str()));
-                asset_clip.push_attribute(("us:shadows-warmth", clip.shadows_warmth.to_string().as_str()));
-                asset_clip.push_attribute(("us:shadows-tint", clip.shadows_tint.to_string().as_str()));
-                if clip.chroma_key_enabled {
-                    asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
-                    asset_clip.push_attribute((
-                        "us:chroma-key-color",
-                        format!("{:#08X}", clip.chroma_key_color).as_str(),
-                    ));
-                    asset_clip.push_attribute((
-                        "us:chroma-key-tolerance",
-                        clip.chroma_key_tolerance.to_string().as_str(),
-                    ));
-                    asset_clip.push_attribute((
-                        "us:chroma-key-softness",
-                        clip.chroma_key_softness.to_string().as_str(),
-                    ));
-                }
-                if clip.bg_removal_enabled {
-                    asset_clip.push_attribute(("us:bg-removal-enabled", "true"));
-                    asset_clip.push_attribute((
-                        "us:bg-removal-threshold",
-                        clip.bg_removal_threshold.to_string().as_str(),
-                    ));
-                }
-                if let Some(ref lut) = clip.lut_path {
-                    asset_clip.push_attribute(("us:lut-path", lut.as_str()));
-                }
-                if !clip.transition_after.is_empty() {
+                let mut asset_clip = BytesStart::new("asset-clip");
+                asset_clip.push_attribute(("ref", asset_ref.as_str()));
+                asset_clip.push_attribute(("offset", offset.as_str()));
+                asset_clip.push_attribute(("duration", duration.as_str()));
+                asset_clip.push_attribute(("start", start.as_str()));
+                asset_clip.push_attribute(("name", clip.label.as_str()));
+                if emit_vendor_extensions {
+                    // Multi-track routing
+                    asset_clip.push_attribute(("us:track-idx", track_idx.to_string().as_str()));
+                    asset_clip.push_attribute(("us:track-kind", track_kind));
+                    asset_clip.push_attribute(("us:track-name", track.label.as_str()));
+                    asset_clip.push_attribute(("us:track-muted", track.muted.to_string().as_str()));
                     asset_clip
-                        .push_attribute(("us:transition-after", clip.transition_after.as_str()));
+                        .push_attribute(("us:track-locked", track.locked.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
                     asset_clip.push_attribute((
-                        "us:transition-after-ns",
-                        clip.transition_after_ns.to_string().as_str(),
+                        "us:track-height",
+                        match track.height_preset {
+                            crate::model::track::TrackHeightPreset::Small => "small",
+                            crate::model::track::TrackHeightPreset::Medium => "medium",
+                            crate::model::track::TrackHeightPreset::Large => "large",
+                        },
                     ));
-                }
-            }
-            if !strip_unknown_fields {
-                for (k, v) in &clip.fcpxml_unknown_attrs {
-                    if !is_writer_managed_asset_clip_attr(k) {
-                        asset_clip.push_attribute((k.as_str(), v.as_str()));
+                    asset_clip.push_attribute((
+                        "us:color-label",
+                        match clip.color_label {
+                            crate::model::clip::ClipColorLabel::None => "none",
+                            crate::model::clip::ClipColorLabel::Red => "red",
+                            crate::model::clip::ClipColorLabel::Orange => "orange",
+                            crate::model::clip::ClipColorLabel::Yellow => "yellow",
+                            crate::model::clip::ClipColorLabel::Green => "green",
+                            crate::model::clip::ClipColorLabel::Teal => "teal",
+                            crate::model::clip::ClipColorLabel::Blue => "blue",
+                            crate::model::clip::ClipColorLabel::Purple => "purple",
+                            crate::model::clip::ClipColorLabel::Magenta => "magenta",
+                        },
+                    ));
+                    // Store color/effects as custom vendor attributes (us: prefix).
+                    // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
+                    asset_clip
+                        .push_attribute(("us:brightness", clip.brightness.to_string().as_str()));
+                    asset_clip.push_attribute(("us:contrast", clip.contrast.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:saturation", clip.saturation.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:temperature", clip.temperature.to_string().as_str()));
+                    asset_clip.push_attribute(("us:tint", clip.tint.to_string().as_str()));
+                    let brightness_keyframes_json = if clip.brightness_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.brightness_keyframes).ok()
+                    };
+                    if let Some(value) = brightness_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:brightness-keyframes", value));
+                    }
+                    let contrast_keyframes_json = if clip.contrast_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.contrast_keyframes).ok()
+                    };
+                    if let Some(value) = contrast_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:contrast-keyframes", value));
+                    }
+                    let saturation_keyframes_json = if clip.saturation_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.saturation_keyframes).ok()
+                    };
+                    if let Some(value) = saturation_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:saturation-keyframes", value));
+                    }
+                    let temperature_keyframes_json = if clip.temperature_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.temperature_keyframes).ok()
+                    };
+                    if let Some(value) = temperature_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:temperature-keyframes", value));
+                    }
+                    let tint_keyframes_json = if clip.tint_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.tint_keyframes).ok()
+                    };
+                    if let Some(value) = tint_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:tint-keyframes", value));
+                    }
+                    asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
+                    asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
+                    let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.volume_keyframes).ok()
+                    };
+                    if let Some(value) = volume_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:volume-keyframes", value));
+                    }
+                    asset_clip.push_attribute(("us:pan", clip.pan.to_string().as_str()));
+                    let pan_keyframes_json = if clip.pan_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.pan_keyframes).ok()
+                    };
+                    if let Some(value) = pan_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:pan-keyframes", value));
+                    }
+                    let rotate_keyframes_json = if clip.rotate_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.rotate_keyframes).ok()
+                    };
+                    if let Some(value) = rotate_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:rotate-keyframes", value));
+                    }
+                    asset_clip
+                        .push_attribute(("us:crop-left", clip.crop_left.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:crop-right", clip.crop_right.to_string().as_str()));
+                    asset_clip.push_attribute(("us:crop-top", clip.crop_top.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:crop-bottom", clip.crop_bottom.to_string().as_str()));
+                    let crop_left_keyframes_json = if clip.crop_left_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.crop_left_keyframes).ok()
+                    };
+                    if let Some(value) = crop_left_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:crop-left-keyframes", value));
+                    }
+                    let crop_right_keyframes_json = if clip.crop_right_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.crop_right_keyframes).ok()
+                    };
+                    if let Some(value) = crop_right_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:crop-right-keyframes", value));
+                    }
+                    let crop_top_keyframes_json = if clip.crop_top_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.crop_top_keyframes).ok()
+                    };
+                    if let Some(value) = crop_top_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:crop-top-keyframes", value));
+                    }
+                    let crop_bottom_keyframes_json = if clip.crop_bottom_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.crop_bottom_keyframes).ok()
+                    };
+                    if let Some(value) = crop_bottom_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:crop-bottom-keyframes", value));
+                    }
+                    asset_clip.push_attribute(("us:rotate", clip.rotate.to_string().as_str()));
+                    asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
+                    asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
+                    asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
+                    let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.scale_keyframes).ok()
+                    };
+                    if let Some(value) = scale_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:scale-keyframes", value));
+                    }
+                    asset_clip.push_attribute(("us:opacity", clip.opacity.to_string().as_str()));
+                    let opacity_keyframes_json = if clip.opacity_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.opacity_keyframes).ok()
+                    };
+                    if let Some(value) = opacity_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:opacity-keyframes", value));
+                    }
+                    asset_clip
+                        .push_attribute(("us:position-x", clip.position_x.to_string().as_str()));
+                    let position_x_keyframes_json = if clip.position_x_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.position_x_keyframes).ok()
+                    };
+                    if let Some(value) = position_x_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:position-x-keyframes", value));
+                    }
+                    asset_clip
+                        .push_attribute(("us:position-y", clip.position_y.to_string().as_str()));
+                    let position_y_keyframes_json = if clip.position_y_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.position_y_keyframes).ok()
+                    };
+                    if let Some(value) = position_y_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:position-y-keyframes", value));
+                    }
+                    asset_clip.push_attribute(("us:title-text", clip.title_text.as_str()));
+                    asset_clip.push_attribute(("us:title-font", clip.title_font.as_str()));
+                    asset_clip.push_attribute((
+                        "us:title-color",
+                        format!("{:08X}", clip.title_color).as_str(),
+                    ));
+                    asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
+                    asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
+                    asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
+                    let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&clip.speed_keyframes).ok()
+                    };
+                    if let Some(value) = speed_keyframes_json.as_deref() {
+                        asset_clip.push_attribute(("us:speed-keyframes", value));
+                    }
+                    asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
+                    if clip.freeze_frame {
+                        asset_clip.push_attribute(("us:freeze-frame", "true"));
+                    }
+                    if let Some(freeze_source_ns) = clip.freeze_frame_source_ns {
+                        asset_clip.push_attribute((
+                            "us:freeze-source-ns",
+                            freeze_source_ns.to_string().as_str(),
+                        ));
+                    }
+                    if let Some(freeze_hold_duration_ns) = clip.freeze_frame_hold_duration_ns {
+                        asset_clip.push_attribute((
+                            "us:freeze-hold-duration-ns",
+                            freeze_hold_duration_ns.to_string().as_str(),
+                        ));
+                    }
+                    if let Some(ref gid) = clip.group_id {
+                        if !gid.is_empty() {
+                            asset_clip.push_attribute(("us:group-id", gid.as_str()));
+                        }
+                    }
+                    if let Some(ref link_gid) = clip.link_group_id {
+                        if !link_gid.is_empty() {
+                            asset_clip.push_attribute(("us:link-group-id", link_gid.as_str()));
+                        }
+                    }
+                    if let Some(source_timecode_base_ns) = clip.source_timecode_base_ns {
+                        asset_clip.push_attribute((
+                            "us:source-timecode-base-ns",
+                            source_timecode_base_ns.to_string().as_str(),
+                        ));
+                    }
+                    asset_clip.push_attribute(("us:shadows", clip.shadows.to_string().as_str()));
+                    asset_clip.push_attribute(("us:midtones", clip.midtones.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:highlights", clip.highlights.to_string().as_str()));
+                    asset_clip.push_attribute(("us:exposure", clip.exposure.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:black-point", clip.black_point.to_string().as_str()));
+                    asset_clip.push_attribute((
+                        "us:highlights-warmth",
+                        clip.highlights_warmth.to_string().as_str(),
+                    ));
+                    asset_clip.push_attribute((
+                        "us:highlights-tint",
+                        clip.highlights_tint.to_string().as_str(),
+                    ));
+                    asset_clip.push_attribute((
+                        "us:midtones-warmth",
+                        clip.midtones_warmth.to_string().as_str(),
+                    ));
+                    asset_clip.push_attribute((
+                        "us:midtones-tint",
+                        clip.midtones_tint.to_string().as_str(),
+                    ));
+                    asset_clip.push_attribute((
+                        "us:shadows-warmth",
+                        clip.shadows_warmth.to_string().as_str(),
+                    ));
+                    asset_clip.push_attribute((
+                        "us:shadows-tint",
+                        clip.shadows_tint.to_string().as_str(),
+                    ));
+                    if clip.chroma_key_enabled {
+                        asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
+                        asset_clip.push_attribute((
+                            "us:chroma-key-color",
+                            format!("{:#08X}", clip.chroma_key_color).as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:chroma-key-tolerance",
+                            clip.chroma_key_tolerance.to_string().as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:chroma-key-softness",
+                            clip.chroma_key_softness.to_string().as_str(),
+                        ));
+                    }
+                    if clip.bg_removal_enabled {
+                        asset_clip.push_attribute(("us:bg-removal-enabled", "true"));
+                        asset_clip.push_attribute((
+                            "us:bg-removal-threshold",
+                            clip.bg_removal_threshold.to_string().as_str(),
+                        ));
+                    }
+                    if let Some(ref lut) = clip.lut_path {
+                        asset_clip.push_attribute(("us:lut-path", lut.as_str()));
+                    }
+                    if !clip.transition_after.is_empty() {
+                        asset_clip.push_attribute((
+                            "us:transition-after",
+                            clip.transition_after.as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:transition-after-ns",
+                            clip.transition_after_ns.to_string().as_str(),
+                        ));
                     }
                 }
-            }
-            writer.write_event(Event::Start(asset_clip))?;
-            if let Some(fragment) = preserved_unknown_time_map_fragment(clip) {
-                writer.get_mut().write_all(fragment.as_bytes())?;
-            } else {
-                write_native_time_map(&mut writer, clip, &project.frame_rate)?;
-            }
-
-            let (position_x, position_y) = internal_position_to_fcpxml(
-                clip.position_x,
-                clip.position_y,
-                project.width,
-                project.height,
-                clip.scale,
-            );
-            {
-                let mut adjust_transform = BytesStart::new("adjust-transform");
-                adjust_transform.push_attribute((
-                    "position",
-                    format!("{} {}", position_x, position_y).as_str(),
-                ));
-                adjust_transform
-                    .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
-                adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
-                let has_transform_kfs = !clip.position_x_keyframes.is_empty()
-                    || !clip.position_y_keyframes.is_empty()
-                    || !clip.scale_keyframes.is_empty()
-                    || !clip.rotate_keyframes.is_empty();
-                if has_transform_kfs {
-                    writer.write_event(Event::Start(adjust_transform))?;
-                    write_transform_keyframe_params(&mut writer, clip, project)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_transform))?;
-                }
-
-                let mut adjust_compositing = BytesStart::new("adjust-compositing");
-                adjust_compositing.push_attribute(("opacity", clip.opacity.to_string().as_str()));
-                if !clip.opacity_keyframes.is_empty() {
-                    writer.write_event(Event::Start(adjust_compositing))?;
-                    write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-compositing")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_compositing))?;
-                }
-
-                let mut adjust_volume = BytesStart::new("adjust-volume");
-                adjust_volume.push_attribute((
-                    "amount",
-                    linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
-                ));
-                if !clip.volume_keyframes.is_empty() {
-                    writer.write_event(Event::Start(adjust_volume))?;
-                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate, 0, false)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_volume))?;
-                }
-
-                let mut adjust_panner = BytesStart::new("adjust-panner");
-                adjust_panner.push_attribute((
-                    "amount",
-                    format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
-                ));
-                if !clip.pan_keyframes.is_empty() {
-                    writer.write_event(Event::Start(adjust_panner))?;
-                    write_pan_keyframe_params(&mut writer, clip, &project.frame_rate, 0, false)?;
-                    writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
-                } else {
-                    writer.write_event(Event::Empty(adjust_panner))?;
-                }
-
-                let mut adjust_crop = BytesStart::new("adjust-crop");
-                adjust_crop.push_attribute(("left", clip.crop_left.to_string().as_str()));
-                adjust_crop.push_attribute(("right", clip.crop_right.to_string().as_str()));
-                adjust_crop.push_attribute(("top", clip.crop_top.to_string().as_str()));
-                adjust_crop.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
-                writer.write_event(Event::Empty(adjust_crop))?;
-            }
-            if !strip_unknown_fields {
-                for fragment in &clip.fcpxml_unknown_children {
-                    if is_time_map_fragment(fragment) {
-                        continue;
+                if !strip_unknown_fields {
+                    for (k, v) in &clip.fcpxml_unknown_attrs {
+                        if !is_writer_managed_asset_clip_attr(k) {
+                            asset_clip.push_attribute((k.as_str(), v.as_str()));
+                        }
                     }
+                }
+                writer.write_event(Event::Start(asset_clip))?;
+                if let Some(fragment) = preserved_unknown_time_map_fragment(clip) {
                     writer.get_mut().write_all(fragment.as_bytes())?;
+                } else {
+                    write_native_time_map(&mut writer, clip, &project.frame_rate)?;
                 }
-            }
 
-            writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
-
-            if clip_idx + 1 < track.clips.len()
-                && !clip.transition_after.trim().is_empty()
-                && clip.transition_after_ns > 0
-            {
-                let next_clip = &track.clips[clip_idx + 1];
-                let clamped_duration_ns = clip
-                    .transition_after_ns
-                    .min(clip.duration())
-                    .min(next_clip.duration());
-                if clamped_duration_ns > 0 {
-                    let mut transition = BytesStart::new("transition");
-                    if let Some(name) =
-                        fcpxml_transition_name_for_kind(clip.transition_after.trim())
-                    {
-                        transition.push_attribute(("name", name));
+                let (position_x, position_y) = internal_position_to_fcpxml(
+                    clip.position_x,
+                    clip.position_y,
+                    project.width,
+                    project.height,
+                    clip.scale,
+                );
+                {
+                    let mut adjust_transform = BytesStart::new("adjust-transform");
+                    adjust_transform.push_attribute((
+                        "position",
+                        format!("{} {}", position_x, position_y).as_str(),
+                    ));
+                    adjust_transform.push_attribute((
+                        "scale",
+                        format!("{} {}", clip.scale, clip.scale).as_str(),
+                    ));
+                    adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
+                    let has_transform_kfs = !clip.position_x_keyframes.is_empty()
+                        || !clip.position_y_keyframes.is_empty()
+                        || !clip.scale_keyframes.is_empty()
+                        || !clip.rotate_keyframes.is_empty();
+                    if has_transform_kfs {
+                        writer.write_event(Event::Start(adjust_transform))?;
+                        write_transform_keyframe_params(&mut writer, clip, project)?;
+                        writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
+                    } else {
+                        writer.write_event(Event::Empty(adjust_transform))?;
                     }
-                    transition.push_attribute((
-                        "offset",
-                        ns_to_fcpxml_time(
-                            clip.timeline_start
-                                .saturating_add(clip.duration())
-                                .saturating_sub(clamped_duration_ns),
+
+                    let mut adjust_compositing = BytesStart::new("adjust-compositing");
+                    adjust_compositing
+                        .push_attribute(("opacity", clip.opacity.to_string().as_str()));
+                    if !clip.opacity_keyframes.is_empty() {
+                        writer.write_event(Event::Start(adjust_compositing))?;
+                        write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                        writer.write_event(Event::End(BytesEnd::new("adjust-compositing")))?;
+                    } else {
+                        writer.write_event(Event::Empty(adjust_compositing))?;
+                    }
+
+                    let mut adjust_volume = BytesStart::new("adjust-volume");
+                    adjust_volume.push_attribute((
+                        "amount",
+                        linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
+                    ));
+                    if !clip.volume_keyframes.is_empty() {
+                        writer.write_event(Event::Start(adjust_volume))?;
+                        write_volume_keyframe_params(
+                            &mut writer,
+                            clip,
                             &project.frame_rate,
-                        )
-                        .as_str(),
+                            0,
+                            false,
+                        )?;
+                        writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+                    } else {
+                        writer.write_event(Event::Empty(adjust_volume))?;
+                    }
+
+                    let mut adjust_panner = BytesStart::new("adjust-panner");
+                    adjust_panner.push_attribute((
+                        "amount",
+                        format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
                     ));
-                    transition.push_attribute((
-                        "duration",
-                        ns_to_fcpxml_time(clamped_duration_ns, &project.frame_rate).as_str(),
-                    ));
-                    writer.write_event(Event::Empty(transition))?;
+                    if !clip.pan_keyframes.is_empty() {
+                        writer.write_event(Event::Start(adjust_panner))?;
+                        write_pan_keyframe_params(
+                            &mut writer,
+                            clip,
+                            &project.frame_rate,
+                            0,
+                            false,
+                        )?;
+                        writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
+                    } else {
+                        writer.write_event(Event::Empty(adjust_panner))?;
+                    }
+
+                    let mut adjust_crop = BytesStart::new("adjust-crop");
+                    adjust_crop.push_attribute(("left", clip.crop_left.to_string().as_str()));
+                    adjust_crop.push_attribute(("right", clip.crop_right.to_string().as_str()));
+                    adjust_crop.push_attribute(("top", clip.crop_top.to_string().as_str()));
+                    adjust_crop.push_attribute(("bottom", clip.crop_bottom.to_string().as_str()));
+                    writer.write_event(Event::Empty(adjust_crop))?;
+                }
+                if !strip_unknown_fields {
+                    for fragment in &clip.fcpxml_unknown_children {
+                        if is_time_map_fragment(fragment) {
+                            continue;
+                        }
+                        writer.get_mut().write_all(fragment.as_bytes())?;
+                    }
+                }
+
+                writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
+
+                if clip_idx + 1 < track.clips.len()
+                    && !clip.transition_after.trim().is_empty()
+                    && clip.transition_after_ns > 0
+                {
+                    let next_clip = &track.clips[clip_idx + 1];
+                    let clamped_duration_ns = clip
+                        .transition_after_ns
+                        .min(clip.duration())
+                        .min(next_clip.duration());
+                    if clamped_duration_ns > 0 {
+                        let mut transition = BytesStart::new("transition");
+                        if let Some(name) =
+                            fcpxml_transition_name_for_kind(clip.transition_after.trim())
+                        {
+                            transition.push_attribute(("name", name));
+                        }
+                        transition.push_attribute((
+                            "offset",
+                            ns_to_fcpxml_time(
+                                clip.timeline_start
+                                    .saturating_add(clip.duration())
+                                    .saturating_sub(clamped_duration_ns),
+                                &project.frame_rate,
+                            )
+                            .as_str(),
+                        ));
+                        transition.push_attribute((
+                            "duration",
+                            ns_to_fcpxml_time(clamped_duration_ns, &project.frame_rate).as_str(),
+                        ));
+                        writer.write_event(Event::Empty(transition))?;
+                    }
                 }
             }
         }
-    }
     } // end non-strict else
 
     if !strip_unknown_fields {
@@ -1577,9 +1630,24 @@ fn write_strict_filter_video_color(
     write_param(writer, "Black Point", "1", clip.black_point * 100.0)?;
     write_param(writer, "Shadows", "4", clip.shadows * 100.0)?;
     write_param(writer, "Saturation", "16", (clip.saturation - 1.0) * 100.0)?;
-    write_param(writer, "Highlights Warmth", "10", clip.highlights_warmth * 100.0)?;
-    write_param(writer, "Highlights Tint", "11", clip.highlights_tint * 100.0)?;
-    write_param(writer, "Midtones Warmth", "12", clip.midtones_warmth * 100.0)?;
+    write_param(
+        writer,
+        "Highlights Warmth",
+        "10",
+        clip.highlights_warmth * 100.0,
+    )?;
+    write_param(
+        writer,
+        "Highlights Tint",
+        "11",
+        clip.highlights_tint * 100.0,
+    )?;
+    write_param(
+        writer,
+        "Midtones Warmth",
+        "12",
+        clip.midtones_warmth * 100.0,
+    )?;
     write_param(writer, "Midtones Tint", "13", clip.midtones_tint * 100.0)?;
     write_param(writer, "Shadows Warmth", "14", clip.shadows_warmth * 100.0)?;
     write_param(writer, "Shadows Tint", "15", clip.shadows_tint * 100.0)?;
@@ -2007,10 +2075,7 @@ fn remove_attr(tag_text: &str, attr_name: &str) -> String {
 /// Build export context by probing media files for native frame rate and
 /// embedded timecodes. Only used for strict FCPXML export to FCP.
 fn build_export_context(project: &Project) -> ExportContext {
-    let project_fps_key = (
-        project.frame_rate.numerator,
-        project.frame_rate.denominator,
-    );
+    let project_fps_key = (project.frame_rate.numerator, project.frame_rate.denominator);
     let mut media_map: HashMap<String, MediaExportInfo> = HashMap::new();
     let mut fps_to_format: HashMap<(u32, u32), String> = HashMap::new();
     fps_to_format.insert(project_fps_key, "r1".to_string());
@@ -2125,9 +2190,12 @@ fn probe_audio_duration(path: &str) -> Option<u64> {
     use std::process::Command;
     let output = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
             path,
         ])
         .output()
@@ -2143,9 +2211,12 @@ fn probe_audio_time_reference(path: &str) -> Option<u64> {
     use std::process::Command;
     let output = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-show_entries", "format_tags=time_reference",
-            "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-show_entries",
+            "format_tags=time_reference",
+            "-of",
+            "csv=p=0",
             path,
         ])
         .output()
@@ -2227,10 +2298,8 @@ fn parse_timecode_to_ns_writer(tc: &str, fps_num: u32, fps_den: u32) -> Option<u
 
     let nominal_fps = (fps_num as u64 + fps_den as u64 - 1) / fps_den as u64;
 
-    let total_frames = hours * 3600 * nominal_fps
-        + minutes * 60 * nominal_fps
-        + seconds * nominal_fps
-        + frames;
+    let total_frames =
+        hours * 3600 * nominal_fps + minutes * 60 * nominal_fps + seconds * nominal_fps + frames;
 
     Some(total_frames * fps_den as u64 * 1_000_000_000 / fps_num as u64)
 }
@@ -2331,12 +2400,8 @@ fn write_resources(
         for (fmt_id, fps, w, h) in &ctx.extra_formats {
             let mut extra_fmt = BytesStart::new("format");
             extra_fmt.push_attribute(("id", fmt_id.as_str()));
-            if let Some(name) = known_fcpxml_format_name_for(
-                *w,
-                *h,
-                fps.numerator,
-                fps.denominator,
-            ) {
+            if let Some(name) = known_fcpxml_format_name_for(*w, *h, fps.numerator, fps.denominator)
+            {
                 extra_fmt.push_attribute(("name", name));
             }
             extra_fmt.push_attribute((
@@ -2375,12 +2440,8 @@ fn write_resources(
             // Use export context for accurate timecode and format, with fallbacks.
             let media_info = export_ctx.and_then(|ctx| ctx.media.get(export_source_path));
             let is_audio_only = media_info.map(|m| m.is_audio_only).unwrap_or(false);
-            let asset_fps = media_info
-                .map(|m| &m.fps)
-                .unwrap_or(&project.frame_rate);
-            let asset_format_id = media_info
-                .map(|m| m.format_id.as_str())
-                .unwrap_or("r1");
+            let asset_fps = media_info.map(|m| &m.fps).unwrap_or(&project.frame_rate);
+            let asset_format_id = media_info.map(|m| m.format_id.as_str()).unwrap_or("r1");
             let asset_start = if is_audio_only {
                 // Audio-only: use BWF time_reference if available.
                 media_info
@@ -2872,7 +2933,10 @@ fn write_volume_keyframe_params(
     for kf in &sorted {
         let mut kf_elem = BytesStart::new("keyframe");
         // Offset clip-local time back to source time for FCP
-        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str()));
+        kf_elem.push_attribute((
+            "time",
+            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
+        ));
         kf_elem.push_attribute(("value", linear_volume_to_fcpxml_db(kf.value).as_str()));
         // FCP ignores interp on volume param keyframes — omit in strict mode.
         if !strict {
@@ -2916,7 +2980,10 @@ fn write_pan_keyframe_params(
     for kf in &sorted {
         let mut kf_elem = BytesStart::new("keyframe");
         // Offset clip-local time back to source time for FCP
-        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str()));
+        kf_elem.push_attribute((
+            "time",
+            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
+        ));
         kf_elem.push_attribute((
             "value",
             format!("{:.6}", kf.value.clamp(-1.0, 1.0)).as_str(),
@@ -3657,9 +3724,7 @@ mod tests {
         // Find the LAST </asset-clip> in the spine — this is the primary's
         // closing tag. Everything between the primary's opening and this closing
         // tag includes the nested connected clips.
-        let last_close = primary_clip_xml
-            .rfind("</asset-clip>")
-            .expect("last close");
+        let last_close = primary_clip_xml.rfind("</asset-clip>").expect("last close");
         let inner = &primary_clip_xml[..last_close];
         assert!(
             inner.contains("lane=\"1\""),
@@ -5046,8 +5111,14 @@ mod tests {
         let xml = std::fs::read_to_string(&output).expect("read packaged xml");
 
         // Rich mode: should contain vendor namespace and us: attributes
-        assert!(xml.contains("xmlns:us="), "expected vendor namespace in rich export");
-        assert!(xml.contains("us:exposure="), "expected us:exposure in rich export");
+        assert!(
+            xml.contains("xmlns:us="),
+            "expected vendor namespace in rich export"
+        );
+        assert!(
+            xml.contains("us:exposure="),
+            "expected us:exposure in rich export"
+        );
 
         // LUT should be copied into Library
         let lut_in_library = library.join("grade.cube");
@@ -5059,7 +5130,10 @@ mod tests {
         );
 
         // us:lut-path in XML should reference the packaged path
-        assert!(xml.contains("us:lut-path="), "expected us:lut-path in rich export");
+        assert!(
+            xml.contains("us:lut-path="),
+            "expected us:lut-path in rich export"
+        );
         assert!(
             !xml.contains(&lut.to_string_lossy().to_string()),
             "should not contain original absolute LUT path"
@@ -5096,8 +5170,14 @@ mod tests {
         let xml = std::fs::read_to_string(&output).expect("read packaged xml");
 
         // Strict mode: no vendor namespace or us: attributes
-        assert!(!xml.contains("xmlns:us="), "strict export should not have vendor namespace");
-        assert!(!xml.contains("us:lut-path"), "strict export should not have us:lut-path");
+        assert!(
+            !xml.contains("xmlns:us="),
+            "strict export should not have vendor namespace"
+        );
+        assert!(
+            !xml.contains("us:lut-path"),
+            "strict export should not have us:lut-path"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -5285,10 +5365,7 @@ mod tests {
             (clip2.brightness - (-0.1)).abs() < 1e-3,
             "brightness round-trip"
         );
-        assert!(
-            (clip2.contrast - 1.25).abs() < 1e-3,
-            "contrast round-trip"
-        );
+        assert!((clip2.contrast - 1.25).abs() < 1e-3, "contrast round-trip");
         assert!(
             (clip2.saturation - 0.5).abs() < 1e-3,
             "saturation round-trip"

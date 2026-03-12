@@ -121,9 +121,8 @@ fn probe_media_bg(uri: &str) -> (u64, bool, bool, Option<u64>) {
     // Prefer the embedded timecode track (required by FCP) over creation
     // date/time which is only useful for multi-cam sync.
     let file_path = uri.strip_prefix("file://").unwrap_or(uri);
-    let source_timecode_base_ns =
-        extract_embedded_timecode(file_path, video_fps.0, video_fps.1)
-            .or_else(|| extract_creation_time_ns(&info));
+    let source_timecode_base_ns = extract_embedded_timecode(file_path, video_fps.0, video_fps.1)
+        .or_else(|| extract_creation_time_ns(&info));
 
     (
         duration_ns,
@@ -185,10 +184,8 @@ fn parse_timecode_to_ns(tc: &str, fps_num: u32, fps_den: u32) -> Option<u64> {
     // Nominal fps for timecode frame counting (e.g. 24 for 23.976fps).
     let nominal_fps = (fps_num as u64 + fps_den as u64 - 1) / fps_den as u64;
 
-    let total_frames = hours * 3600 * nominal_fps
-        + minutes * 60 * nominal_fps
-        + seconds * nominal_fps
-        + frames;
+    let total_frames =
+        hours * 3600 * nominal_fps + minutes * 60 * nominal_fps + seconds * nominal_fps + frames;
 
     // Convert frames to nanoseconds: frames × fps_den × 1e9 / fps_num
     Some(total_frames * fps_den as u64 * 1_000_000_000 / fps_num as u64)

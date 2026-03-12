@@ -209,11 +209,15 @@ impl InspectorView {
                 self.highlights_slider.set_value(c.highlights as f64);
                 self.exposure_slider.set_value(c.exposure as f64);
                 self.black_point_slider.set_value(c.black_point as f64);
-                self.highlights_warmth_slider.set_value(c.highlights_warmth as f64);
-                self.highlights_tint_slider.set_value(c.highlights_tint as f64);
-                self.midtones_warmth_slider.set_value(c.midtones_warmth as f64);
+                self.highlights_warmth_slider
+                    .set_value(c.highlights_warmth as f64);
+                self.highlights_tint_slider
+                    .set_value(c.highlights_tint as f64);
+                self.midtones_warmth_slider
+                    .set_value(c.midtones_warmth as f64);
                 self.midtones_tint_slider.set_value(c.midtones_tint as f64);
-                self.shadows_warmth_slider.set_value(c.shadows_warmth as f64);
+                self.shadows_warmth_slider
+                    .set_value(c.shadows_warmth as f64);
                 self.shadows_tint_slider.set_value(c.shadows_tint as f64);
                 // For keyframed properties, show the evaluated value at the playhead
                 let vol_val = c.value_for_phase1_property_at_timeline_ns(
@@ -537,7 +541,8 @@ impl InspectorView {
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) + 'static,
+    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)
+        + 'static,
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
@@ -1258,8 +1263,28 @@ pub fn build_inspector(
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed: Rc<dyn Fn()> = Rc::new(on_clip_changed);
-    let on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)> =
-        Rc::new(on_color_changed);
+    let on_color_changed: Rc<
+        dyn Fn(
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+        ),
+    > = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
@@ -1310,7 +1335,28 @@ pub fn build_inspector(
         project: Rc<RefCell<Project>>,
         selected_clip_id: Rc<RefCell<Option<String>>>,
         updating: Rc<RefCell<bool>>,
-        on_color_changed: Rc<dyn Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>,
+        on_color_changed: Rc<
+            dyn Fn(
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+            ),
+        >,
         brightness_slider: Scale,
         contrast_slider: Scale,
         saturation_slider: Scale,
@@ -1366,8 +1412,9 @@ pub fn build_inspector(
                 let mt = midtones_tint_slider.value() as f32;
                 let sw = shadows_warmth_slider.value() as f32;
                 let st = shadows_tint_slider.value() as f32;
-                on_color_changed(b, c, sat, temp, tnt, d, sh, shd, mid, hil,
-                                 exp, bp, hw, ht, mw, mt, sw, st);
+                on_color_changed(
+                    b, c, sat, temp, tnt, d, sh, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st,
+                );
             }
         });
     }
@@ -1415,7 +1462,8 @@ pub fn build_inspector(
     wire_color_slider!(highlights_slider, |clip, v| clip.highlights = v);
     wire_color_slider!(exposure_slider, |clip, v| clip.exposure = v);
     wire_color_slider!(black_point_slider, |clip, v| clip.black_point = v);
-    wire_color_slider!(highlights_warmth_slider, |clip, v| clip.highlights_warmth = v);
+    wire_color_slider!(highlights_warmth_slider, |clip, v| clip.highlights_warmth =
+        v);
     wire_color_slider!(highlights_tint_slider, |clip, v| clip.highlights_tint = v);
     wire_color_slider!(midtones_warmth_slider, |clip, v| clip.midtones_warmth = v);
     wire_color_slider!(midtones_tint_slider, |clip, v| clip.midtones_tint = v);
