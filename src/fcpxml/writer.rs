@@ -2082,11 +2082,16 @@ fn write_resources(
             // Omit duration — FCP will probe the actual media file.
             // Declaring a duration that exceeds the real media (even by a
             // fraction of a frame) triggers a setClippedRange: assertion.
-            if media_has_video {
-                asset.push_attribute(("format", asset_format_id));
-            }
+            // Always include format — even audio-only assets need a time base
+            // for FCP to interpret start/duration correctly.
+            asset.push_attribute(("format", asset_format_id));
             asset.push_attribute(("hasVideo", has_video));
             asset.push_attribute(("hasAudio", has_audio));
+            if !media_has_video {
+                asset.push_attribute(("audioSources", "1"));
+                asset.push_attribute(("audioChannels", "2"));
+                asset.push_attribute(("audioRate", "48000"));
+            }
             if !strip_unknown_fields {
                 for (k, v) in &clip.fcpxml_unknown_asset_attrs {
                     if !is_writer_managed_asset_attr(k) {
