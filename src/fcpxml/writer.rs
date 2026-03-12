@@ -1,4 +1,4 @@
-use crate::model::project::Project;
+use crate::model::project::{FrameRate, Project};
 use anyhow::Result;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
@@ -10,6 +10,23 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy)]
 struct WriterOptions {
     strict_dtd: bool,
+}
+
+/// Per-media-file export info probed at export time.
+struct MediaExportInfo {
+    format_id: String,
+    fps: FrameRate,
+    timecode_ns: Option<u64>,
+    width: u32,
+    height: u32,
+}
+
+/// Context built from probing media files before writing strict FCPXML.
+struct ExportContext {
+    /// Map from source_path to per-file info.
+    media: HashMap<String, MediaExportInfo>,
+    /// Additional format elements beyond r1: (format_id, fps, width, height).
+    extra_formats: Vec<(String, FrameRate, u32, u32)>,
 }
 
 /// Serialize a `Project` to FCPXML format.
@@ -86,8 +103,15 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     }
     writer.write_event(Event::Start(fcpxml))?;
 
+    // Build export context for strict FCPXML — probes media for native fps/timecode.
+    let export_ctx = if options.strict_dtd {
+        Some(build_export_context(project))
+    } else {
+        None
+    };
+
     // <resources>
-    write_resources(project, &mut writer, options)?;
+    write_resources(project, &mut writer, options, export_ctx.as_ref())?;
 
     // <library>
     let mut library = BytesStart::new("library");
@@ -203,27 +227,81 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
              parent_clip: Option<&crate::model::clip::Clip>|
              -> Result<()> {
                 let asset_ref = format!("a_{}", sanitize_id(&clip.id));
+
+                // Look up probed media info for this clip and its parent.
+                let clip_source = clip
+                    .fcpxml_original_source_path
+                    .as_deref()
+                    .unwrap_or(&clip.source_path);
+                let clip_media = export_ctx.as_ref().and_then(|ctx| ctx.media.get(clip_source));
+                let clip_fps = clip_media
+                    .map(|m| &m.fps)
+                    .unwrap_or(&project.frame_rate);
+                let clip_format = clip_media
+                    .map(|m| m.format_id.as_str())
+                    .unwrap_or(format_ref);
+                let clip_tc = clip_media.and_then(|m| m.timecode_ns);
+
                 let offset = if let Some(parent) = parent_clip {
-                    // Connected clip: offset in parent's source time space
-                    let parent_source_start =
-                        parent.source_timecode_start_ns().unwrap_or(parent.source_in);
+                    // Connected clip: offset in parent's source time space.
+                    let parent_source = parent
+                        .fcpxml_original_source_path
+                        .as_deref()
+                        .unwrap_or(&parent.source_path);
+                    let parent_media =
+                        export_ctx.as_ref().and_then(|ctx| ctx.media.get(parent_source));
+                    let parent_fps = parent_media
+                        .map(|m| &m.fps)
+                        .unwrap_or(&project.frame_rate);
+                    let parent_tc = parent_media.and_then(|m| m.timecode_ns);
+                    let parent_source_start = parent_tc
+                        .or(parent.source_timecode_base_ns)
+                        .map(|tc| {
+                            // Compute source_in in the media's time base
+                            let tc_frames = (tc * parent_fps.numerator as u64
+                                + parent_fps.denominator as u64 * 500_000_000)
+                                / (parent_fps.denominator as u64 * 1_000_000_000);
+                            let in_frames = (parent.source_in * parent_fps.numerator as u64
+                                + parent_fps.denominator as u64 * 500_000_000)
+                                / (parent_fps.denominator as u64 * 1_000_000_000);
+                            (tc_frames + in_frames)
+                                * parent_fps.denominator as u64
+                                * 1_000_000_000
+                                / parent_fps.numerator as u64
+                        })
+                        .unwrap_or(parent.source_timecode_start_ns().unwrap_or(parent.source_in));
                     let delta = clip.timeline_start.saturating_sub(parent.timeline_start);
-                    ns_to_fcpxml_time(parent_source_start + delta, &project.frame_rate)
+                    ns_to_fcpxml_time(parent_source_start + delta, parent_fps)
                 } else {
                     ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate)
                 };
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
-                let start = ns_to_fcpxml_time(
-                    clip.source_timecode_start_ns().unwrap_or(clip.source_in),
-                    &project.frame_rate,
-                );
+
+                // Asset-clip start: position in the asset's source timeline.
+                let source_start = clip_tc
+                    .or(clip.source_timecode_base_ns)
+                    .map(|tc| {
+                        let tc_frames = (tc * clip_fps.numerator as u64
+                            + clip_fps.denominator as u64 * 500_000_000)
+                            / (clip_fps.denominator as u64 * 1_000_000_000);
+                        let in_frames = (clip.source_in * clip_fps.numerator as u64
+                            + clip_fps.denominator as u64 * 500_000_000)
+                            / (clip_fps.denominator as u64 * 1_000_000_000);
+                        (tc_frames + in_frames)
+                            * clip_fps.denominator as u64
+                            * 1_000_000_000
+                            / clip_fps.numerator as u64
+                    })
+                    .unwrap_or(clip.source_in);
+                let start = ns_to_fcpxml_time(source_start, clip_fps);
+
                 let mut elem = BytesStart::new("asset-clip");
                 elem.push_attribute(("ref", asset_ref.as_str()));
                 elem.push_attribute(("offset", offset.as_str()));
                 elem.push_attribute(("duration", duration.as_str()));
                 elem.push_attribute(("start", start.as_str()));
                 elem.push_attribute(("name", clip.label.as_str()));
-                elem.push_attribute(("format", format_ref));
+                elem.push_attribute(("format", clip_format));
                 elem.push_attribute(("tcFormat", "NDF"));
                 elem.push_attribute(("audioRole", "dialogue"));
                 if let Some(l) = lane {
@@ -1676,10 +1754,195 @@ fn remove_attr(tag_text: &str, attr_name: &str) -> String {
     tag_text.to_string()
 }
 
+/// Build export context by probing media files for native frame rate and
+/// embedded timecodes. Only used for strict FCPXML export to FCP.
+fn build_export_context(project: &Project) -> ExportContext {
+    let project_fps_key = (
+        project.frame_rate.numerator,
+        project.frame_rate.denominator,
+    );
+    let mut media_map: HashMap<String, MediaExportInfo> = HashMap::new();
+    let mut fps_to_format: HashMap<(u32, u32), String> = HashMap::new();
+    fps_to_format.insert(project_fps_key, "r1".to_string());
+    let mut next_format_id = 2u32;
+    let mut extra_formats = Vec::new();
+
+    for track in project.video_tracks().chain(project.audio_tracks()) {
+        for clip in &track.clips {
+            let source = clip
+                .fcpxml_original_source_path
+                .as_deref()
+                .unwrap_or(&clip.source_path);
+            if media_map.contains_key(source) {
+                continue;
+            }
+
+            let probed = probe_media_format(source);
+            let (fps_num, fps_den, media_w, media_h, probed_tc) = probed.unwrap_or((
+                project.frame_rate.numerator,
+                project.frame_rate.denominator,
+                project.width,
+                project.height,
+                None,
+            ));
+
+            let fps_key = (fps_num, fps_den);
+            let format_id = fps_to_format
+                .entry(fps_key)
+                .or_insert_with(|| {
+                    let id = format!("r{next_format_id}");
+                    next_format_id += 1;
+                    extra_formats.push((
+                        id.clone(),
+                        FrameRate {
+                            numerator: fps_num,
+                            denominator: fps_den,
+                        },
+                        media_w,
+                        media_h,
+                    ));
+                    id
+                })
+                .clone();
+
+            // Prefer probed timecode, fall back to clip's stored value.
+            let timecode_ns = probed_tc.or(clip.source_timecode_base_ns);
+
+            media_map.insert(
+                source.to_string(),
+                MediaExportInfo {
+                    format_id,
+                    fps: FrameRate {
+                        numerator: fps_num,
+                        denominator: fps_den,
+                    },
+                    timecode_ns,
+                    width: media_w,
+                    height: media_h,
+                },
+            );
+        }
+    }
+
+    ExportContext {
+        media: media_map,
+        extra_formats,
+    }
+}
+
+/// Probe a media file with ffprobe to get native frame rate, resolution, and embedded timecode.
+fn probe_media_format(path: &str) -> Option<(u32, u32, u32, u32, Option<u64>)> {
+    use std::process::Command;
+
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate,width,height",
+            "-show_entries",
+            "stream_tags=timecode",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    // CSV format: "width,height,fps_ratio[,timecode]"
+    // e.g. "5312,2988,24000/1001,20:13:33:07" or "1920,1080,24/1"
+    let fields: Vec<&str> = line.splitn(4, ',').collect();
+    if fields.len() < 3 {
+        return None;
+    }
+
+    let width: u32 = fields[0].trim().parse().ok()?;
+    let height: u32 = fields[1].trim().parse().ok()?;
+    let fps_str = fields[2].trim();
+    let tc_str = fields.get(3).copied();
+
+    let mut fps_parts = fps_str.split('/');
+    let fps_num: u32 = fps_parts.next()?.parse().ok()?;
+    let fps_den: u32 = fps_parts.next()?.parse().ok()?;
+
+    let tc_ns = tc_str.and_then(|tc| parse_timecode_to_ns_writer(tc.trim(), fps_num, fps_den));
+
+    Some((fps_num, fps_den, width, height, tc_ns))
+}
+
+/// Parse a timecode string (HH:MM:SS:FF or HH:MM:SS;FF) to nanoseconds.
+fn parse_timecode_to_ns_writer(tc: &str, fps_num: u32, fps_den: u32) -> Option<u64> {
+    let tc = tc.replace(';', ":");
+    let parts: Vec<&str> = tc.split(':').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+
+    let hours: u64 = parts[0].parse().ok()?;
+    let minutes: u64 = parts[1].parse().ok()?;
+    let seconds: u64 = parts[2].parse().ok()?;
+    let frames: u64 = parts[3].parse().ok()?;
+
+    let nominal_fps = (fps_num as u64 + fps_den as u64 - 1) / fps_den as u64;
+
+    let total_frames = hours * 3600 * nominal_fps
+        + minutes * 60 * nominal_fps
+        + seconds * nominal_fps
+        + frames;
+
+    Some(total_frames * fps_den as u64 * 1_000_000_000 / fps_num as u64)
+}
+
+/// Generate a known FCP format name for a given resolution and frame rate.
+fn known_fcpxml_format_name_for(
+    width: u32,
+    height: u32,
+    fps_num: u32,
+    fps_den: u32,
+) -> Option<&'static str> {
+    match (width, height, fps_num, fps_den) {
+        (1920, 1080, 24000, 1001) => Some("FFVideoFormat1080p2398"),
+        (1920, 1080, 24, 1) => Some("FFVideoFormat1080p24"),
+        (1920, 1080, 25, 1) => Some("FFVideoFormat1080p25"),
+        (1920, 1080, 30000, 1001) => Some("FFVideoFormat1080p2997"),
+        (1920, 1080, 30, 1) => Some("FFVideoFormat1080p30"),
+        (1920, 1080, 50, 1) => Some("FFVideoFormat1080p50"),
+        (1920, 1080, 60000, 1001) => Some("FFVideoFormat1080p5994"),
+        (1920, 1080, 60, 1) => Some("FFVideoFormat1080p60"),
+        (3840, 2160, 24000, 1001) => Some("FFVideoFormat2160p2398"),
+        (3840, 2160, 24, 1) => Some("FFVideoFormat2160p24"),
+        (3840, 2160, 25, 1) => Some("FFVideoFormat2160p25"),
+        (3840, 2160, 30000, 1001) => Some("FFVideoFormat2160p2997"),
+        (3840, 2160, 30, 1) => Some("FFVideoFormat2160p30"),
+        (3840, 2160, 60000, 1001) => Some("FFVideoFormat2160p5994"),
+        (3840, 2160, 60, 1) => Some("FFVideoFormat2160p60"),
+        (1280, 720, 24000, 1001) => Some("FFVideoFormat720p2398"),
+        (1280, 720, 25, 1) => Some("FFVideoFormat720p25"),
+        (1280, 720, 30000, 1001) => Some("FFVideoFormat720p2997"),
+        (1280, 720, 50, 1) => Some("FFVideoFormat720p50"),
+        (1280, 720, 60000, 1001) => Some("FFVideoFormat720p5994"),
+        (1280, 720, 60, 1) => Some("FFVideoFormat720p60"),
+        _ => None,
+    }
+}
+
 fn write_resources(
     project: &Project,
     writer: &mut Writer<Cursor<Vec<u8>>>,
     options: WriterOptions,
+    export_ctx: Option<&ExportContext>,
 ) -> Result<()> {
     let strip_unknown_fields = options.strict_dtd;
     let mut resources = BytesStart::new("resources");
@@ -1692,7 +1955,7 @@ fn write_resources(
     }
     writer.write_event(Event::Start(resources))?;
 
-    // Format resource
+    // Format resource (r1 = project/sequence format)
     let _fps = format!(
         "{}/{}",
         project.frame_rate.numerator, project.frame_rate.denominator
@@ -1729,6 +1992,29 @@ fn write_resources(
         writer.write_event(Event::End(BytesEnd::new("format")))?;
     }
 
+    // Extra format elements for media with different native frame rates.
+    if let Some(ctx) = export_ctx {
+        for (fmt_id, fps, w, h) in &ctx.extra_formats {
+            let mut extra_fmt = BytesStart::new("format");
+            extra_fmt.push_attribute(("id", fmt_id.as_str()));
+            if let Some(name) = known_fcpxml_format_name_for(
+                *w,
+                *h,
+                fps.numerator,
+                fps.denominator,
+            ) {
+                extra_fmt.push_attribute(("name", name));
+            }
+            extra_fmt.push_attribute((
+                "frameDuration",
+                format!("{}/{}s", fps.denominator, fps.numerator).as_str(),
+            ));
+            extra_fmt.push_attribute(("width", w.to_string().as_str()));
+            extra_fmt.push_attribute(("height", h.to_string().as_str()));
+            writer.write_event(Event::Empty(extra_fmt))?;
+        }
+    }
+
     // Asset resources for each unique clip (correct hasVideo/hasAudio per clip kind)
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
@@ -1745,9 +2031,18 @@ fn write_resources(
             };
             let has_audio = "1";
 
-            let asset_start = clip
-                .source_timecode_base_ns
-                .map(|ns| ns_to_fcpxml_time(ns, &project.frame_rate))
+            // Use export context for accurate timecode and format, with fallbacks.
+            let media_info = export_ctx.and_then(|ctx| ctx.media.get(export_source_path));
+            let asset_fps = media_info
+                .map(|m| &m.fps)
+                .unwrap_or(&project.frame_rate);
+            let asset_format_id = media_info
+                .map(|m| m.format_id.as_str())
+                .unwrap_or("r1");
+            let asset_start = media_info
+                .and_then(|m| m.timecode_ns)
+                .or(clip.source_timecode_base_ns)
+                .map(|ns| ns_to_fcpxml_time(ns, asset_fps))
                 .unwrap_or_else(|| "0s".to_string());
 
             let mut asset = BytesStart::new("asset");
@@ -1758,7 +2053,7 @@ fn write_resources(
             // Declaring a duration that exceeds the real media (even by a
             // fraction of a frame) triggers a setClippedRange: assertion.
             if has_video == "1" {
-                asset.push_attribute(("format", "r1"));
+                asset.push_attribute(("format", asset_format_id));
             }
             asset.push_attribute(("hasVideo", has_video));
             asset.push_attribute(("hasAudio", has_audio));
@@ -1795,38 +2090,12 @@ fn write_resources(
 }
 
 fn known_fcpxml_format_name(project: &Project) -> Option<&'static str> {
-    match (
+    known_fcpxml_format_name_for(
         project.width,
         project.height,
         project.frame_rate.numerator,
         project.frame_rate.denominator,
-    ) {
-        // 1080p
-        (1920, 1080, 24000, 1001) => Some("FFVideoFormat1080p2398"),
-        (1920, 1080, 24, 1) => Some("FFVideoFormat1080p24"),
-        (1920, 1080, 25, 1) => Some("FFVideoFormat1080p25"),
-        (1920, 1080, 30000, 1001) => Some("FFVideoFormat1080p2997"),
-        (1920, 1080, 30, 1) => Some("FFVideoFormat1080p30"),
-        (1920, 1080, 50, 1) => Some("FFVideoFormat1080p50"),
-        (1920, 1080, 60000, 1001) => Some("FFVideoFormat1080p5994"),
-        (1920, 1080, 60, 1) => Some("FFVideoFormat1080p60"),
-        // 4K UHD
-        (3840, 2160, 24000, 1001) => Some("FFVideoFormat2160p2398"),
-        (3840, 2160, 24, 1) => Some("FFVideoFormat2160p24"),
-        (3840, 2160, 25, 1) => Some("FFVideoFormat2160p25"),
-        (3840, 2160, 30000, 1001) => Some("FFVideoFormat2160p2997"),
-        (3840, 2160, 30, 1) => Some("FFVideoFormat2160p30"),
-        (3840, 2160, 60000, 1001) => Some("FFVideoFormat2160p5994"),
-        (3840, 2160, 60, 1) => Some("FFVideoFormat2160p60"),
-        // 720p
-        (1280, 720, 24000, 1001) => Some("FFVideoFormat720p2398"),
-        (1280, 720, 25, 1) => Some("FFVideoFormat720p25"),
-        (1280, 720, 30000, 1001) => Some("FFVideoFormat720p2997"),
-        (1280, 720, 50, 1) => Some("FFVideoFormat720p50"),
-        (1280, 720, 60000, 1001) => Some("FFVideoFormat720p5994"),
-        (1280, 720, 60, 1) => Some("FFVideoFormat720p60"),
-        _ => None,
-    }
+    )
 }
 
 /// Convert linear volume (0.0–~4.0) to dB string for FCPXML.
