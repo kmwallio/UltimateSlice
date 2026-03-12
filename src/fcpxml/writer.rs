@@ -194,13 +194,24 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         }
 
         // Helper: write an asset-clip open tag with standard attributes.
+        // `parent_clip` is set when writing connected clips to convert offset
+        // from timeline space into the parent's source time space.
         let write_asset_clip_start =
             |writer: &mut Writer<Cursor<Vec<u8>>>,
              clip: &crate::model::clip::Clip,
-             lane: Option<i32>|
+             lane: Option<i32>,
+             parent_clip: Option<&crate::model::clip::Clip>|
              -> Result<()> {
                 let asset_ref = format!("a_{}", sanitize_id(&clip.id));
-                let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
+                let offset = if let Some(parent) = parent_clip {
+                    // Connected clip: offset in parent's source time space
+                    let parent_source_start =
+                        parent.source_timecode_start_ns().unwrap_or(parent.source_in);
+                    let delta = clip.timeline_start.saturating_sub(parent.timeline_start);
+                    ns_to_fcpxml_time(parent_source_start + delta, &project.frame_rate)
+                } else {
+                    ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate)
+                };
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
                 let start = ns_to_fcpxml_time(
                     clip.source_timecode_start_ns().unwrap_or(clip.source_in),
@@ -225,7 +236,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         if let Some(primary_idx) = primary_track_idx {
             let primary_track = &project.tracks[primary_idx];
             for (clip_idx, clip) in primary_track.clips.iter().enumerate() {
-                write_asset_clip_start(&mut writer, clip, None)?;
+                write_asset_clip_start(&mut writer, clip, None, None)?;
                 write_strict_clip_body(&mut writer, clip, project)?;
 
                 // Nest connected clips whose offset falls within this primary clip's range.
@@ -245,7 +256,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                         < primary_track.clips[clip_idx + 1].timeline_start)
                         };
                         if belongs_here {
-                            write_asset_clip_start(&mut writer, conn_clip, Some(ct.lane))?;
+                            write_asset_clip_start(
+                                &mut writer,
+                                conn_clip,
+                                Some(ct.lane),
+                                Some(clip),
+                            )?;
                             write_strict_clip_body(&mut writer, conn_clip, project)?;
                             writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                         }
@@ -294,7 +310,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             for ct in &connected_tracks {
                 let track = &project.tracks[ct.track_idx];
                 for clip in &track.clips {
-                    write_asset_clip_start(&mut writer, clip, Some(ct.lane))?;
+                    write_asset_clip_start(&mut writer, clip, Some(ct.lane), None)?;
                     write_strict_clip_body(&mut writer, clip, project)?;
                     writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                 }
@@ -2911,9 +2927,15 @@ mod tests {
         project.tracks.clear();
 
         let mut video_1 = Track::new_video("Video 1");
-        video_1.add_clip(Clip::new("/tmp/v1.mov", 1_000_000_000, 0, ClipKind::Video));
+        let mut v1_clip = Clip::new("/tmp/v1.mov", 1_000_000_000, 0, ClipKind::Video);
+        // Give primary clip a source timecode base so we can verify connected
+        // clip offset is expressed in the parent's source time space.
+        v1_clip.source_timecode_base_ns = Some(10_000_000_000); // 10s timecode base
+        video_1.add_clip(v1_clip);
         let mut video_2 = Track::new_video("Video 2");
-        video_2.add_clip(Clip::new("/tmp/v2.mov", 1_000_000_000, 0, ClipKind::Video));
+        let mut v2_clip = Clip::new("/tmp/v2.mov", 1_000_000_000, 0, ClipKind::Video);
+        v2_clip.timeline_start = 500_000_000; // 0.5s into timeline
+        video_2.add_clip(v2_clip);
         let mut audio_1 = Track::new_audio("Audio 1");
         audio_1.add_clip(Clip::new("/tmp/a1.wav", 1_000_000_000, 0, ClipKind::Audio));
 
@@ -2978,6 +3000,19 @@ mod tests {
         assert!(
             audio_clip_xml.contains("<adjust-volume"),
             "audio clip should still have adjust-volume"
+        );
+
+        // Verify connected clip offset is in parent's source time space.
+        // Primary clip: timeline_start=0, source_timecode_base=10s, source_in=0 →
+        //   start = 10s. Connected video: timeline_start=0.5s →
+        //   offset should be 10 + (0.5 - 0) = 10.5s = 10500000000ns.
+        // At 24fps (denom=1): 10.5s = 252 frames → "252/24s".
+        let connected_video_start = inner.find("lane=\"1\"").expect("connected video lane");
+        let connected_video_tag =
+            &inner[inner[..connected_video_start].rfind("<asset-clip").unwrap()..connected_video_start];
+        assert!(
+            connected_video_tag.contains("offset=\"252/24s\""),
+            "connected video offset should be in parent source time space: {connected_video_tag}"
         );
     }
 
