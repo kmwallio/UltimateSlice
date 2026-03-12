@@ -20,6 +20,8 @@ struct MediaExportInfo {
     width: u32,
     height: u32,
     is_audio_only: bool,
+    /// Duration in nanoseconds (probed from media file). Used for audio-only assets.
+    duration_ns: Option<u64>,
 }
 
 /// Context built from probing media files before writing strict FCPXML.
@@ -1837,6 +1839,7 @@ fn build_export_context(project: &Project) -> ExportContext {
                     next_format_id += 1;
                     id
                 });
+                let duration_ns = probe_audio_duration(source);
                 media_map.insert(
                     source.to_string(),
                     MediaExportInfo {
@@ -1849,6 +1852,7 @@ fn build_export_context(project: &Project) -> ExportContext {
                         width: 0,
                         height: 0,
                         is_audio_only: true,
+                        duration_ns,
                     },
                 );
                 continue;
@@ -1899,6 +1903,7 @@ fn build_export_context(project: &Project) -> ExportContext {
                     width: media_w,
                     height: media_h,
                     is_audio_only: false,
+                    duration_ns: None,
                 },
             );
         }
@@ -1909,6 +1914,23 @@ fn build_export_context(project: &Project) -> ExportContext {
         extra_formats,
         audio_format_id,
     }
+}
+
+/// Probe an audio file with ffprobe to get its duration in nanoseconds.
+fn probe_audio_duration(path: &str) -> Option<u64> {
+    use std::process::Command;
+    let output = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let secs: f64 = text.trim().parse().ok()?;
+    Some((secs * 1_000_000_000.0) as u64)
 }
 
 /// Probe a media file with ffprobe to get native frame rate, resolution, and embedded timecode.
@@ -2145,9 +2167,18 @@ fn write_resources(
             asset.push_attribute(("id", asset_id.as_str()));
             asset.push_attribute(("name", clip.label.as_str()));
             asset.push_attribute(("start", asset_start.as_str()));
-            // Omit duration — FCP will probe the actual media file.
-            // Declaring a duration that exceeds the real media (even by a
+            // For audio-only assets, include probed duration (FCP requires it
+            // since FFVideoFormatRateUndefined has no frame grid).
+            // For video assets, omit duration — FCP will probe the media file.
+            // Declaring a duration that exceeds the real video (even by a
             // fraction of a frame) triggers a setClippedRange: assertion.
+            let audio_dur_str;
+            if is_audio_only {
+                if let Some(dur_ns) = media_info.and_then(|m| m.duration_ns) {
+                    audio_dur_str = ns_to_fcpxml_time(dur_ns, asset_fps);
+                    asset.push_attribute(("duration", audio_dur_str.as_str()));
+                }
+            }
             if media_has_video {
                 asset.push_attribute(("format", asset_format_id));
             }
