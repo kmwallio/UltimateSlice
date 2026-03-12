@@ -7694,7 +7694,7 @@ impl ProgramPlayer {
         let fill = if transparent_pad { "black@0" } else { "black" };
         format!(
             ",rotate={:.10}:fillcolor={fill}",
-            (clip.rotate as f64).to_radians()
+            -(clip.rotate as f64).to_radians()
         )
     }
 

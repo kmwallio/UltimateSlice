@@ -1107,14 +1107,14 @@ fn build_rotation_filter(clip: &crate::model::clip::Clip, transparent_pad: bool)
             180.0,
             "t",
         );
-        return format!(",rotate='({angle_expr})*PI/180':fillcolor={fill}");
+        return format!(",rotate='-({angle_expr})*PI/180':fillcolor={fill}");
     }
     let rot = clip.rotate;
     if rot == 0 {
         return String::new();
     }
     let fill = if transparent_pad { "black@0" } else { "black" };
-    format!(",rotate={:.10}:fillcolor={fill}", (rot as f64).to_radians())
+    format!(",rotate={:.10}:fillcolor={fill}", -(rot as f64).to_radians())
 }
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.
