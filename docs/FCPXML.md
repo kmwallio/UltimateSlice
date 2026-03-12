@@ -2008,16 +2008,33 @@ Where `source_start_ns` is the same value written to the asset-clip's `start` at
 
 ### 20.9 Strict Writer Element Order
 
-The strict writer emits intrinsic parameters in DTD order within each `<asset-clip>`:
+The strict writer emits children of each `<asset-clip>` in DTD order. The FCPXML 1.14 DTD expands to:
+
+```
+asset-clip = (note?, conform-rate?, timeMap?,
+              object-tracker?, adjust-crop?, adjust-corners?, adjust-conform?,
+              adjust-transform?, adjust-blend?, adjust-stabilization?, ...,
+              adjust-colorConform?, adjust-stereo-3D?,
+              adjust-volume?, adjust-panner?,
+              (%anchor_item;)*,     ← connected clips
+              (%marker_item;)*,
+              audio-channel-source*,
+              (filter-video | filter-video-mask)*,
+              filter-audio*, metadata?)
+```
+
+The strict writer emits:
 
 1. `<timeMap>` (if present)
 2. `<adjust-crop>` / `<crop-rect>` (video only)
 3. `<adjust-transform>` (video only)
 4. `<adjust-blend>` (video only, with opacity keyframes if present)
-5. `<audio-channel-source>` (only when volume/pan keyframes exist)
-6. `<adjust-volume>` (flat, only when no volume keyframes)
-7. `<adjust-panner>` (flat, only when no pan keyframes)
-8. Connected clips (lane ≠ 0, nested inside)
+5. `<adjust-volume>` (flat, only when no volume keyframes)
+6. `<adjust-panner>` (flat, only when no pan keyframes)
+7. Connected clips (lane ≠ 0, nested as `%anchor_item;`)
+8. `<audio-channel-source>` (only when volume/pan keyframes exist)
+
+> **Critical**: `<audio-channel-source>` must come AFTER connected clips (`%anchor_item;`). Placing it before connected clips or before `<adjust-panner>` causes DTD validation failure.
 
 ### 20.10 Attributes Omitted in Strict Mode
 

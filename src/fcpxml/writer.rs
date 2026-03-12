@@ -376,7 +376,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             let primary_track = &project.tracks[primary_idx];
             for (clip_idx, clip) in primary_track.clips.iter().enumerate() {
                 let source_start = write_asset_clip_start(&mut writer, clip, None, None)?;
-                write_strict_clip_body(&mut writer, clip, project, source_start)?;
+                write_strict_clip_body(&mut writer, clip, project)?;
 
                 // Nest connected clips whose offset falls within this primary clip's range.
                 // A connected clip belongs to the last primary clip whose timeline_start
@@ -401,11 +401,20 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 Some(ct.lane),
                                 Some(clip),
                             )?;
-                            write_strict_clip_body(&mut writer, conn_clip, project, conn_source_start)?;
+                            write_strict_clip_body(&mut writer, conn_clip, project)?;
+                            // audio-channel-source after connected clip's own anchors (none here)
+                            write_strict_audio_channel_sources(
+                                &mut writer, conn_clip, &project.frame_rate, conn_source_start,
+                            )?;
                             writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                         }
                     }
                 }
+
+                // audio-channel-source after connected clips (per DTD order)
+                write_strict_audio_channel_sources(
+                    &mut writer, clip, &project.frame_rate, source_start,
+                )?;
 
                 writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
 
@@ -450,7 +459,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 let track = &project.tracks[ct.track_idx];
                 for clip in &track.clips {
                     let source_start = write_asset_clip_start(&mut writer, clip, Some(ct.lane), None)?;
-                    write_strict_clip_body(&mut writer, clip, project, source_start)?;
+                    write_strict_clip_body(&mut writer, clip, project)?;
+                    write_strict_audio_channel_sources(
+                        &mut writer, clip, &project.frame_rate, source_start,
+                    )?;
                     writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                 }
             }
@@ -1301,7 +1313,6 @@ fn write_strict_clip_body(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     clip: &crate::model::clip::Clip,
     project: &Project,
-    source_start_ns: u64,
 ) -> Result<()> {
     // timeMap
     if let Some(fragment) = preserved_unknown_time_map_fragment(clip) {
@@ -1369,46 +1380,11 @@ fn write_strict_clip_body(
         }
     }
 
-    // audio-channel-source with volume/pan keyframes (FCP wraps these)
-    let has_vol_kf = !clip.volume_keyframes.is_empty();
-    let has_pan_kf = !clip.pan_keyframes.is_empty();
-
-    if has_vol_kf || has_pan_kf {
-        // FCP expects keyframed volume/pan inside <audio-channel-source>
-        let mut acs = BytesStart::new("audio-channel-source");
-        acs.push_attribute(("srcCh", "1, 2"));
-        acs.push_attribute(("role", "dialogue"));
-        writer.write_event(Event::Start(acs))?;
-
-        // adjust-volume (keyframed)
-        if has_vol_kf {
-            let mut adjust_volume = BytesStart::new("adjust-volume");
-            adjust_volume.push_attribute((
-                "amount",
-                linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
-            ));
-            writer.write_event(Event::Start(adjust_volume))?;
-            write_volume_keyframe_params(writer, clip, &project.frame_rate, source_start_ns)?;
-            writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
-        }
-
-        // adjust-panner (keyframed)
-        if has_pan_kf {
-            let mut adjust_panner = BytesStart::new("adjust-panner");
-            adjust_panner.push_attribute((
-                "amount",
-                format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
-            ));
-            writer.write_event(Event::Start(adjust_panner))?;
-            write_pan_keyframe_params(writer, clip, &project.frame_rate, source_start_ns)?;
-            writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
-        }
-
-        writer.write_event(Event::End(BytesEnd::new("audio-channel-source")))?;
-    }
-
-    // Flat adjust-volume (no keyframes)
-    if !has_vol_kf {
+    // audio intrinsic params (adjust-volume, adjust-panner)
+    // DTD: these come after video intrinsic params, before anchor_items.
+    // When keyframed, the keyframes go in audio-channel-source (emitted later,
+    // after connected clips per DTD), so we skip the flat element here.
+    if clip.volume_keyframes.is_empty() {
         let mut adjust_volume = BytesStart::new("adjust-volume");
         adjust_volume.push_attribute((
             "amount",
@@ -1417,8 +1393,7 @@ fn write_strict_clip_body(
         writer.write_event(Event::Empty(adjust_volume))?;
     }
 
-    // Flat adjust-panner (no keyframes)
-    if !has_pan_kf {
+    if clip.pan_keyframes.is_empty() {
         let mut adjust_panner = BytesStart::new("adjust-panner");
         adjust_panner.push_attribute((
             "amount",
@@ -1427,6 +1402,52 @@ fn write_strict_clip_body(
         writer.write_event(Event::Empty(adjust_panner))?;
     }
 
+    Ok(())
+}
+
+/// Emit `<audio-channel-source>` with keyframed volume/pan.
+/// Per DTD, audio-channel-source comes AFTER anchor_items (connected clips).
+fn write_strict_audio_channel_sources(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    clip: &crate::model::clip::Clip,
+    fps: &crate::model::project::FrameRate,
+    source_start_ns: u64,
+) -> Result<()> {
+    let has_vol_kf = !clip.volume_keyframes.is_empty();
+    let has_pan_kf = !clip.pan_keyframes.is_empty();
+
+    if !has_vol_kf && !has_pan_kf {
+        return Ok(());
+    }
+
+    let mut acs = BytesStart::new("audio-channel-source");
+    acs.push_attribute(("srcCh", "1, 2"));
+    acs.push_attribute(("role", "dialogue"));
+    writer.write_event(Event::Start(acs))?;
+
+    if has_vol_kf {
+        let mut adjust_volume = BytesStart::new("adjust-volume");
+        adjust_volume.push_attribute((
+            "amount",
+            linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
+        ));
+        writer.write_event(Event::Start(adjust_volume))?;
+        write_volume_keyframe_params(writer, clip, fps, source_start_ns)?;
+        writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+    }
+
+    if has_pan_kf {
+        let mut adjust_panner = BytesStart::new("adjust-panner");
+        adjust_panner.push_attribute((
+            "amount",
+            format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
+        ));
+        writer.write_event(Event::Start(adjust_panner))?;
+        write_pan_keyframe_params(writer, clip, fps, source_start_ns)?;
+        writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("audio-channel-source")))?;
     Ok(())
 }
 
@@ -3617,6 +3638,19 @@ mod tests {
         assert!(
             !after_acs.contains("<adjust-volume"),
             "no duplicate adjust-volume after audio-channel-source"
+        );
+        // DTD order: adjust-blend before audio-channel-source (no flat adjust-volume/panner between)
+        let blend_pos = xml.find("<adjust-blend").expect("adjust-blend present");
+        assert!(
+            blend_pos < acs_start,
+            "adjust-blend must come before audio-channel-source per DTD"
+        );
+        // No flat adjust-volume or adjust-panner should appear before audio-channel-source
+        // (they are omitted when keyframed)
+        let before_acs = &xml[..acs_start];
+        assert!(
+            !before_acs.contains("<adjust-volume"),
+            "no flat adjust-volume when volume is keyframed"
         );
     }
 
