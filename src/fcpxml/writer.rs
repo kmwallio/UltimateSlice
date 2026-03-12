@@ -1738,12 +1738,6 @@ fn write_resources(
                 .as_deref()
                 .unwrap_or(&clip.source_path);
             let uri = fcpxml_media_src_uri(export_source_path);
-            // FCP asset duration = timecoded end of usable range
-            let duration_ns = clip
-                .source_timecode_base_ns
-                .unwrap_or(0)
-                .saturating_add(clip.source_out);
-            let duration = ns_to_fcpxml_time(duration_ns, &project.frame_rate);
             let has_video = if clip.kind == crate::model::clip::ClipKind::Audio {
                 "0"
             } else {
@@ -1760,7 +1754,9 @@ fn write_resources(
             asset.push_attribute(("id", asset_id.as_str()));
             asset.push_attribute(("name", clip.label.as_str()));
             asset.push_attribute(("start", asset_start.as_str()));
-            asset.push_attribute(("duration", duration.as_str()));
+            // Omit duration — FCP will probe the actual media file.
+            // Declaring a duration that exceeds the real media (even by a
+            // fraction of a frame) triggers a setClippedRange: assertion.
             if has_video == "1" {
                 asset.push_attribute(("format", "r1"));
             }
