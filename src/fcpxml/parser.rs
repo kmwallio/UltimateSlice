@@ -1984,6 +1984,7 @@ fn apply_native_opacity_keyframes(
 }
 
 /// Apply native volume keyframes from adjust-volume.
+/// FCP keyframe times are in absolute source time; convert to clip-local.
 fn apply_native_volume_keyframes(
     params: &NativeKeyframeParams,
     ctx: &ActiveClipContext,
@@ -1993,7 +1994,14 @@ fn apply_native_volume_keyframes(
         return;
     }
     if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
-        clip.volume_keyframes = params.volume_keyframes.clone();
+        clip.volume_keyframes = params
+            .volume_keyframes
+            .iter()
+            .map(|kf| NumericKeyframe {
+                time_ns: kf.time_ns.saturating_sub(ctx.source_in),
+                ..*kf
+            })
+            .collect();
     }
 }
 
@@ -2006,7 +2014,14 @@ fn apply_native_pan_keyframes(
         return;
     }
     if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
-        clip.pan_keyframes = params.pan_keyframes.clone();
+        clip.pan_keyframes = params
+            .pan_keyframes
+            .iter()
+            .map(|kf| NumericKeyframe {
+                time_ns: kf.time_ns.saturating_sub(ctx.source_in),
+                ..*kf
+            })
+            .collect();
     }
 }
 
@@ -4601,5 +4616,54 @@ mod tests {
         assert!(clip.volume_keyframes[1].value > 0.1 && clip.volume_keyframes[1].value < 0.3);
         assert_eq!(clip.volume_keyframes[2].time_ns, 5_000_000_000);
         assert!((clip.volume_keyframes[2].value - 0.0).abs() < 0.01);
+    }
+
+    /// Volume keyframes with a non-zero `start` (source timecode offset).
+    /// FCP emits keyframe times in absolute source time; the parser must
+    /// subtract `source_in` so they become clip-local.
+    #[test]
+    fn test_parse_volume_keyframes_source_in_subtracted() {
+        // start="10s" means source_in = 10s.
+        // Keyframes at 10s, 13s, 15s → clip-local 0s, 3s, 5s.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="20s" hasAudio="1"/>
+  </resources>
+  <project name="SourceIn Keyframes">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="10s" duration="5s">
+          <audio-channel-source srcCh="1, 2" role="dialogue.dialogue-1">
+            <adjust-volume>
+              <param name="amount">
+                <keyframeAnimation>
+                  <keyframe time="10s" value="0dB"/>
+                  <keyframe time="13s" value="-14.5dB"/>
+                  <keyframe time="15s" value="-96dB"/>
+                </keyframeAnimation>
+              </param>
+            </adjust-volume>
+          </audio-channel-source>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let track = project.tracks.iter().find(|t| !t.clips.is_empty()).unwrap();
+        let clip = &track.clips[0];
+
+        assert_eq!(
+            clip.volume_keyframes.len(),
+            3,
+            "expected 3 volume keyframes"
+        );
+        // After subtracting source_in (10s), keyframes should be at 0s, 3s, 5s
+        assert_eq!(clip.volume_keyframes[0].time_ns, 0);
+        assert_eq!(clip.volume_keyframes[1].time_ns, 3_000_000_000);
+        assert_eq!(clip.volume_keyframes[2].time_ns, 5_000_000_000);
     }
 }

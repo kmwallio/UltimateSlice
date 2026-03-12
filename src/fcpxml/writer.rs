@@ -230,7 +230,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
              clip: &crate::model::clip::Clip,
              lane: Option<i32>,
              parent_clip: Option<&crate::model::clip::Clip>|
-             -> Result<()> {
+             -> Result<u64> {
                 let asset_ref = format!("a_{}", sanitize_id(&clip.id));
 
                 // Look up probed media info for this clip and its parent.
@@ -317,9 +317,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 };
 
                 // Asset-clip start: position in the asset's source timeline.
-                let start = if clip_is_audio_only {
+                let source_start_ns = if clip_is_audio_only {
                     // Audio-only: BWF timecode + source_in, in 48kHz time base.
-                    let source_start = clip_tc
+                    clip_tc
                         .map(|tc| {
                             let tc_samples = (tc * clip_fps.numerator as u64
                                 + clip_fps.denominator as u64 * 500_000_000)
@@ -332,10 +332,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 * 1_000_000_000
                                 / clip_fps.numerator as u64
                         })
-                        .unwrap_or(clip.source_in);
-                    ns_to_fcpxml_time(source_start, clip_fps)
+                        .unwrap_or(clip.source_in)
                 } else {
-                    let source_start = clip_tc
+                    clip_tc
                         .or(clip.source_timecode_base_ns)
                         .map(|tc| {
                             let tc_frames = (tc * clip_fps.numerator as u64
@@ -349,9 +348,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 * 1_000_000_000
                                 / clip_fps.numerator as u64
                         })
-                        .unwrap_or(clip.source_in);
-                    ns_to_fcpxml_time(source_start, clip_fps)
+                        .unwrap_or(clip.source_in)
                 };
+                let start = ns_to_fcpxml_time(source_start_ns, clip_fps);
 
                 let mut elem = BytesStart::new("asset-clip");
                 elem.push_attribute(("ref", asset_ref.as_str()));
@@ -370,14 +369,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 }
                 elem.push_attribute(("audioRole", "dialogue"));
                 writer.write_event(Event::Start(elem))?;
-                Ok(())
+                Ok(source_start_ns)
             };
 
         if let Some(primary_idx) = primary_track_idx {
             let primary_track = &project.tracks[primary_idx];
             for (clip_idx, clip) in primary_track.clips.iter().enumerate() {
-                write_asset_clip_start(&mut writer, clip, None, None)?;
-                write_strict_clip_body(&mut writer, clip, project)?;
+                let source_start = write_asset_clip_start(&mut writer, clip, None, None)?;
+                write_strict_clip_body(&mut writer, clip, project, source_start)?;
 
                 // Nest connected clips whose offset falls within this primary clip's range.
                 // A connected clip belongs to the last primary clip whose timeline_start
@@ -396,13 +395,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                         < primary_track.clips[clip_idx + 1].timeline_start)
                         };
                         if belongs_here {
-                            write_asset_clip_start(
+                            let conn_source_start = write_asset_clip_start(
                                 &mut writer,
                                 conn_clip,
                                 Some(ct.lane),
                                 Some(clip),
                             )?;
-                            write_strict_clip_body(&mut writer, conn_clip, project)?;
+                            write_strict_clip_body(&mut writer, conn_clip, project, conn_source_start)?;
                             writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                         }
                     }
@@ -450,8 +449,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             for ct in &connected_tracks {
                 let track = &project.tracks[ct.track_idx];
                 for clip in &track.clips {
-                    write_asset_clip_start(&mut writer, clip, Some(ct.lane), None)?;
-                    write_strict_clip_body(&mut writer, clip, project)?;
+                    let source_start = write_asset_clip_start(&mut writer, clip, Some(ct.lane), None)?;
+                    write_strict_clip_body(&mut writer, clip, project, source_start)?;
                     writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
                 }
             }
@@ -819,7 +818,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 ));
                 if !clip.volume_keyframes.is_empty() {
                     writer.write_event(Event::Start(adjust_volume))?;
-                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                    write_volume_keyframe_params(&mut writer, clip, &project.frame_rate, 0)?;
                     writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
                 } else {
                     writer.write_event(Event::Empty(adjust_volume))?;
@@ -832,7 +831,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 ));
                 if !clip.pan_keyframes.is_empty() {
                     writer.write_event(Event::Start(adjust_panner))?;
-                    write_pan_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                    write_pan_keyframe_params(&mut writer, clip, &project.frame_rate, 0)?;
                     writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
                 } else {
                     writer.write_event(Event::Empty(adjust_panner))?;
@@ -1302,6 +1301,7 @@ fn write_strict_clip_body(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     clip: &crate::model::clip::Clip,
     project: &Project,
+    source_start_ns: u64,
 ) -> Result<()> {
     // timeMap
     if let Some(fragment) = preserved_unknown_time_map_fragment(clip) {
@@ -1388,7 +1388,7 @@ fn write_strict_clip_body(
                 linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
             ));
             writer.write_event(Event::Start(adjust_volume))?;
-            write_volume_keyframe_params(writer, clip, &project.frame_rate)?;
+            write_volume_keyframe_params(writer, clip, &project.frame_rate, source_start_ns)?;
             writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
         }
 
@@ -1400,7 +1400,7 @@ fn write_strict_clip_body(
                 format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
             ));
             writer.write_event(Event::Start(adjust_panner))?;
-            write_pan_keyframe_params(writer, clip, &project.frame_rate)?;
+            write_pan_keyframe_params(writer, clip, &project.frame_rate, source_start_ns)?;
             writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
         }
 
@@ -2666,6 +2666,7 @@ fn write_volume_keyframe_params(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     clip: &crate::model::clip::Clip,
     fps: &crate::model::project::FrameRate,
+    source_start_ns: u64,
 ) -> Result<()> {
     if clip.volume_keyframes.is_empty() {
         return Ok(());
@@ -2688,7 +2689,8 @@ fn write_volume_keyframe_params(
 
     for kf in &sorted {
         let mut kf_elem = BytesStart::new("keyframe");
-        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+        // Offset clip-local time back to source time for FCP
+        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str()));
         kf_elem.push_attribute(("value", linear_volume_to_fcpxml_db(kf.value).as_str()));
         kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
         writer.write_event(Event::Empty(kf_elem))?;
@@ -2705,6 +2707,7 @@ fn write_pan_keyframe_params(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     clip: &crate::model::clip::Clip,
     fps: &crate::model::project::FrameRate,
+    source_start_ns: u64,
 ) -> Result<()> {
     if clip.pan_keyframes.is_empty() {
         return Ok(());
@@ -2726,7 +2729,8 @@ fn write_pan_keyframe_params(
 
     for kf in &sorted {
         let mut kf_elem = BytesStart::new("keyframe");
-        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+        // Offset clip-local time back to source time for FCP
+        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str()));
         kf_elem.push_attribute((
             "value",
             format!("{:.6}", kf.value.clamp(-1.0, 1.0)).as_str(),
@@ -3633,6 +3637,46 @@ mod tests {
         assert!(
             xml.contains("<adjust-volume"),
             "flat volume should still emit adjust-volume"
+        );
+    }
+
+    /// Verify that volume keyframe times are offset by source_in when written
+    /// to strict FCPXML, so FCP sees them in source-absolute time.
+    #[test]
+    fn test_write_fcpxml_strict_volume_keyframes_offset_by_source_in() {
+        let mut project = Project::new("VolKFOffset");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/source.mov", 2_000_000_000, 0, ClipKind::Video);
+        clip.source_in = 10_000_000_000; // 10 seconds into source
+        clip.volume_keyframes = vec![
+            crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+            crate::model::clip::NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        // start="10s" → source_start_ns = 10_000_000_000
+        // Keyframe 0 time: 0 + 10s = "240/24s" (10s at 24fps = 240 frames)
+        // Keyframe 1 time: 1s + 10s = "264/24s" (11s at 24fps = 264 frames)
+        assert!(
+            xml.contains("time=\"240/24s\""),
+            "first keyframe should be at 10s (240/24s), got:\n{}",
+            xml
+        );
+        assert!(
+            xml.contains("time=\"264/24s\""),
+            "second keyframe should be at 11s (264/24s), got:\n{}",
+            xml
         );
     }
 
