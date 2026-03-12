@@ -40,7 +40,7 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 | **Shadows Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in shadows |
 | **Shadows Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in shadows |
 
-> **Note:** Exposure, Black Point, and per-tone Warmth/Tint are stored and round-tripped through FCPXML (mapped from/to FCP's "Color Adjustments" filter-video params) but are not yet applied in real-time preview or export. Brightness, Contrast, Saturation, Temperature, and Tint are fully applied.
+> **Note:** Exposure is applied as gamma correction in both GStreamer preview (`videobalance` brightness approximation) and FFmpeg export (`eq` filter gamma). Black Point and per-tone Warmth/Tint are applied via frei0r `3-point-color-balance` in preview (per-channel RGB offsets) and FFmpeg `colorbalance` in export (per-range per-channel shifts).
 
 ---
 

@@ -703,6 +703,13 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     let has_keyframes = !clip.brightness_keyframes.is_empty()
         || !clip.contrast_keyframes.is_empty()
         || !clip.saturation_keyframes.is_empty();
+    // Exposure → gamma: gamma = 2^exposure gives a natural exposure curve.
+    let has_exposure = clip.exposure.abs() > f32::EPSILON;
+    let gamma = if has_exposure {
+        2.0_f64.powf(clip.exposure as f64)
+    } else {
+        1.0
+    };
     if has_keyframes {
         let brightness_expr = build_keyframed_property_expression(
             &clip.brightness_keyframes,
@@ -725,16 +732,32 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
             2.0,
             "t",
         );
-        format!(
-            ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
-        )
-    } else if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
-        format!(
-            ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
-            clip.brightness.clamp(-1.0, 1.0),
-            clip.contrast.clamp(0.0, 2.0),
-            clip.saturation.clamp(0.0, 2.0)
-        )
+        if has_exposure {
+            format!(
+                ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':gamma={gamma:.4}:eval=frame"
+            )
+        } else {
+            format!(
+                ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
+            )
+        }
+    } else if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 || has_exposure {
+        if has_exposure {
+            format!(
+                ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}:gamma={:.4}",
+                clip.brightness.clamp(-1.0, 1.0),
+                clip.contrast.clamp(0.0, 2.0),
+                clip.saturation.clamp(0.0, 2.0),
+                gamma,
+            )
+        } else {
+            format!(
+                ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
+                clip.brightness.clamp(-1.0, 1.0),
+                clip.contrast.clamp(0.0, 2.0),
+                clip.saturation.clamp(0.0, 2.0)
+            )
+        }
     } else {
         String::new()
     }
@@ -962,12 +985,53 @@ fn build_lut_filter(clip: &crate::model::clip::Clip) -> String {
 }
 
 fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
-    if clip.shadows != 0.0 || clip.midtones != 0.0 || clip.highlights != 0.0 {
+    let has_grading = clip.shadows != 0.0
+        || clip.midtones != 0.0
+        || clip.highlights != 0.0
+        || clip.black_point != 0.0
+        || clip.highlights_warmth != 0.0
+        || clip.highlights_tint != 0.0
+        || clip.midtones_warmth != 0.0
+        || clip.midtones_tint != 0.0
+        || clip.shadows_warmth != 0.0
+        || clip.shadows_tint != 0.0;
+    if has_grading {
         let s = clip.shadows.clamp(-1.0, 1.0);
         let m = clip.midtones.clamp(-1.0, 1.0);
         let h = clip.highlights.clamp(-1.0, 1.0);
+        let bp = clip.black_point.clamp(-1.0, 1.0);
+
+        // Per-channel warmth/tint offsets.
+        // Warmth: positive = warm (boost red, cut blue), negative = cool.
+        // Tint: positive = magenta (cut green), negative = green (boost green).
+        let warmth_scale = 0.5_f32;
+        let tint_scale = 0.4_f32;
+
+        let sw = clip.shadows_warmth.clamp(-1.0, 1.0) * warmth_scale;
+        let st = clip.shadows_tint.clamp(-1.0, 1.0) * tint_scale;
+        let mw = clip.midtones_warmth.clamp(-1.0, 1.0) * warmth_scale;
+        let mt = clip.midtones_tint.clamp(-1.0, 1.0) * tint_scale;
+        let hw = clip.highlights_warmth.clamp(-1.0, 1.0) * warmth_scale;
+        let ht = clip.highlights_tint.clamp(-1.0, 1.0) * tint_scale;
+
+        // FFmpeg colorbalance: rs/gs/bs = shadows, rm/gm/bm = midtones, rh/gh/bh = highlights.
+        // Range -1..1. Positive boosts channel, negative cuts.
+        // Base luminance shift (equal channels) + per-channel warmth/tint.
+        // Black point adds to shadow luminance (lifts/crushes blacks).
+        let rs = (s + bp * 0.5 + sw).clamp(-1.0, 1.0);
+        let gs = (s + bp * 0.5 - st).clamp(-1.0, 1.0);
+        let bs = (s + bp * 0.5 - sw).clamp(-1.0, 1.0);
+
+        let rm = (m + mw).clamp(-1.0, 1.0);
+        let gm = (m - mt).clamp(-1.0, 1.0);
+        let bm = (m - mw).clamp(-1.0, 1.0);
+
+        let rh = (h + hw).clamp(-1.0, 1.0);
+        let gh = (h - ht).clamp(-1.0, 1.0);
+        let bh = (h - hw).clamp(-1.0, 1.0);
+
         format!(
-            ",colorbalance=rs={s:.4}:gs={s:.4}:bs={s:.4}:rm={m:.4}:gm={m:.4}:bm={m:.4}:rh={h:.4}:gh={h:.4}:bh={h:.4}"
+            ",colorbalance=rs={rs:.4}:gs={gs:.4}:bs={bs:.4}:rm={rm:.4}:gm={gm:.4}:bm={bm:.4}:rh={rh:.4}:gh={gh:.4}:bh={bh:.4}"
         )
     } else {
         String::new()
