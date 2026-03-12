@@ -1137,8 +1137,53 @@ where
         clip.fcpxml_original_source_path = None;
     }
 
+    // Copy LUT files into the Library directory and rewrite paths.
+    let mut lut_canonical_to_export: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut lut_used_names: HashSet<String> = HashSet::new();
+    for clip in export_project
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.clips.iter_mut())
+    {
+        let lut_path_str = match clip.lut_path {
+            Some(ref p) => p.clone(),
+            None => continue,
+        };
+        let lut_local = source_path_to_local_path(&lut_path_str)?;
+        if !lut_local.exists() {
+            // LUT file missing — clear the reference rather than fail the export.
+            clip.lut_path = None;
+            continue;
+        }
+        let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
+        if let Some(existing_export) = lut_canonical_to_export.get(&lut_canonical) {
+            let portable = normalize_packaged_path_for_portability(existing_export);
+            clip.lut_path = Some(portable.to_string_lossy().to_string());
+            continue;
+        }
+        let lut_file_name = lut_canonical
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("lut.cube");
+        let unique_lut_name =
+            unique_packaged_media_name(lut_file_name, &lut_canonical, &lut_used_names);
+        lut_used_names.insert(unique_lut_name.clone());
+        let lut_dest = library_dir.join(&unique_lut_name);
+        std::fs::copy(&lut_canonical, &lut_dest).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to copy LUT {} to {}: {e}",
+                lut_canonical.display(),
+                lut_dest.display()
+            )
+        })?;
+        let resolved_dest = std::fs::canonicalize(&lut_dest).unwrap_or(lut_dest);
+        lut_canonical_to_export.insert(lut_canonical, resolved_dest.clone());
+        let portable = normalize_packaged_path_for_portability(&resolved_dest);
+        clip.lut_path = Some(portable.to_string_lossy().to_string());
+    }
+
     on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
-    let xml = write_fcpxml_strict(&export_project)?;
+    let xml = write_fcpxml_for_path(&export_project, &output_fcpxml_path)?;
     std::fs::write(&output_fcpxml_path, xml)?;
     Ok(library_dir)
 }
@@ -4688,7 +4733,7 @@ mod tests {
         let source_b = root.join("clip-b.mp4");
         std::fs::write(&source_a, b"source-a").expect("write source-a");
         std::fs::write(&source_b, b"source-b").expect("write source-b");
-        let output = root.join("Strict.uspxml");
+        let output = root.join("Strict.fcpxml");
 
         let mut project = Project::new("Strict");
         project.tracks.clear();
@@ -4768,7 +4813,7 @@ mod tests {
         std::fs::write(&source_v1, b"source-v1").expect("write v1");
         std::fs::write(&source_v2, b"source-v2").expect("write v2");
         std::fs::write(&source_a1, b"source-a1").expect("write a1");
-        let output = root.join("StrictMultiTrack.uspxml");
+        let output = root.join("StrictMultiTrack.fcpxml");
 
         let mut project = Project::new("StrictMultiTrack");
         project.tracks.clear();
@@ -4855,7 +4900,7 @@ mod tests {
         let source_b = root.join("clip-b.mp4");
         std::fs::write(&source_a, b"source-a").expect("write source-a");
         std::fs::write(&source_b, b"source-b").expect("write source-b");
-        let output = root.join("Validate.uspxml");
+        let output = root.join("Validate.fcpxml");
 
         let mut project = Project::new("Validate");
         project.tracks.clear();
@@ -4968,6 +5013,91 @@ mod tests {
             error.to_string().contains("Source media not found"),
             "unexpected error: {error}"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_export_project_with_media_uspxml_uses_rich_writer_and_copies_luts() {
+        let root = unique_test_dir("package-rich-lut");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source = root.join("clip.mp4");
+        std::fs::write(&source, b"video-data").expect("write source");
+        let lut = root.join("grade.cube");
+        std::fs::write(&lut, b"LUT3D_DATA").expect("write lut");
+        let output = root.join("RichLut.uspxml");
+
+        let mut project = Project::new("RichLut");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new(
+            source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip.lut_path = Some(lut.to_string_lossy().to_string());
+        clip.exposure = 0.5;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let library =
+            export_project_with_media(&project, &output).expect("rich export should succeed");
+        let xml = std::fs::read_to_string(&output).expect("read packaged xml");
+
+        // Rich mode: should contain vendor namespace and us: attributes
+        assert!(xml.contains("xmlns:us="), "expected vendor namespace in rich export");
+        assert!(xml.contains("us:exposure="), "expected us:exposure in rich export");
+
+        // LUT should be copied into Library
+        let lut_in_library = library.join("grade.cube");
+        assert!(lut_in_library.exists(), "LUT should be copied to Library");
+        assert_eq!(
+            std::fs::read(&lut_in_library).unwrap(),
+            b"LUT3D_DATA",
+            "LUT content should match"
+        );
+
+        // us:lut-path in XML should reference the packaged path
+        assert!(xml.contains("us:lut-path="), "expected us:lut-path in rich export");
+        assert!(
+            !xml.contains(&lut.to_string_lossy().to_string()),
+            "should not contain original absolute LUT path"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_export_project_with_media_fcpxml_strips_lut_and_vendor_attrs() {
+        let root = unique_test_dir("package-strict-lut");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source = root.join("clip.mp4");
+        std::fs::write(&source, b"video-data").expect("write source");
+        let lut = root.join("grade.cube");
+        std::fs::write(&lut, b"LUT3D_DATA").expect("write lut");
+        let output = root.join("StrictLut.fcpxml");
+
+        let mut project = Project::new("StrictLut");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new(
+            source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip.lut_path = Some(lut.to_string_lossy().to_string());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let _library =
+            export_project_with_media(&project, &output).expect("strict export should succeed");
+        let xml = std::fs::read_to_string(&output).expect("read packaged xml");
+
+        // Strict mode: no vendor namespace or us: attributes
+        assert!(!xml.contains("xmlns:us="), "strict export should not have vendor namespace");
+        assert!(!xml.contains("us:lut-path"), "strict export should not have us:lut-path");
 
         let _ = std::fs::remove_dir_all(&root);
     }
