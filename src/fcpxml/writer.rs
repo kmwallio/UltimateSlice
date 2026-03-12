@@ -1801,9 +1801,30 @@ fn known_fcpxml_format_name(project: &Project) -> Option<&'static str> {
         project.frame_rate.numerator,
         project.frame_rate.denominator,
     ) {
+        // 1080p
+        (1920, 1080, 24000, 1001) => Some("FFVideoFormat1080p2398"),
         (1920, 1080, 24, 1) => Some("FFVideoFormat1080p24"),
+        (1920, 1080, 25, 1) => Some("FFVideoFormat1080p25"),
+        (1920, 1080, 30000, 1001) => Some("FFVideoFormat1080p2997"),
         (1920, 1080, 30, 1) => Some("FFVideoFormat1080p30"),
+        (1920, 1080, 50, 1) => Some("FFVideoFormat1080p50"),
+        (1920, 1080, 60000, 1001) => Some("FFVideoFormat1080p5994"),
+        (1920, 1080, 60, 1) => Some("FFVideoFormat1080p60"),
+        // 4K UHD
+        (3840, 2160, 24000, 1001) => Some("FFVideoFormat2160p2398"),
         (3840, 2160, 24, 1) => Some("FFVideoFormat2160p24"),
+        (3840, 2160, 25, 1) => Some("FFVideoFormat2160p25"),
+        (3840, 2160, 30000, 1001) => Some("FFVideoFormat2160p2997"),
+        (3840, 2160, 30, 1) => Some("FFVideoFormat2160p30"),
+        (3840, 2160, 60000, 1001) => Some("FFVideoFormat2160p5994"),
+        (3840, 2160, 60, 1) => Some("FFVideoFormat2160p60"),
+        // 720p
+        (1280, 720, 24000, 1001) => Some("FFVideoFormat720p2398"),
+        (1280, 720, 25, 1) => Some("FFVideoFormat720p25"),
+        (1280, 720, 30000, 1001) => Some("FFVideoFormat720p2997"),
+        (1280, 720, 50, 1) => Some("FFVideoFormat720p50"),
+        (1280, 720, 60000, 1001) => Some("FFVideoFormat720p5994"),
+        (1280, 720, 60, 1) => Some("FFVideoFormat720p60"),
         _ => None,
     }
 }
@@ -2251,8 +2272,9 @@ fn write_pan_keyframe_params(
 fn ns_to_fcpxml_time(ns: u64, fps: &crate::model::project::FrameRate) -> String {
     let timebase = fps.numerator as u64;
     let denom = fps.denominator as u64;
-    // frames = ns * fps_num / (fps_den * 1_000_000_000)
-    let frames = ns * timebase / (denom * 1_000_000_000);
+    // frames = ns * fps_num / (fps_den * 1_000_000_000), rounded to nearest frame
+    // to avoid off-by-one truncation at NTSC rates (1001/24000 = 41708333.33… ns).
+    let frames = (ns * timebase + denom * 500_000_000) / (denom * 1_000_000_000);
     // FCPXML numerator = frames × fps_den so that numerator/timebase gives seconds
     let numerator = frames * denom;
     format!("{numerator}/{timebase}s")
@@ -3518,15 +3540,15 @@ mod tests {
     #[test]
     fn test_write_fcpxml_omits_unknown_format_name_for_nonstandard_preset() {
         let mut project = Project::new("UnknownFormatName");
-        project.width = 1280;
-        project.height = 720;
+        project.width = 2560;
+        project.height = 1080;
         project.frame_rate.numerator = 30000;
         project.frame_rate.denominator = 1001;
 
         let xml = write_fcpxml(&project).expect("write should succeed");
         assert!(
             xml.contains(
-                "<format id=\"r1\" frameDuration=\"1001/30000s\" width=\"1280\" height=\"720\"/>"
+                "<format id=\"r1\" frameDuration=\"1001/30000s\" width=\"2560\" height=\"1080\"/>"
             ),
             "expected export to keep numeric format data for non-standard preset:\n{xml}"
         );
@@ -4194,5 +4216,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_ns_to_fcpxml_time_ntsc_roundtrip() {
+        use crate::model::project::FrameRate;
+        let fps = FrameRate {
+            numerator: 24000,
+            denominator: 1001,
+        };
+
+        // GoPro timecode 20:13:33:07 = 1,747,519 frames
+        // Stored as ns: 1747519 * 1001 * 1e9 / 24000 = 72886104958333
+        let ns = 72_886_104_958_333u64;
+        let result = ns_to_fcpxml_time(ns, &fps);
+        // Should round to exactly 1749266519/24000s (= 1747519 frames * 1001)
+        assert_eq!(result, "1749266519/24000s");
+    }
+
+    #[test]
+    fn test_ns_to_fcpxml_time_integer_fps() {
+        use crate::model::project::FrameRate;
+        let fps = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
+        // 48 frames = 2 seconds
+        let ns = 2_000_000_000u64;
+        assert_eq!(ns_to_fcpxml_time(ns, &fps), "48/24s");
+    }
+
+    #[test]
+    fn test_known_fcpxml_format_name_ntsc() {
+        let mut project = Project::new("Test");
+        project.width = 1920;
+        project.height = 1080;
+        project.frame_rate.numerator = 24000;
+        project.frame_rate.denominator = 1001;
+        assert_eq!(
+            known_fcpxml_format_name(&project),
+            Some("FFVideoFormat1080p2398")
+        );
     }
 }
