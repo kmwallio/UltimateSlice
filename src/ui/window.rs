@@ -1369,7 +1369,7 @@ mod tests {
                 .iter()
                 .flat_map(|t| t.clips.iter())
                 .filter(|c| media_seen.insert(c.source_path.as_str()))
-                .map(|c| (c.source_path.clone(), c.source_out, c.source_timecode_base_ns))
+                .map(|c| (c.source_path.clone(), c.media_duration_ns.unwrap_or(0), c.source_timecode_base_ns))
                 .collect();
 
             let seen: HashSet<String> = library.iter().map(|i| i.source_path.clone()).collect();
@@ -4884,7 +4884,7 @@ pub fn build_window(
                     .map(|c| {
                         (
                             c.source_path.clone(),
-                            c.source_out,
+                            c.media_duration_ns.unwrap_or(0),
                             c.source_timecode_base_ns,
                         )
                     })

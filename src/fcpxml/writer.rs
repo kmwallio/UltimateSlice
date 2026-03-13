@@ -2517,7 +2517,6 @@ fn write_resources(
             } else {
                 media_info
                     .and_then(|m| m.timecode_ns)
-                    .or(clip.source_timecode_base_ns)
                     .map(|ns| ns_to_fcpxml_time(ns, asset_fps))
                     .unwrap_or_else(|| "0s".to_string())
             };
