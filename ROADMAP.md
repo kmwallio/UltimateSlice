@@ -265,15 +265,15 @@ Tracking docs:
   - [x] Keyframe navigation (◀/▶ buttons, `Alt+Left`/`Alt+Right` shortcuts, timeline marker click-to-seek, ◆ indicator)
   - [x] Animation mode: "Record Keyframes" toggle (`Shift+K`) auto-creates keyframes on transform drags and slider changes
   - [x] Additional interpolation modes: EaseIn, EaseOut, EaseInOut with cubic bezier evaluation (preview), quadratic FFmpeg expressions (export), FCPXML `interp` attribute round-trip, Inspector dropdown, and MCP `interpolation` parameter
-- [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
+- [x] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
   - [x] Phase 1: Dopesheet panel appears as a dedicated panel beneath the timeline tracks (with show/hide control on the track-management bar), includes per-lane visibility toggles, keyframe point selection (including additive/range multi-select), drag-to-retime, add/remove controls, interpolation apply control, value-curve overlays, keyboard delete/nudge controls, time zoom/pan controls, and full undo/redo integration.
-  - [ ] Phase 2: Bezier-handle curve editing for per-segment shape/tangent authoring.
+  - [x] Phase 2: Bezier-handle curve editing for per-segment shape/tangent authoring.
     - [x] Phase 2a: selected keyframe segments now show Bezier handles; dragging a handle updates segment easing (snapped to nearest preset interpolation mode) with undo/redo integration.
-    - [ ] Phase 2b: continuous custom tangent values (non-preset Bezier control points) across preview/export/FCPXML/MCP paths.
+    - [x] Phase 2b: continuous custom tangent values (non-preset Bezier control points) across preview/export/FCPXML/MCP paths.
       - [x] Phase 2b.1: dopesheet handle drags now store exact per-segment Bezier controls on keyframes and preview/runtime evaluation uses those controls.
-      - [ ] Phase 2b.2: FCPXML/MCP parity for custom controls (export parity now uses piecewise cubic-bezier approximation from stored controls).
+      - [x] Phase 2b.2: FCPXML/MCP parity for custom controls (export parity now uses piecewise cubic-bezier approximation from stored controls).
         - [x] Phase 2b.2a: MCP `set_clip_keyframe` supports optional `bezier_controls` and `list_clips` exposes stored custom controls in keyframe arrays.
-        - [ ] Phase 2b.2b: Native FCPXML representation/parity for custom controls beyond vendor attrs.
+        - [x] Phase 2b.2b: Native FCPXML representation/parity for custom controls beyond vendor attrs (`curve="smooth"` + `interp` native keyframe metadata import/export mapping).
 
 ### Program Monitor
 - [x] Program Monitor panel showing assembled timeline playback

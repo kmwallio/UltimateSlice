@@ -111,6 +111,8 @@ The **Interpolation** dropdown selects how values transition between adjacent ke
 
 The selected mode applies to new keyframes created by "Set Keyframe" buttons, animation mode auto-keyframes, and MCP. When the playhead lands on an existing keyframe, the dropdown reflects that keyframe's interpolation. FCPXML round-trip preserves interpolation modes (`interp` attribute).
 
+For strict native `.fcpxml` workflows, custom handle-authored segments are also exported with native keyframe `curve="smooth"` metadata, and imported `curve="smooth"` keyframes are mapped back into Bezier controls so non-linear segment intent survives beyond vendor-only attrs.
+
 ### Keyframe navigation
 
 - **◀ Prev KF / Next KF ▶** buttons jump the playhead to the previous/next keyframe across all properties of the selected clip.

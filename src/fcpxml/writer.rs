@@ -2767,6 +2767,14 @@ fn integrate_speed_distance_to_time_ns(
     integrated
 }
 
+fn keyframe_curve_attr(kf: &crate::model::clip::NumericKeyframe) -> Option<&'static str> {
+    if kf.bezier_controls.is_some() {
+        Some("smooth")
+    } else {
+        None
+    }
+}
+
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for transform properties.
 /// `source_start_ns` is the FCPXML `start` attribute value in nanoseconds — keyframe times
 /// are offset by this amount so they appear in absolute source time as FCP expects.
@@ -2827,6 +2835,18 @@ fn write_transform_keyframe_params(
                 ns_to_fcpxml_time(t + source_start_ns, fps).as_str(),
             ));
             kf_elem.push_attribute(("value", format!("{} {}", fx, fy).as_str()));
+            let x_kf = clip.position_x_keyframes.iter().find(|kf| kf.time_ns == t);
+            let y_kf = clip.position_y_keyframes.iter().find(|kf| kf.time_ns == t);
+            let interp = x_kf
+                .map(|kf| kf.interpolation)
+                .or_else(|| y_kf.map(|kf| kf.interpolation))
+                .unwrap_or(crate::model::clip::KeyframeInterpolation::Linear);
+            kf_elem.push_attribute(("interp", interp.to_fcpxml()));
+            let has_curve = x_kf.and_then(keyframe_curve_attr).is_some()
+                || y_kf.and_then(keyframe_curve_attr).is_some();
+            if has_curve {
+                kf_elem.push_attribute(("curve", "smooth"));
+            }
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2855,6 +2875,10 @@ fn write_transform_keyframe_params(
                 ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
             ));
             kf_elem.push_attribute(("value", format!("{} {}", kf.value, kf.value).as_str()));
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2883,6 +2907,10 @@ fn write_transform_keyframe_params(
                 ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
             ));
             kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2925,6 +2953,9 @@ fn write_opacity_keyframe_params(
         ));
         kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
         kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+        if let Some(curve) = keyframe_curve_attr(kf) {
+            kf_elem.push_attribute(("curve", curve));
+        }
         writer.write_event(Event::Empty(kf_elem))?;
     }
 
@@ -2972,6 +3003,9 @@ fn write_volume_keyframe_params(
         // FCP ignores interp on volume param keyframes — omit in strict mode.
         if !strict {
             kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
         }
         writer.write_event(Event::Empty(kf_elem))?;
     }
@@ -3022,6 +3056,9 @@ fn write_pan_keyframe_params(
         // FCP ignores interp on pan param keyframes — omit in strict mode.
         if !strict {
             kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
         }
         writer.write_event(Event::Empty(kf_elem))?;
     }
@@ -4628,6 +4665,48 @@ mod tests {
         assert!(
             xml.contains("us:crop-left-keyframes="),
             "missing vendor crop keyframes"
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_strict_emits_native_curve_for_custom_bezier_keyframes() {
+        use crate::model::clip::{
+            BezierControls, Clip, ClipKind, KeyframeInterpolation, NumericKeyframe,
+        };
+        use crate::model::track::Track;
+
+        let mut project = Project::new("StrictBezierCurve");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/clip.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.scale_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::EaseOut,
+                bezier_controls: Some(BezierControls {
+                    x1: 0.10,
+                    y1: 0.05,
+                    x2: 0.72,
+                    y2: 0.95,
+                }),
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 1.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        assert!(!xml.contains("xmlns:us="), "strict export should omit vendor ns");
+        assert!(xml.contains("<param name=\"scale\""), "missing scale param");
+        assert!(
+            xml.contains("curve=\"smooth\""),
+            "strict keyframe should emit native curve attribute for custom tangents: {xml}"
         );
     }
 

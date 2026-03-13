@@ -1,4 +1,6 @@
-use crate::model::clip::{Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe};
+use crate::model::clip::{
+    BezierControls, Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe,
+};
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
 use anyhow::{anyhow, bail, Result};
@@ -1672,7 +1674,7 @@ fn apply_adjust_crop(
 /// Keyframe data parsed from native FCPXML `<param>/<keyframeAnimation>/<keyframe>` elements.
 #[derive(Default)]
 struct NativeKeyframeParams {
-    position_keyframes: Vec<(u64, f64, f64, KeyframeInterpolation)>, // (time_ns, fcpxml_x, fcpxml_y, interp)
+    position_keyframes: Vec<(u64, f64, f64, KeyframeInterpolation, Option<BezierControls>)>, // (time_ns, fcpxml_x, fcpxml_y, interp, bezier_controls)
     scale_keyframes: Vec<NumericKeyframe>,
     rotation_keyframes: Vec<NumericKeyframe>,
     opacity_keyframes: Vec<NumericKeyframe>,
@@ -1700,39 +1702,41 @@ fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeK
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "position" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some((x, y)) = parse_vec2(val_str) {
-                                result.position_keyframes.push((*time_ns, x, y, *interp));
+                                result
+                                    .position_keyframes
+                                    .push((*time_ns, x, y, *interp, *bezier_controls));
                             }
                         }
                     } else if param_name_lower == "scale" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some((sx, _sy)) = parse_vec2(val_str) {
                                 result.scale_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: sx,
                                     interpolation: *interp,
-                                    bezier_controls: None,
+                                    bezier_controls: *bezier_controls,
                                 });
                             } else if let Ok(s) = val_str.parse::<f64>() {
                                 result.scale_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: s,
                                     interpolation: *interp,
-                                    bezier_controls: None,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
                     } else if param_name_lower == "rotation" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Ok(r) = val_str.parse::<f64>() {
                                 result.rotation_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: r,
                                     interpolation: *interp,
-                                    bezier_controls: None,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1783,13 +1787,13 @@ fn parse_adjust_blend_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyfr
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "opacity" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Ok(v) = val_str.parse::<f64>() {
                                 result.opacity_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: v,
                                     interpolation: *interp,
-                                    bezier_controls: None,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1890,13 +1894,13 @@ fn parse_adjust_volume_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "volume" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some(linear) = parse_fcpxml_volume_amount(val_str) {
                                 result.volume_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: linear,
                                     interpolation: *interp,
-                                    bezier_controls: None,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1946,13 +1950,13 @@ fn parse_adjust_panner_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "pan" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some(pan) = parse_fcpxml_pan_amount(val_str) {
                                 result.pan_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: pan,
                                     interpolation: *interp,
-                                    bezier_controls: None,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1987,10 +1991,28 @@ fn parse_adjust_panner_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
 /// Parse the children of a `<param>` element, looking for `<keyframeAnimation>/<keyframe>`.
 /// Returns a vec of (time_ns, value_string, interpolation) tuples.
 /// Consumes events until the matching `</param>` End event.
+fn native_curve_to_bezier_controls(
+    interpolation: KeyframeInterpolation,
+    curve: Option<&str>,
+) -> Option<BezierControls> {
+    let curve = curve?;
+    if !curve.eq_ignore_ascii_case("smooth") {
+        return None;
+    }
+    let interpolation = if interpolation == KeyframeInterpolation::Linear {
+        KeyframeInterpolation::EaseInOut
+    } else {
+        interpolation
+    };
+    let (x1, y1, x2, y2) = interpolation.control_points();
+    Some(BezierControls { x1, y1, x2, y2 })
+}
+
 fn parse_keyframe_animation_children(
     reader: &mut Reader<&[u8]>,
-) -> Result<Vec<(u64, String, KeyframeInterpolation)>> {
-    let mut keyframes: Vec<(u64, String, KeyframeInterpolation)> = Vec::new();
+) -> Result<Vec<(u64, String, KeyframeInterpolation, Option<BezierControls>)>> {
+    let mut keyframes: Vec<(u64, String, KeyframeInterpolation, Option<BezierControls>)> =
+        Vec::new();
     let mut buf = Vec::new();
     let mut depth = 1usize; // already inside <param>
     let mut in_keyframe_animation = false;
@@ -2018,7 +2040,11 @@ fn parse_keyframe_animation_children(
                                 .get("interp")
                                 .map(|s| KeyframeInterpolation::from_fcpxml(s))
                                 .unwrap_or(KeyframeInterpolation::Linear);
-                            keyframes.push((time_ns, value_str.clone(), interp));
+                            let bezier_controls = native_curve_to_bezier_controls(
+                                interp,
+                                attrs.get("curve").map(|s| s.as_str()),
+                            );
+                            keyframes.push((time_ns, value_str.clone(), interp, bezier_controls));
                         }
                     }
                 }
@@ -2056,7 +2082,7 @@ fn apply_native_transform_keyframes(
     if !ctx.has_us_position_keyframes && !params.position_keyframes.is_empty() {
         let mut x_kfs = Vec::new();
         let mut y_kfs = Vec::new();
-        for &(time_ns, fcpxml_x, fcpxml_y, interp) in &params.position_keyframes {
+        for &(time_ns, fcpxml_x, fcpxml_y, interp, bezier_controls) in &params.position_keyframes {
             // For position conversion, we need the scale at this keyframe's time.
             // Use scale keyframes if present, otherwise static clip scale.
             // Note: params.scale_keyframes and time_ns are both in absolute source
@@ -2078,13 +2104,13 @@ fn apply_native_transform_keyframes(
                 time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: ix,
                 interpolation: interp,
-                bezier_controls: None,
+                bezier_controls,
             });
             y_kfs.push(NumericKeyframe {
                 time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: iy,
                 interpolation: interp,
-                bezier_controls: None,
+                bezier_controls,
             });
         }
         clip.position_x_keyframes = x_kfs;
@@ -4679,6 +4705,47 @@ mod tests {
         assert!((clip.scale_keyframes[0].value - 0.5).abs() < 0.001);
         assert_eq!(clip.scale_keyframes[1].time_ns, 5_000_000_000);
         assert!((clip.scale_keyframes[1].value - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_native_fcp_curve_smooth_sets_bezier_controls() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="FCP Smooth Curve">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform>
+            <param name="scale">
+              <keyframeAnimation>
+                <keyframe time="0s" value="1.0 1.0" interp="easeOut" curve="smooth"/>
+                <keyframe time="5s" value="2.0 2.0" interp="linear"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-transform>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.scale_keyframes.len(), 2);
+        let first = &clip.scale_keyframes[0];
+        assert_eq!(first.interpolation, KeyframeInterpolation::EaseOut);
+        let bezier = first
+            .bezier_controls
+            .as_ref()
+            .expect("curve=smooth should map to bezier controls");
+        assert!((bezier.x1 - 0.0).abs() < 1e-9);
+        assert!((bezier.y1 - 0.0).abs() < 1e-9);
+        assert!((bezier.x2 - 0.58).abs() < 1e-9);
+        assert!((bezier.y2 - 1.0).abs() < 1e-9);
     }
 
     #[test]
