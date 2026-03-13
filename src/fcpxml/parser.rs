@@ -1679,7 +1679,7 @@ struct NativeKeyframeParams {
 }
 
 /// Parse children of an `<adjust-transform>` Start element until its matching End.
-/// Extracts `<param name="position">` and `<param name="Scale">` keyframes;
+/// Extracts `<param name="position">` and `<param name="scale">` keyframes;
 /// collects other children as unknown fragments for round-trip preservation.
 fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyframeParams> {
     let mut result = NativeKeyframeParams::default();
@@ -2050,6 +2050,8 @@ fn apply_native_transform_keyframes(
         for &(time_ns, fcpxml_x, fcpxml_y, interp) in &params.position_keyframes {
             // For position conversion, we need the scale at this keyframe's time.
             // Use scale keyframes if present, otherwise static clip scale.
+            // Note: params.scale_keyframes and time_ns are both in absolute source
+            // time, so the evaluation is correct before we convert to clip-local.
             let scale_at_time = if !params.scale_keyframes.is_empty() {
                 Clip::evaluate_keyframed_value(&params.scale_keyframes, time_ns, clip.scale)
             } else {
@@ -2062,13 +2064,14 @@ fn apply_native_transform_keyframes(
                 project_height,
                 scale_at_time,
             );
+            // Convert absolute source time to clip-local time
             x_kfs.push(NumericKeyframe {
-                time_ns,
+                time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: ix,
                 interpolation: interp,
             });
             y_kfs.push(NumericKeyframe {
-                time_ns,
+                time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: iy,
                 interpolation: interp,
             });
@@ -2078,16 +2081,33 @@ fn apply_native_transform_keyframes(
     }
 
     // Scale keyframes: only if no us:scale-keyframes
+    // Convert absolute source time to clip-local time
     if !ctx.has_us_scale_keyframes && !params.scale_keyframes.is_empty() {
-        clip.scale_keyframes = params.scale_keyframes.clone();
+        clip.scale_keyframes = params
+            .scale_keyframes
+            .iter()
+            .map(|kf| NumericKeyframe {
+                time_ns: kf.time_ns.saturating_sub(ctx.raw_source_start_ns),
+                ..*kf
+            })
+            .collect();
     }
     // Rotation keyframes: only if no us:rotate-keyframes
+    // Convert absolute source time to clip-local time
     if !ctx.has_us_rotate_keyframes && !params.rotation_keyframes.is_empty() {
-        clip.rotate_keyframes = params.rotation_keyframes.clone();
+        clip.rotate_keyframes = params
+            .rotation_keyframes
+            .iter()
+            .map(|kf| NumericKeyframe {
+                time_ns: kf.time_ns.saturating_sub(ctx.raw_source_start_ns),
+                ..*kf
+            })
+            .collect();
     }
 }
 
 /// Apply native opacity keyframes from adjust-blend/adjust-compositing.
+/// FCP keyframe times are in absolute source time; convert to clip-local.
 fn apply_native_opacity_keyframes(
     params: &NativeKeyframeParams,
     ctx: &ActiveClipContext,
@@ -2097,7 +2117,14 @@ fn apply_native_opacity_keyframes(
         return;
     }
     if let Some(clip) = current_clip_mut(track_map, Some(ctx)) {
-        clip.opacity_keyframes = params.opacity_keyframes.clone();
+        clip.opacity_keyframes = params
+            .opacity_keyframes
+            .iter()
+            .map(|kf| NumericKeyframe {
+                time_ns: kf.time_ns.saturating_sub(ctx.raw_source_start_ns),
+                ..*kf
+            })
+            .collect();
     }
 }
 
@@ -2116,7 +2143,7 @@ fn apply_native_volume_keyframes(
             .volume_keyframes
             .iter()
             .map(|kf| NumericKeyframe {
-                time_ns: kf.time_ns.saturating_sub(ctx.source_in),
+                time_ns: kf.time_ns.saturating_sub(ctx.raw_source_start_ns),
                 ..*kf
             })
             .collect();
@@ -2136,7 +2163,7 @@ fn apply_native_pan_keyframes(
             .pan_keyframes
             .iter()
             .map(|kf| NumericKeyframe {
-                time_ns: kf.time_ns.saturating_sub(ctx.source_in),
+                time_ns: kf.time_ns.saturating_sub(ctx.raw_source_start_ns),
                 ..*kf
             })
             .collect();
@@ -4641,6 +4668,103 @@ mod tests {
         assert!((clip.scale_keyframes[0].value - 0.5).abs() < 0.001);
         assert_eq!(clip.scale_keyframes[1].time_ns, 5_000_000_000);
         assert!((clip.scale_keyframes[1].value - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_native_fcp_transform_keyframes_with_offset() {
+        // When start != "0s", keyframe times in FCPXML are absolute source-media
+        // times. The parser must subtract source_in to produce clip-local times.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1001/24000s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" start="1000000/24000s" duration="1200000/24000s"/>
+  </resources>
+  <project name="FCP Offset">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="1000000/24000s" duration="100100/24000s">
+          <adjust-transform>
+            <param name="position">
+              <keyframeAnimation>
+                <keyframe time="1000000/24000s" value="100 50"/>
+                <keyframe time="1050000/24000s" value="200 100"/>
+              </keyframeAnimation>
+            </param>
+            <param name="scale">
+              <keyframeAnimation>
+                <keyframe time="1000000/24000s" value="0.5 0.5"/>
+                <keyframe time="1050000/24000s" value="1.5 1.5"/>
+              </keyframeAnimation>
+            </param>
+            <param name="rotation">
+              <keyframeAnimation>
+                <keyframe time="1000000/24000s" value="0"/>
+                <keyframe time="1050000/24000s" value="45"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-transform>
+          <adjust-compositing>
+            <param name="amount">
+              <keyframeAnimation>
+                <keyframe time="1000000/24000s" value="1.0" interp="linear"/>
+                <keyframe time="1050000/24000s" value="0.5" interp="linear"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-compositing>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+
+        // source_in = 1000000/24000s. Keyframes at 1000000 and 1050000.
+        // Clip-local times should be 0/24000s and 50000/24000s.
+        let source_in_ns = 1_000_000u64 * 1_000_000_000 / 24_000;
+        let expected_offset_ns = 50_000u64 * 1_000_000_000 / 24_000;
+
+        // Scale keyframes: clip-local times
+        assert_eq!(clip.scale_keyframes.len(), 2);
+        assert!(
+            clip.scale_keyframes[0].time_ns <= 1,
+            "first scale kf should be at ~0, got {}",
+            clip.scale_keyframes[0].time_ns
+        );
+        let delta = clip.scale_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        assert!(
+            delta <= 1,
+            "second scale kf off by {delta}ns (expected ~{expected_offset_ns})"
+        );
+
+        // Rotation keyframes: clip-local times
+        assert_eq!(clip.rotate_keyframes.len(), 2);
+        assert!(clip.rotate_keyframes[0].time_ns <= 1);
+        let delta = clip.rotate_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        assert!(delta <= 1, "second rotation kf off by {delta}ns");
+
+        // Position keyframes: clip-local times
+        assert_eq!(clip.position_x_keyframes.len(), 2);
+        assert!(clip.position_x_keyframes[0].time_ns <= 1);
+        let delta = clip.position_x_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        assert!(delta <= 1, "second position_x kf off by {delta}ns");
+
+        // Opacity keyframes: clip-local times
+        assert_eq!(clip.opacity_keyframes.len(), 2);
+        assert!(clip.opacity_keyframes[0].time_ns <= 1);
+        let delta = clip.opacity_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        assert!(delta <= 1, "second opacity kf off by {delta}ns");
+
+        // Verify all keyframe times are < source_in (i.e. clip-local, not absolute)
+        for kf in &clip.scale_keyframes {
+            assert!(
+                kf.time_ns < source_in_ns,
+                "scale kf time {} should be clip-local, not absolute source time",
+                kf.time_ns
+            );
+        }
     }
 
     #[test]
