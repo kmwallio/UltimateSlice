@@ -12,6 +12,7 @@
 | `Ctrl+O` | Open project XML (`.uspxml` / `.fcpxml`) |
 | `Ctrl+S` | Save project XML (default `.uspxml`) |
 | `Ctrl+,` | Open Preferences |
+| `Ctrl+J` | Go to timecode (jump playhead) |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 
@@ -47,6 +48,8 @@
 | `E` | Toggle Roll edit tool |
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
+| `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
+| `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
 | `Escape` | Switch to Select tool |
@@ -66,6 +69,7 @@
 | `Ctrl+A` | Select all timeline clips |
 | Drag in empty timeline body | Marquee-select clips intersecting the rectangle |
 | `M` | Add chapter marker at playhead |
+| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync when applicable) |
 | `Right-click ruler` | Remove nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |
 | `Scroll (vertical)` | Zoom timeline in/out |

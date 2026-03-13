@@ -39,11 +39,16 @@ The **Source Monitor** previews individual library clips before they are added t
 
 The selected region is highlighted in the scrubber bar.
 
+When dragging the green/orange In/Out markers directly on the scrubber, Source Monitor now seeks to the marker position continuously so the preview frame follows the marker being moved.
+
 ## Scrubbing
 
 - Click anywhere on the scrubber to jump to that position.
 - Click and drag to scrub continuously.
 - Repeated scrubs that land on the same frame are deduplicated internally to avoid redundant decoder seeks.
+- If playback is active, scrubber drags temporarily pause playback and resume on release, with the final dragged frame always applied on release.
+- On macOS, live frame seeks during scrubber and marker drags are deferred to drag release as a stability safeguard.
+- FLUSH seeks are automatically deferred when the pipeline has an async state transition in progress (e.g. preroll), preventing a GStreamer qtdemux race condition.
 
 ## Source Playback Priority
 
@@ -55,9 +60,13 @@ Source seek behavior can be tuned in **Preferences → Playback → Source monit
 
 After setting In/Out points, click **Append to Timeline** to add the marked range to the timeline. The button auto-detects whether the source is audio-only or contains video.
 
+Dragging directly from the Source Monitor video display also exports the current source selection to timeline drop targets. Accidental drops back onto the Source Monitor itself are ignored as a no-op.
+
 - Audio-only sources append to a matching audio track.
 - Sources with video only append to a matching video track.
-- Sources with both video and audio now append as a **linked A/V pair** when matching video and audio tracks exist. UltimateSlice places the picture on the chosen video track, the sound on the chosen audio track, and links the two clips automatically so selection/move/delete operations stay synchronized.
+- For sources with both video and audio, **Source Monitor A/V auto-link** is configurable:
+  - **Enabled**: append creates a linked A/V pair when matching video and audio tracks exist. UltimateSlice places picture on video, sound on audio, links the clips automatically, and mutes the video clip's embedded audio while the linked audio-track peer exists.
+  - **Disabled**: append uses single-clip placement behavior.
 
 If an active track of the matching kind is highlighted in the timeline, that track is preferred; otherwise UltimateSlice falls back to the first matching track of that kind.
 
@@ -68,9 +77,12 @@ In addition to Append, the Source Monitor provides two 3-point editing operation
 - **⤵ Insert** (or press `,`): Places the marked source range at the current playhead position on the timeline. All clips at or after the playhead are shifted right to make room — a ripple insert.
 - **⏺ Overwrite** (or press `.`): Places the marked source range at the current playhead position, replacing any existing timeline material in the time range. Overlapping clips are trimmed, split, or removed as needed.
 
-For eligible sources with both video and audio streams, Insert and Overwrite also create a linked A/V pair across matching video and audio tracks instead of placing only a single clip.
+For eligible sources with both video and audio streams, Insert and Overwrite follow the same optional Source Monitor A/V auto-link behavior:
 
-Both operations target the active track (if its kind matches), or fall back to the first matching track of each required kind. Both support full undo/redo.
+- **Enabled**: creates a linked A/V pair across matching video and audio tracks, and mutes the video clip's embedded audio while the linked audio-track peer exists.
+- **Disabled**: uses single-clip placement behavior.
+
+Both operations target the active track (if its kind matches), or fall back to the first matching track of each required kind. If only one required track kind is available, UltimateSlice falls back to placing a single clip on that available track kind. If no compatible track exists, the operation is skipped. Both support full undo/redo.
 
 ## Closing the Source Monitor
 
@@ -80,11 +92,11 @@ Both operations target the active track (if its kind matches), or fall back to t
 
 ## Proxy Preview
 
-When a proxy file exists for the selected media (see [Preferences → Proxy Preview](preferences.md)), the Source Monitor automatically loads the proxy instead of the full-resolution original. If no proxy exists yet, a proxy transcode is requested in the background; once it completes, the player reloads with the proxy automatically. This ensures smooth preview playback even with high-resolution footage (e.g. 5.3K GoPro HEVC) without any manual steps.
+When Proxy mode is enabled (`Half Res` or `Quarter Res`), the Source Monitor automatically loads an available proxy for the selected media instead of the full-resolution original. If no proxy exists yet, a proxy transcode is requested in the background and Source Monitor continues using original media until the proxy is ready.
 
-When global Proxy mode is **Off**, Source Monitor proxy scale now adapts to panel size:
-- smaller Source Monitor area → prefers **Quarter** proxy
-- larger Source Monitor area → prefers **Half** proxy
+If a selected proxy URI later fails to load/decode, Source Monitor automatically retries once with the original media URI.
+
+When global Proxy mode is **Off**, the Source Monitor stays on original media and does not request proxy transcodes.
 
 ## Adaptive Quality
 
@@ -97,3 +109,5 @@ During active Source Monitor playback, UltimateSlice prioritizes smooth visual m
 ## Hardware Decode Detection and Fallback
 
 When **Enable hardware acceleration** is on, the Source Monitor now checks for available VA-API decoders and prefers a hardware-fast decode path when possible. If the hardware path fails on a given clip (for example due to format negotiation/DMABuf issues), UltimateSlice automatically falls back to the software decode path for that clip and continues playback.
+
+On macOS, Source Monitor's software-filtered mode deprioritizes VideoToolbox decoder elements for stability during heavy seek/scrub interactions.

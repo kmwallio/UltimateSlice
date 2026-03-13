@@ -12,9 +12,11 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     ListTracks {
+        compact: bool,
         reply: SyncSender<Value>,
     },
     ListClips {
+        compact: bool,
         reply: SyncSender<Value>,
     },
     GetTimelineSettings {
@@ -23,8 +25,21 @@ pub enum McpCommand {
     GetPlayheadPosition {
         reply: SyncSender<Value>,
     },
+    GetPerformanceSnapshot {
+        reply: SyncSender<Value>,
+    },
     SetMagneticMode {
         enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetTrackSolo {
+        track_id: String,
+        solo: bool,
+        reply: SyncSender<Value>,
+    },
+    SetTrackHeightPreset {
+        track_id: String,
+        height_preset: String,
         reply: SyncSender<Value>,
     },
     CloseSourcePreview {
@@ -102,6 +117,19 @@ pub enum McpCommand {
         shadows: f64,
         midtones: f64,
         highlights: f64,
+        exposure: f64,
+        black_point: f64,
+        highlights_warmth: f64,
+        highlights_tint: f64,
+        midtones_warmth: f64,
+        midtones_tint: f64,
+        shadows_warmth: f64,
+        shadows_tint: f64,
+        reply: SyncSender<Value>,
+    },
+    SetClipColorLabel {
+        clip_id: String,
+        color_label: String,
         reply: SyncSender<Value>,
     },
     SetClipChromaKey {
@@ -127,6 +155,10 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     SaveFcpxml {
+        path: String,
+        reply: SyncSender<Value>,
+    },
+    SaveProjectWithMedia {
         path: String,
         reply: SyncSender<Value>,
     },
@@ -198,6 +230,20 @@ pub enum McpCommand {
         opacity: f64,
         reply: SyncSender<Value>,
     },
+    SetClipKeyframe {
+        clip_id: String,
+        property: String,
+        timeline_pos_ns: Option<u64>,
+        value: f64,
+        interpolation: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    RemoveClipKeyframe {
+        clip_id: String,
+        property: String,
+        timeline_pos_ns: Option<u64>,
+        reply: SyncSender<Value>,
+    },
     SlipClip {
         clip_id: String,
         delta_ns: i64,
@@ -240,6 +286,12 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    ExportTimelineSnapshot {
+        path: String,
+        width: u32,
+        height: u32,
+        reply: SyncSender<Value>,
+    },
     Play {
         reply: SyncSender<Value>,
     },
@@ -254,6 +306,7 @@ pub enum McpCommand {
         source_in_ns: u64,
         source_out_ns: u64,
         track_index: Option<usize>,
+        timeline_pos_ns: Option<u64>,
         reply: SyncSender<Value>,
     },
     OverwriteClip {
@@ -261,6 +314,7 @@ pub enum McpCommand {
         source_in_ns: u64,
         source_out_ns: u64,
         track_index: Option<usize>,
+        timeline_pos_ns: Option<u64>,
         reply: SyncSender<Value>,
     },
     TakeScreenshot {

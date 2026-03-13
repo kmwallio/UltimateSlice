@@ -7,7 +7,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 - **Ruler** — shows time positions with adaptive major/mid/minor tick marks; higher zoom levels add more marks and intermediate labels, while lower zoom levels reduce clutter. Click to seek the playhead.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
-- **Track header** — shows the track name and a compact per-track stereo level meter (L/R) on the right.
+- **Track header** — shows the track name, a per-track **S** solo badge, and a compact per-track stereo level meter (L/R) on the right.
 - **Status bar** — bottom-left includes a **Track Audio Levels** eye toggle to show/hide track-header meters. Proxy queue label/progress appear only while proxies are actively generating.
 
 ## Navigation
@@ -15,6 +15,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 | Action | How |
 |---|---|
 | Seek | Click on the ruler or left-drag in the ruler |
+| Jump to exact timecode | `Ctrl+J` then enter `HH:MM:SS:FF` |
 | Zoom in/out | Scroll the mouse wheel vertically |
 | Pan left/right | Scroll the mouse wheel horizontally |
 | Pan ruler view | Middle/right-drag in the ruler |
@@ -69,18 +70,20 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ### Insert at Playhead (`,`)
 
-- Places the current source selection (In → Out from the source monitor) at the playhead position on the active track.
+- Places the current source selection (In → Out from the source monitor) at the playhead position, preferring the active track when kinds match.
 - All clips at or after the playhead are **shifted right** to make room — a ripple insert.
+- For sources with both video and audio, **Source Monitor A/V auto-link** controls behavior: **enabled** inserts a linked A/V pair when matching video+audio tracks exist (with embedded audio on the video clip muted), while **disabled** uses single-clip placement on a compatible track kind.
 - Also available via the **⤵ Insert** button in the source monitor transport bar.
-- Requires a source to be loaded with valid in/out marks.
+- Requires a source to be loaded with valid in/out marks; if no compatible track exists, the operation is skipped.
 
 ### Overwrite at Playhead (`.`)
 
-- Places the current source selection at the playhead position, **replacing** any existing material in the time range.
+- Places the current source selection at the playhead position, **replacing** any existing material in the time range and preferring the active track when kinds match.
 - Clips that fall within the overwrite range are trimmed, split, or removed as needed.
+- For sources with both video and audio, **Source Monitor A/V auto-link** controls behavior: **enabled** overwrites with a linked A/V pair when matching video+audio tracks exist (with embedded audio on the video clip muted), while **disabled** uses single-clip placement on a compatible track kind.
 - No subsequent clips are shifted — the timeline duration only changes if you overwrite past the end.
 - Also available via the **⏺ Overwrite** button in the source monitor transport bar.
-- Requires a source to be loaded with valid in/out marks.
+- Requires a source to be loaded with valid in/out marks; if no compatible track exists, the operation is skipped.
 
 ### Timeline Copy/Paste (`Ctrl+C`, `Ctrl+V`, `Ctrl+Shift+V`)
 
@@ -88,6 +91,34 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Paste insert (`Ctrl+V`)** inserts the copied clip at the current playhead and shifts clips at/after the playhead to the right on the target track.
 - **Paste attributes (`Ctrl+Shift+V`)** applies copied clip attributes (color/effects/audio/transform/title settings) onto the currently selected clip.
 - Copy/paste currently operates on a single selected clip.
+
+### Freeze Frame (`Shift+F`)
+
+- Select a **video** clip and position the playhead on that clip, then press **Shift+F**.
+- UltimateSlice opens a hold-duration prompt and creates a new freeze-frame clip at the playhead on the same track.
+- The new freeze clip is **video-only and silent** by default, and stores freeze metadata for save/load/export pipelines.
+- If the playhead is inside the selected clip, the source clip is split and downstream material on **all tracks** is rippled right to make room.
+- On non-selected tracks, clips that overlap the playhead are split at the playhead; only their right segment is shifted.
+- Also available via right-click clip context menu (**Create Freeze Frame…**) and the timeline track toolbar button (**❄ Freeze Frame…**).
+
+### Join Through Edit (`Ctrl+Shift+B`)
+
+- Select one side of a join-safe through-edit cut (or select both clips), then press **Ctrl+Shift+B`.
+- UltimateSlice merges the two adjacent segments back into a single clip when the boundary is through-edit-safe and clip metadata/effect settings are compatible.
+- The merged clip keeps the left segment identity/timing and carries forward the right segment's outgoing transition metadata (if any).
+- Join Through Edit is unavailable when metadata/effect settings have diverged between the two segments or when the selection resolves to multiple candidate boundaries.
+- Also available from the right-click clip context menu as **Join Through Edit**.
+
+## Image Clips
+
+Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeline like video clips.
+
+- **Default duration**: Images are imported with a **4-second** default duration.
+- **Placement**: Images are always placed on a **Video track** as `ClipKind::Image`. No linked audio clip is created.
+- **Extending duration**: Drag the right edge (trim-out handle) of an image clip to extend it to any length — there is no upper limit.
+- **Shortening duration**: Drag the right edge inward to shorten the clip.
+- **Color/effects**: All color correction, grading, LUT, transform, title, and chroma key controls work on image clips, just as they do on video clips.
+- **Export**: Image clips are exported with the correct duration using the FFmpeg `tpad` hold filter, consistent with freeze-frame video clips.
 
 ### Multi-Select (staged rollout)
 
@@ -138,14 +169,14 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
 
-- Appending, inserting, overwriting, dragging, or MCP-placing a source that contains both video and audio now auto-creates a linked A/V pair when matching video and audio tracks exist.
+- Dragging or MCP-placing a source that contains both video and audio auto-creates a linked A/V pair when matching video and audio tracks exist. Source Monitor Append/Insert/Overwrite do the same only when Source Monitor A/V auto-link is enabled; when disabled, those operations use single-clip placement behavior.
 - Auto-linked pairs share the same clip link group immediately, so the picture and sound stay selected/moved/deleted together without requiring a manual `Ctrl+L`.
 - While a linked same-source audio-track peer exists, UltimateSlice suppresses the duplicate embedded audio from the linked video-track clip to avoid doubled playback/export audio. Unlinking restores the video clip's own embedded audio automatically.
 - **Link (`Ctrl+L`)** assigns the current multi-selection to a shared clip link group.
 - **Unlink (`Ctrl+Shift+L`)** clears linking for the selected linked clip(s) and any linked peers in the same link group.
 - Linked clips are selected together, move together when dragging any linked member, and delete together for both normal delete and ripple delete.
 - Link behavior is intentionally narrower than clip grouping: trims remain independent in this first pass.
-- Right-clicking a selected clip now opens a clip context menu with **Link Selected Clips** and **Unlink Selected Clips** actions so link editing is available without remembering the shortcuts.
+- Right-clicking a selected clip opens a context menu that only shows currently actionable clip operations (for example Link/Unlink when applicable), so link editing is available without extra disabled entries.
 - Linked clips show a **LINK** badge in the timeline so linked relationships stay visible even when nothing is selected.
 - When a linked selection spans multiple clips, non-primary linked peers also get a cyan inset border so they stay visually distinct from the primary selected clip.
 
@@ -159,6 +190,9 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `E` | Toggle Roll edit tool |
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
+| `S` | Toggle solo for selected track |
+| `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
+| `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (from source monitor) |
 | `.` | Overwrite at playhead (from source monitor) |
 | `Escape` | Switch to Select tool |
@@ -166,6 +200,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
 | `Ctrl+Shift+→` | Select clips forward from playhead |
 | `Ctrl+Shift+←` | Select clips backward from playhead |
+| `Ctrl+J` | Go to timecode (jump playhead) |
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
@@ -173,7 +208,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
-| `Right-click clip` | Open clip context menu with link/unlink, grouped timecode-align, and audio sync actions |
+| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync when applicable) |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |
@@ -186,6 +221,9 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 | `Scroll (vertical)` | Zoom timeline |
 | `Scroll (horizontal)` | Pan timeline |
 | `?` / `/` | Show in-app keyboard shortcut reference |
+| `Alt+Left` | Jump playhead to previous keyframe of selected clip |
+| `Alt+Right` | Jump playhead to next keyframe of selected clip |
+| `Shift+K` | Toggle animation mode (Record Keyframes) |
 
 ## Chapter Markers
 
@@ -201,8 +239,10 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - **Remove Track** removes the currently active (highlighted) track, or the last track if none is selected. At least one track is always kept.
 - **Reorder tracks** by dragging a track's label vertically; a blue indicator line shows the drop target. Release to confirm.
 - **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a blue accent bar on its label. The active track is used as the target for the Append button and the Remove Track button.
+- **Track height presets** — right-click a track header and choose **Track Height: Small / Medium / Large** to resize that track row independently.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Muting an audio track excludes it from both preview and export.
+- **Solo track** — click the **S** badge on a track header (or press **S** with that track active) to solo it. When one or more tracks are soloed, only soloed non-muted tracks are active for Program Monitor playback and export.
 
 ## Automatic Audio Crossfades
 
@@ -238,7 +278,11 @@ The undo history is per-session (not persisted in the FCPXML).
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
+- Clips with phase-1 keyframes show color-coded keyframe ticks/guides on the clip body (Scale, Opacity, Position X, Position Y, Volume, Pan, Rotate, Crop Left/Right/Top/Bottom), a `KF <count>` badge, and a `◆` prefix in the clip label when keyframes are present. **Click a keyframe tick** to select the clip and jump the playhead to that keyframe time.
+- Hovering a keyframe marker shows a tooltip with the clip name, keyframe time, and which properties are modified at that keyframe moment.
+- Clips can use semantic color labels (set in the Inspector) for quick visual categorization.
 - Selected clips have a yellow highlight border.
+- Adjacent join-safe through-edits (same source with contiguous source/timeline ranges, no boundary transition, and compatible clip metadata/effects) are marked with a subtle dotted line at the cut on the track row.
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.
 - Linked clips show a `LINK` badge whenever they belong to a clip link group.
 - Non-primary linked peers in the current linked selection show a cyan inset border.

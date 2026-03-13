@@ -145,16 +145,17 @@ pub fn build_media_browser(
                 let cache = probe_cache.borrow();
                 let mut lib = library.borrow_mut();
                 for path in &resolved {
-                        if let Some(result) = cache.get(path) {
-                            if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
-                                item.duration_ns = result.duration_ns;
-                                item.is_audio_only = result.is_audio_only;
-                                item.has_audio = result.has_audio;
-                                if item.source_timecode_base_ns.is_none() {
-                                    item.source_timecode_base_ns = result.source_timecode_base_ns;
-                                }
+                    if let Some(result) = cache.get(path) {
+                        if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
+                            item.duration_ns = result.duration_ns;
+                            item.is_audio_only = result.is_audio_only;
+                            item.has_audio = result.has_audio;
+                            item.is_image = result.is_image;
+                            if item.source_timecode_base_ns.is_none() {
+                                item.source_timecode_base_ns = result.source_timecode_base_ns;
                             }
                         }
+                    }
                 }
                 if !flowbox_matches_library(&flow_box_paths.borrow(), &lib) {
                     rebuild_flowbox(&flow_box, &lib, &thumb_cache, &flow_box_paths);
@@ -390,37 +391,30 @@ fn make_grid_item(
     child
 }
 
-/// Quickly probe the duration of a media file using GStreamer discoverer.
-pub fn probe_duration(uri: &str) -> Option<u64> {
-    use gstreamer_pbutils::Discoverer;
-    gstreamer::init().ok()?;
-    let discoverer = Discoverer::new(gstreamer::ClockTime::from_seconds(5)).ok()?;
-    let info = discoverer.discover_uri(uri).ok()?;
-    info.duration().map(|d| d.nseconds())
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MediaProbeMetadata {
+    pub duration_ns: Option<u64>,
+    pub is_audio_only: bool,
+    pub has_audio: bool,
 }
 
-/// Returns `true` if the media file has no video streams (audio-only).
-pub fn probe_is_audio_only(uri: &str) -> bool {
-    probe_stream_flags(uri).0
-}
-
-/// Returns `true` if the media file has at least one audio stream.
-pub fn probe_has_audio(uri: &str) -> bool {
-    probe_stream_flags(uri).1
-}
-
-fn probe_stream_flags(uri: &str) -> (bool, bool) {
+/// Probe duration + stream characteristics in one Discoverer pass.
+pub fn probe_media_metadata(uri: &str) -> MediaProbeMetadata {
     use gstreamer_pbutils::Discoverer;
     let Ok(()) = gstreamer::init() else {
-        return (false, false);
+        return MediaProbeMetadata::default();
     };
     let Ok(discoverer) = Discoverer::new(gstreamer::ClockTime::from_seconds(5)) else {
-        return (false, false);
+        return MediaProbeMetadata::default();
     };
     let Ok(info) = discoverer.discover_uri(uri) else {
-        return (false, false);
+        return MediaProbeMetadata::default();
     };
-    (info.video_streams().is_empty(), !info.audio_streams().is_empty())
+    MediaProbeMetadata {
+        duration_ns: info.duration().map(|d| d.nseconds()),
+        is_audio_only: info.video_streams().is_empty(),
+        has_audio: !info.audio_streams().is_empty(),
+    }
 }
 
 fn flowbox_matches_library(current_paths: &[String], lib: &[MediaItem]) -> bool {

@@ -25,9 +25,14 @@ pub fn build_timeline_panel(
     let btn_add_video = Button::with_label("＋ Video Track");
     let btn_add_audio = Button::with_label("＋ Audio Track");
     let btn_remove = Button::with_label("✕ Remove Track");
+    let btn_freeze = Button::with_label("❄ Freeze Frame…");
     btn_add_video.add_css_class("small-btn");
     btn_add_audio.add_css_class("small-btn");
     btn_remove.add_css_class("small-btn");
+    btn_freeze.add_css_class("small-btn");
+    btn_freeze.set_tooltip_text(Some(
+        "Create freeze frame from selected clip at playhead (Shift+F)",
+    ));
 
     {
         let state = state.clone();
@@ -81,6 +86,13 @@ pub fn build_timeline_panel(
     }
     {
         let state = state.clone();
+        let area = area.clone();
+        btn_freeze.connect_clicked(move |_| {
+            widget::open_freeze_frame_dialog(state.clone(), area.clone());
+        });
+    }
+    {
+        let state = state.clone();
         let on_project_changed = on_project_changed.clone();
         let area = area.clone();
         btn_remove.connect_clicked(move |_| {
@@ -116,6 +128,7 @@ pub fn build_timeline_panel(
 
     bar.append(&btn_add_video);
     bar.append(&btn_add_audio);
+    bar.append(&btn_freeze);
     bar.append(&btn_remove);
     vbox.append(&bar);
 

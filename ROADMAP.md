@@ -32,6 +32,7 @@ Tracking docs:
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
+- [x] Still-image detection by extension (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) with 4-second default duration
 - [x] GStreamer Discoverer probes duration and source timecode on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
 - [x] Thumbnails auto-refresh when extraction completes (debounced batch redraw) without requiring manual panel/window redraw
@@ -51,7 +52,7 @@ Tracking docs:
 - [x] Play/Pause (Space), Stop transport buttons
 - [x] Timecode label (`position / duration`)
 - [x] Playback-only drop-late smoothness policy for source monitor (aggressive while playing, conservative while paused/stopped)
-- [x] Adaptive source-proxy scale when proxy mode is Off (Quarter for small source monitor sizes, Half for larger)
+- [x] Strict source preview behavior when proxy mode is Off (always load original media; no proxy requests)
 - [x] Adaptive VA-API source decode mode (hardware-first when available and enabled) with automatic software fallback on hardware-path errors
 - [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
 
@@ -73,6 +74,7 @@ Tracking docs:
 - [x] **Delete** — Delete/Backspace removes selected clip
 - [x] **Play/Pause** — Space bar toggles player
 - [x] Tool indicator overlay (Razor mode)
+- [x] **Image clips** — still images (PNG, JPEG, etc.) placed as `ClipKind::Image` with 4 s default, unlimited trim-out, `imagefreeze` playback, and `tpad`-based export
 
 ### Undo / Redo System
 - [x] `EditCommand` trait with `execute` / `undo` / `description`
@@ -89,6 +91,7 @@ Tracking docs:
 - [x] Recent projects menu limits to 10 entries and omits missing files
 - [x] Undo / Redo buttons
 - [x] Select / Razor tool toggle buttons
+- [x] Export Project with Media action in **Export ▼** menu (`Export Project with Media…`) that writes XML plus colocated `ProjectName.Library` packaged media
 
 ### Append to Timeline
 - [x] "Append to Timeline" button in media browser
@@ -101,6 +104,13 @@ Tracking docs:
 - [x] Progress estimate based on ffmpeg `total_size` versus largest imported library file, capped to 99% until completion (100% only on successful finish)
 - [x] Audio from embedded video-clip streams and standalone audio-track clips included in export
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
+- [x] Extended grading parity bridge: export prefers FFmpeg frei0r (`coloradj_RGB`, `three_point_balance`) using the same calibrated mapping as Program Monitor preview, with automatic native-filter fallback when frei0r modules are unavailable
+- [x] Exposure parity alignment: export exposure now follows preview-calibrated brightness/contrast delta mapping to reduce preview/export mismatch on extreme values
+- [x] Primary static-control parity retune: export `brightness`/`contrast`/`saturation` now follows preview-calibrated mapping (plus calibrated contrast-brightness bias) for closer Program Monitor/export match on flat/high-contrast looks
+- [x] Tonal warmth/tint creative boost: highlights/midtones/shadows warmth+tint now use a non-linear response with stronger endpoint effect and gentle center control, while keeping preview/export mapping aligned
+- [x] Warmth slider direction consistency: midtones/highlights warmth now follow standard grading direction (left cooler, right warmer) in both preview and export
+- [x] Shadows warmth deep-shadow direction consistency: 3-point mapping now inverts shadows warmth in curve-space so slider direction remains conventional (left cooler, right warmer) in preview/export bridge
+- [x] Stronger shadows endpoint range: shadows warmth/tint endpoint gain increased to allow more pronounced blue/gold shadow looks near slider extremes while preserving directional semantics
 
 ### FCPXML
 - [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
@@ -121,6 +131,18 @@ Tracking docs:
 - [x] Shared MIME registration for UltimateSlice projects: ship `application/x-ultimateslice-project+xml` shared-mime-info definition with `*.uspxml` glob and install it in Flatpak package metadata
 - [x] Dirty imported transform edits prefer in-place XML patching (when `adjust-transform` exists), preserving original asset IDs/document structure instead of full regeneration
 - [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
+- [x] Export URI safety: writer now percent-encodes `media-rep@src` file paths (spaces/special characters) for standards-friendly `file://` references
+- [x] Packaged export external-drive path normalization: **Export Project with Media** rewrites Linux external mount roots (`/media`, `/run/media`, `/mnt`) to `/Volumes/<drive>/...` in saved XML for cross-platform portability
+- [x] Strict packaged-export FCPXML mode: **Export Project with Media** now emits DTD-safe XML (no `xmlns:us`/`us:*` attrs, no passthrough unknown attrs/children, DTD-friendly `adjust-blend` and structured `adjust-crop` with `crop-rect`)
+- [x] Extension-based strict-save routing: normal Save now uses strict compatibility writer for `.fcpxml` outputs while `.uspxml` retains feature-rich round-trip output
+- [x] Strict export DTD + multitrack hardening: strict writer now emits lane-based track mapping for multi-track fallback routing and enforces DTD asset-clip intrinsic ordering (video params before audio params), with strict-mode sequence-marker suppression for validator compliance
+- [x] Strict FCPXML connected clip nesting: connected clips (lane ≠ 0) are nested inside the primary storyline clip per FCPXML spec, fixing Final Cut Pro import assertion failures
+- [x] Native transition import/export parity (phase 1): parse native spine `<transition>` into clip transition fields and emit native `<transition>` between adjacent clips using mapped transition names/duration/offset
+- [x] Native `timeMap/timept` import/export parity (phase 1): parse 2-point constant retimes (speed/reverse/freeze) from native time maps and emit native time maps for constant speed/reverse/freeze clips
+- [x] Native `timeMap/timept` import/export parity (phase 2): support representable multi-point monotonic retimes (speed ramps) via speed keyframes, while preserving unsupported mixed-direction/partial-hold maps as passthrough
+- [x] Native `timeMap/timept` preservation hardening (phase 3): preserve and emit unsupported imported native timeMap fragments in timing-params order (including strict output) instead of replacing them with generated approximations
+- [x] Native `timeMap/timept` easing compatibility (phase 4): map `timept@interp` smooth modes to eased speed keyframes, emit `smooth2` for non-linear native retimes, and preserve `inTime`/`outTime` maps as passthrough
+- [x] Import fallback for spine `ref-clip` and `sync-clip`: parse `ref-clip@ref` via asset mapping and traverse `sync-clip`/nested `spine` containers to import nested clip items
 - [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
@@ -131,15 +153,36 @@ Tracking docs:
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
 - [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
+- [x] MCP performance profiling tool `get_performance_snapshot` (prerender queue/transition hit-rate/rebuild telemetry snapshot)
 - [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
 - [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
+- [x] MCP color parity calibration harness hardening: `tools/calibrate_mcp_color_match.py` now covers full clip color controls, uses repeated seek/settle stabilization + sample re-apply before export capture, and reports threshold-based pass/fail summaries
+- [x] MCP parity metrics normalization: calibration report now tracks absolute RMSE and delta-from-neutral pass metrics (`pass_absolute`, `pass_delta`, combined `pass`) plus per-slider delta summaries
+- [x] MCP parity low-loss export mode: calibration harness now supports preset-based ProRes/MOV capture (`--export-mode prores_mov`) to reduce compression artifacts during parity evaluation
+- [x] MCP parity smoke-check helper: `tools/mcp_parity_smoke_check.py` wraps low-sample calibration and enforces broad guardrails for normalized focus-slider regressions in automation/CI
+- [x] MCP parity smoke-check multi-media profile: `tools/mcp_parity_smoke_check.py` supports repeated `--media` inputs and writes aggregate cross-media pass/fail summaries (`smoke_aggregate_report.json`)
+- [x] MCP parity tint retune (frei0r bridge): export `coloradj_RGB` path now attenuates tint deltas for closer preview/export matching on chart and natural-footage sweeps
+- [x] MCP parity targeted slider sweeps: calibration/smoke tools now support `--sliders` so retune iterations can focus on selected high-residual controls
+- [x] MCP parity retry hardening: calibration/smoke tools now support median-attempt sample + neutral-baseline retries (`--sample-retries`, `--neutral-baseline-retries`) to reduce stale-frame outlier noise
+- [x] MCP parity LUT coverage: calibration/smoke tools now support `--lut-path` so parity sweeps can include clip-level `.cube` LUT processing in both preview and export
+- [x] MCP parity LUT/proxy correctness: calibration/smoke tools now support `--proxy-mode`, and LUT runs auto-switch to proxy-backed capture when proxy mode is Off
+- [x] MCP parity signed-bias telemetry: calibration reports now include signed per-channel bias (`export - preview`) for neutral/sample captures and slider-level mean signed-bias summaries for direction-aware fitting
+- [x] MCP parity baseline-vs-candidate comparator: `tools/compare_mcp_parity_reports.py` scores retune candidates and enforces endpoint regression guardrails for risky controls
+- [x] MCP parity multi-profile comparator: `tools/compare_mcp_parity_profiles.py` gates candidates across multiple baseline/candidate report pairs with per-profile + aggregate scoring
+- [x] MCP parity cool-side temperature harmonization hook: export coloradj bridge supports cool-side gain via `ProgramPlayer::export_temperature_parity_gain` with unity default + runtime override
+- [x] MCP parity retune-cycle wrapper: `tools/run_mcp_parity_retune_cycle.py` runs sweep + single-profile compare + multi-profile compare in one command, with optional profile weights and automatic temperature endpoint guardrails
+- [x] MCP parity gain optimizer: `tools/optimize_mcp_temperature_gain.py` sweeps export parity gain sets (temperature + optional tonal endpoint gains) via repeated retune-cycle runs and selects best aggregate-scoring candidate
+- [x] MCP parity gain runtime overrides: ProgramPlayer export parity supports bounded env overrides (`US_EXPORT_COOL_TEMP_GAIN`, `US_EXPORT_SHADOWS_POS_GAIN`, `US_EXPORT_MIDTONES_NEG_GAIN`, `US_EXPORT_HIGHLIGHTS_NEG_GAIN`) for automation loops
+- [x] MCP parity piecewise cool-temperature shaping: export parity now supports `US_EXPORT_COOL_TEMP_GAIN_FAR` + `US_EXPORT_COOL_TEMP_GAIN_NEAR` (with legacy fallback) for two-segment cool-range fitting
 - [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
 - [x] Local perf tooling scripts: `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py`
+- [x] MCP color parity calibration script: `tools/calibrate_mcp_color_match.py` (slider sweeps + preview/export RMSE report + frei0r cross-runtime probe)
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
 - [x] `select_library_item`, `source_play`, `source_pause` tools — select media in the library and control Source Monitor playback via MCP
+- [x] `save_project_with_media` tool — package-save the project (`.uspxml` + `ProjectName.Library` media copy with rewritten XML media paths)
 
 ---
 
@@ -150,7 +193,13 @@ Tracking docs:
 - [x] Close button to hide source preview and clear current source selection
 - [x] Frame-accurate jog/shuttle control
 - [x] Mark-in / Mark-out visible as timecodes in a dedicated bar
-- [x] Source preview auto-loads proxy files when available and requests proxy transcodes for high-resolution video
+- [x] Source preview uses proxies only when proxy mode is enabled; Off mode keeps original media without proxy requests
+- [x] Source preview proxy fallback parity: use original media until proxy file is ready, and retry once with original URI on proxy load/decode error
+- [x] Source preview seeks continuously to In/Out marker position while dragging markers on the scrubber
+- [x] Source preview drag safety: accidental self-drops are consumed as no-ops, and source playback pauses/resumes during source-clip drag operations to reduce crash-prone decode churn
+- [x] Source scrubber drag safety: playhead scrub drags pause/resume playback and force a final seek on drag release (with macOS deferring live drag seeks until release for crash resistance)
+- [x] Source preview macOS decode stability: software-filtered mode down-ranks `vtdec`/`vtdec_hw` to prefer non-VideoToolbox decode during source interactions
+- [x] Source scrubber macOS quiesce guard: re-preroll current URI before final scrub-release seek to reduce `qtdemux` crash frequency
 
 ### Timeline Improvements
 - [x] Time-mapped clip filmstrip thumbnails in video track rows (background GStreamer extraction via `ThumbnailCache`)
@@ -181,15 +230,24 @@ Tracking docs:
   - [x] Align grouped clips by audio or timecode
     - [x] Phase 1: Align grouped clips by stored timecode metadata
     - [x] Phase 2: Align grouped clips by audio (FFT cross-correlation via `rustfft`)
-- [ ] Audio/video linking (auto-link video and audio from same source)
+- [x] Audio/video linking (auto-link video and audio from same source)
   - [x] Manual clip linking / unlinking with synchronized selection, move, and delete behavior
   - [x] Auto-link same-source A/V clip creation on drag-and-drop
-  - [ ] Auto-link A/V for source monitor operations (Append/Insert/Overwrite) — reverted to single-clip placement; needs redesign to handle track targeting and edge cases before re-enabling
-- [ ] Solo track (play only selected tracks, complement to muted/locked)
-- [ ] Freeze frame (hold single frame for arbitrary duration)
-- [ ] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
+  - [x] Optional auto-link A/V mode for source monitor operations (Append/Insert/Overwrite): enabled creates linked pairs (with embedded video-track audio suppression while linked), disabled uses single-clip placement behavior; both retain single-kind fallback when only one matching track kind exists
+- [x] Solo track (play only selected tracks, complement to muted/locked)
+- [x] Freeze frame (hold single frame for arbitrary duration)
+  - [x] Persist freeze-frame clip model fields (enable/source/hold duration) with backward-compatible serialization and helper semantics
+  - [x] Add timeline UI command (keyboard/context/toolbar) to create undoable freeze-frame clips with configurable hold duration
+  - [x] Program Monitor freeze-frame playback: hold a single sampled source frame for resolved freeze duration (including transition/composite timing)
+  - [x] Program Monitor freeze-frame seek reliability: force accurate, non-key-unit decoder seeks for single-frame freeze windows so held-frame preview does not black out
+  - [x] Export freeze-frame parity: ffmpeg output now matches preview hold timing and treats freeze-frame video clips as silent (video-only)
+- [x] Through edit detection (dotted lines for contiguous same-source cuts, join-back)
+  - [x] Model-side detection for join-safe through-edit boundaries (same source, contiguous source/timeline ranges, compatible kind, transition-safe)
+  - [x] Timeline dotted boundary indicators
+  - [x] Join-back edit action
+- [x] Right-click clip context menu now shows only currently actionable clip operations (hides unavailable actions)
 - [x] Select clips forward/backward from playhead for bulk operations
-- [ ] Clip display options / adjustable per-track height, clip color labels
+- [x] Clip display options / adjustable per-track height, clip color labels
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
@@ -200,7 +258,13 @@ Tracking docs:
 - [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
 
 ### Keyframe Animation
-- [ ] Property keyframes with interpolation (position, scale, opacity, volume over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
+- [ ] Property keyframes with interpolation (position, scale, opacity, volume, pan over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
+  - [x] Phase 1 foundation: linear keyframes for position/scale/opacity/volume/pan across model, Inspector, Program Monitor preview, MCP, FCPXML round-trip, and export
+  - [x] Rotation/crop keyframe lane support: model/runtime + Program Monitor preview + export + MCP set/remove/list + FCPXML vendor/native rotation round-trip
+  - [x] Native FCPXML keyframe interop: parser reads FCP `<param>/<keyframeAnimation>/<keyframe>` elements; writer emits them alongside vendor attrs for bidirectional exchange with Final Cut Pro
+  - [x] Keyframe navigation (◀/▶ buttons, `Alt+Left`/`Alt+Right` shortcuts, timeline marker click-to-seek, ◆ indicator)
+  - [x] Animation mode: "Record Keyframes" toggle (`Shift+K`) auto-creates keyframes on transform drags and slider changes
+  - [x] Additional interpolation modes: EaseIn, EaseOut, EaseInOut with cubic bezier evaluation (preview), quadratic FFmpeg expressions (export), FCPXML `interp` attribute round-trip, Inspector dropdown, and MCP `interpolation` parameter
 - [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
 
 ### Program Monitor
@@ -223,8 +287,10 @@ Tracking docs:
   - [x] Move FCPXML project open (file I/O + XML parsing) to background thread with polling timer
   - [x] Move MCP `open_fcpxml` read/parse path off the GTK main thread and trim parser attribute-allocation overhead
   - [x] Reduce timeline thumbnail/waveform warm-up spikes via lower extraction concurrency and lighter thumbnail tile density
-  - [ ] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
+  - [x] Add short frame cache around playhead (previous/current/next frames) to reduce stutter on scrubbing and pause/seek
     - [x] Frame-boundary seek deduplication: quantize paused scrub positions to frame boundaries and skip redundant pipeline work for same-frame seeks
+    - [x] Add bounded previous/current/next paused-frame cache keyed by frame position + render signature, with robust invalidation on project/render-setting changes
+    - [x] Use short-frame cache hits to tighten paused in-place seek settle budgets, reducing scrub blocking while preserving accurate decoder seeks
    - [x] Introduce proxy preview mode (quarter/half resolution decode, full-res export) for large media
    - [x] Managed local proxy cache root (`$XDG_CACHE_HOME/ultimateslice/proxies`, fallback `/tmp/ultimateslice/proxies`) with fallback to alongside-media `UltimateSlice.cache` when local-cache transcodes fail
     - [x] Managed proxy cache lifecycle cleanup (startup stale prune for ownership-index entries older than 24h, plus project unload/app-close cleanup of managed cache files)
@@ -233,7 +299,7 @@ Tracking docs:
     - [x] Preserve full-frame fit at reduced preview quality (`Half` / `Quarter`) so the monitor downscales the composed frame instead of cropping to the top-left region
    - [x] Apply preview quality divisor to Program Monitor processing resolution (slot effects/compositor), reducing heavy-overlap playback cost when `Half`/`Quarter` preview is selected
     - [x] Add adaptive `Auto` preview quality mode that derives effective quality from current Program Monitor canvas size while preserving manual `Full/Half/Quarter`
-    - [x] Auto-enable proxy preview during heavy overlap (3+ active video tracks) when manual proxy mode is Off, with automatic disable when overlap drops
+    - [x] Respect strict Off proxy mode during heavy overlap (no automatic proxy-enable assist)
       - [x] Ensure paused timeline seek in compositor preview re-prerolls after decoder seek so Program Monitor/transform overlay frame refresh remains reliable while scrubbing
        - [x] Use accurate decoder seeks during playback boundary rebuilds (2→3 / 3→2 active-track transitions) so long-GOP proxies do not snap B-roll back to an earlier keyframe
        - [x] Reduce playback boundary handoff blocking by removing redundant paused-transition/state checks and shortening playback-path preroll waits for 3+ tracks
@@ -262,10 +328,23 @@ Tracking docs:
            - [x] Prerender promotion correctness: when prerender becomes ready mid-overlap, force full rebuild (bypass continue-decoder short-circuit) so prerender segment is actually consumed; add explicit unavailable/promote/used diagnostics
             - [x] Idle prerender warmup + shared status bar: when background prerender is enabled, schedule nearby prerender jobs while paused/stopped and surface progress in the existing proxy generation status bar
             - [x] Status-bar quick toggle for background prerender next to Track Audio Levels
-            - [x] Status-bar Background Render toggle icon state cues (process-stop/system-run for off/on)
-            - [x] Prerender-exit warmup: while a prerender slot is active, prewarm the immediate post-prerender boundary clip resources to reduce handoff stalls
-            - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
-          - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
+             - [x] Status-bar Background Render toggle icon state cues (process-stop/system-run for off/on)
+             - [x] Prerender-exit warmup: while a prerender slot is active, prewarm the immediate post-prerender boundary clip resources to reduce handoff stalls
+             - [x] Prewarm incoming boundary clip decoder/effects resources ahead of handoff (lightweight Ready/Null warm-up)
+             - [x] Adaptive transition prerender prewarm horizon: in Smooth mode, scan one extra upcoming boundary and farther lookahead for prerender scheduling, while limiting to baseline depth when prerender queue is already busy
+             - [x] Transition prerender telemetry counters: log per-transition prerender hit/miss outcomes to guide future prewarm/priority tuning
+             - [x] Transition prerender hit-rate auto-tune: when accumulated transition prerender hit rate is low (after minimum samples), temporarily expand Smooth-mode prewarm depth/lookahead while keeping busy-queue guardrails
+             - [x] Transition prerender overlap padding: add small frame padding around overlap boundaries (with incoming pre-overlap `tpad` hold) to reduce edge handoff misses at transition entry/exit
+             - [x] Transition-priority prewarm scheduling: when Smooth-mode queue budget is tight, prioritize worst hit-rate transition boundaries first so limited prewarm slots target highest-risk misses
+             - [x] Transition overlap audio-padding parity: delay incoming transition audio during prerender pre-padding so overlap audio starts at boundary (no early incoming bleed)
+             - [x] Distance-aware transition prewarm priority: blend transition risk and boundary proximity so queue-constrained prewarm still favors near-term boundaries while targeting high miss-risk transitions
+             - [x] Recency-weighted transition metrics: apply periodic decay to prerender hit/miss counters so scheduling reacts to current playback behavior
+             - [x] Priority-aware prerender queue admission: cap in-flight prerender queue depth and allow limited overflow only for meaningfully higher-priority requests
+             - [x] Prerender ready-cache pruning: bound cached ready segments and evict far-from-playhead entries first (while keeping active key) to reduce stale-cache churn
+             - [x] Prerender cache hit telemetry: track cache hit/miss counters and expose hit-rate in performance snapshot/logging for tighter tuning feedback
+             - [x] Prerender LUT guard for proxy-backed inputs: skip LUT re-application in prerender when source media is already proxy-backed/LUT-baked
+             - [x] Track meter continuity during prerender playback: map prerender level telemetry to active prerender tracks so per-track audio monitors stay visible
+           - [x] Adaptive rebuild wait budgets: scale preroll/arrival/link waits dynamically from a ring buffer of recent rebuild durations (tighter after fast rebuilds, conservative after slow ones)
           - [x] Audio pipeline continuity: skip audio_pipeline pause/resync at boundaries where only video tracks change
            - [x] Phase-level rebuild telemetry: per-phase timestamps in rebuild_pipeline_at
            - [x] Debounce duplicate playback boundary rebuild attempts (same desired clip set within ~120ms) to reduce transient rebuild thrash
@@ -285,6 +364,8 @@ Tracking docs:
             - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
+   - [x] Proxy shutdown cleanup policy: always clean managed local/tmp proxies on unload/close; preserve tracked `UltimateSlice.cache` proxies only when Proxy mode is enabled (clean sidecar proxies too when disabled)
+   - [x] Enabled-mode sidecar proxy mirroring: when Proxy mode is enabled, local proxy transcodes are mirrored to alongside-media `UltimateSlice.cache` as well
    - [x] Preview LUTs preference: when Proxy mode is Off, generate/use project-resolution LUT-baked preview media for LUT-assigned clips
    - [x] Export/proxy progress percentage now uses bitrate×duration size estimates with ffmpeg `total_size` tracking, capped below 100% until ffmpeg completion
    - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
@@ -309,12 +390,18 @@ Tracking docs:
 
 ### Color & Effects
 - [x] Basic color correction (brightness / contrast / saturation) via GStreamer `videobalance`
+- [x] Extended color grading — exposure, black point, highlights/midtones/shadows warmth & tint; Inspector sliders, FCPXML round-trip (FCP `filter-video` "Color Adjustments" import/export), MCP `set_clip_color` support; preview/export parity improved by reusing calibrated preview mapping in export with FFmpeg frei0r bridge (`coloradj_RGB`, `three_point_balance`) and native-filter fallback
+- [x] Shadows and Highlights — imported from FCP `<filter-video>` params, Inspector sliders, MCP support
 - [x] Denoise filter per clip (GStreamer `gaussianblur` positive sigma; ffmpeg `hqdn3d` on export)
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [x] LUT import / apply
 - [ ] Apply multiple LUTs to a clip
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
-- [ ] Shadows and Highlights
+- [ ] Preview/Export color parity improvements
+  - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
+  - [ ] Prerender keyframe interpolation — support brightness/contrast/saturation/temperature/tint keyframes in the prerender pipeline (currently only static values are applied; animated color adjustments are not visible in proxy mode)
+  - [ ] Configurable prerender quality — expose CRF / encoding preset in Preferences (currently CRF 20 veryfast) to let users trade cache size and prerender speed for higher color fidelity
+  - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
 - [ ] Advanced color grading
 - [ ] Color management pipeline via OpenColorIO (OCIO)
   - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
@@ -441,7 +528,7 @@ Tracking docs:
 - [ ] Help documentation and tutorials
 - [ ] Application icon and desktop integration (`.desktop` file)
 - [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
-- [ ] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
+- [x] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
 - [ ] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
 - [ ] Customizable workspace layouts (save/restore panel arrangements for different tasks)
 - [ ] Named project snapshots (create named versions at milestones without separate files)

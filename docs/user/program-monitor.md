@@ -26,6 +26,7 @@ or outside the export frame.
 |---|---|
 | Video display | Renders the assembled sequence at the playhead position |
 | Timecode label | Current timeline position |
+| Go To button | Opens a timecode entry dialog (`HH:MM:SS:FF`) and jumps playhead |
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
 | Safe Areas toggle | Shows/hides action-safe (90%) and title-safe (80%) guides |
@@ -42,6 +43,7 @@ or outside the export frame.
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause (when timeline has focus) |
+| `Ctrl+J` | Open Go To Timecode dialog |
 | `←` / `→` / `↑` / `↓` | Nudge selected clip position in transform overlay (0.01) |
 | `Shift + Arrow` | Coarse nudge selected clip position (0.1) |
 | `+` / `-` | Increase / decrease selected clip scale in transform overlay |
@@ -68,14 +70,17 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 
 - The program monitor uses a GStreamer **compositor** pipeline that layers all active video tracks simultaneously at the playhead position.
 - Each active clip gets its own decoder branch with per-clip effects, connected to the compositor with correct z-ordering (higher tracks render on top).
-- Audio from all active video clips is mixed through an **audiomixer** element; audio-only tracks use a separate playbin.
+- Audio from active video clips is mixed through an **audiomixer** element (except freeze-frame video holds, which are intentionally silent); audio-only tracks use a separate playbin.
 - Program Monitor shows a **master stereo meter** (L/R), updated from GStreamer `level` elements.
+- During prerender playback, per-track timeline meters remain active by mapping prerender audio-level telemetry to the currently active prerender track set.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
 - Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
 - **Transitions** (cross-dissolve, fade-to-black, wipe-right, wipe-left) are previewed in real time during both playback and scrubbing, matching the FFmpeg `xfade` export output. Dissolve and fade transitions animate compositor pad alpha; wipe transitions use videocrop animation on the incoming clip to progressively reveal it.
+- Freeze-frame clips are rendered as true video holds: Program Monitor samples the configured freeze source frame and holds that frame for the clip's resolved freeze duration during playback and scrubbing.
+- Freeze-frame decoder seeks use accurate (non-key-unit) frame selection for the hold sample, preventing black-frame preview failures on long-GOP media.
 - Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.
 - If optional denoise filters are unavailable in your GStreamer runtime, Program Monitor still applies crop/scale/position transforms.
 - Program Monitor normalizes preview output to square pixels (`PAR 1:1`) so 21:9/ultra-wide sources don't keep aspect-ratio bars after zoom scaling.
@@ -96,20 +101,34 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - During heavy 3+ track playback overlap, the monitor enables an audio-master "drop-late" preview path so late video frames are dropped rather than queued behind audio; when overlap drops or playback pauses/stops, normal non-dropping buffering is restored.
 - During the same heavy-overlap windows, per-clip compositor branch queues also switch to drop-late mode to reduce branch backpressure and boundary handoff stalls.
 - During playback, the monitor also prewarms the next near-future boundary clip set (look-ahead probe/path warm-up), including lightweight incoming decoder/effects resource warm-up, to reduce transition-handoff stalls.
+- In **Smooth** playback priority with background prerender enabled, UltimateSlice prewarms a slightly deeper upcoming-boundary horizon (and farther lookahead) for transition windows; when background prerender jobs are already heavily queued, it automatically falls back to the baseline depth to avoid overscheduling.
+- Program Monitor logs now include periodic transition prerender hit/miss summaries by transition kind, which helps profiling runs identify where prerender is being generated but not consumed.
+- Smooth-mode transition prewarm depth/lookahead is also auto-tuned from recent prerender hit/miss history: if hit rate stays low after enough samples, prewarm temporarily expands (bounded by queue-pressure guardrails) to improve prerender availability.
+- Transition prerender windows include a small frame padding around overlap boundaries; incoming transition input is held through pre-overlap padding so source timing stays correct while reducing edge handoff misses.
+- When Smooth-mode queue budget is tight, transition prewarm scheduling prioritizes boundaries with the worst observed prerender hit rates first, improving the odds that limited background prerender work helps the most problematic transitions.
+- Transition prerender overlap padding now includes incoming audio timing parity: incoming transition audio is delayed until the overlap boundary, avoiding early incoming-audio bleed during the pre-padding window.
+- Queue-constrained transition prewarm now also factors boundary proximity into prioritization, preventing far-future high-risk boundaries from starving near-term boundary preparation.
+- Transition prerender hit/miss metrics are recency-weighted via periodic decay, so adaptive tuning and prioritization respond to current session behavior rather than stale long-ago outcomes.
+- Background prerender queue admission is now priority-aware under load: queue depth is capped, and overflow is only allowed for substantially higher-priority requests, reducing low-value prerender churn.
+- Ready prerender segments are now cache-pruned by playhead distance (while protecting any currently active prerender segment), keeping cache size bounded and focused on likely near-term reuse.
+- Prerender cache lookups now track hit/miss telemetry (with hit-rate summaries), and `get_performance_snapshot` includes `prerender_cache_hits`, `prerender_cache_misses`, and `prerender_cache_hit_rate_percent`.
+- For proxy-backed prerender inputs, LUT is not re-applied in the prerender FFmpeg graph, preventing double LUT grading when the proxy media is already LUT-baked.
 
 ## Seeking
 
 - Click on the **ruler** in the timeline to seek the program monitor to that position.
+- Use **Go To** in the Program Monitor header (or **Ctrl+J**) to jump directly to a timecode in `HH:MM:SS:FF` format.
 - The program monitor seeks to the correct source position within the appropriate clip, accounting for clip speed.
 - When scrubbing within the same clip, the existing decoder is seeked in-place (no pipeline rebuild) so the monitor shows the frame at the exact playhead position without a black-screen or first-frame flash.
 - When the playhead crosses a clip boundary (different clips become active), the pipeline is briefly rebuilt for the new set of active clips.
 - Opening a project and seeking immediately now follows the same safe paused rebuild/seek flow, avoiding intermittent monitor freezes during initial interaction.
 - Opening/creating a project does not auto-start playback; Program Monitor remains paused until you explicitly press Play.
 - Project reload + first seek now run as short staged callbacks (load first, then seek), and stale pending seek/reload requests are coalesced so rapid edits/scrubs don't queue long back-to-back main-thread work.
-- During automatic proxy assist (manual proxy mode Off), proxy enable/disable now uses hysteresis near overlap boundaries to avoid rapid mode flapping while clips start/end.
+- Proxy mode is now strict: when set to `Off`, Program Monitor does not auto-enable proxy playback during overlap boundaries.
 - During paused scrubbing, UltimateSlice waits for a fresh post-seek preroll frame so the Program Monitor and transform overlay update to the new playhead frame instead of showing black.
 - During paused scrubbing, active clip decoder branches are created before preroll/seek settle so the monitor does not remain stuck on a black frame after moving the playhead.
 - With 3+ active video tracks, paused settle waits are budget-capped to keep the UI responsive; if the full second-pass settle would exceed the budget it is skipped in favor of immediate interactivity.
+- During paused scrubbing, Program Monitor keeps a short previous/current/next frame cache around the playhead (keyed by frame position and current render state) and uses cache hits to tighten in-place seek settle waits, reducing repeated scrub stutter around nearby frames.
 - Manual timeline seeks use the paused accurate-seek path and then resume playback if it was active, so the frame shown at the playhead is updated before playback continues.
 - While paused, the monitor is repainted continuously so delayed post-seek frame updates still appear without requiring playback to resume.
 
@@ -128,5 +147,6 @@ When **Reverse** is enabled on a clip, Program Monitor preview plays that clip b
 ## MCP Automation
 
 - `seek_playhead` seeks the timeline/program-monitor playhead to an absolute nanosecond position.
+- `get_performance_snapshot` returns compact Program Monitor performance metrics for automation (prerender queue/segment state, recent rebuild timings, and transition prerender hit/miss rates).
 - `export_displayed_frame` exports the current displayed frame to a binary PPM (`P6`) image file.
 - `take_screenshot` captures a PNG screenshot of the full application window using the GTK snapshot API and GSK `CairoRenderer`. The PNG is written to the current working directory as `ultimateslice-screenshot-<unix_epoch>.png`.

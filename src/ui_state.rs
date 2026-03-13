@@ -527,6 +527,9 @@ pub struct PreferencesState {
     /// Show thumbnail preview strips on timeline video clips.
     #[serde(default = "default_show_timeline_preview")]
     pub show_timeline_preview: bool,
+    /// Auto-link source monitor A/V placements into paired video+audio clips when possible.
+    #[serde(default = "default_source_monitor_auto_link_av")]
+    pub source_monitor_auto_link_av: bool,
     /// Show per-track audio levels in timeline track labels.
     #[serde(default = "default_show_track_audio_levels")]
     pub show_track_audio_levels: bool,
@@ -573,6 +576,7 @@ impl Default for PreferencesState {
             proxy_mode: ProxyMode::default(),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),
+            source_monitor_auto_link_av: default_source_monitor_auto_link_av(),
             show_track_audio_levels: default_show_track_audio_levels(),
             mcp_socket_enabled: false,
             gsk_renderer: GskRenderer::default(),
@@ -594,6 +598,10 @@ fn default_show_timeline_preview() -> bool {
 
 fn default_show_track_audio_levels() -> bool {
     true
+}
+
+fn default_source_monitor_auto_link_av() -> bool {
+    false
 }
 
 fn default_crossfade_duration_ns() -> u64 {
@@ -757,6 +765,7 @@ mod tests {
         let parsed: UiState =
             serde_json::from_str(r#"{"preferences":{"hardware_acceleration_enabled":true}}"#)
                 .unwrap();
+        assert!(!parsed.preferences.source_monitor_auto_link_av);
         assert!(!parsed.preferences.crossfade_enabled);
         assert_eq!(
             parsed.preferences.crossfade_curve,
@@ -781,6 +790,17 @@ mod tests {
         assert!(decoded.crossfade_enabled);
         assert_eq!(decoded.crossfade_curve, CrossfadeCurve::Linear);
         assert_eq!(decoded.crossfade_duration_ns, 350_000_000);
+    }
+
+    #[test]
+    fn preferences_source_monitor_auto_link_round_trip() {
+        let prefs = PreferencesState {
+            source_monitor_auto_link_av: false,
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.source_monitor_auto_link_av);
     }
 
     #[test]

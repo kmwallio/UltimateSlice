@@ -4,6 +4,7 @@ pub mod media_browser;
 pub mod preferences;
 pub mod preview;
 pub mod program_monitor;
+pub mod timecode;
 pub mod timeline;
 pub mod toolbar;
 pub mod transform_overlay;

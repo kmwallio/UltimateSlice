@@ -33,11 +33,14 @@
         <p>A start to complex workflows</p>
         <ul>
           <li>Align clips based on TimeCode or Audio</li>
+          <li>Keyframe support for audio levels</li>
+          <li>Keyframe support for some clip animations</li>
           <li>Group or Link Clips together</li>
           <li>Export Presets</li>
           <li>frei0r plugin support for color grading and effects</li>
           <li>Color temperature and tint correction</li>
           <li>Chromakey (green screen) effect with adjustable keying parameters</li>
+          <li>Prerendering and Proxy options for improved performance on complex timelines</li>
           <li>Vertical video crash fixes</li>
           <li>Bug fixes</li>
         </ul>

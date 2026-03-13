@@ -48,6 +48,8 @@ pub struct BgRemovalProgress {
 pub struct BgRemovalCache {
     /// Completed bg-removed file paths: **source_path → output_path**.
     pub paths: HashMap<String, String>,
+    /// Desired cache key for each source path (encodes threshold).
+    source_to_key: HashMap<String, String>,
     /// Currently processing keys (internal cache keys).
     pending: HashSet<String>,
     /// Failed keys (not retried).
@@ -79,8 +81,12 @@ impl BgRemovalCache {
                     };
                     match job {
                         Ok(job) => {
-                            let success =
-                                run_bg_removal(&job.source_path, &job.output_path, &job.model_path, job.threshold);
+                            let success = run_bg_removal(
+                                &job.source_path,
+                                &job.output_path,
+                                &job.model_path,
+                                job.threshold,
+                            );
                             let _ = tx.send(WorkerUpdate::Done(WorkerResult {
                                 cache_key: job.cache_key,
                                 output_path: job.output_path,
@@ -103,6 +109,7 @@ impl BgRemovalCache {
 
         Self {
             paths: HashMap::new(),
+            source_to_key: HashMap::new(),
             pending: HashSet::new(),
             failed: HashSet::new(),
             key_to_source: HashMap::new(),
@@ -132,10 +139,24 @@ impl BgRemovalCache {
             return;
         };
         let key = cache_key(source_path, threshold);
-        // Already completed (keyed by source_path in self.paths)?
-        if self.paths.contains_key(source_path) || self.pending.contains(&key) || self.failed.contains(&key) {
+        if self.pending.contains(&key) || self.failed.contains(&key) {
             return;
         }
+
+        if let Some(prev_key) = self.source_to_key.get(source_path) {
+            if prev_key == &key && self.paths.contains_key(source_path) {
+                return;
+            }
+            if prev_key != &key {
+                // Threshold changed for this source; drop the old resolved path
+                // so preview/export fall back to source media until the new
+                // threshold-specific output is ready.
+                self.paths.remove(source_path);
+            }
+        }
+        self.source_to_key
+            .insert(source_path.to_string(), key.clone());
+
         // Check disk for pre-existing result.
         let output_path = self.output_path_for_key(&key);
         if Path::new(&output_path).exists() {
@@ -149,7 +170,8 @@ impl BgRemovalCache {
         }
         self.total_requested += 1;
         self.pending.insert(key.clone());
-        self.key_to_source.insert(key.clone(), source_path.to_string());
+        self.key_to_source
+            .insert(key.clone(), source_path.to_string());
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(BgRemovalJob {
                 cache_key: key,
@@ -173,18 +195,23 @@ impl BgRemovalCache {
                             .key_to_source
                             .remove(&result.cache_key)
                             .unwrap_or_else(|| result.cache_key.clone());
-                        log::info!(
-                            "BgRemovalCache: completed source={} path={}",
-                            source,
-                            result.output_path
-                        );
-                        self.paths.insert(source.clone(), result.output_path);
-                        resolved.push(source);
+                        if self.source_to_key.get(&source) == Some(&result.cache_key) {
+                            log::info!(
+                                "BgRemovalCache: completed source={} path={}",
+                                source,
+                                result.output_path
+                            );
+                            self.paths.insert(source.clone(), result.output_path);
+                            resolved.push(source);
+                        } else {
+                            log::info!(
+                                "BgRemovalCache: ignored stale result for source={} key={}",
+                                source,
+                                result.cache_key
+                            );
+                        }
                     } else {
-                        log::warn!(
-                            "BgRemovalCache: failed key={}",
-                            result.cache_key
-                        );
+                        log::warn!("BgRemovalCache: failed key={}", result.cache_key);
                         self.failed.insert(result.cache_key);
                     }
                 }
@@ -205,18 +232,27 @@ impl BgRemovalCache {
     /// Invalidate all cached results (e.g. when model or threshold changes).
     pub fn invalidate_all(&mut self) {
         self.paths.clear();
+        self.source_to_key.clear();
         self.failed.clear();
         self.key_to_source.clear();
         self.total_requested = 0;
     }
 
     /// Get the bg-removed file path for a source clip, if ready.
-    pub fn get_path(&self, source_path: &str, _threshold: f64) -> Option<&String> {
-        self.paths.get(source_path)
+    pub fn get_path(&self, source_path: &str, threshold: f64) -> Option<&String> {
+        let key = cache_key(source_path, threshold);
+        if self.source_to_key.get(source_path) == Some(&key) {
+            self.paths.get(source_path)
+        } else {
+            None
+        }
     }
 
     fn output_path_for_key(&self, key: &str) -> String {
-        self.cache_root.join(format!("{key}.webm")).to_string_lossy().to_string()
+        self.cache_root
+            .join(format!("{key}.webm"))
+            .to_string_lossy()
+            .to_string()
     }
 }
 
@@ -269,7 +305,10 @@ pub fn find_model_path() -> Option<String> {
         // Relative to executable.
         std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("data/models/modnet_photographic_portrait_matting.onnx")))
+            .and_then(|p| {
+                p.parent()
+                    .map(|d| d.join("data/models/modnet_photographic_portrait_matting.onnx"))
+            })
             .unwrap_or_default(),
         // Relative to CWD (development).
         PathBuf::from("data/models/modnet_photographic_portrait_matting.onnx"),
@@ -306,12 +345,7 @@ fn bg_removal_file_is_ready(path: &str) -> bool {
 /// Pipeline: FFmpeg decode → per-frame MODNet inference → FFmpeg VP9+alpha encode.
 /// Uses the `ort` crate for ONNX Runtime.
 #[cfg(feature = "ai-inference")]
-fn run_bg_removal(
-    source_path: &str,
-    output_path: &str,
-    model_path: &str,
-    threshold: f64,
-) -> bool {
+fn run_bg_removal(source_path: &str, output_path: &str, model_path: &str, threshold: f64) -> bool {
     use ort::session::Session;
     use ort::value::TensorRef;
 
@@ -319,7 +353,9 @@ fn run_bg_removal(
 
     // 1. Load ONNX model.
     let mut session: Session = match Session::builder()
-        .and_then(|b| Ok(b.with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?))
+        .and_then(|b| {
+            Ok(b.with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?)
+        })
         .and_then(|mut b: ort::session::builder::SessionBuilder| b.commit_from_file(model_path))
     {
         Ok(s) => s,
@@ -342,11 +378,16 @@ fn run_bg_removal(
     let mut decoder = match Command::new("ffmpeg")
         .args([
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", source_path,
-            "-pix_fmt", "rgba",
-            "-f", "rawvideo",
-            "-v", "error",
+            "-loglevel",
+            "error",
+            "-i",
+            source_path,
+            "-pix_fmt",
+            "rgba",
+            "-f",
+            "rawvideo",
+            "-v",
+            "error",
             "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
@@ -364,19 +405,31 @@ fn run_bg_removal(
     let mut encoder = match Command::new("ffmpeg")
         .args([
             "-hide_banner",
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
             "-y",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgba",
-            "-s", &format!("{}x{}", src_w, src_h),
-            "-r", &format!("{}/{}", fps_num, fps_den),
-            "-i", "pipe:0",
-            "-c:v", "libvpx-vp9",
-            "-pix_fmt", "yuva420p",
-            "-crf", "30",
-            "-b:v", "0",
-            "-auto-alt-ref", "0",
-            "-f", "webm",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &format!("{}x{}", src_w, src_h),
+            "-r",
+            &format!("{}/{}", fps_num, fps_den),
+            "-i",
+            "pipe:0",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+            "-crf",
+            "30",
+            "-b:v",
+            "0",
+            "-auto-alt-ref",
+            "0",
+            "-f",
+            "webm",
             &temp_path,
         ])
         .stdin(std::process::Stdio::piped())
@@ -412,7 +465,8 @@ fn run_bg_removal(
         }
 
         // Prepare model input: resize to 512×512, normalize to [0, 1], CHW layout.
-        let input_tensor = prepare_input_tensor(&frame_buf, src_w as usize, src_h as usize, model_size);
+        let input_tensor =
+            prepare_input_tensor(&frame_buf, src_w as usize, src_h as usize, model_size);
 
         // Create ort tensor from ndarray.
         let ort_input = match TensorRef::from_array_view(&input_tensor) {
@@ -427,33 +481,38 @@ fn run_bg_removal(
         let outputs = match session.run(ort::inputs!["input" => ort_input]) {
             Ok(o) => o,
             Err(e) => {
-                log::error!("BgRemovalCache: inference failed at frame {}: {}", frame_count, e);
+                log::error!(
+                    "BgRemovalCache: inference failed at frame {}: {}",
+                    frame_count,
+                    e
+                );
                 break;
             }
         };
 
         // Extract output matte (1×1×512×512).
         // Extract shape and data into owned types to avoid lifetime issues with ValueRef.
-        let (matte_dims, matte_owned): (Vec<i64>, Vec<f32>) = if let Some(val) = outputs.get("output") {
-            match val.try_extract_tensor::<f32>() {
-                Ok((shape, data)) => (shape.iter().copied().collect(), data.to_vec()),
-                Err(e) => {
-                    log::error!("BgRemovalCache: failed to extract matte tensor: {}", e);
-                    break;
+        let (matte_dims, matte_owned): (Vec<i64>, Vec<f32>) =
+            if let Some(val) = outputs.get("output") {
+                match val.try_extract_tensor::<f32>() {
+                    Ok((shape, data)) => (shape.iter().copied().collect(), data.to_vec()),
+                    Err(e) => {
+                        log::error!("BgRemovalCache: failed to extract matte tensor: {}", e);
+                        break;
+                    }
                 }
-            }
-        } else if let Some((_name, val)) = outputs.iter().next() {
-            match val.try_extract_tensor::<f32>() {
-                Ok((shape, data)) => (shape.iter().copied().collect(), data.to_vec()),
-                Err(e) => {
-                    log::error!("BgRemovalCache: failed to extract matte tensor: {}", e);
-                    break;
+            } else if let Some((_name, val)) = outputs.iter().next() {
+                match val.try_extract_tensor::<f32>() {
+                    Ok((shape, data)) => (shape.iter().copied().collect(), data.to_vec()),
+                    Err(e) => {
+                        log::error!("BgRemovalCache: failed to extract matte tensor: {}", e);
+                        break;
+                    }
                 }
-            }
-        } else {
-            log::error!("BgRemovalCache: no output tensors");
-            break;
-        };
+            } else {
+                log::error!("BgRemovalCache: no output tensors");
+                break;
+            };
 
         // Apply matte to frame alpha channel.
         apply_matte_to_frame(
@@ -482,7 +541,9 @@ fn run_bg_removal(
     if !enc_ok || frame_count == 0 {
         log::error!(
             "BgRemovalCache: encode failed or no frames (dec={} enc={} frames={})",
-            dec_ok, enc_ok, frame_count
+            dec_ok,
+            enc_ok,
+            frame_count
         );
         let _ = std::fs::remove_file(&temp_path);
         return false;
@@ -490,7 +551,11 @@ fn run_bg_removal(
 
     // Atomic rename.
     if std::fs::rename(&temp_path, output_path).is_err() {
-        log::error!("BgRemovalCache: failed to rename {} → {}", temp_path, output_path);
+        log::error!(
+            "BgRemovalCache: failed to rename {} → {}",
+            temp_path,
+            output_path
+        );
         let _ = std::fs::remove_file(&temp_path);
         return false;
     }
@@ -520,10 +585,14 @@ fn run_bg_removal(
 fn probe_video_info(path: &str) -> Option<(u32, u32, u32, u32)> {
     let output = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate",
-            "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,r_frame_rate",
+            "-of",
+            "csv=p=0",
             path,
         ])
         .output()

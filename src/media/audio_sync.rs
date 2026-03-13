@@ -32,9 +32,7 @@ const MAX_EXTRACT_SECONDS: f64 = 15.0;
 /// robust alignment across different microphone types and reverberant environments.
 /// Audio is bandpass-filtered to 300–3000 Hz before correlation to focus on the
 /// frequency range shared by virtually all microphones.
-pub fn sync_clips_by_audio(
-    clips: &[(String, String, u64, u64)],
-) -> Vec<AudioSyncResult> {
+pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyncResult> {
     if clips.len() < 2 {
         return Vec::new();
     }
@@ -42,7 +40,11 @@ pub fn sync_clips_by_audio(
     let anchor = &clips[0];
     let anchor_audio = match extract_and_prepare(&anchor.1, anchor.2, anchor.3) {
         Some(a) => {
-            eprintln!("audio_sync: anchor '{}' extracted {} samples", anchor.0, a.len());
+            eprintln!(
+                "audio_sync: anchor '{}' extracted {} samples",
+                anchor.0,
+                a.len()
+            );
             a
         }
         None => return Vec::new(),
@@ -52,7 +54,11 @@ pub fn sync_clips_by_audio(
     for clip in &clips[1..] {
         let clip_audio = match extract_and_prepare(&clip.1, clip.2, clip.3) {
             Some(a) => {
-                eprintln!("audio_sync: clip '{}' extracted {} samples", clip.0, a.len());
+                eprintln!(
+                    "audio_sync: clip '{}' extracted {} samples",
+                    clip.0,
+                    a.len()
+                );
                 a
             }
             None => {
@@ -142,8 +148,7 @@ impl Biquad {
         let mut y2 = 0.0f32;
         for s in samples.iter_mut() {
             let x0 = *s;
-            let y0 = self.b0 * x0 + self.b1 * x1 + self.b2 * x2
-                - self.a1 * y1 - self.a2 * y2;
+            let y0 = self.b0 * x0 + self.b1 * x1 + self.b2 * x2 - self.a1 * y1 - self.a2 * y2;
             x2 = x1;
             x1 = x0;
             y2 = y1;
@@ -253,8 +258,7 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
     // Cap extraction length: use the shorter of clip duration and MAX_EXTRACT_SECONDS
     let clip_duration_s = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
     let extract_s = clip_duration_s.min(MAX_EXTRACT_SECONDS);
-    let max_samples =
-        (extract_s * SAMPLE_RATE as f64) as usize + SAMPLE_RATE as usize; // small buffer
+    let max_samples = (extract_s * SAMPLE_RATE as f64) as usize + SAMPLE_RATE as usize; // small buffer
 
     let mut samples: Vec<f32> = Vec::new();
     let bus = pipeline.bus()?;
@@ -265,10 +269,7 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
             let map = buffer.map_readable().ok()?;
             let raw_bytes = map.as_slice();
             let floats: &[f32] = unsafe {
-                std::slice::from_raw_parts(
-                    raw_bytes.as_ptr() as *const f32,
-                    raw_bytes.len() / 4,
-                )
+                std::slice::from_raw_parts(raw_bytes.as_ptr() as *const f32, raw_bytes.len() / 4)
             };
             samples.extend_from_slice(floats);
 

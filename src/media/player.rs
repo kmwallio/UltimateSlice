@@ -51,6 +51,8 @@ pub struct Player {
     vaapi_available: bool,
     /// Original decoder ranks for VA decoder factories (restored in HW mode).
     va_decoder_original_ranks: Vec<(String, gst::Rank)>,
+    /// Original decoder ranks for Apple VideoToolbox decoders.
+    apple_decoder_original_ranks: Vec<(String, gst::Rank)>,
     /// Active source decode mode.
     decode_mode: Arc<Mutex<SourceDecodeMode>>,
     /// Last URI loaded into the source player.
@@ -63,6 +65,14 @@ pub struct Player {
     frame_duration_ns: Arc<Mutex<u64>>,
     /// Last frame-quantized seek position.
     last_seeked_frame_pos: Arc<Mutex<Option<u64>>>,
+    /// Pending seek position deferred until the pipeline finishes an async
+    /// state transition.  Avoids FLUSH seeks racing with qtdemux's internal
+    /// loop during preroll, which causes a NULL-dereference crash on macOS.
+    pending_seek_ns: Arc<Mutex<Option<u64>>>,
+    /// Whether the deferred-seek dispatch timer is already running.
+    pending_seek_active: Arc<Mutex<bool>>,
+    /// Whether the deferred seek should use ACCURATE flags.
+    pending_seek_accurate: Arc<Mutex<bool>>,
 }
 
 impl Player {
@@ -111,6 +121,13 @@ impl Player {
             }
         }
         let vaapi_available = !va_decoder_original_ranks.is_empty();
+        let apple_decoder_names = ["vtdec", "vtdec_hw"];
+        let mut apple_decoder_original_ranks: Vec<(String, gst::Rank)> = Vec::new();
+        for name in &apple_decoder_names {
+            if let Some(factory) = gst::ElementFactory::find(name) {
+                apple_decoder_original_ranks.push(((*name).to_string(), factory.rank()));
+            }
+        }
 
         // Build a filter bin:
         // prescale ! caps(I420,≤640×360) ! queue ! videocrop ! videobalance
@@ -147,6 +164,14 @@ impl Player {
             let prescale = gst::ElementFactory::make("videoconvertscale")
                 .build()
                 .expect("videoconvertscale must be available");
+            // On macOS, vtdec (VideoToolbox) outputs IOSurface-backed NV12 buffers.
+            // The parallelized task runner in videoconvertscale reads them on worker
+            // threads after the backing memory may be released → SIGSEGV in
+            // unpack_NV12.  Force single-threaded conversion to avoid this.
+            #[cfg(target_os = "macos")]
+            if prescale.find_property("n-threads").is_some() {
+                prescale.set_property("n-threads", 1u32);
+            }
             let prescale_caps = gst::ElementFactory::make("capsfilter")
                 .property(
                     "caps",
@@ -211,6 +236,22 @@ impl Player {
             pipeline.set_property("video-filter", &bin_element);
         }
 
+        // On macOS, playbin's internal decodebin may also auto-create
+        // videoconvertscale elements (e.g., colour-space conversion after vtdec).
+        // Intercept them and force n-threads=1 for the same IOSurface reason.
+        #[cfg(target_os = "macos")]
+        pipeline.connect("deep-element-added", false, |args| {
+            let child = args[2].get::<gst::Element>().ok()?;
+            let factory_name = child
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
+            if factory_name == "videoconvertscale" && child.find_property("n-threads").is_some() {
+                child.set_property("n-threads", 1u32);
+            }
+            None
+        });
+
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let hardware_acceleration_enabled = Arc::new(Mutex::new(hardware_acceleration_enabled));
         let decode_mode = Arc::new(Mutex::new(SourceDecodeMode::HardwareFast));
@@ -220,6 +261,9 @@ impl Player {
             Arc::new(Mutex::new(crate::ui_state::PlaybackPriority::Smooth));
         let frame_duration_ns = Arc::new(Mutex::new(41_666_667));
         let last_seeked_frame_pos = Arc::new(Mutex::new(None));
+        let pending_seek_ns = Arc::new(Mutex::new(None));
+        let pending_seek_active = Arc::new(Mutex::new(false));
+        let pending_seek_accurate = Arc::new(Mutex::new(false));
 
         let player = Self {
             pipeline,
@@ -237,12 +281,16 @@ impl Player {
             software_video_filter: software_video_filter_field,
             vaapi_available,
             va_decoder_original_ranks,
+            apple_decoder_original_ranks,
             decode_mode,
             current_uri,
             hw_failed_uri,
             source_playback_priority,
             frame_duration_ns,
             last_seeked_frame_pos,
+            pending_seek_ns,
+            pending_seek_active,
+            pending_seek_accurate,
         };
 
         if *player.hardware_acceleration_enabled.lock().unwrap() && player.vaapi_available {
@@ -326,6 +374,54 @@ impl Player {
         });
     }
 
+    /// Start a periodic timer that waits for the pipeline to finish any async
+    /// state transition, then dispatches the most-recently-requested seek.
+    /// Coalesces rapid seek requests so only the latest position is applied.
+    fn arm_pending_seek_dispatch(&self, _playing: bool) {
+        let mut active = self.pending_seek_active.lock().unwrap();
+        if *active {
+            return; // timer already running — it will pick up the latest position
+        }
+        *active = true;
+        drop(active);
+
+        let pipeline = self.pipeline.clone();
+        let pending_seek_ns = self.pending_seek_ns.clone();
+        let pending_seek_active = self.pending_seek_active.clone();
+        let pending_seek_accurate = self.pending_seek_accurate.clone();
+        let last_seeked_frame_pos = self.last_seeked_frame_pos.clone();
+        let source_playback_priority = self.source_playback_priority.clone();
+
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            let (_r, _s, p) = pipeline.state(Some(gst::ClockTime::from_mseconds(0)));
+            if p != gst::State::VoidPending {
+                return glib::ControlFlow::Continue;
+            }
+            // Pipeline is in a stable state — safe to seek.
+            let pos = pending_seek_ns.lock().unwrap().take();
+            *pending_seek_active.lock().unwrap() = false;
+            let accurate = *pending_seek_accurate.lock().unwrap();
+
+            if let Some(pos_ns) = pos {
+                *last_seeked_frame_pos.lock().unwrap() = None;
+                let flags = if accurate {
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+                } else {
+                    let prio = source_playback_priority.lock().unwrap().clone();
+                    match prio {
+                        crate::ui_state::PlaybackPriority::Accurate => {
+                            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+                        }
+                        _ => gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    }
+                };
+                let _ = pipeline.seek_simple(flags, gst::ClockTime::from_nseconds(pos_ns));
+            }
+
+            glib::ControlFlow::Break
+        });
+    }
+
     #[allow(dead_code)]
     pub fn toggle_play_pause(&self) -> Result<()> {
         let state = self.state.lock().unwrap().clone();
@@ -350,6 +446,18 @@ impl Player {
         } else {
             *self.last_seeked_frame_pos.lock().unwrap() = None;
         }
+        // Defer FLUSH seeks while the pipeline has an async state transition
+        // in progress (e.g. Null→Paused preroll).  Sending a FLUSH event into
+        // qtdemux while its streaming loop is initializing causes a
+        // NULL-dereference crash on macOS (gst_qtdemux_push_buffer + 0x50).
+        let (_result, _current, pending) =
+            self.pipeline.state(Some(gst::ClockTime::from_mseconds(0)));
+        if pending != gst::State::VoidPending {
+            *self.pending_seek_ns.lock().unwrap() = Some(position_ns);
+            *self.pending_seek_accurate.lock().unwrap() = false;
+            self.arm_pending_seek_dispatch(playing);
+            return Ok(());
+        }
         self.pipeline.seek_simple(
             self.source_seek_flags(playing),
             gst::ClockTime::from_nseconds(position_ns),
@@ -363,6 +471,15 @@ impl Player {
         let frame_ns = (*self.frame_duration_ns.lock().unwrap()).max(1);
         let frame_pos = (position_ns / frame_ns) * frame_ns;
         *self.last_seeked_frame_pos.lock().unwrap() = Some(frame_pos);
+        // Defer FLUSH seeks during async state transitions (see seek()).
+        let (_result, _current, pending) =
+            self.pipeline.state(Some(gst::ClockTime::from_mseconds(0)));
+        if pending != gst::State::VoidPending {
+            *self.pending_seek_ns.lock().unwrap() = Some(position_ns);
+            *self.pending_seek_accurate.lock().unwrap() = true;
+            self.arm_pending_seek_dispatch(false);
+            return Ok(());
+        }
         self.pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_nseconds(position_ns),
@@ -405,6 +522,10 @@ impl Player {
 
     pub fn state(&self) -> PlayerState {
         self.state.lock().unwrap().clone()
+    }
+
+    pub fn current_uri(&self) -> Option<String> {
+        self.current_uri.lock().unwrap().clone()
     }
 
     pub fn set_hardware_acceleration(&self, enabled: bool) -> Result<()> {
@@ -468,12 +589,14 @@ impl Player {
         match mode {
             SourceDecodeMode::SoftwareFiltered => {
                 self.set_va_decoder_rank_policy(false);
+                self.set_apple_decoder_rank_policy(false);
                 if let Some(ref filter) = self.software_video_filter {
                     self.pipeline.set_property("video-filter", filter);
                 }
             }
             SourceDecodeMode::HardwareFast => {
                 self.set_va_decoder_rank_policy(true);
+                self.set_apple_decoder_rank_policy(true);
                 self.pipeline
                     .set_property("video-filter", Option::<&gst::Element>::None);
             }
@@ -488,6 +611,18 @@ impl Player {
                     factory.set_rank(*original_rank);
                 } else {
                     factory.set_rank(gst::Rank::MARGINAL);
+                }
+            }
+        }
+    }
+
+    fn set_apple_decoder_rank_policy(&self, restore_original: bool) {
+        for (name, original_rank) in &self.apple_decoder_original_ranks {
+            if let Some(factory) = gst::ElementFactory::find(name) {
+                if restore_original {
+                    factory.set_rank(*original_rank);
+                } else {
+                    factory.set_rank(gst::Rank::NONE);
                 }
             }
         }
@@ -610,9 +745,9 @@ impl Player {
         }
         if let Some(ref vfr) = self.videoflip_rotate {
             let method = match rotate {
-                90 => "clockwise",
-                180 => "rotate-180",
-                270 => "counterclockwise",
+                90 => "counterclockwise",
+                -90 | 270 => "clockwise",
+                180 | -180 => "rotate-180",
                 _ => "none",
             };
             vfr.set_property_from_str("method", method);

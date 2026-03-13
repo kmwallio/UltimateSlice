@@ -47,8 +47,9 @@ src/
     proxy_cache.rs          Background proxy transcoding (half/quarter-res H.264 via ffmpeg) for preview playback
 
   fcpxml/
-    parser.rs               FCPXML 1.10-1.14 → Project (quick-xml; parses assets, spine, asset-clip)
-    writer.rs               Project → FCPXML 1.14
+    parser.rs               FCPXML 1.10-1.14 → Project (quick-xml; parses assets, spine, asset-clip,
+                            native <param>/<keyframeAnimation>/<keyframe> elements for FCP interop)
+    writer.rs               Project → FCPXML 1.14 (emits native keyframe elements + us:* vendor attrs)
 
   undo.rs                   EditCommand trait + EditHistory (undo/redo stacks)
                             Commands: MoveClip, TrimIn, TrimOut, DeleteClip, SplitClip
@@ -328,11 +329,13 @@ Before declaring a task finished, agents must verify via MCP:
 | Tool | Description |
 |---|---|
 | `get_project` | Full project JSON (title, tracks, clips) |
-| `list_tracks` | Track index, id, kind, clip count |
-| `list_clips` | All clips with id, path, track\_index, ns positions, `group_id` / `link_group_id`, and source-time metadata when present |
+| `batch_call_tools` | Execute multiple MCP tool calls in-order in one request; supports optional `stop_on_error` and `include_timing`, returning per-call success/error records (plus optional elapsed timing) |
+| `list_tracks` | Track list; accepts optional `compact` flag for automation-focused output (`index/id/kind/clip_count` only) |
+| `list_clips` | Clip list; accepts optional `compact` flag for automation-focused timing/source output (`id/source path/track/timing`) |
 | `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
 | `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
+| `set_track_solo` | Set solo state for a track id; soloed non-muted tracks become the active preview/export set |
 | `close_source_preview` | Deselect current source media and hide the source preview |
 | `get_preferences` | Get persisted application preferences |
 | `set_hardware_acceleration` | Set hardware-acceleration preference and apply to source preview playback |
@@ -346,7 +349,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_experimental_preview_optimizations` | Toggle occlusion optimization (audio-only decode for fully-occluded clips) |
 | `set_background_prerender` | Toggle background prerender of complex overlap windows (`true` / `false`) |
 | `set_preview_luts` | Toggle LUT-baked project-resolution preview media generation when proxy mode is off (`true` / `false`) |
-| `add_clip` | Add clip at track\_index + timeline position |
+| `add_clip` | Add source clip(s) at `track_index` + timeline position using source-placement rules (Source Monitor A/V auto-link enabled: linked A/V pair when both matching kinds exist + embedded-video-audio suppression; disabled: single-clip placement; single-kind fallback otherwise) |
 | `remove_clip` | Remove clip by id |
 | `move_clip` | Change a clip's `timeline_start_ns` |
 | `link_clips` | Assign a shared clip link group to two or more clips |
@@ -356,8 +359,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |
-| `insert_clip` | Insert a source clip at playhead, shifting subsequent clips right (3-point insert edit) |
-| `overwrite_clip` | Overwrite timeline content at playhead with a source clip (3-point overwrite edit) |
+| `insert_clip` | Insert source clip(s) at `timeline_pos_ns` (or playhead when omitted) using source-placement rules (including optional Source Monitor A/V auto-link behavior); shifts subsequent clips right on affected track(s) |
+| `overwrite_clip` | Overwrite timeline content at `timeline_pos_ns` (or playhead when omitted) with source clip(s) (3-point overwrite) using source-placement rules (including optional Source Monitor A/V auto-link behavior) on affected track(s) |
 | `seek_playhead` | Seek the timeline/program monitor to an absolute `timeline_pos_ns` |
 | `export_displayed_frame` | Export current program-monitor displayed frame to an image file (PPM/P6) |
 | `play` | Start program monitor playback |
@@ -366,6 +369,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `take_screenshot` | Capture a PNG screenshot of the full application window (GTK snapshot + GSK CairoRenderer); saved to CWD as `ultimateslice-screenshot-<epoch>.png` |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
+| `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`) at an absolute timeline position |
+| `remove_clip_keyframe` | Remove a phase-1 keyframe for a property at an absolute timeline position |
 | `set_clip_chroma_key` | Set chroma key (green/blue screen) params on a clip by id |
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.14 to a file path |
@@ -379,6 +384,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `reorder_track` | Move a track from one index to another (undoable) |
 | `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
 | `create_project` | Discard the current project and start a new empty one (optional title) |
+
+For automation-heavy loops, MCP keeps a short-lived per-session read cache for repeated `get_project`, `list_tracks`, and `list_clips` calls. Both direct tool calls and `batch_call_tools` can reuse this cache, and it is invalidated when a mutating tool runs so subsequent reads observe the updated state.
 
 ### Example session
 

@@ -70,6 +70,13 @@ impl FrameRate {
     pub fn as_f64(&self) -> f64 {
         self.numerator as f64 / self.denominator as f64
     }
+
+    pub fn frame_duration_ns(&self) -> u64 {
+        if self.numerator == 0 {
+            return 41_666_667; // fallback ~24fps
+        }
+        ((self.denominator as u64) * 1_000_000_000) / (self.numerator as u64)
+    }
 }
 
 /// The top-level project, containing all tracks and sequence settings
@@ -151,6 +158,17 @@ impl Project {
 
     pub fn audio_tracks(&self) -> impl Iterator<Item = &Track> {
         self.tracks.iter().filter(|t| t.kind == TrackKind::Audio)
+    }
+
+    pub fn has_solo_tracks(&self) -> bool {
+        self.tracks.iter().any(|t| t.soloed)
+    }
+
+    pub fn track_is_active_for_output(&self, track: &Track) -> bool {
+        if track.muted {
+            return false;
+        }
+        !self.has_solo_tracks() || track.soloed
     }
 
     /// Total sequence duration across all tracks, in nanoseconds
@@ -248,6 +266,28 @@ mod tests {
         p.add_audio_track();
         assert_eq!(p.audio_tracks().count(), 2);
         assert!(p.dirty);
+    }
+
+    #[test]
+    fn test_track_is_active_for_output_without_solo() {
+        let mut p = Project::new("Test");
+        let v = p.video_tracks().next().unwrap().id.clone();
+        let t = p.track_mut(&v).unwrap();
+        t.muted = false;
+        assert!(p.track_is_active_for_output(p.tracks.iter().find(|tr| tr.id == v).unwrap()));
+    }
+
+    #[test]
+    fn test_track_is_active_for_output_with_solo() {
+        let mut p = Project::new("Test");
+        p.add_video_track();
+        let ids: Vec<String> = p.video_tracks().map(|t| t.id.clone()).collect();
+        p.track_mut(&ids[0]).unwrap().soloed = true;
+        p.track_mut(&ids[1]).unwrap().soloed = false;
+        let left = p.tracks.iter().find(|t| t.id == ids[0]).unwrap();
+        let right = p.tracks.iter().find(|t| t.id == ids[1]).unwrap();
+        assert!(p.track_is_active_for_output(left));
+        assert!(!p.track_is_active_for_output(right));
     }
 
     #[test]

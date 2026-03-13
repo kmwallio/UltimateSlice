@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
+const SESSION_READ_CACHE_TTL_MS: u64 = 150;
 
 /// Transport-agnostic MCP JSON-RPC loop.  Reads newline-delimited JSON-RPC
 /// messages from `reader`, dispatches tool calls via `sender`, and writes
@@ -15,6 +16,8 @@ fn run_server(
     writer: &mut impl Write,
     sender: &std::sync::mpsc::Sender<McpCommand>,
 ) {
+    let mut session_read_cache: std::collections::HashMap<String, (Value, std::time::Instant)> =
+        std::collections::HashMap::new();
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -49,7 +52,7 @@ fn run_server(
             "ping" => ok(&id, json!({})),
             "tools/list" => ok(&id, tools_list()),
             "resources/list" => ok(&id, json!({"resources": []})),
-            "tools/call" => call_tool(&id, &params, sender),
+            "tools/call" => call_tool(&id, &params, sender, &mut session_read_cache),
             _ => err(id, -32601, "Method not found"),
         };
 
@@ -179,13 +182,23 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_tracks",
-            "description": "List all tracks in the project with their index, id, kind (Video/Audio), and clip count.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "List all tracks in the project with index/id/kind, clip count, muted/locked/soloed flags, and track height preset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "compact": { "type": "boolean", "description": "When true, return only automation-critical fields (index/id/kind/clip_count)." }
+                }
+            }
         },
         {
             "name": "list_clips",
-            "description": "List every clip on the timeline across all tracks.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "List every clip on the timeline across all tracks, including color label and timing/effect metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "compact": { "type": "boolean", "description": "When true, return only automation-critical timing/source fields." }
+                }
+            }
         },
         {
             "name": "get_timeline_settings",
@@ -198,6 +211,11 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_performance_snapshot",
+            "description": "Return compact Program Monitor performance counters for tuning: prerender queue state, rebuild telemetry, and transition prerender hit/miss metrics.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "set_magnetic_mode",
             "description": "Enable or disable magnetic timeline mode (gap-free edits on the edited track).",
             "inputSchema": {
@@ -206,6 +224,30 @@ fn tools_list() -> Value {
                     "enabled": { "type": "boolean", "description": "Whether magnetic mode should be enabled." }
                 },
                 "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_track_solo",
+            "description": "Set solo state for a track by id. When any track is soloed, only soloed non-muted tracks are active in preview/export.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "solo": { "type": "boolean", "description": "Whether the target track should be soloed." }
+                },
+                "required": ["track_id", "solo"]
+            }
+        },
+        {
+            "name": "set_track_height_preset",
+            "description": "Set timeline display height preset for a track by id ('small', 'medium', or 'large').",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "height_preset": { "type": "string", "enum": ["small", "medium", "large"], "description": "Track display height preset." }
+                },
+                "required": ["track_id", "height_preset"]
             }
         },
         {
@@ -400,9 +442,29 @@ fn tools_list() -> Value {
                     "sharpness":  { "type": "number",  "description": "Sharpness: -1.0 (soften) to 1.0 (sharpen). Default 0.0." },
                     "shadows":    { "type": "number",  "description": "Shadow grading: -1.0 (crush) to 1.0 (lift). Default 0.0." },
                     "midtones":   { "type": "number",  "description": "Midtone grading: -1.0 (darken) to 1.0 (brighten). Default 0.0." },
-                    "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." }
+                    "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." },
+                    "exposure":   { "type": "number",  "description": "Exposure adjustment: -1.0 to 1.0. Default 0.0." },
+                    "black_point":{ "type": "number",  "description": "Black point adjustment: -1.0 to 1.0. Default 0.0." },
+                    "highlights_warmth": { "type": "number", "description": "Highlights warmth (orange-blue): -1.0 to 1.0. Default 0.0." },
+                    "highlights_tint":   { "type": "number", "description": "Highlights tint (green-magenta): -1.0 to 1.0. Default 0.0." },
+                    "midtones_warmth":   { "type": "number", "description": "Midtones warmth (orange-blue): -1.0 to 1.0. Default 0.0." },
+                    "midtones_tint":     { "type": "number", "description": "Midtones tint (green-magenta): -1.0 to 1.0. Default 0.0." },
+                    "shadows_warmth":    { "type": "number", "description": "Shadows warmth (orange-blue): -1.0 to 1.0. Default 0.0." },
+                    "shadows_tint":      { "type": "number", "description": "Shadows tint (green-magenta): -1.0 to 1.0. Default 0.0." }
                 },
                 "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_clip_color_label",
+            "description": "Set semantic timeline color label for a clip by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "color_label": { "type": "string", "enum": ["none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "magenta"], "description": "Clip color label." }
+                },
+                "required": ["clip_id", "color_label"]
             }
         },
         {
@@ -451,6 +513,17 @@ fn tools_list() -> Value {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path for the output .fcpxml file." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "save_project_with_media",
+            "description": "Export a packaged project: write .uspxml plus copy all timeline-used media into a sibling ProjectName.Library directory, with XML media paths rewritten to the packaged copies.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for the packaged output .uspxml/.fcpxml file." }
                 },
                 "required": ["path"]
             }
@@ -616,6 +689,34 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_keyframe",
+            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) for a clip at a timeline position.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property to keyframe." },
+                    "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
+                    "value": { "type": "number", "description": "Property value at this keyframe time." },
+                    "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." }
+                },
+                "required": ["clip_id", "property", "value"]
+            }
+        },
+        {
+            "name": "remove_clip_keyframe",
+            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) at a timeline position for a clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property keyframe lane." },
+                    "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." }
+                },
+                "required": ["clip_id", "property"]
+            }
+        },
+        {
             "name": "create_project",
             "description": "Create a new empty project, discarding the current one. Resets the timeline to a blank state.",
             "inputSchema": {
@@ -693,28 +794,30 @@ fn tools_list() -> Value {
         },
         {
             "name": "insert_clip",
-            "description": "Insert a source clip at the playhead position, shifting all subsequent clips right to make room (3-point insert edit).",
+            "description": "Insert a source clip at a target timeline position (defaults to playhead), shifting all subsequent clips right to make room (3-point insert edit).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "source_path": { "type": "string", "description": "Absolute path to the media file." },
                     "source_in_ns": { "type": "integer", "description": "Source in-point in nanoseconds." },
                     "source_out_ns": { "type": "integer", "description": "Source out-point in nanoseconds." },
-                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." }
+                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." },
+                    "timeline_pos_ns": { "type": "integer", "description": "Optional absolute timeline position in nanoseconds. If omitted, uses current playhead." }
                 },
                 "required": ["source_path", "source_in_ns", "source_out_ns"]
             }
         },
         {
             "name": "overwrite_clip",
-            "description": "Overwrite timeline content at the playhead position with a source clip, replacing existing material in the time range (3-point overwrite edit).",
+            "description": "Overwrite timeline content at a target timeline position (defaults to playhead) with a source clip, replacing existing material in the time range (3-point overwrite edit).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "source_path": { "type": "string", "description": "Absolute path to the media file." },
                     "source_in_ns": { "type": "integer", "description": "Source in-point in nanoseconds." },
                     "source_out_ns": { "type": "integer", "description": "Source out-point in nanoseconds." },
-                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." }
+                    "track_index": { "type": "integer", "description": "Optional target track index. Omit to use the active or first matching track." },
+                    "timeline_pos_ns": { "type": "integer", "description": "Optional absolute timeline position in nanoseconds. If omitted, uses current playhead." }
                 },
                 "required": ["source_path", "source_in_ns", "source_out_ns"]
             }
@@ -737,6 +840,19 @@ fn tools_list() -> Value {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute output file path (recommended .ppm extension)." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "export_timeline_snapshot",
+            "description": "Render the timeline panel to a PNG image file. Useful for verifying timeline overlays like keyframe markers in headless environments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute output file path (recommended .png extension)." },
+                    "width": { "type": "integer", "description": "Output image width in pixels (default 1920)." },
+                    "height": { "type": "integer", "description": "Output image height in pixels (default 1080)." }
                 },
                 "required": ["path"]
             }
@@ -783,6 +899,36 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "batch_call_tools",
+            "description": "Execute multiple MCP tool calls in-order within one request. Returns per-call success/error records.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "calls": {
+                        "type": "array",
+                        "description": "Ordered list of tool calls: [{\"name\":\"tool_name\",\"arguments\":{...}}].",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "arguments": { "type": "object" }
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "stop_on_error": {
+                        "type": "boolean",
+                        "description": "When true, stop executing remaining calls after the first error (default: false)."
+                    },
+                    "include_timing": {
+                        "type": "boolean",
+                        "description": "When true, include elapsed_ms per call and total_elapsed_ms in the batch result (default: false)."
+                    }
+                },
+                "required": ["calls"]
+            }
+        },
+        {
             "name": "sync_clips_by_audio",
             "description": "Synchronize two or more timeline clips by audio cross-correlation. The first clip is used as the anchor; other clips are repositioned based on matching audio content. Returns offset and confidence for each non-anchor clip.",
             "inputSchema": {
@@ -802,21 +948,70 @@ fn tools_list() -> Value {
 
 // ── Tool dispatch ─────────────────────────────────────────────────────────────
 
-fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCommand>) -> Value {
-    let name = params["name"].as_str().unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+fn tool_error_payload(code: i32, message: impl Into<String>) -> Value {
+    json!({"code": code, "message": message.into()})
+}
 
+fn is_cacheable_read_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "get_project"
+            | "list_tracks"
+            | "list_clips"
+            | "get_timeline_settings"
+            | "get_playhead_position"
+            | "get_performance_snapshot"
+            | "get_preferences"
+            | "list_export_presets"
+            | "list_library"
+    )
+}
+
+fn is_session_cacheable_read_tool(name: &str) -> bool {
+    matches!(name, "get_project" | "list_tracks" | "list_clips")
+}
+
+fn cache_key(name: &str, args: &Value) -> String {
+    let args_json = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+    format!("{name}\u{1f}{args_json}")
+}
+
+fn dispatch_tool_payload(
+    name: &str,
+    args: &Value,
+    sender: &std::sync::mpsc::Sender<McpCommand>,
+) -> Result<Value, Value> {
     // Every tool call gets a dedicated one-shot reply channel.
     let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
 
     let cmd = match name {
         "get_project" => McpCommand::GetProject { reply: tx },
-        "list_tracks" => McpCommand::ListTracks { reply: tx },
-        "list_clips" => McpCommand::ListClips { reply: tx },
+        "list_tracks" => McpCommand::ListTracks {
+            compact: args["compact"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "list_clips" => McpCommand::ListClips {
+            compact: args["compact"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
         "get_timeline_settings" => McpCommand::GetTimelineSettings { reply: tx },
         "get_playhead_position" => McpCommand::GetPlayheadPosition { reply: tx },
+        "get_performance_snapshot" => McpCommand::GetPerformanceSnapshot { reply: tx },
         "set_magnetic_mode" => McpCommand::SetMagneticMode {
             enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "set_track_solo" => McpCommand::SetTrackSolo {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            solo: args["solo"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "set_track_height_preset" => McpCommand::SetTrackHeightPreset {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            height_preset: args["height_preset"]
+                .as_str()
+                .unwrap_or("medium")
+                .to_string(),
             reply: tx,
         },
         "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
@@ -836,7 +1031,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         "set_crossfade_settings" => {
             let (enabled, curve, duration_ns) = match parse_crossfade_settings_args(&args) {
                 Ok(parsed) => parsed,
-                Err(message) => return err(id.clone(), -32602, message),
+                Err(message) => return Err(tool_error_payload(-32602, message)),
             };
             McpCommand::SetCrossfadeSettings {
                 enabled,
@@ -930,6 +1125,19 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             shadows: args["shadows"].as_f64().unwrap_or(0.0),
             midtones: args["midtones"].as_f64().unwrap_or(0.0),
             highlights: args["highlights"].as_f64().unwrap_or(0.0),
+            exposure: args["exposure"].as_f64().unwrap_or(0.0),
+            black_point: args["black_point"].as_f64().unwrap_or(0.0),
+            highlights_warmth: args["highlights_warmth"].as_f64().unwrap_or(0.0),
+            highlights_tint: args["highlights_tint"].as_f64().unwrap_or(0.0),
+            midtones_warmth: args["midtones_warmth"].as_f64().unwrap_or(0.0),
+            midtones_tint: args["midtones_tint"].as_f64().unwrap_or(0.0),
+            shadows_warmth: args["shadows_warmth"].as_f64().unwrap_or(0.0),
+            shadows_tint: args["shadows_tint"].as_f64().unwrap_or(0.0),
+            reply: tx,
+        },
+        "set_clip_color_label" => McpCommand::SetClipColorLabel {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            color_label: args["color_label"].as_str().unwrap_or("none").to_string(),
             reply: tx,
         },
 
@@ -955,6 +1163,11 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "save_project_with_media" => McpCommand::SaveProjectWithMedia {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
@@ -1042,6 +1255,23 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             opacity: args["opacity"].as_f64().unwrap_or(1.0),
             reply: tx,
         },
+        "set_clip_keyframe" => McpCommand::SetClipKeyframe {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            property: args["property"].as_str().unwrap_or("").to_string(),
+            timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
+            value: args["value"].as_f64().unwrap_or(0.0),
+            interpolation: args
+                .get("interpolation")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reply: tx,
+        },
+        "remove_clip_keyframe" => McpCommand::RemoveClipKeyframe {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            property: args["property"].as_str().unwrap_or("").to_string(),
+            timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
+            reply: tx,
+        },
 
         "create_project" => McpCommand::CreateProject {
             title: args["title"].as_str().unwrap_or("Untitled").to_string(),
@@ -1084,6 +1314,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
             source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
             track_index: args["track_index"].as_u64().map(|v| v as usize),
+            timeline_pos_ns: args["timeline_pos_ns"].as_u64(),
             reply: tx,
         },
 
@@ -1092,6 +1323,7 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
             source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
             track_index: args["track_index"].as_u64().map(|v| v as usize),
+            timeline_pos_ns: args["timeline_pos_ns"].as_u64(),
             reply: tx,
         },
 
@@ -1104,6 +1336,12 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
         },
         "export_displayed_frame" => McpCommand::ExportDisplayedFrame {
             path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "export_timeline_snapshot" => McpCommand::ExportTimelineSnapshot {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            width: args["width"].as_u64().unwrap_or(1920) as u32,
+            height: args["height"].as_u64().unwrap_or(1080) as u32,
             reply: tx,
         },
         "take_screenshot" => McpCommand::TakeScreenshot { reply: tx },
@@ -1125,16 +1363,228 @@ fn call_tool(id: &Value, params: &Value, sender: &std::sync::mpsc::Sender<McpCom
             reply: tx,
         },
 
-        _ => return err(id.clone(), -32602, &format!("Unknown tool: '{name}'")),
+        _ => {
+            return Err(tool_error_payload(
+                -32602,
+                format!("Unknown tool: '{name}'"),
+            ))
+        }
     };
 
     if sender.send(cmd).is_err() {
-        return err(id.clone(), -32603, "App main thread unavailable");
+        return Err(tool_error_payload(-32603, "App main thread unavailable"));
     }
 
     match rx.recv() {
-        Ok(result) => ok(id, text_content(result)),
-        Err(_) => err(id.clone(), -32603, "No reply from app"),
+        Ok(result) => Ok(result),
+        Err(_) => Err(tool_error_payload(-32603, "No reply from app")),
+    }
+}
+
+fn call_tool(
+    id: &Value,
+    params: &Value,
+    sender: &std::sync::mpsc::Sender<McpCommand>,
+    session_read_cache: &mut std::collections::HashMap<String, (Value, std::time::Instant)>,
+) -> Value {
+    let name = params["name"].as_str().unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    if name == "batch_call_tools" {
+        let Some(calls) = args.get("calls").and_then(Value::as_array) else {
+            return err(id.clone(), -32602, "calls must be an array");
+        };
+        let stop_on_error = args["stop_on_error"].as_bool().unwrap_or(false);
+        let include_timing = args["include_timing"].as_bool().unwrap_or(false);
+        let batch_started = std::time::Instant::now();
+        let mut results = Vec::with_capacity(calls.len());
+        let mut stopped_on_error = false;
+        let mut read_cache: std::collections::HashMap<String, Result<Value, Value>> =
+            std::collections::HashMap::new();
+        for (index, call) in calls.iter().enumerate() {
+            let call_started = std::time::Instant::now();
+            let tool_name = call.get("name").and_then(Value::as_str).unwrap_or("");
+            if tool_name.is_empty() {
+                let mut entry = json!({
+                    "index": index,
+                    "success": false,
+                    "error": {"code": -32602, "message": "call.name must be a non-empty string"}
+                });
+                if include_timing {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert(
+                            "elapsed_ms".to_string(),
+                            json!(call_started.elapsed().as_secs_f64() * 1000.0),
+                        );
+                    }
+                }
+                results.push(entry);
+                if stop_on_error {
+                    stopped_on_error = true;
+                    break;
+                }
+                continue;
+            }
+            if tool_name == "batch_call_tools" {
+                let mut entry = json!({
+                    "index": index,
+                    "name": tool_name,
+                    "success": false,
+                    "error": {"code": -32602, "message": "Nested batch_call_tools is not supported"}
+                });
+                if include_timing {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert(
+                            "elapsed_ms".to_string(),
+                            json!(call_started.elapsed().as_secs_f64() * 1000.0),
+                        );
+                    }
+                }
+                results.push(entry);
+                if stop_on_error {
+                    stopped_on_error = true;
+                    break;
+                }
+                continue;
+            }
+            let tool_args = call.get("arguments").cloned().unwrap_or(json!({}));
+            let tool_is_read = is_cacheable_read_tool(tool_name);
+            let tool_is_session_cacheable = is_session_cacheable_read_tool(tool_name);
+            if !tool_is_read {
+                read_cache.clear();
+                session_read_cache.clear();
+            }
+            let dispatch_result = if tool_is_read {
+                let key = cache_key(tool_name, &tool_args);
+                if let Some(cached) = read_cache.get(&key) {
+                    cached.clone()
+                } else if tool_is_session_cacheable {
+                    if let Some((cached_payload, cached_at)) = session_read_cache.get(&key) {
+                        if call_started.duration_since(*cached_at)
+                            <= std::time::Duration::from_millis(SESSION_READ_CACHE_TTL_MS)
+                        {
+                            let cached_result = Ok(cached_payload.clone());
+                            read_cache.insert(key, cached_result.clone());
+                            cached_result
+                        } else {
+                            let dispatched = dispatch_tool_payload(tool_name, &tool_args, sender);
+                            if let Ok(result_payload) = &dispatched {
+                                session_read_cache
+                                    .insert(key.clone(), (result_payload.clone(), call_started));
+                            }
+                            read_cache.insert(key, dispatched.clone());
+                            dispatched
+                        }
+                    } else {
+                        let dispatched = dispatch_tool_payload(tool_name, &tool_args, sender);
+                        if let Ok(result_payload) = &dispatched {
+                            session_read_cache
+                                .insert(key.clone(), (result_payload.clone(), call_started));
+                        }
+                        read_cache.insert(key, dispatched.clone());
+                        dispatched
+                    }
+                } else {
+                    let dispatched = dispatch_tool_payload(tool_name, &tool_args, sender);
+                    read_cache.insert(key, dispatched.clone());
+                    dispatched
+                }
+            } else {
+                dispatch_tool_payload(tool_name, &tool_args, sender)
+            };
+            match dispatch_result {
+                Ok(result_payload) => {
+                    let mut entry = json!({
+                        "index": index,
+                        "name": tool_name,
+                        "success": true,
+                        "result": result_payload
+                    });
+                    if include_timing {
+                        if let Some(obj) = entry.as_object_mut() {
+                            obj.insert(
+                                "elapsed_ms".to_string(),
+                                json!(call_started.elapsed().as_secs_f64() * 1000.0),
+                            );
+                        }
+                    }
+                    results.push(entry);
+                }
+                Err(error_payload) => {
+                    let mut entry = json!({
+                        "index": index,
+                        "name": tool_name,
+                        "success": false,
+                        "error": error_payload
+                    });
+                    if include_timing {
+                        if let Some(obj) = entry.as_object_mut() {
+                            obj.insert(
+                                "elapsed_ms".to_string(),
+                                json!(call_started.elapsed().as_secs_f64() * 1000.0),
+                            );
+                        }
+                    }
+                    results.push(entry);
+                }
+            }
+            if stop_on_error
+                && results
+                    .last()
+                    .is_some_and(|entry| !entry["success"].as_bool().unwrap_or(false))
+            {
+                stopped_on_error = true;
+                break;
+            }
+        }
+        let mut payload = json!({
+            "results": results,
+            "stopped_on_error": stopped_on_error
+        });
+        if include_timing {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "total_elapsed_ms".to_string(),
+                    json!(batch_started.elapsed().as_secs_f64() * 1000.0),
+                );
+            }
+        }
+        return ok(id, text_content(payload));
+    }
+
+    let now = std::time::Instant::now();
+    let session_cacheable = is_session_cacheable_read_tool(name);
+    let session_key = cache_key(name, &args);
+    if session_cacheable {
+        if let Some((cached, cached_at)) = session_read_cache.get(&session_key) {
+            if now.duration_since(*cached_at)
+                <= std::time::Duration::from_millis(SESSION_READ_CACHE_TTL_MS)
+            {
+                return ok(id, text_content(cached.clone()));
+            }
+        }
+    } else {
+        session_read_cache.clear();
+    }
+
+    match dispatch_tool_payload(name, &args, sender) {
+        Ok(result_payload) => {
+            if session_cacheable {
+                session_read_cache.insert(session_key, (result_payload.clone(), now));
+            }
+            ok(id, text_content(result_payload))
+        }
+        Err(error_payload) => {
+            let code = error_payload
+                .get("code")
+                .and_then(Value::as_i64)
+                .unwrap_or(-32603) as i32;
+            let message = error_payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Tool call failed");
+            err(id.clone(), code, message)
+        }
     }
 }
 
@@ -1161,8 +1611,11 @@ fn parse_crossfade_settings_args(args: &Value) -> Result<(bool, &'static str, u6
 
 #[cfg(test)]
 mod tests {
-    use super::parse_crossfade_settings_args;
+    use super::{call_tool, parse_crossfade_settings_args};
+    use crate::mcp::McpCommand;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn parse_crossfade_settings_accepts_valid_bounds() {
@@ -1210,5 +1663,321 @@ mod tests {
             parse_crossfade_settings_args(&args),
             Err("duration_ns must be an integer")
         );
+    }
+
+    #[test]
+    fn call_tool_dispatches_set_track_solo() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SetTrackSolo {
+                    track_id,
+                    solo,
+                    reply,
+                } => {
+                    assert_eq!(track_id, "track-1");
+                    assert!(solo);
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "soloed": solo}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(7);
+        let params = json!({
+            "name": "set_track_solo",
+            "arguments": { "track_id": "track-1", "solo": true }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_get_performance_snapshot() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::GetPerformanceSnapshot { reply } => {
+                    reply
+                        .send(json!({
+                            "player_state": "paused",
+                            "prerender_pending": 0
+                        }))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(8);
+        let params = json!({
+            "name": "get_performance_snapshot",
+            "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_save_project_with_media() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SaveProjectWithMedia { path, reply } => {
+                    assert_eq!(path, "/tmp/packaged.uspxml");
+                    reply
+                        .send(json!({"success": true, "path": path, "library_path": "/tmp/packaged.Library"}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(9);
+        let params = json!({
+            "name": "save_project_with_media",
+            "arguments": { "path": "/tmp/packaged.uspxml" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn batch_call_tools_returns_per_call_results() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let first = receiver.recv().expect("expected first command");
+            match first {
+                McpCommand::GetTimelineSettings { reply } => {
+                    reply.send(json!({"magnetic_mode": false})).ok();
+                }
+                _ => panic!("unexpected first MCP command"),
+            }
+            let second = receiver.recv().expect("expected second command");
+            match second {
+                McpCommand::GetPlayheadPosition { reply } => {
+                    reply.send(json!({"timeline_pos_ns": 1234u64})).ok();
+                }
+                _ => panic!("unexpected second MCP command"),
+            }
+        });
+        let id = json!(88);
+        let params = json!({
+            "name": "batch_call_tools",
+            "arguments": {
+                "include_timing": true,
+                "calls": [
+                    {"name": "get_timeline_settings", "arguments": {}},
+                    {"name": "get_playhead_position", "arguments": {}}
+                ]
+            }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["error"], serde_json::Value::Null);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("batch content text");
+        let payload: serde_json::Value = serde_json::from_str(text).expect("parse batch payload");
+        let results = payload["results"].as_array().expect("batch results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["success"], true);
+        assert_eq!(results[1]["success"], true);
+        assert!(results[0]["elapsed_ms"].as_f64().is_some());
+        assert!(payload["total_elapsed_ms"].as_f64().is_some());
+    }
+
+    #[test]
+    fn batch_call_tools_stop_on_error_halts_remaining_calls() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let first = receiver.recv().expect("expected first command");
+            match first {
+                McpCommand::GetTimelineSettings { reply } => {
+                    reply.send(json!({"magnetic_mode": true})).ok();
+                }
+                _ => panic!("unexpected first MCP command"),
+            }
+            // No second recv expected: unknown tool should stop execution when stop_on_error=true.
+        });
+        let id = json!(99);
+        let params = json!({
+            "name": "batch_call_tools",
+            "arguments": {
+                "stop_on_error": true,
+                "calls": [
+                    {"name": "get_timeline_settings", "arguments": {}},
+                    {"name": "not_a_real_tool", "arguments": {}},
+                    {"name": "get_playhead_position", "arguments": {}}
+                ]
+            }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["error"], serde_json::Value::Null);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("batch content text");
+        let payload: serde_json::Value = serde_json::from_str(text).expect("parse batch payload");
+        let results = payload["results"].as_array().expect("batch results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["success"], true);
+        assert_eq!(results[1]["success"], false);
+        assert_eq!(payload["stopped_on_error"], true);
+    }
+
+    #[test]
+    fn batch_call_tools_reuses_cached_read_results_until_mutation() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        let command_count = Arc::new(AtomicUsize::new(0));
+        let command_count_thread = command_count.clone();
+        let worker = std::thread::spawn(move || {
+            while let Ok(cmd) = receiver.recv_timeout(std::time::Duration::from_millis(200)) {
+                command_count_thread.fetch_add(1, Ordering::Relaxed);
+                match cmd {
+                    McpCommand::GetTimelineSettings { reply } => {
+                        reply.send(json!({"magnetic_mode": false})).ok();
+                    }
+                    McpCommand::SetMagneticMode { enabled, reply } => {
+                        reply
+                            .send(json!({"success": true, "magnetic_mode": enabled}))
+                            .ok();
+                    }
+                    _ => panic!("unexpected MCP command"),
+                }
+            }
+        });
+        let id = json!(123);
+        let params = json!({
+            "name": "batch_call_tools",
+            "arguments": {
+                "calls": [
+                    {"name": "get_timeline_settings", "arguments": {}},
+                    {"name": "get_timeline_settings", "arguments": {}},
+                    {"name": "set_magnetic_mode", "arguments": {"enabled": true}},
+                    {"name": "get_timeline_settings", "arguments": {}}
+                ]
+            }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["error"], serde_json::Value::Null);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("batch content text");
+        let payload: serde_json::Value = serde_json::from_str(text).expect("parse batch payload");
+        let results = payload["results"].as_array().expect("batch results array");
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0]["success"], true);
+        assert_eq!(results[1]["success"], true);
+        assert_eq!(results[2]["success"], true);
+        assert_eq!(results[3]["success"], true);
+        drop(sender);
+        worker.join().expect("worker join");
+        assert_eq!(command_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn top_level_read_cache_hits_and_invalidates_on_mutation() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        let command_count = Arc::new(AtomicUsize::new(0));
+        let command_count_thread = command_count.clone();
+        let worker = std::thread::spawn(move || {
+            while let Ok(cmd) = receiver.recv_timeout(std::time::Duration::from_millis(200)) {
+                command_count_thread.fetch_add(1, Ordering::Relaxed);
+                match cmd {
+                    McpCommand::ListTracks { compact, reply } => {
+                        reply.send(json!([{"index": 0, "compact": compact}])).ok();
+                    }
+                    McpCommand::SetMagneticMode { enabled, reply } => {
+                        reply
+                            .send(json!({"success": true, "magnetic_mode": enabled}))
+                            .ok();
+                    }
+                    _ => panic!("unexpected MCP command"),
+                }
+            }
+        });
+
+        let mut cache = std::collections::HashMap::new();
+        let read_id_1 = json!(201);
+        let read_params = json!({"name":"list_tracks","arguments":{"compact":true}});
+        let _ = call_tool(&read_id_1, &read_params, &sender, &mut cache);
+        // Second identical read should hit cache and avoid dispatch.
+        let read_id_2 = json!(202);
+        let _ = call_tool(&read_id_2, &read_params, &sender, &mut cache);
+        // Mutation clears top-level cache.
+        let mut_id = json!(203);
+        let mut_params = json!({"name":"set_magnetic_mode","arguments":{"enabled":true}});
+        let _ = call_tool(&mut_id, &mut_params, &sender, &mut cache);
+        // Read after mutation should dispatch again.
+        let read_id_3 = json!(204);
+        let _ = call_tool(&read_id_3, &read_params, &sender, &mut cache);
+
+        drop(sender);
+        worker.join().expect("worker join");
+        assert_eq!(command_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn batch_call_tools_reuses_session_cache_then_invalidates_on_mutation() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        let command_count = Arc::new(AtomicUsize::new(0));
+        let command_count_thread = command_count.clone();
+        let worker = std::thread::spawn(move || {
+            while let Ok(cmd) = receiver.recv_timeout(std::time::Duration::from_millis(200)) {
+                command_count_thread.fetch_add(1, Ordering::Relaxed);
+                match cmd {
+                    McpCommand::ListTracks { compact, reply } => {
+                        reply.send(json!([{"index": 0, "compact": compact}])).ok();
+                    }
+                    McpCommand::SetMagneticMode { enabled, reply } => {
+                        reply
+                            .send(json!({"success": true, "magnetic_mode": enabled}))
+                            .ok();
+                    }
+                    _ => panic!("unexpected MCP command"),
+                }
+            }
+        });
+
+        let mut cache = std::collections::HashMap::new();
+        let single_read_id = json!(301);
+        let single_read_params = json!({"name":"list_tracks","arguments":{"compact":true}});
+        let _ = call_tool(&single_read_id, &single_read_params, &sender, &mut cache);
+
+        let batch_id = json!(302);
+        let batch_params = json!({
+            "name": "batch_call_tools",
+            "arguments": {
+                "calls": [
+                    {"name":"list_tracks","arguments":{"compact":true}},
+                    {"name":"set_magnetic_mode","arguments":{"enabled":true}},
+                    {"name":"list_tracks","arguments":{"compact":true}}
+                ]
+            }
+        });
+        let response = call_tool(&batch_id, &batch_params, &sender, &mut cache);
+        assert_eq!(response["error"], serde_json::Value::Null);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("batch content text");
+        let payload: serde_json::Value = serde_json::from_str(text).expect("parse batch payload");
+        let results = payload["results"].as_array().expect("batch results array");
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|entry| entry["success"] == true));
+
+        drop(sender);
+        worker.join().expect("worker join");
+        // One dispatch for initial read, one for mutation, one for read after mutation.
+        assert_eq!(command_count.load(Ordering::Relaxed), 3);
     }
 }

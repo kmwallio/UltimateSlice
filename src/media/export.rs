@@ -1,4 +1,5 @@
-use crate::model::clip::{Clip, ClipKind};
+use crate::media::program_player::ProgramPlayer;
+use crate::model::clip::{Clip, ClipKind, NumericKeyframe};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -12,6 +13,12 @@ pub enum ExportProgress {
     Progress(f64), // 0.0 – 1.0
     Done,
     Error(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ColorFilterCapabilities {
+    pub(crate) use_coloradj_frei0r: bool,
+    pub(crate) three_point_frei0r_module: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,21 +103,29 @@ pub fn export_project(
     } else {
         options.output_height
     };
+    let frame_duration_s = if project.frame_rate.numerator > 0 && project.frame_rate.denominator > 0
+    {
+        project.frame_rate.denominator as f64 / project.frame_rate.numerator as f64
+    } else {
+        1.0 / 30.0
+    };
 
-    // Primary video track (first video track) — forms the base concat sequence.
-    // Secondary video tracks are composited on top with overlay.
-    let mut video_tracks_iter = project.video_tracks();
-    let mut primary_clips: Vec<&crate::model::clip::Clip> = video_tracks_iter
-        .next()
+    // Primary video track (first active video track) — forms the base concat sequence.
+    // Secondary active video tracks are composited on top with overlay.
+    let active_video_tracks: Vec<_> = project
+        .video_tracks()
+        .filter(|t| project.track_is_active_for_output(t))
+        .collect();
+    let mut primary_clips: Vec<&crate::model::clip::Clip> = active_video_tracks
+        .first()
         .map(|t| t.clips.iter().collect())
         .unwrap_or_default();
     primary_clips.sort_by_key(|c| c.timeline_start);
 
     // Remaining video tracks: each is a list of (overlay) clips
-    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
-        .video_tracks()
+    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = active_video_tracks
+        .into_iter()
         .skip(1)
-        .filter(|t| !t.muted)
         .map(|t| {
             let mut clips: Vec<&Clip> = t.clips.iter().collect();
             clips.sort_by_key(|c| c.timeline_start);
@@ -122,10 +137,10 @@ pub fn export_project(
         return Err(anyhow!("No video clips to export"));
     }
 
-    // Collect audio-only clips from non-muted audio tracks
+    // Collect audio-only clips from active audio tracks.
     let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
         .audio_tracks()
-        .filter(|t| !t.muted)
+        .filter(|t| project.track_is_active_for_output(t))
         .map(|t| {
             let mut clips: Vec<&Clip> = t.clips.iter().collect();
             clips.sort_by_key(|c| c.timeline_start);
@@ -181,8 +196,10 @@ pub fn export_project(
 
     // Inputs: primary video clips (0..primary_clips.len())
     for clip in &primary_clips {
-        let in_s = clip.source_in as f64 / 1_000_000_000.0;
-        let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
+        let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
+        if clip.kind == ClipKind::Image {
+            cmd.arg("-loop").arg("1");
+        }
         cmd.arg("-ss")
             .arg(format!("{in_s:.6}"))
             .arg("-t")
@@ -193,8 +210,10 @@ pub fn export_project(
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
     for clip in &secondary_clips_flat {
-        let in_s = clip.source_in as f64 / 1_000_000_000.0;
-        let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
+        let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
+        if clip.kind == ClipKind::Image {
+            cmd.arg("-loop").arg("1");
+        }
         cmd.arg("-ss")
             .arg(format!("{in_s:.6}"))
             .arg("-t")
@@ -219,28 +238,73 @@ pub fn export_project(
     }
 
     let mut filter = String::new();
+    let color_caps = detect_color_filter_capabilities(&ffmpeg);
 
     // === Primary video track: scale/correct each clip then concatenate ===
     for (i, clip) in primary_clips.iter().enumerate() {
         let color_filter = build_color_filter(clip);
-        let temp_tint_filter = build_temperature_tint_filter(clip);
-        let grading_filter = build_grading_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter_with_caps(clip, &color_caps);
+        let grading_filter = build_grading_filter_with_caps(clip, &color_caps);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
-        let speed_filter = build_speed_filter(clip);
-        let lut_filter = build_lut_filter(clip);
+        let title_filter = build_title_filter(clip);
+        let speed_filter = build_timing_filter(clip, frame_duration_s);
+        let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
-        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
-        if clip.chroma_key_enabled || clip.bg_removal_enabled {
+        let has_transform_keyframes = has_transform_keyframes(clip);
+        let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
+        if has_transform_keyframes || has_opacity_keyframes {
+            let scale_expr = build_keyframed_property_expression(
+                &clip.scale_keyframes,
+                clip.scale,
+                0.1,
+                4.0,
+                "t",
+            );
+            let pos_x_expr = build_keyframed_property_expression(
+                &clip.position_x_keyframes,
+                clip.position_x,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let pos_y_expr = build_keyframed_property_expression(
+                &clip.position_y_keyframes,
+                clip.position_y,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let opacity_expr = build_keyframed_property_expression(
+                &clip.opacity_keyframes,
+                clip.opacity,
+                0.0,
+                1.0,
+                "T",
+            );
+            let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             filter.push_str(&format!(
-                "[{i}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{rotate_filter},fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{speed_filter}\
+                 ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
+                 color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
+                 [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
+                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[pv{i}raw];\
+                 [pv{i}raw]format=yuv420p[pv{i}];",
+                project.frame_rate.numerator, project.frame_rate.denominator
+                , project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        } else if clip.chroma_key_enabled || clip.bg_removal_enabled {
+            let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
+            filter.push_str(&format!(
+                "[{i}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
+            let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             filter.push_str(&format!(
-                "[{i}:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{title_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -276,30 +340,23 @@ pub fn export_project(
         let mut total_overlap_s = 0.0_f64;
         for i in 0..(primary_clips.len() - 1) {
             let next_label = format!("pv{}", i + 1);
-            let out_label = format!("vxd{}", i + 1);
+            let out_label = format!("vseq{}", i + 1);
             let clip = &primary_clips[i];
-            let mut d_s = if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
-                clip.transition_after_ns as f64 / 1_000_000_000.0
-            } else {
-                0.0
-            };
-            let max_d = (primary_clips[i]
-                .duration()
-                .min(primary_clips[i + 1].duration()) as f64
-                / 1_000_000_000.0)
-                - 0.001;
-            d_s = d_s.clamp(0.0, max_d.max(0.0));
-            if d_s <= 0.0 {
-                d_s = 0.001;
-            }
-            let offset_s = (running_s - d_s).max(0.0);
             let sep = if i == 0 { "" } else { ";" };
-            let xfade = transition_xfade_name(&clip.transition_after);
-            filter.push_str(&format!(
-                "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
-            ));
-            running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
-            total_overlap_s += d_s;
+            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, primary_clips[i + 1]) {
+                let offset_s = (running_s - d_s).max(0.0);
+                let xfade = transition_xfade_name(&clip.transition_after);
+                filter.push_str(&format!(
+                    "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
+                ));
+                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
+                total_overlap_s += d_s;
+            } else {
+                filter.push_str(&format!(
+                    "{sep}[{prev_label}][{next_label}]concat=n=2:v=1:a=0[{out_label}]"
+                ));
+                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0;
+            }
             prev_label = out_label;
         }
         if total_overlap_s > 0.0 {
@@ -322,22 +379,64 @@ pub fn export_project(
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         let color_filter = build_color_filter(clip);
-        let temp_tint_filter = build_temperature_tint_filter(clip);
-        let grading_filter = build_grading_filter(clip);
+        let temp_tint_filter = build_temperature_tint_filter_with_caps(clip, &color_caps);
+        let grading_filter = build_grading_filter_with_caps(clip, &color_caps);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
-        let speed_filter = build_speed_filter(clip);
-        let lut_filter = build_lut_filter(clip);
-        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
+        let title_filter = build_title_filter(clip);
+        let speed_filter = build_timing_filter(clip, frame_duration_s);
+        let lut_prefix = build_lut_filter_prefix(clip);        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let rotate_filter = build_rotation_filter(clip, true);
-        let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
-        let opacity = clip.opacity.clamp(0.0, 1.0);
+        let has_transform_keyframes = has_transform_keyframes(clip);
+        let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
-        filter.push_str(&format!(
-            ";[{in_idx}:v]format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{lut_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
-        ));
+        if has_transform_keyframes || has_opacity_keyframes {
+            let scale_expr = build_keyframed_property_expression(
+                &clip.scale_keyframes,
+                clip.scale,
+                0.1,
+                4.0,
+                "t",
+            );
+            let pos_x_expr = build_keyframed_property_expression(
+                &clip.position_x_keyframes,
+                clip.position_x,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let pos_y_expr = build_keyframed_property_expression(
+                &clip.position_y_keyframes,
+                clip.position_y,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let opacity_expr = build_keyframed_property_expression(
+                &clip.opacity_keyframes,
+                clip.opacity,
+                0.0,
+                1.0,
+                "T",
+            );
+            let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
+            filter.push_str(&format!(
+                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                 ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
+                 color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
+                 [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
+                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[{ov_label}raw]"
+                , project.frame_rate.numerator, project.frame_rate.denominator
+            ));
+        } else {
+            let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
+            let opacity = clip.opacity.clamp(0.0, 1.0);
+            filter.push_str(&format!(
+                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{chroma_key_filter}{title_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+            ));
+        }
         // Delay PTS to timeline position so the overlay lands at the right time
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
         filter.push_str(&format!(
@@ -362,6 +461,7 @@ pub fn export_project(
             let mut primary_embedded_audio_clips = Vec::new();
             for clip in &primary_clips {
                 if clip.kind == ClipKind::Video
+                    && !clip.is_freeze_frame()
                     && !has_linked_audio_peer(clip, &audio_clips)
                     && !uses_bg_removal_path(clip)
                     && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -377,6 +477,7 @@ pub fn export_project(
                 let mut secondary_embedded_audio_clips = Vec::new();
                 for clip in track_clips {
                     if clip.kind == ClipKind::Video
+                        && !clip.is_freeze_frame()
                         && !has_linked_audio_peer(clip, &audio_clips)
                         && !uses_bg_removal_path(clip)
                         && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -403,6 +504,7 @@ pub fn export_project(
     // Embedded audio from primary video clips, with per-clip volume scaling
     for (i, clip) in primary_clips.iter().enumerate() {
         if clip.kind == ClipKind::Video
+            && !clip.is_freeze_frame()
             && !has_linked_audio_peer(clip, &audio_clips)
             && !uses_bg_removal_path(clip)
             && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -411,12 +513,16 @@ pub fn export_project(
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
-            let vol = clip.volume;
+            let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
+            let pre_pan = format!("{label}_prepan");
+            let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]"
+                ";[{i}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
             ));
+            append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+            filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
             audio_labels.push(label);
         }
     }
@@ -425,6 +531,7 @@ pub fn export_project(
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         if clip.kind == ClipKind::Video
+            && !clip.is_freeze_frame()
             && !has_linked_audio_peer(clip, &audio_clips)
             && !uses_bg_removal_path(clip)
             && clip_has_audio(&ffmpeg, clip, &mut audio_presence_cache)
@@ -433,12 +540,16 @@ pub fn export_project(
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_atempo(clip.speed);
-            let vol = clip.volume;
+            let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
+            let pre_pan = format!("{label}_prepan");
+            let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]"
+                ";[{in_idx}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
             ));
+            append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+            filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
             audio_labels.push(label);
         }
     }
@@ -449,13 +560,17 @@ pub fn export_project(
         let label = format!("aa{j}");
         let areverse = if clip.reverse { "areverse," } else { "" };
         let atempo = build_atempo(clip.speed);
-        let vol = clip.volume;
+        let volume_filter = build_volume_filter(clip);
         let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
         let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
+        let pre_pan = format!("{label}_prepan");
+        let post_pan = format!("{label}_panned");
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}volume={vol:.4},{fade_filters}adelay={delay_ms}:all=1[{label}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
+        append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+        filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
         audio_labels.push(label);
     }
 
@@ -600,29 +715,292 @@ pub fn export_project(
 }
 
 fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
-    if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
+    let has_keyframes = !clip.brightness_keyframes.is_empty()
+        || !clip.contrast_keyframes.is_empty()
+        || !clip.saturation_keyframes.is_empty();
+    // Keep exposure mapping aligned with preview parity:
+    // preview approximates exposure as a brightness lift + slight contrast boost.
+    let has_exposure = clip.exposure.abs() > f32::EPSILON;
+    let (exposure_brightness_delta, exposure_contrast_delta) = if has_exposure {
+        let e = clip.exposure.clamp(-1.0, 1.0) as f64;
+        (e * 0.55, e * 0.12)
+    } else {
+        (0.0, 0.0)
+    };
+    if has_keyframes {
+        let brightness_expr = build_keyframed_property_expression(
+            &clip.brightness_keyframes,
+            clip.brightness as f64,
+            -1.0,
+            1.0,
+            "t",
+        );
+        let contrast_expr = build_keyframed_property_expression(
+            &clip.contrast_keyframes,
+            clip.contrast as f64,
+            0.0,
+            2.0,
+            "t",
+        );
+        let saturation_expr = build_keyframed_property_expression(
+            &clip.saturation_keyframes,
+            clip.saturation as f64,
+            0.0,
+            2.0,
+            "t",
+        );
+        let brightness_expr = if has_exposure {
+            format!("({brightness_expr})+{exposure_brightness_delta:.6}")
+        } else {
+            brightness_expr
+        };
+        let contrast_expr = if has_exposure {
+            format!("({contrast_expr})+{exposure_contrast_delta:.6}")
+        } else {
+            contrast_expr
+        };
+        format!(
+            ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
+        )
+    } else if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 || has_exposure
+    {
+        // For static (non-keyframed) primaries, align export with Program Monitor
+        // by reusing the calibrated videobalance mapping used in preview.
+        // Temperature/tint and tonal grading are excluded here because export
+        // applies them through dedicated filters later in the chain.
+        let preview_params = ProgramPlayer::compute_videobalance_params(
+            clip.brightness as f64,
+            clip.contrast as f64,
+            clip.saturation as f64,
+            6500.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            clip.exposure as f64,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            true,
+            true,
+        );
+        // FFmpeg `eq` contrast pivots around Y=0.5 differently than preview's
+        // GStreamer videobalance path. Add a calibrated brightness bias around
+        // neutral contrast to keep low/high contrast looks closer to preview.
+        let contrast_t = clip.contrast.clamp(0.0, 2.0) as f64;
+        let contrast_delta = contrast_t - 1.0;
+        let contrast_brightness_bias = 0.26 * contrast_delta - 0.08 * contrast_delta * contrast_delta;
         format!(
             ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
-            clip.brightness.clamp(-1.0, 1.0),
-            clip.contrast.clamp(0.0, 2.0),
-            clip.saturation.clamp(0.0, 2.0)
+            (preview_params.brightness + contrast_brightness_bias).clamp(-1.0, 1.0),
+            preview_params.contrast,
+            preview_params.saturation
         )
     } else {
         String::new()
     }
 }
 
+fn has_transform_keyframes(clip: &Clip) -> bool {
+    !clip.scale_keyframes.is_empty()
+        || !clip.position_x_keyframes.is_empty()
+        || !clip.position_y_keyframes.is_empty()
+        || !clip.rotate_keyframes.is_empty()
+        || !clip.crop_left_keyframes.is_empty()
+        || !clip.crop_right_keyframes.is_empty()
+        || !clip.crop_top_keyframes.is_empty()
+        || !clip.crop_bottom_keyframes.is_empty()
+}
+
+fn build_keyframed_property_expression(
+    keyframes: &[NumericKeyframe],
+    default_value: f64,
+    min_value: f64,
+    max_value: f64,
+    time_var: &str,
+) -> String {
+    use crate::model::clip::KeyframeInterpolation;
+
+    let mut sorted: Vec<&NumericKeyframe> = keyframes.iter().collect();
+    sorted.sort_by_key(|kf| kf.time_ns);
+    // Deduplicate by time (last wins)
+    let mut deduped: Vec<(u64, f64, KeyframeInterpolation)> = Vec::with_capacity(sorted.len());
+    for kf in &sorted {
+        let v = kf.value.clamp(min_value, max_value);
+        if let Some(last) = deduped.last_mut() {
+            if last.0 == kf.time_ns {
+                last.1 = v;
+                last.2 = kf.interpolation;
+                continue;
+            }
+        }
+        deduped.push((kf.time_ns, v, kf.interpolation));
+    }
+
+    if deduped.is_empty() {
+        return format!("{:.10}", default_value.clamp(min_value, max_value));
+    }
+    if deduped.len() == 1 {
+        return format!("{:.10}", deduped[0].1);
+    }
+
+    let mut expr = format!(
+        "{:.10}",
+        deduped.last().map(|(_, v, _)| *v).unwrap_or(default_value)
+    );
+    for i in (1..deduped.len()).rev() {
+        let (left_ns, left_value, interp) = deduped[i - 1];
+        let (right_ns, right_value, _) = deduped[i];
+        let left_s = left_ns as f64 / 1_000_000_000.0;
+        let right_s = right_ns as f64 / 1_000_000_000.0;
+        let span_s = (right_s - left_s).max(1e-9);
+        // Compute normalized t for this segment
+        let t_expr = format!("(({time_var})-{left_s:.9})/{span_s:.9}");
+        // Apply easing to t
+        let eased_t = match interp {
+            KeyframeInterpolation::Linear => t_expr.clone(),
+            KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
+            KeyframeInterpolation::EaseOut => format!("(1-pow(1-({t_expr}),2))"),
+            KeyframeInterpolation::EaseInOut => {
+                format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
+            }
+        };
+        let segment_expr =
+            format!("{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}");
+        expr = format!(
+            "if(lt({time_var},{right_s:.9}),{segment_expr},{expr})",
+            right_s = right_s
+        );
+    }
+    let (first_ns, first_value, _) = deduped[0];
+    let first_s = first_ns as f64 / 1_000_000_000.0;
+    format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
+}
+
+fn build_volume_filter(clip: &Clip) -> String {
+    if clip.volume_keyframes.is_empty() {
+        return format!("volume={:.4}", clip.volume.clamp(0.0, 4.0));
+    }
+    let expr = build_keyframed_property_expression(
+        &clip.volume_keyframes,
+        clip.volume as f64,
+        0.0,
+        4.0,
+        "t",
+    );
+    // Keyframed volume expressions depend on `t`, so force per-frame evaluation.
+    format!("volume='{expr}':eval=frame")
+}
+
+fn build_pan_expression(clip: &Clip) -> String {
+    if clip.pan_keyframes.is_empty() {
+        format!("{:.10}", clip.pan.clamp(-1.0, 1.0))
+    } else {
+        build_keyframed_property_expression(&clip.pan_keyframes, clip.pan as f64, -1.0, 1.0, "t")
+    }
+}
+
+fn append_pan_filter_chain(
+    filter: &mut String,
+    clip: &Clip,
+    input_label: &str,
+    output_label: &str,
+    label_prefix: &str,
+) {
+    if clip.pan.abs() <= f32::EPSILON && clip.pan_keyframes.is_empty() {
+        filter.push_str(&format!(";[{input_label}]anull[{output_label}]"));
+        return;
+    }
+
+    let pan_expr = build_pan_expression(clip);
+    let left_gain_expr = format!("if(gt({pan_expr},0),1-({pan_expr}),1)");
+    let right_gain_expr = format!("if(lt({pan_expr},0),1+({pan_expr}),1)");
+    let left_label = format!("{label_prefix}_pan_l");
+    let right_label = format!("{label_prefix}_pan_r");
+    let left_scaled_label = format!("{label_prefix}_pan_lv");
+    let right_scaled_label = format!("{label_prefix}_pan_rv");
+
+    filter.push_str(&format!(
+        ";[{input_label}]aformat=channel_layouts=stereo,channelsplit=channel_layout=stereo[{left_label}][{right_label}]"
+    ));
+    filter.push_str(&format!(
+        ";[{left_label}]volume='{left_gain_expr}':eval=frame[{left_scaled_label}]"
+    ));
+    filter.push_str(&format!(
+        ";[{right_label}]volume='{right_gain_expr}':eval=frame[{right_scaled_label}]"
+    ));
+    filter.push_str(&format!(
+        ";[{left_scaled_label}][{right_scaled_label}]amerge=inputs=2,aformat=channel_layouts=stereo[{output_label}]"
+    ));
+}
+
 fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
+    build_temperature_tint_filter_with_caps(clip, &ColorFilterCapabilities::default())
+}
+
+fn build_temperature_tint_filter_with_caps(
+    clip: &crate::model::clip::Clip,
+    caps: &ColorFilterCapabilities,
+) -> String {
     let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
     let has_tint = clip.tint.abs() > 0.001;
+    let has_temp_keyframes = !clip.temperature_keyframes.is_empty();
+    let has_tint_keyframes = !clip.tint_keyframes.is_empty();
+
+    // FFmpeg frei0r bridge path: use the same calibrated coloradj mapping as preview
+    // when this is a static (non-keyframed) temp/tint adjustment.
+    if caps.use_coloradj_frei0r
+        && (has_temp || has_tint)
+        && !has_temp_keyframes
+        && !has_tint_keyframes
+    {
+        let cp = compute_export_coloradj_params(clip.temperature as f64, clip.tint as f64);
+        return format!(
+            ",frei0r=filter_name=coloradj_RGB:filter_params={:.6}|{:.6}|{:.6}|0.333",
+            cp.r, cp.g, cp.b
+        );
+    }
+
     let mut f = String::new();
-    if has_temp {
+    if has_temp_keyframes {
+        let temp_expr = build_keyframed_property_expression(
+            &clip.temperature_keyframes,
+            clip.temperature as f64,
+            2000.0,
+            10000.0,
+            "t",
+        );
+        f.push_str(&format!(
+            ",colortemperature=temperature='{temp_expr}':eval=frame"
+        ));
+    } else if has_temp {
         f.push_str(&format!(
             ",colortemperature=temperature={:.0}",
             clip.temperature.clamp(2000.0, 10000.0)
         ));
     }
-    if has_tint {
+    if has_tint_keyframes {
+        // Map tint to green channel offset via colorbalance midtones.
+        // Negative tint = boost green (positive gm), positive tint = cut green (negative gm)
+        // and complementary red+blue boost.
+        let tint_expr = build_keyframed_property_expression(
+            &clip.tint_keyframes,
+            clip.tint as f64,
+            -1.0,
+            1.0,
+            "t",
+        );
+        let gm_expr = format!("(-({tint_expr}))*0.5");
+        let rm_expr = format!("({tint_expr})*0.25");
+        let bm_expr = format!("({tint_expr})*0.25");
+        f.push_str(&format!(
+            ",colorbalance=rm='{rm_expr}':gm='{gm_expr}':bm='{bm_expr}':eval=frame"
+        ));
+    } else if has_tint {
         // Map tint to green channel offset via colorbalance midtones.
         // Negative tint = boost green (positive gm), positive tint = cut green (negative gm)
         // and complementary red+blue boost.
@@ -659,29 +1037,147 @@ fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-fn build_lut_filter(clip: &crate::model::clip::Clip) -> String {
+/// LUT filter for use at the start of a chain (trailing comma, no leading).
+/// Returns `lut3d={path},` or empty string.
+fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
     if let Some(ref path) = clip.lut_path {
         if !path.is_empty() && std::path::Path::new(path).exists() {
-            // Escape path for ffmpeg filter syntax (colons and backslashes need escaping)
             let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
-            return format!(",lut3d={escaped}");
+            return format!("lut3d={escaped},");
         }
     }
     String::new()
 }
 
+fn parse_title_font(font_desc: &str) -> (String, f64) {
+    let trimmed = font_desc.trim();
+    if trimmed.is_empty() {
+        return ("Sans".to_string(), 36.0);
+    }
+    let mut parts = trimmed.rsplitn(2, ' ');
+    let last = parts.next().unwrap_or_default();
+    if let Ok(size) = last.parse::<f64>() {
+        let family = parts.next().unwrap_or("Sans").trim();
+        if family.is_empty() {
+            ("Sans".to_string(), size.max(1.0))
+        } else {
+            (family.to_string(), size.max(1.0))
+        }
+    } else {
+        (trimmed.to_string(), 36.0)
+    }
+}
+
+fn escape_drawtext_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "\\'")
+        .replace('%', "\\%")
+}
+
+fn build_title_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.title_text.trim().is_empty() {
+        return String::new();
+    }
+
+    let text = escape_drawtext_value(&clip.title_text).replace('\n', "\\n");
+    let (font_name, font_size) = parse_title_font(&clip.title_font);
+    let font_name = escape_drawtext_value(&font_name);
+    let rel_x = clip.title_x.clamp(0.0, 1.0);
+    let rel_y = clip.title_y.clamp(0.0, 1.0);
+
+    let rgba = clip.title_color;
+    let r = ((rgba >> 24) & 0xFF) as u8;
+    let g = ((rgba >> 16) & 0xFF) as u8;
+    let b = ((rgba >> 8) & 0xFF) as u8;
+    let a = (rgba & 0xFF) as u8;
+    let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
+
+    format!(
+        ",drawtext=font='{font_name}':text='{text}':fontsize={font_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*(w-text_w)':y='({rel_y:.6})*(h-text_h)'"
+    )
+}
+
 fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
-    if clip.shadows != 0.0 || clip.midtones != 0.0 || clip.highlights != 0.0 {
-        let s = clip.shadows.clamp(-1.0, 1.0);
-        let m = clip.midtones.clamp(-1.0, 1.0);
-        let h = clip.highlights.clamp(-1.0, 1.0);
-        format!(
-            ",colorbalance=rs={s:.4}:gs={s:.4}:bs={s:.4}:rm={m:.4}:gm={m:.4}:bm={m:.4}:rh={h:.4}:gh={h:.4}:bh={h:.4}"
-        )
+    build_grading_filter_with_caps(clip, &ColorFilterCapabilities::default())
+}
+
+fn rgb_triplet_hex(r: f64, g: f64, b: f64) -> String {
+    let to_u8 = |v: f64| ((v.clamp(0.0, 1.0) * 255.0).round() as u8) as u32;
+    format!("0x{:02X}{:02X}{:02X}", to_u8(r), to_u8(g), to_u8(b))
+}
+
+fn build_grading_filter_with_caps(
+    clip: &crate::model::clip::Clip,
+    caps: &ColorFilterCapabilities,
+) -> String {
+    let has_grading = clip.shadows != 0.0
+        || clip.midtones != 0.0
+        || clip.highlights != 0.0
+        || clip.black_point != 0.0
+        || clip.highlights_warmth != 0.0
+        || clip.highlights_tint != 0.0
+        || clip.midtones_warmth != 0.0
+        || clip.midtones_tint != 0.0
+        || clip.shadows_warmth != 0.0
+        || clip.shadows_tint != 0.0;
+    if has_grading {
+        // Replicate the frei0r 3-point-color-balance quadratic transfer
+        // curve using FFmpeg's `lutrgb`.  The frei0r plugin fits a parabola
+        // y = a·x² + b·x + c through (black_c, 0), (gray_c, 0.5),
+        // (white_c, 1.0) per channel.  Using the identical quadratic in
+        // `lutrgb` avoids frei0r cross-runtime parameter-passing issues
+        // and cubic-spline overshoot from `curves`.
+        let p = ProgramPlayer::compute_export_3point_params(
+            clip.shadows as f64,
+            clip.midtones as f64,
+            clip.highlights as f64,
+            clip.black_point as f64,
+            clip.highlights_warmth as f64,
+            clip.highlights_tint as f64,
+            clip.midtones_warmth as f64,
+            clip.midtones_tint as f64,
+            clip.shadows_warmth as f64,
+            clip.shadows_tint as f64,
+        );
+        let parabola = crate::media::program_player::ThreePointParabola::from_params(&p);
+        parabola.to_lutrgb_filter()
     } else {
         String::new()
     }
 }
+
+pub(crate) fn compute_export_coloradj_params(
+    temperature: f64,
+    tint: f64,
+) -> crate::media::program_player::ColorAdjRGBParams {
+    let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
+    let temp_only = ProgramPlayer::compute_coloradj_params(temperature, 0.0);
+    let tint_only = ProgramPlayer::compute_coloradj_params(6500.0, tint);
+
+    // FFmpeg frei0r implementations can diverge from preview at stronger
+    // temperature/tint settings; apply a conservative attenuation of deltas
+    // from neutral to better align cross-runtime behavior.
+    let temp_gain = ProgramPlayer::export_temperature_parity_gain(temperature);
+    let tint_gain = if tint < 0.0 {
+        0.60
+    } else if tint > 0.0 {
+        0.72
+    } else {
+        1.0
+    };
+
+    // Per-channel additive offsets for cross-runtime bridge compensation.
+    let (off_r, off_g, off_b) = ProgramPlayer::export_temperature_channel_offsets(temperature);
+
+    crate::media::program_player::ColorAdjRGBParams {
+        r: (neutral.r + (temp_only.r - neutral.r) * temp_gain + (tint_only.r - neutral.r) * tint_gain + off_r).clamp(0.0, 1.0),
+        g: (neutral.g + (temp_only.g - neutral.g) * temp_gain + (tint_only.g - neutral.g) * tint_gain + off_g).clamp(0.0, 1.0),
+        b: (neutral.b + (temp_only.b - neutral.b) * temp_gain + (tint_only.b - neutral.b) * tint_gain + off_b).clamp(0.0, 1.0),
+    }
+}
+
 
 fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.chroma_key_enabled {
@@ -694,7 +1190,45 @@ fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-fn build_speed_filter(clip: &crate::model::clip::Clip) -> String {
+fn video_input_seek_and_duration(
+    clip: &crate::model::clip::Clip,
+    frame_duration_s: f64,
+) -> (f64, f64) {
+    if clip.is_freeze_frame() {
+        let source_ns = clip.freeze_frame_source_time_ns().unwrap_or(clip.source_in);
+        return (
+            source_ns as f64 / 1_000_000_000.0,
+            frame_duration_s.max(0.001),
+        );
+    }
+    // Still images: seek to 0, decode a single frame.
+    if clip.kind == ClipKind::Image {
+        return (0.0, frame_duration_s.max(0.001));
+    }
+    (
+        clip.source_in as f64 / 1_000_000_000.0,
+        clip.source_duration() as f64 / 1_000_000_000.0,
+    )
+}
+
+fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -> String {
+    if clip.is_freeze_frame() || clip.kind == ClipKind::Image {
+        let hold_s = clip.duration() as f64 / 1_000_000_000.0;
+        let frame_s = frame_duration_s.max(0.001);
+        let pad_s = (hold_s - frame_s).max(0.0);
+        return format!(
+            ",trim=duration={frame_s:.6},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={pad_s:.6},trim=duration={hold_s:.6},setpts=PTS-STARTPTS"
+        );
+    }
+    if !clip.speed_keyframes.is_empty() {
+        let speed_expr =
+            build_keyframed_property_expression(&clip.speed_keyframes, clip.speed, 0.05, 16.0, "T");
+        return if clip.reverse {
+            format!(",reverse,setpts=PTS/({speed_expr})")
+        } else {
+            format!(",setpts=PTS/({speed_expr})")
+        };
+    }
     let has_speed = (clip.speed - 1.0).abs() > 0.001;
     match (clip.reverse, has_speed) {
         (false, false) => String::new(),
@@ -715,6 +1249,45 @@ fn build_crop_filter(
     out_h: u32,
     transparent_pad: bool,
 ) -> String {
+    let has_crop_keyframes = !clip.crop_left_keyframes.is_empty()
+        || !clip.crop_right_keyframes.is_empty()
+        || !clip.crop_top_keyframes.is_empty()
+        || !clip.crop_bottom_keyframes.is_empty();
+    if has_crop_keyframes {
+        let cl_expr = build_keyframed_property_expression(
+            &clip.crop_left_keyframes,
+            clip.crop_left as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        let cr_expr = build_keyframed_property_expression(
+            &clip.crop_right_keyframes,
+            clip.crop_right as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        let ct_expr = build_keyframed_property_expression(
+            &clip.crop_top_keyframes,
+            clip.crop_top as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        let cb_expr = build_keyframed_property_expression(
+            &clip.crop_bottom_keyframes,
+            clip.crop_bottom as f64,
+            0.0,
+            500.0,
+            "T",
+        );
+        // Dynamic crop via alpha masking (per-frame expressions). This avoids relying on
+        // crop filter `eval=frame` support while matching preview semantics.
+        return format!(
+            ",geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='if(between(X,({cl_expr}),{out_w}-({cr_expr})-1)*between(Y,({ct_expr}),{out_h}-({cb_expr})-1),alpha(X,Y),0)'"
+        );
+    }
     let cl = clip.crop_left.max(0) as u32;
     let cr = clip.crop_right.max(0) as u32;
     let ct = clip.crop_top.max(0) as u32;
@@ -734,12 +1307,26 @@ fn build_crop_filter(
 
 /// Build a rotation filter for arbitrary-angle clip rotation.
 fn build_rotation_filter(clip: &crate::model::clip::Clip, transparent_pad: bool) -> String {
+    if !clip.rotate_keyframes.is_empty() {
+        let fill = if transparent_pad { "black@0" } else { "black" };
+        let angle_expr = build_keyframed_property_expression(
+            &clip.rotate_keyframes,
+            clip.rotate as f64,
+            -180.0,
+            180.0,
+            "t",
+        );
+        return format!(",rotate='-({angle_expr})*PI/180':fillcolor={fill}");
+    }
     let rot = clip.rotate;
     if rot == 0 {
         return String::new();
     }
     let fill = if transparent_pad { "black@0" } else { "black" };
-    format!(",rotate={:.10}:fillcolor={fill}", (rot as f64).to_radians())
+    format!(
+        ",rotate={:.10}:fillcolor={fill}",
+        -(rot as f64).to_radians()
+    )
 }
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.
@@ -819,6 +1406,16 @@ fn build_scale_position_filter(
             format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
         }
     }
+}
+
+fn clamped_primary_xfade_duration_s(current: &Clip, next: &Clip) -> Option<f64> {
+    if current.transition_after.is_empty() || current.transition_after_ns == 0 {
+        return None;
+    }
+    let mut d_s = current.transition_after_ns as f64 / 1_000_000_000.0;
+    let max_d = (current.duration().min(next.duration()) as f64 / 1_000_000_000.0) - 0.001;
+    d_s = d_s.clamp(0.001, max_d.max(0.001));
+    Some(d_s)
 }
 
 /// Build atempo filter chain for audio speed change.
@@ -1040,6 +1637,58 @@ fn check_filter_support(ffmpeg: &str, filter_name: &str) -> bool {
     })
 }
 
+fn check_frei0r_module_support(ffmpeg: &str, module_name: &str, probe_params: &str) -> bool {
+    let vf = format!("format=rgba,frei0r=filter_name={module_name}:filter_params={probe_params}");
+    Command::new(ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.04",
+            "-vf",
+            &vf,
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub(crate) fn detect_color_filter_capabilities(ffmpeg: &str) -> ColorFilterCapabilities {
+    if !check_filter_support(ffmpeg, "frei0r") {
+        return ColorFilterCapabilities::default();
+    }
+
+    let use_coloradj_frei0r =
+        check_frei0r_module_support(ffmpeg, "coloradj_RGB", "0.5|0.5|0.5|0.333");
+
+    // FFmpeg module naming differs across builds; prefer the common underscore form.
+    let three_point_frei0r_module =
+        if check_frei0r_module_support(ffmpeg, "three_point_balance", "0x000000|0x808080|0xFFFFFF")
+        {
+            Some("three_point_balance".to_string())
+        } else if check_frei0r_module_support(
+            ffmpeg,
+            "3-point-color-balance",
+            "0x000000|0x808080|0xFFFFFF",
+        ) {
+            Some("3-point-color-balance".to_string())
+        } else {
+            None
+        };
+
+    ColorFilterCapabilities {
+        use_coloradj_frei0r,
+        three_point_frei0r_module,
+    }
+}
+
 fn has_linked_audio_peer(clip: &Clip, audio_clips: &[&Clip]) -> bool {
     audio_clips
         .iter()
@@ -1103,13 +1752,45 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_crossfade_curve_name, build_audio_crossfade_filters, compute_clip_audio_fades,
-        estimate_export_size_bytes, has_linked_audio_peer, parse_progress_line, AudioCodec,
-        ClipAudioFade, ExportOptions, VideoCodec,
+        append_pan_filter_chain, audio_crossfade_curve_name, build_audio_crossfade_filters,
+        build_color_filter, build_crop_filter, build_grading_filter,
+        build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
+        build_temperature_tint_filter, build_timing_filter, build_title_filter,
+        build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
+        compute_export_coloradj_params,
+        estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
+        parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
+        ExportOptions, VideoCodec,
     };
-    use crate::model::clip::{Clip, ClipKind};
+    use crate::media::program_player::ProgramPlayer;
+    use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
     use crate::ui_state::CrossfadeCurve;
+
+    fn extract_colorbalance_component(filter: &str, key: &str) -> f32 {
+        let needle = format!("{key}=");
+        let start = filter
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing colorbalance component `{key}` in `{filter}`"));
+        let rest = &filter[start + needle.len()..];
+        let end = rest.find(':').unwrap_or(rest.len());
+        rest[..end]
+            .parse::<f32>()
+            .unwrap_or_else(|e| panic!("invalid `{key}` value in `{filter}`: {e}"))
+    }
+
+    fn extract_eq_component(filter: &str, key: &str) -> f32 {
+        let needle = format!("{key}=");
+        let start = filter
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing eq component `{key}` in `{filter}`"));
+        let rest = &filter[start + needle.len()..];
+        let end = rest.find(':').unwrap_or(rest.len());
+        rest[..end]
+            .trim_matches('\'')
+            .parse::<f32>()
+            .unwrap_or_else(|e| panic!("invalid `{key}` value in `{filter}`: {e}"))
+    }
 
     #[test]
     fn total_size_progress_uses_estimate_and_caps() {
@@ -1166,6 +1847,17 @@ mod tests {
             duration_ns,
             timeline_start,
             ClipKind::Audio,
+        );
+        clip.id = id.to_string();
+        clip
+    }
+
+    fn make_video_clip(id: &str, timeline_start: u64, source_duration_ns: u64) -> Clip {
+        let mut clip = Clip::new(
+            "/tmp/video.mp4",
+            source_duration_ns,
+            timeline_start,
+            ClipKind::Video,
         );
         clip.id = id.to_string();
         clip
@@ -1284,5 +1976,483 @@ mod tests {
         let linear = build_audio_crossfade_filters(&clip, fades, "tri");
         assert!(equal_power.contains("curve=qsin"));
         assert!(linear.contains("curve=tri"));
+    }
+
+    #[test]
+    fn freeze_frame_video_input_uses_freeze_source_and_single_frame_duration() {
+        let mut clip = make_video_clip("freeze", 0, 6_000_000_000);
+        clip.source_in = 1_000_000_000;
+        clip.source_out = 6_000_000_000;
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(4_500_000_000);
+        clip.freeze_frame_hold_duration_ns = Some(3_000_000_000);
+
+        let (seek_s, input_s) = video_input_seek_and_duration(&clip, 1.0 / 30.0);
+        assert!((seek_s - 4.5).abs() < 1e-6);
+        assert!((input_s - (1.0 / 30.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn freeze_frame_timing_filter_holds_single_frame_for_clip_duration() {
+        let mut clip = make_video_clip("freeze", 0, 6_000_000_000);
+        clip.freeze_frame = true;
+        clip.freeze_frame_hold_duration_ns = Some(2_500_000_000);
+
+        let filter = build_timing_filter(&clip, 1.0 / 25.0);
+        assert!(filter.contains("trim=duration=0.040000"));
+        assert!(filter.contains("tpad=stop_mode=clone:stop_duration=2.460000"));
+        assert!(filter.contains("trim=duration=2.500000"));
+    }
+
+    #[test]
+    fn keyframed_expression_uses_first_value_before_first_point() {
+        let expr = build_keyframed_property_expression(
+            &[
+                NumericKeyframe {
+                    time_ns: 500_000_000,
+                    value: 0.5,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+                NumericKeyframe {
+                    time_ns: 1_000_000_000,
+                    value: 1.0,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+            ],
+            0.25,
+            0.0,
+            1.0,
+            "t",
+        );
+        assert!(expr.starts_with("if(lt(t,0.500000000),0.5000000000,"));
+    }
+
+    #[test]
+    fn volume_filter_uses_expression_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.volume = 0.8;
+        clip.volume_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.3,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.9,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let filter = build_volume_filter(&clip);
+        assert!(filter.starts_with("volume='if(lt(t,"));
+        assert!(filter.ends_with("':eval=frame"));
+    }
+
+    #[test]
+    fn volume_filter_uses_constant_when_not_keyframed() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.volume = 1.25;
+        let filter = build_volume_filter(&clip);
+        assert_eq!(filter, "volume=1.2500");
+    }
+
+    #[test]
+    fn pan_expression_uses_keyframes_when_present() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.pan = 0.0;
+        clip.pan_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let expr = build_pan_expression(&clip);
+        assert!(expr.starts_with("if(lt(t,"));
+    }
+
+    #[test]
+    fn append_pan_filter_chain_uses_anull_for_center_pan_without_keyframes() {
+        let clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        let mut graph = String::new();
+        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        assert_eq!(graph, ";[in]anull[out]");
+    }
+
+    #[test]
+    fn append_pan_filter_chain_emits_dynamic_channel_gains_for_keyframed_pan() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.pan_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let mut graph = String::new();
+        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        assert!(graph.contains("channelsplit=channel_layout=stereo"));
+        assert!(graph.contains("volume='if(gt("));
+        assert!(graph.contains("':eval=frame"));
+        assert!(graph.contains("amerge=inputs=2"));
+    }
+
+    #[test]
+    fn clamped_primary_xfade_duration_requires_explicit_transition() {
+        let a = make_video_clip("a", 0, 4_000_000_000);
+        let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
+        assert_eq!(clamped_primary_xfade_duration_s(&a, &b), None);
+    }
+
+    #[test]
+    fn clamped_primary_xfade_duration_clamps_to_boundary_limits() {
+        let mut a = make_video_clip("a", 0, 4_000_000_000);
+        let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
+        a.transition_after = "cross_dissolve".to_string();
+        a.transition_after_ns = 10_000_000_000;
+        let d = clamped_primary_xfade_duration_s(&a, &b).expect("transition should be enabled");
+        assert!((d - 3.999).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn has_transform_keyframes_includes_rotate_and_crop_lanes() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        assert!(!has_transform_keyframes(&clip));
+        clip.rotate_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 20.0,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        assert!(has_transform_keyframes(&clip));
+
+        clip.rotate_keyframes.clear();
+        clip.crop_left_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 42.0,
+            interpolation: KeyframeInterpolation::Linear,
+        });
+        assert!(has_transform_keyframes(&clip));
+    }
+
+    #[test]
+    fn build_rotation_filter_uses_expression_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.rotate = 0;
+        clip.rotate_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -45.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 45.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_rotation_filter(&clip, false);
+        assert!(f.contains("rotate='-(")); // negated for ffmpeg convention
+        assert!(f.contains("*PI/180'"));
+    }
+
+    #[test]
+    fn build_crop_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.crop_left_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 100.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_crop_filter(&clip, 1920, 1080, false);
+        assert!(f.contains(",geq=lum='lum(X,Y)'"));
+        assert!(f.contains("alpha(X,Y)"));
+        assert!(f.contains("between(X,("));
+    }
+
+    #[test]
+    fn build_color_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.brightness_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.25,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_color_filter(&clip);
+        assert!(f.contains("eq=brightness='if(lt(t,"));
+        assert!(f.contains(":eval=frame"));
+    }
+
+    #[test]
+    fn build_color_filter_exposure_uses_preview_aligned_deltas() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.exposure = 1.0;
+        let f = build_color_filter(&clip);
+        assert!(f.contains(",eq=brightness="));
+        assert!(f.contains(":contrast="));
+        assert!(!f.contains(":gamma="));
+    }
+
+    #[test]
+    fn build_color_filter_static_uses_preview_calibrated_primary_mapping() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.contrast = 0.0;
+        let f = build_color_filter(&clip);
+        let brightness = extract_eq_component(&f, "brightness");
+        let contrast = extract_eq_component(&f, "contrast");
+        let saturation = extract_eq_component(&f, "saturation");
+        assert!(
+            brightness < -0.2,
+            "low contrast should include negative brightness bias for preview parity; got {brightness}"
+        );
+        assert!(
+            contrast < 0.5,
+            "preview-calibrated contrast=0 mapping should stay low; got {contrast}"
+        );
+        assert!(
+            saturation > 1.5,
+            "preview-calibrated contrast=0 mapping should include saturation compensation; got {saturation}"
+        );
+
+        clip.contrast = 2.0;
+        let f_hi = build_color_filter(&clip);
+        let brightness_hi = extract_eq_component(&f_hi, "brightness");
+        assert!(
+            brightness_hi > 0.1,
+            "high contrast should include positive brightness bias for preview parity; got {brightness_hi}"
+        );
+    }
+
+    #[test]
+    fn build_temperature_tint_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.temperature_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 3200.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 7800.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        clip.tint_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        let f = build_temperature_tint_filter(&clip);
+        assert!(f.contains("colortemperature=temperature='if(lt(t,"));
+        assert!(f.contains(",colorbalance=rm='("));
+        assert!(f.contains(":eval=frame"));
+    }
+
+    #[test]
+    fn build_grading_filter_emits_lutrgb_when_active() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.shadows = 0.25;
+        let f = build_grading_filter(&clip);
+        assert!(f.contains(",lutrgb="), "grading should emit lutrgb filter: {f}");
+        assert!(f.contains("r='"), "lutrgb should have red channel");
+    }
+
+    #[test]
+    fn build_grading_filter_boosts_tonal_warmth_at_slider_extremes() {
+        // Validate via compute_export_3point_params that shadows warmth is
+        // stronger than midtones due to shadows_endpoint_boost.
+        // In 3-point space: positive warmth lowers the R control point
+        // (brighter red output) and raises the B control point (darker blue).
+        let sh_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        );
+        let mid_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        );
+        // Positive warmth: red control lowered (more red output)
+        assert!(sh_p.black_r < 0.05, "shadows warmth should lower red control: {}", sh_p.black_r);
+        // Shadows warmth shift should be proportionally larger than midtones
+        let sh_r_shift = (0.0 - sh_p.black_r).abs(); // shift from neutral black=0
+        let mid_r_shift = (0.5 - mid_p.gray_r).abs(); // shift from neutral gray=0.5
+        assert!(sh_r_shift > 0.01 || mid_r_shift > 0.01,
+            "warmth should produce measurable shifts: sh={} mid={}",
+            sh_r_shift, mid_r_shift);
+
+        // Also check the curves filter is emitted
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.shadows_warmth = 1.0;
+        let f = build_grading_filter(&clip);
+        assert!(f.contains(",lutrgb="), "should emit lutrgb: {f}");
+    }
+
+    #[test]
+    fn build_grading_filter_boosts_shadows_tint_at_slider_extremes() {
+        // Validate that shadows tint is stronger than midtones tint.
+        let sh_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        );
+        let mid_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+        );
+        // Positive tint = magenta: green channel lowered (or stays at floor)
+        // Shadows tint effect (on black) should be proportionally larger
+        // than midtones tint (on gray) due to shadows_endpoint_boost.
+        let sh_g_deviation = (sh_p.black_g - 0.0).abs();
+        let mid_g_deviation = (mid_p.gray_g - 0.5).abs();
+        assert!(
+            sh_g_deviation < mid_g_deviation + 0.3,
+            "tint produces effect: sh_g_dev={} mid_g_dev={}",
+            sh_g_deviation, mid_g_deviation
+        );
+    }
+
+    #[test]
+    fn build_temperature_tint_filter_preserves_green_magenta_direction() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.tint = 0.8;
+        let magenta = build_temperature_tint_filter(&clip);
+        let magenta_rm = extract_colorbalance_component(&magenta, "rm");
+        let magenta_gm = extract_colorbalance_component(&magenta, "gm");
+        let magenta_bm = extract_colorbalance_component(&magenta, "bm");
+        assert!(magenta_rm > 0.0, "positive tint should boost red");
+        assert!(magenta_gm < 0.0, "positive tint should cut green");
+        assert!(magenta_bm > 0.0, "positive tint should boost blue");
+
+        clip.tint = -0.8;
+        let green = build_temperature_tint_filter(&clip);
+        let green_rm = extract_colorbalance_component(&green, "rm");
+        let green_gm = extract_colorbalance_component(&green, "gm");
+        let green_bm = extract_colorbalance_component(&green, "bm");
+        assert!(green_rm < 0.0, "negative tint should cut red");
+        assert!(green_gm > 0.0, "negative tint should boost green");
+        assert!(green_bm < 0.0, "negative tint should cut blue");
+    }
+
+    #[test]
+    fn export_coloradj_compensation_preserves_neutral_and_tunes_tint_delta() {
+        let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
+        let preview_temp = ProgramPlayer::compute_coloradj_params(2000.0, 0.0);
+        let export_temp = compute_export_coloradj_params(2000.0, 0.0);
+        let preview_tint = ProgramPlayer::compute_coloradj_params(6500.0, -1.0);
+        let export_tint = compute_export_coloradj_params(6500.0, -1.0);
+        let export_neutral = compute_export_coloradj_params(6500.0, 0.0);
+
+        let magnitude = |a: &crate::media::program_player::ColorAdjRGBParams,
+                         b: &crate::media::program_player::ColorAdjRGBParams| {
+            (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
+        };
+        assert!(
+            (export_neutral.r - neutral.r).abs() < 1e-9
+                && (export_neutral.g - neutral.g).abs() < 1e-9
+                && (export_neutral.b - neutral.b).abs() < 1e-9,
+            "neutral mapping should remain unchanged"
+        );
+        // Per-channel offsets intentionally push the export delta slightly
+        // beyond preview's to compensate for FFmpeg's weaker frei0r
+        // rendering.  Allow up to 20% amplification.
+        assert!(
+            magnitude(&export_temp, &neutral) <= magnitude(&preview_temp, &neutral) * 1.20,
+            "temperature mapping should not over-amplify preview delta"
+        );
+        assert!(
+            magnitude(&export_tint, &neutral) < magnitude(&preview_tint, &neutral),
+            "tint compensation should attenuate delta from neutral"
+        );
+    }
+
+    #[test]
+    fn build_grading_filter_warmth_direction_is_consistent_per_tonal_region() {
+        // Positive warmth = warm (lower R control point = brighter red output,
+        // higher B control point = darker blue output) in ALL zones.
+        let sh = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        );
+        assert!(sh.black_r < sh.black_b, "shadows warmth: red control < blue control at black point");
+
+        let mid = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        );
+        assert!(mid.gray_r < mid.gray_b, "midtones warmth: red control < blue control at gray point");
+
+        let hi = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
+        assert!(hi.white_r < hi.white_b, "highlights warmth: red control < blue control at white point");
+    }
+
+    #[test]
+    fn build_grading_filter_tint_direction_is_consistent_per_tonal_region() {
+        // Positive tint = magenta (higher G control = less green output) in ALL zones.
+        let sh = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        );
+        assert!(sh.black_g > sh.black_r,
+            "shadows tint +1: green control should be higher than red (less green output)");
+
+        let mid = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+        );
+        assert!(mid.gray_g > mid.gray_r, "midtones tint +1: green control > red at gray point");
+
+        let hi = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+        );
+        assert!(hi.white_g > hi.white_r, "highlights tint +1: green control > red at white point");
+    }
+
+    #[test]
+    fn build_title_filter_empty_when_no_title_text() {
+        let clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        assert!(build_title_filter(&clip).is_empty());
+    }
+
+    #[test]
+    fn build_title_filter_emits_drawtext_with_position_and_color() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "Hello: world".to_string();
+        clip.title_font = "Sans Bold 48".to_string();
+        clip.title_x = 0.25;
+        clip.title_y = 0.75;
+        clip.title_color = 0xFF3366CC;
+
+        let f = build_title_filter(&clip);
+        assert!(f.contains(",drawtext="));
+        assert!(f.contains("text='Hello\\: world'"));
+        assert!(f.contains("font='Sans Bold'"));
+        assert!(f.contains("fontsize=48.00"));
+        assert!(f.contains("fontcolor=ff3366@0.8000"));
+        assert!(f.contains("x='(0.250000)*(w-text_w)'"));
+        assert!(f.contains("y='(0.750000)*(h-text_h)'"));
     }
 }
