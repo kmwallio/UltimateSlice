@@ -142,9 +142,13 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     gst::init()?;
 
     let uri = crate::media::thumbnail::path_to_uri(&source_path);
+    let is_image = crate::model::clip::is_image_file(&source_path);
 
+    // For still images, insert imagefreeze so the single decoded frame becomes
+    // a continuous stream that pull_sample() can always grab from.
+    let freeze = if is_image { "imagefreeze ! " } else { "" };
     let pipeline_desc = format!(
-        "uridecodebin name=dec uri=\"{uri}\" ! videoconvert ! videoscale ! \
+        "uridecodebin name=dec uri=\"{uri}\" ! {freeze}videoconvert ! videoscale ! \
          video/x-raw,format=RGBA,width={THUMB_W},height={THUMB_H} ! \
          appsink name=sink sync=false max-buffers=1 drop=false"
     );
