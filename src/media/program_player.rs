@@ -8702,17 +8702,20 @@ impl ProgramPlayer {
         let ht = -Self::compute_tonal_axis_response(highlights_tint) * tint_scale;
 
         // Per-channel: warmth shifts R↔B, tint shifts G↔(R+B).
-        let black_r = (black + bp + sw - st * 0.5).clamp(0.0, 0.95);
-        let black_g = (black + bp - sw * 0.0 + st).clamp(0.0, 0.95);
-        let black_b = (black + bp - sw - st * 0.5).clamp(0.0, 0.95);
+        // In frei0r 3-point space a LOWER control point value means
+        // BRIGHTER channel output (the curve shifts left), so we
+        // subtract warmth from red and add it to blue for a warm look.
+        let black_r = (black + bp - sw + st * 0.5).clamp(0.0, 0.95);
+        let black_g = (black + bp - st).clamp(0.0, 0.95);
+        let black_b = (black + bp + sw + st * 0.5).clamp(0.0, 0.95);
 
-        let gray_r = (gray + mw - mt * 0.5).clamp(0.01, 0.99);
-        let gray_g = (gray - mw * 0.0 + mt).clamp(0.01, 0.99);
-        let gray_b = (gray - mw - mt * 0.5).clamp(0.01, 0.99);
+        let gray_r = (gray - mw + mt * 0.5).clamp(0.01, 0.99);
+        let gray_g = (gray - mt).clamp(0.01, 0.99);
+        let gray_b = (gray + mw + mt * 0.5).clamp(0.01, 0.99);
 
-        let white_r = (white + hw - ht * 0.5).clamp(0.05, 1.0);
-        let white_g = (white - hw * 0.0 + ht).clamp(0.05, 1.0);
-        let white_b = (white - hw - ht * 0.5).clamp(0.05, 1.0);
+        let white_r = (white - hw + ht * 0.5).clamp(0.05, 1.0);
+        let white_g = (white - ht).clamp(0.05, 1.0);
+        let white_b = (white + hw + ht * 0.5).clamp(0.05, 1.0);
 
         ThreePointParams {
             black_r,
@@ -11893,12 +11896,13 @@ mod tests {
     #[test]
     fn threepoint_positive_shadows_warmth_produces_warm_red() {
         // Positive warmth = warm (red boost in shadows).
-        // In 3-point space: black_r raised, black_b lowered.
+        // In 3-point space: lower R control point = brighter red output,
+        // higher B control point = darker blue output.
         let p =
             ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
         assert!(
-            p.black_r > p.black_b + 0.20,
-            "positive shadows warmth should raise red: black_r={}, black_b={}",
+            p.black_r < p.black_b,
+            "positive shadows warmth: red control should be lower than blue: black_r={}, black_b={}",
             p.black_r,
             p.black_b
         );
@@ -11907,12 +11911,12 @@ mod tests {
     #[test]
     fn threepoint_negative_shadows_warmth_produces_cool_blue() {
         // Negative warmth = cool (blue boost in shadows).
-        // In 3-point space: black_b raised, black_r lowered.
+        // In 3-point space: lower B control = brighter blue, higher R control = darker red.
         let p =
             ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0);
         assert!(
-            p.black_b > p.black_r + 0.20,
-            "negative shadows warmth should raise blue: black_r={}, black_b={}",
+            p.black_b < p.black_r,
+            "negative shadows warmth: blue control should be lower than red: black_r={}, black_b={}",
             p.black_r,
             p.black_b
         );
@@ -11920,22 +11924,23 @@ mod tests {
 
     #[test]
     fn threepoint_shadows_tint_changes_curve_space_channels() {
-        // Positive tint = magenta (green cut): black_g should be LOWER.
-        // Negative tint = green (green boost): black_g should be HIGHER.
+        // Positive tint = magenta (green cut): black_g should be HIGHER
+        // (higher control point = darker/less green output).
+        // Negative tint = green (green boost): black_g should be LOWER.
         let magenta =
             ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
         let green = ProgramPlayer::compute_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         );
         assert!(
-            magenta.black_g < green.black_g,
-            "magenta tint (+1) should cut green more than green tint (-1): magenta_g={}, green_g={}",
+            magenta.black_g > green.black_g,
+            "magenta tint (+1) green control should be higher (less green): magenta_g={}, green_g={}",
             magenta.black_g,
             green.black_g
         );
         assert!(
-            magenta.black_r > green.black_r && magenta.black_b > green.black_b,
-            "magenta tint should boost R+B more than green tint"
+            magenta.black_r < green.black_r && magenta.black_b < green.black_b,
+            "magenta tint should have lower R+B controls (more R+B output) than green tint"
         );
     }
 

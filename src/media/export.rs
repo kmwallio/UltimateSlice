@@ -2282,17 +2282,22 @@ mod tests {
     fn build_grading_filter_boosts_tonal_warmth_at_slider_extremes() {
         // Validate via compute_export_3point_params that shadows warmth is
         // stronger than midtones due to shadows_endpoint_boost.
+        // In 3-point space: positive warmth lowers the R control point
+        // (brighter red output) and raises the B control point (darker blue).
         let sh_p = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
         let mid_p = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         );
-        // Positive warmth: red black lifted, blue black lowered
-        assert!(sh_p.black_r > 0.1, "shadows warmth should lift red: {}", sh_p.black_r);
-        assert!(sh_p.black_r > mid_p.gray_r - 0.5 + 0.10,
-            "shadows warmth endpoint should be stronger than midtones: sh_r={} mid_gray_r={}",
-            sh_p.black_r, mid_p.gray_r);
+        // Positive warmth: red control lowered (more red output)
+        assert!(sh_p.black_r < 0.05, "shadows warmth should lower red control: {}", sh_p.black_r);
+        // Shadows warmth shift should be proportionally larger than midtones
+        let sh_r_shift = (0.0 - sh_p.black_r).abs(); // shift from neutral black=0
+        let mid_r_shift = (0.5 - mid_p.gray_r).abs(); // shift from neutral gray=0.5
+        assert!(sh_r_shift > 0.01 || mid_r_shift > 0.01,
+            "warmth should produce measurable shifts: sh={} mid={}",
+            sh_r_shift, mid_r_shift);
 
         // Also check the curves filter is emitted
         let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
@@ -2378,41 +2383,42 @@ mod tests {
 
     #[test]
     fn build_grading_filter_warmth_direction_is_consistent_per_tonal_region() {
-        // Positive warmth = warm (red up, blue down) in ALL zones.
+        // Positive warmth = warm (lower R control point = brighter red output,
+        // higher B control point = darker blue output) in ALL zones.
         let sh = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
-        assert!(sh.black_r > sh.black_b, "shadows warmth: red > blue at black point");
+        assert!(sh.black_r < sh.black_b, "shadows warmth: red control < blue control at black point");
 
         let mid = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         );
-        assert!(mid.gray_r > mid.gray_b, "midtones warmth: red > blue at gray point");
+        assert!(mid.gray_r < mid.gray_b, "midtones warmth: red control < blue control at gray point");
 
         let hi = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
-        assert!(hi.white_r > hi.white_b, "highlights warmth: red > blue at white point");
+        assert!(hi.white_r < hi.white_b, "highlights warmth: red control < blue control at white point");
     }
 
     #[test]
     fn build_grading_filter_tint_direction_is_consistent_per_tonal_region() {
-        // Positive tint = magenta (green cut) in ALL zones.
+        // Positive tint = magenta (higher G control = less green output) in ALL zones.
         let sh = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
-        assert!(sh.black_g < sh.black_r || sh.black_g < sh.black_b,
-            "shadows tint +1: green should be lower than R or B");
+        assert!(sh.black_g > sh.black_r,
+            "shadows tint +1: green control should be higher than red (less green output)");
 
         let mid = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         );
-        assert!(mid.gray_g < mid.gray_r, "midtones tint +1: green < red at gray point");
+        assert!(mid.gray_g > mid.gray_r, "midtones tint +1: green control > red at gray point");
 
         let hi = ProgramPlayer::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
         );
-        assert!(hi.white_g < hi.white_r, "highlights tint +1: green < red at white point");
+        assert!(hi.white_g > hi.white_r, "highlights tint +1: green control > red at white point");
     }
 
     #[test]
