@@ -1,3 +1,4 @@
+use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
 use crate::model::clip::{Clip as ModelClip, NumericKeyframe};
 use crate::ui_state::{CrossfadeCurve, PlaybackPriority};
@@ -1002,6 +1003,9 @@ pub struct ProgramPlayer {
     last_boundary_rebuild_at: Option<Instant>,
     /// Last time a main-pipeline not-negotiated recovery rebuild was attempted.
     last_not_negotiated_recover_at: Option<Instant>,
+    /// Cache of parsed 3D LUT files keyed by file path.
+    /// Avoids re-parsing the same `.cube` file on every slot rebuild.
+    lut_cache: HashMap<String, Arc<CubeLut>>,
 }
 
 impl ProgramPlayer {
@@ -1510,6 +1514,7 @@ impl ProgramPlayer {
                 last_boundary_rebuild_clips: Vec::new(),
                 last_boundary_rebuild_at: None,
                 last_not_negotiated_recover_at: None,
+                lut_cache: HashMap::new(),
             },
             paintable,
             paintable2,
@@ -3936,6 +3941,25 @@ impl ProgramPlayer {
         }
     }
 
+    /// Get or parse a `.cube` LUT file, caching the result for reuse.
+    fn get_or_parse_lut(&mut self, path: &str) -> Option<Arc<CubeLut>> {
+        if let Some(cached) = self.lut_cache.get(path) {
+            return Some(cached.clone());
+        }
+        match CubeLut::from_file(std::path::Path::new(path)) {
+            Ok(lut) => {
+                let shared = Arc::new(lut);
+                self.lut_cache.insert(path.to_string(), shared.clone());
+                log::info!("CubeLut: parsed {} (size={})", path, shared.size);
+                Some(shared)
+            }
+            Err(e) => {
+                log::warn!("CubeLut: failed to parse {}: {}", path, e);
+                None
+            }
+        }
+    }
+
     fn next_video_boundary_after(&self, timeline_pos_ns: u64) -> Option<u64> {
         let mut next: Option<u64> = None;
         for clip in &self.clips {
@@ -4452,7 +4476,7 @@ impl ProgramPlayer {
         );
         // Also warm the effects-bin construction path.
         let (proc_w, proc_h) = self.preview_processing_dimensions();
-        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h);
+        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, None);
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
         if self.prepreroll_sidecars.len() >= MAX_PREPREROLL_SIDECARS {
@@ -6508,10 +6532,15 @@ impl ProgramPlayer {
     }
 
     /// Build a per-slot video effects bin and return it along with effect element refs.
+    ///
+    /// If `lut` is `Some`, a buffer pad probe is attached to the capsfilter src pad
+    /// that applies the 3D LUT to every RGBA frame. This provides real-time LUT preview
+    /// without requiring LUT-baked proxy media.
     fn build_effects_bin(
         clip: &ProgramClip,
         target_width: u32,
         target_height: u32,
+        lut: Option<Arc<CubeLut>>,
     ) -> (
         gst::Bin,
         Option<gst::Element>, // videobalance
@@ -6834,6 +6863,25 @@ impl ProgramPlayer {
         }
         if let Some(ref e) = capsfilter_proj {
             chain.push(e.clone());
+        }
+        // 1b. Real-time 3D LUT via buffer pad probe on capsfilter src.
+        // Applied AFTER downscale (RGBA at processing resolution) so the
+        // trilinear interpolation runs on the smaller preview buffer, and
+        // BEFORE any color effects — matching export LUT placement order.
+        if let (Some(ref cf), Some(lut_ref)) = (&capsfilter_proj, &lut) {
+            let lut_clone = lut_ref.clone();
+            cf.static_pad("src").unwrap().add_probe(
+                gst::PadProbeType::BUFFER,
+                move |_pad, info| {
+                    if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                        let buf = buffer.make_mut();
+                        if let Ok(mut map) = buf.map_writable() {
+                            lut_clone.apply_to_rgba_buffer(map.as_mut_slice());
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
         }
         // 2. Crop at project resolution (RGBA) then re-pad with transparent
         //    borders so the compositor reveals lower tracks through cropped areas.
@@ -8078,6 +8126,17 @@ impl ProgramPlayer {
 
         let (proc_w, proc_h) = self.preview_processing_dimensions();
 
+        // Resolve real-time LUT: only apply via pad probe when the source
+        // is NOT already LUT-baked (proxy or preview-LUT media).
+        let realtime_lut = if !using_proxy {
+            clip.lut_path
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .and_then(|p| self.get_or_parse_lut(p))
+        } else {
+            None
+        };
+
         // Build per-slot effects bin.
         let (
             effects_bin,
@@ -8095,7 +8154,7 @@ impl ProgramPlayer {
             alpha_chroma_key,
             capsfilter_zoom,
             videobox_zoom,
-        ) = Self::build_effects_bin(&clip, proc_w, proc_h);
+        ) = Self::build_effects_bin(&clip, proc_w, proc_h, realtime_lut);
 
         // Create uridecodebin for this clip.
         let decoder = match gst::ElementFactory::make("uridecodebin")

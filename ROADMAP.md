@@ -396,7 +396,7 @@ Tracking docs:
 - [ ] Apply multiple LUTs to a clip
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Preview/Export color parity improvements
-  - [ ] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline (via frei0r `lut3d`, custom `GstBaseTransform`, or `glshader` element) so clips with LUTs display correctly when Background Render is off, eliminating the largest remaining preview/export color gap
+  - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
   - [ ] Prerender keyframe interpolation — support brightness/contrast/saturation/temperature/tint keyframes in the prerender pipeline (currently only static values are applied; animated color adjustments are not visible in proxy mode)
   - [ ] Configurable prerender quality — expose CRF / encoding preset in Preferences (currently CRF 20 veryfast) to let users trade cache size and prerender speed for higher color fidelity
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle

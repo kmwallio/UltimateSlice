@@ -174,7 +174,7 @@ Assigns a 3D Look-Up Table (LUT) file for professional color grading. LUTs remap
 | **Import LUT…** | Opens a file chooser filtered to `.cube` files. Select a LUT to assign it to the selected clip. |
 | **Clear** | Removes the currently assigned LUT from the clip. |
 
-> **Applied on export** — The LUT is applied via FFmpeg's `lut3d` filter during export (full quality). Preview playback does not apply the LUT. A cyan **LUT** badge appears on the clip in the timeline when a LUT is assigned.
+> **Real-time preview & export** — The LUT is applied in the Program Monitor via CPU-based trilinear interpolation at preview resolution, providing immediate visual feedback. On export, it is applied via FFmpeg's `lut3d` filter at full resolution. When proxy mode or Preview LUTs is enabled and the proxy is ready, the LUT is already baked into the proxy media — the real-time probe is automatically skipped to prevent double-application. A cyan **LUT** badge appears on the clip in the timeline when a LUT is assigned.
 
 Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacking is a future feature.
 
