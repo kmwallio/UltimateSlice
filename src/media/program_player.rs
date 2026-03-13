@@ -5493,7 +5493,7 @@ impl ProgramPlayer {
         clip: &ProgramClip,
         seek_flags: gst::SeekFlags,
     ) -> gst::SeekFlags {
-        if clip.reverse || clip.is_freeze_frame() {
+        if clip.reverse || clip.is_freeze_frame() || clip.is_image {
             (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
         } else {
             seek_flags
@@ -5505,7 +5505,7 @@ impl ProgramPlayer {
         source_pos_ns: u64,
         frame_duration_ns: u64,
     ) -> u64 {
-        if clip.is_freeze_frame() {
+        if clip.is_freeze_frame() || clip.is_image {
             source_pos_ns.saturating_add(frame_duration_ns.max(1))
         } else {
             clip.seek_stop_ns(source_pos_ns)
@@ -6856,10 +6856,23 @@ impl ProgramPlayer {
 
         // Build chain: downscale to preview processing resolution EARLY so all effects
         // process at target size instead of source resolution (e.g. 5.3K for GoPro).
-        // Order: [capssetter] → convertscale to target res → [crop + alpha repad]
-        // → [effects] → zoom/position → rotate/flip → title.
+        // Order: [imagefreeze] → [capssetter] → convertscale to target res
+        // → [crop + alpha repad] → [effects] → zoom/position → rotate/flip → title.
+        //
+        // imagefreeze MUST come first: image sources (PNG, JPEG, …) produce a
+        // single decoded frame then EOS.  If imagefreeze is placed after elements
+        // whose properties change at runtime (crop, zoom), a property change
+        // triggers caps renegotiation that propagates upstream to the decoder,
+        // but the decoder already sent EOS and cannot supply a new buffer —
+        // causing "streaming stopped, reason error (-5)" in imagefreeze's src
+        // loop.  By placing it first we turn the single frame into an infinite
+        // stream before any mutable elements, so renegotiation always succeeds.
         let mut chain: Vec<gst::Element> = Vec::new();
-        // 0. When a real-time LUT is active, override the source colorimetry
+        // 0. imagefreeze for still-image / freeze-frame clips (before everything).
+        if let Some(ref e) = imagefreeze {
+            chain.push(e.clone());
+        }
+        // 0b. When a real-time LUT is active, override the source colorimetry
         //    to BT.709 full-range.  Many camera files (S-Log3 HEVC, etc.) carry
         //    unknown/unset colorimetry; GStreamer's default YUV→RGB conversion
         //    for unknown sources diverges from FFmpeg's swscale default, causing
@@ -6913,9 +6926,6 @@ impl ProgramPlayer {
             chain.push(e.clone());
         }
         if let Some(ref e) = videobox_crop_alpha {
-            chain.push(e.clone());
-        }
-        if let Some(ref e) = imagefreeze {
             chain.push(e.clone());
         }
         // 3. Effects at project resolution (much cheaper than source res).
