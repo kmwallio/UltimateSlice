@@ -149,6 +149,7 @@ pub(crate) struct ColorAdjRGBParams {
 /// Parameters for frei0r `3-point-color-balance` element.
 /// Maps shadows/midtones/highlights to the black/gray/white reference
 /// points of a piecewise-linear transfer curve.
+#[derive(Clone)]
 pub(crate) struct ThreePointParams {
     pub(crate) black_r: f64,
     pub(crate) black_g: f64,
@@ -8669,7 +8670,9 @@ impl ProgramPlayer {
         shadows_warmth: f64,
         shadows_tint: f64,
     ) -> ThreePointParams {
-        Self::compute_3point_params(
+        let (shadows, midtones, highlights) =
+            Self::export_tonal_parity_inputs(shadows, midtones, highlights);
+        let mut p = Self::compute_3point_params(
             shadows,
             midtones,
             highlights,
@@ -8680,13 +8683,134 @@ impl ProgramPlayer {
             midtones_tint,
             shadows_warmth,
             shadows_tint,
+        );
+        p
+    }
+
+    /// Per-zone additive corrections for the export frei0r 3-point-color-balance
+    /// path.  Reserved for future per-zone compensation once a reliable model
+    /// is found.  Previous polynomial offsets regressed midtones parity
+    /// (3-point curve reshaping has undesirable cross-zone side effects),
+    /// so the body is intentionally empty.
+    pub(crate) fn apply_export_3point_parity_offsets(
+        _p: &mut ThreePointParams,
+        _shadows: f64,
+        _midtones: f64,
+        _highlights: f64,
+    ) {
+        // Intentionally empty — tonal 3-point offsets reverted after
+        // MCP cross-runtime validation showed midtones regression.
+    }
+
+    /// Cool-side export temperature gain (env-overridable for parity fitting).
+    /// Uses a piecewise curve in cool range with unity at/above 6500K.
+    pub(crate) fn export_temperature_parity_gain(temperature: f64) -> f64 {
+        let legacy_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN", 1.0);
+        let far_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN_FAR", legacy_gain);
+        let near_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN_NEAR", legacy_gain);
+        Self::piecewise_cool_temperature_gain(temperature, far_gain, near_gain)
+    }
+
+    pub(crate) fn piecewise_cool_temperature_gain(
+        temperature: f64,
+        far_gain: f64,
+        near_gain: f64,
+    ) -> f64 {
+        const FAR_K: f64 = 2000.0;
+        const NEAR_K: f64 = 5000.0;
+        const NEUTRAL_K: f64 = 6500.0;
+
+        if temperature >= NEUTRAL_K {
+            return 1.0;
+        }
+        if temperature <= FAR_K {
+            return far_gain;
+        }
+        if temperature <= NEAR_K {
+            let t = (temperature - FAR_K) / (NEAR_K - FAR_K);
+            return far_gain + (near_gain - far_gain) * t;
+        }
+        let t = (temperature - NEAR_K) / (NEUTRAL_K - NEAR_K);
+        near_gain + (1.0 - near_gain) * t
+    }
+
+    fn export_gain_env(key: &str, default: f64) -> f64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|v| *v >= 0.80 && *v <= 1.20)
+            .unwrap_or(default)
+    }
+
+    /// Per-channel additive offsets for the export coloradj temperature path.
+    /// Compensates for FFmpeg/GStreamer frei0r bridge differences in color
+    /// temperature rendering.  All offsets taper to zero at neutral (6500K).
+    pub(crate) fn export_temperature_channel_offsets(temperature: f64) -> (f64, f64, f64) {
+        let deviation = (temperature - 6500.0) / 4500.0;
+        if deviation.abs() < 0.01 {
+            return (0.0, 0.0, 0.0);
+        }
+        let abs_dev = deviation.abs().min(1.0);
+
+        if deviation < 0.0 {
+            // Below neutral (warm effect: low Kelvin = orange).
+            // Warm-side offsets intentionally zeroed — chart showed small
+            // improvement but natural footage showed small regression,
+            // indicating content-dependent behaviour.
+            (0.0, 0.0, 0.0)
+        } else {
+            // Above neutral (cool effect: high Kelvin = blue).
+            // FFmpeg bridge doesn't cool enough → excess B and moderate R.
+            (-abs_dev * 0.012, -abs_dev * 0.008, -abs_dev * 0.022)
+        }
+    }
+
+    pub(crate) fn export_tonal_parity_inputs(
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
+    ) -> (f64, f64, f64) {
+        let shadows_pos_gain = Self::export_gain_env("US_EXPORT_SHADOWS_POS_GAIN", 1.0);
+        let midtones_neg_gain = Self::export_gain_env("US_EXPORT_MIDTONES_NEG_GAIN", 1.0);
+        let highlights_neg_gain = Self::export_gain_env("US_EXPORT_HIGHLIGHTS_NEG_GAIN", 1.0);
+        Self::apply_export_tonal_parity_gains(
+            shadows,
+            midtones,
+            highlights,
+            shadows_pos_gain,
+            midtones_neg_gain,
+            highlights_neg_gain,
         )
     }
 
-    /// Conservative cool-side attenuation for export-side coloradj harmonization.
-    /// Empirically, cool-temperature endpoints drift more than warm endpoints.
-    pub(crate) fn export_temperature_parity_gain(temperature: f64) -> f64 {
-        if temperature < 6500.0 { 0.97 } else { 1.0 }
+    pub(crate) fn apply_export_tonal_parity_gains(
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
+        shadows_pos_gain: f64,
+        midtones_neg_gain: f64,
+        highlights_neg_gain: f64,
+    ) -> (f64, f64, f64) {
+        let sh = shadows.clamp(-1.0, 1.0);
+        let mid = midtones.clamp(-1.0, 1.0);
+        let hi = highlights.clamp(-1.0, 1.0);
+
+        let sh = if sh > 0.0 {
+            (sh * shadows_pos_gain).clamp(-1.0, 1.0)
+        } else {
+            sh
+        };
+        let mid = if mid < 0.0 {
+            (mid * midtones_neg_gain).clamp(-1.0, 1.0)
+        } else {
+            mid
+        };
+        let hi = if hi < 0.0 {
+            (hi * highlights_neg_gain).clamp(-1.0, 1.0)
+        } else {
+            hi
+        };
+        (sh, mid, hi)
     }
 
     /// Returns true if two clips would produce effects bins with the same
@@ -11561,25 +11685,121 @@ mod tests {
     }
 
     #[test]
-    fn export_threepoint_harmonization_keeps_shared_mapping() {
-        let base = ProgramPlayer::compute_3point_params(
-            0.7, -0.4, -0.6, 0.2, 0.1, -0.2, -0.3, 0.4, 0.5, -0.6,
-        );
-        let export = ProgramPlayer::compute_export_3point_params(
-            0.7, -0.4, -0.6, 0.2, 0.1, -0.2, -0.3, 0.4, 0.5, -0.6,
-        );
-        assert!((export.black_r - base.black_r).abs() < 1e-9);
-        assert!((export.gray_g - base.gray_g).abs() < 1e-9);
-        assert!((export.white_b - base.white_b).abs() < 1e-9);
+    fn apply_export_tonal_parity_gains_with_unity_preserves_inputs() {
+        let (sh, mid, hi) =
+            ProgramPlayer::apply_export_tonal_parity_gains(0.7, -0.4, -0.6, 1.0, 1.0, 1.0);
+        assert!((sh - 0.7).abs() < 1e-9);
+        assert!((mid + 0.4).abs() < 1e-9);
+        assert!((hi + 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_export_tonal_parity_gains_is_side_selective() {
+        let (sh, mid, hi) =
+            ProgramPlayer::apply_export_tonal_parity_gains(0.8, -0.5, -0.4, 0.9, 0.92, 0.95);
+        assert!((sh - 0.72).abs() < 1e-9);
+        assert!((mid + 0.46).abs() < 1e-9);
+        assert!((hi + 0.38).abs() < 1e-9);
+
+        let (sh_pos, mid_pos, hi_pos) =
+            ProgramPlayer::apply_export_tonal_parity_gains(-0.8, 0.5, 0.4, 0.9, 0.92, 0.95);
+        assert!((sh_pos + 0.8).abs() < 1e-9, "negative shadows must be unchanged");
+        assert!((mid_pos - 0.5).abs() < 1e-9, "positive midtones must be unchanged");
+        assert!((hi_pos - 0.4).abs() < 1e-9, "positive highlights must be unchanged");
     }
 
     #[test]
     fn export_temperature_parity_gain_is_cool_side_only() {
         assert!((ProgramPlayer::export_temperature_parity_gain(6500.0) - 1.0).abs() < 1e-9);
         assert!((ProgramPlayer::export_temperature_parity_gain(10000.0) - 1.0).abs() < 1e-9);
-        assert!(
-            (ProgramPlayer::export_temperature_parity_gain(2000.0) - 0.97).abs() < 1e-9
+        assert!((ProgramPlayer::export_temperature_parity_gain(2000.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn piecewise_cool_temperature_gain_interpolates_segments() {
+        let far = 0.94;
+        let near = 0.98;
+        assert!((ProgramPlayer::piecewise_cool_temperature_gain(2000.0, far, near) - far).abs() < 1e-9);
+        assert!((ProgramPlayer::piecewise_cool_temperature_gain(3500.0, far, near) - 0.96).abs() < 1e-9);
+        assert!((ProgramPlayer::piecewise_cool_temperature_gain(5000.0, far, near) - near).abs() < 1e-9);
+        assert!((ProgramPlayer::piecewise_cool_temperature_gain(5750.0, far, near) - 0.99).abs() < 1e-9);
+        assert!((ProgramPlayer::piecewise_cool_temperature_gain(6500.0, far, near) - 1.0).abs() < 1e-9);
+        assert!((ProgramPlayer::piecewise_cool_temperature_gain(10000.0, far, near) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn export_temperature_channel_offsets_zero_at_neutral() {
+        let (r, g, b) = ProgramPlayer::export_temperature_channel_offsets(6500.0);
+        assert!(r.abs() < 1e-9, "r should be zero at neutral: {r}");
+        assert!(g.abs() < 1e-9, "g should be zero at neutral: {g}");
+        assert!(b.abs() < 1e-9, "b should be zero at neutral: {b}");
+    }
+
+    #[test]
+    fn export_temperature_channel_offsets_at_extremes() {
+        // Warm side (2000K) — offsets are zeroed (content-dependent regression).
+        let (r2k, g2k, b2k) = ProgramPlayer::export_temperature_channel_offsets(2000.0);
+        assert!((r2k).abs() < 1e-9, "2000K: R should be zero: {r2k}");
+        assert!((g2k).abs() < 1e-9, "2000K: G should be zero: {g2k}");
+        assert!((b2k).abs() < 1e-9, "2000K: B should be zero: {b2k}");
+
+        // Cool side (10000K) — offsets are negative (FFmpeg doesn't cool enough).
+        let (r10k, g10k, b10k) = ProgramPlayer::export_temperature_channel_offsets(10000.0);
+        assert!(b10k < -0.01, "10000K: B should be strongly negative: {b10k}");
+        assert!(r10k < 0.0, "10000K: R should be negative: {r10k}");
+        assert!(b10k < r10k, "10000K: B offset should be larger than R: b={b10k} r={r10k}");
+    }
+
+    #[test]
+    fn export_3point_parity_offsets_shadows_positive_is_noop() {
+        // Tonal 3-point offsets are intentionally disabled (no-op).
+        let base = ProgramPlayer::compute_3point_params(
+            0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
+        let mut adjusted = base.clone();
+        ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.5, 0.0, 0.0);
+        assert!((adjusted.black_r - base.black_r).abs() < 1e-9, "no-op: black_r unchanged");
+        assert!((adjusted.gray_r - base.gray_r).abs() < 1e-9, "no-op: gray_r unchanged");
+        assert!((adjusted.white_r - base.white_r).abs() < 1e-9, "no-op: white_r unchanged");
+    }
+
+    #[test]
+    fn export_3point_parity_offsets_midtones_negative_is_noop() {
+        let base = ProgramPlayer::compute_3point_params(
+            0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
+        let mut adjusted = base.clone();
+        ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.0, -1.0, 0.0);
+        assert!((adjusted.gray_r - base.gray_r).abs() < 1e-9, "no-op: gray_r unchanged");
+    }
+
+    #[test]
+    fn export_3point_parity_offsets_highlights_is_noop() {
+        let base = ProgramPlayer::compute_3point_params(
+            0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
+        let mut adjusted = base.clone();
+        ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.0, 0.0, -1.0);
+        assert!((adjusted.white_r - base.white_r).abs() < 1e-9, "no-op: white_r unchanged");
+
+        let base_pos = ProgramPlayer::compute_3point_params(
+            0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
+        let mut adjusted_pos = base_pos.clone();
+        ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted_pos, 0.0, 0.0, 1.0);
+        assert!((adjusted_pos.white_r - base_pos.white_r).abs() < 1e-9, "no-op: white_r unchanged");
+    }
+
+    #[test]
+    fn export_3point_parity_offsets_neutral_is_passthrough() {
+        let base = ProgramPlayer::compute_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
+        let mut adjusted = base.clone();
+        ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.0, 0.0, 0.0);
+        assert!((adjusted.black_r - base.black_r).abs() < 1e-9);
+        assert!((adjusted.gray_r - base.gray_r).abs() < 1e-9);
+        assert!((adjusted.white_r - base.white_r).abs() < 1e-9);
     }
 
     #[test]

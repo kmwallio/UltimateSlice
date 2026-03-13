@@ -83,6 +83,12 @@ printf '%s\n' \
   - One-command loop: runs focused calibration sweeps per profile, single-profile comparison gates, then multi-profile aggregate gate.
   - Automatically adds temperature endpoint guardrails (`temperature@2000`, `temperature@10000`) unless `--no-temperature-guardrails` is set.
   - Writes per-profile compare artifacts plus `retune_cycle_summary.json`.
+- `python3 tools/optimize_mcp_temperature_gain.py --profile-media chart=... --baseline-report chart=... --profile-media natural=... --baseline-report natural=... --out /tmp/us_temp_opt`
+  - Sweeps candidate export gain sets and runs a full retune cycle for each trial.
+  - Supports piecewise cool-side temperature gains (`US_EXPORT_COOL_TEMP_GAIN_FAR`, `US_EXPORT_COOL_TEMP_GAIN_NEAR`) with legacy fallback (`US_EXPORT_COOL_TEMP_GAIN`), plus optional tonal-side gains for endpoint controls (`US_EXPORT_SHADOWS_POS_GAIN`, `US_EXPORT_MIDTONES_NEG_GAIN`, `US_EXPORT_HIGHLIGHTS_NEG_GAIN`).
+  - Use `--cool-far-gains` and `--cool-near-gains` to search cool-temperature curve shape; when omitted, both fall back to `--gains`.
+  - Picks the best candidate by pass status + weighted aggregate multi-profile score.
+  - Writes `parity_gain_optimization_summary.json` with trial scores and selected gain set.
 
 Example multi-media smoke run:
 

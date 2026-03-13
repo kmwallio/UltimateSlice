@@ -167,8 +167,11 @@ Tracking docs:
 - [x] MCP parity signed-bias telemetry: calibration reports now include signed per-channel bias (`export - preview`) for neutral/sample captures and slider-level mean signed-bias summaries for direction-aware fitting
 - [x] MCP parity baseline-vs-candidate comparator: `tools/compare_mcp_parity_reports.py` scores retune candidates and enforces endpoint regression guardrails for risky controls
 - [x] MCP parity multi-profile comparator: `tools/compare_mcp_parity_profiles.py` gates candidates across multiple baseline/candidate report pairs with per-profile + aggregate scoring
-- [x] MCP parity cool-side temperature harmonization: export coloradj bridge now applies a conservative cool-only gain via `ProgramPlayer::export_temperature_parity_gain`
+- [x] MCP parity cool-side temperature harmonization hook: export coloradj bridge supports cool-side gain via `ProgramPlayer::export_temperature_parity_gain` with unity default + runtime override
 - [x] MCP parity retune-cycle wrapper: `tools/run_mcp_parity_retune_cycle.py` runs sweep + single-profile compare + multi-profile compare in one command, with optional profile weights and automatic temperature endpoint guardrails
+- [x] MCP parity gain optimizer: `tools/optimize_mcp_temperature_gain.py` sweeps export parity gain sets (temperature + optional tonal endpoint gains) via repeated retune-cycle runs and selects best aggregate-scoring candidate
+- [x] MCP parity gain runtime overrides: ProgramPlayer export parity supports bounded env overrides (`US_EXPORT_COOL_TEMP_GAIN`, `US_EXPORT_SHADOWS_POS_GAIN`, `US_EXPORT_MIDTONES_NEG_GAIN`, `US_EXPORT_HIGHLIGHTS_NEG_GAIN`) for automation loops
+- [x] MCP parity piecewise cool-temperature shaping: export parity now supports `US_EXPORT_COOL_TEMP_GAIN_FAR` + `US_EXPORT_COOL_TEMP_GAIN_NEAR` (with legacy fallback) for two-segment cool-range fitting
 - [x] MCP `get_playhead_position` tool for playhead-speed/FPS regression measurements in automated perf harnesses
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach

@@ -1141,6 +1141,12 @@ fn build_grading_filter_with_caps(
         let h = clip.highlights.clamp(-1.0, 1.0);
         let bp = clip.black_point.clamp(-1.0, 1.0);
 
+        // Note: tonal colorbalance parity corrections were tried here
+        // (additive s/m/h offsets from cross-runtime signed-bias analysis)
+        // but reverted after MCP validation showed midtones regression.
+        // The 3-point polynomial curve reshaping has undesirable cross-zone
+        // side effects that increase overall RMSE.
+
         // Per-channel warmth/tint offsets.
         // Warmth: positive = warm (boost red, cut blue), negative = cool.
         // Tint: positive = magenta (cut green), negative = green (boost green).
@@ -1207,13 +1213,13 @@ fn compute_export_coloradj_params(
         1.0
     };
 
-    let apply = |n: f64, t: f64, ti: f64| {
-        (n + (t - n) * temp_gain + (ti - n) * tint_gain).clamp(0.0, 1.0)
-    };
+    // Per-channel additive offsets for cross-runtime bridge compensation.
+    let (off_r, off_g, off_b) = ProgramPlayer::export_temperature_channel_offsets(temperature);
+
     crate::media::program_player::ColorAdjRGBParams {
-        r: apply(neutral.r, temp_only.r, tint_only.r),
-        g: apply(neutral.g, temp_only.g, tint_only.g),
-        b: apply(neutral.b, temp_only.b, tint_only.b),
+        r: (neutral.r + (temp_only.r - neutral.r) * temp_gain + (tint_only.r - neutral.r) * tint_gain + off_r).clamp(0.0, 1.0),
+        g: (neutral.g + (temp_only.g - neutral.g) * temp_gain + (tint_only.g - neutral.g) * tint_gain + off_g).clamp(0.0, 1.0),
+        b: (neutral.b + (temp_only.b - neutral.b) * temp_gain + (tint_only.b - neutral.b) * tint_gain + off_b).clamp(0.0, 1.0),
     }
 }
 
@@ -2407,9 +2413,12 @@ mod tests {
                 && (export_neutral.b - neutral.b).abs() < 1e-9,
             "neutral mapping should remain unchanged"
         );
+        // Per-channel offsets intentionally push the export delta slightly
+        // beyond preview's to compensate for FFmpeg's weaker frei0r
+        // rendering.  Allow up to 20% amplification.
         assert!(
-            magnitude(&export_temp, &neutral) <= magnitude(&preview_temp, &neutral),
-            "temperature mapping should not amplify preview delta"
+            magnitude(&export_temp, &neutral) <= magnitude(&preview_temp, &neutral) * 1.20,
+            "temperature mapping should not over-amplify preview delta"
         );
         assert!(
             magnitude(&export_tint, &neutral) < magnitude(&preview_tint, &neutral),
