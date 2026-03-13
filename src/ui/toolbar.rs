@@ -982,14 +982,20 @@ pub fn build_toolbar(
                                     &ac_combo,
                                     &ab_entry,
                                 );
-                                let mut state = presets_state.borrow_mut();
-                                if state
-                                    .upsert_preset(ExportPreset::from_export_options(
-                                        name, &options,
-                                    ))
-                                    .is_ok()
-                                {
-                                    ui_state::save_export_presets_state(&state);
+                                let ok = {
+                                    let mut state = presets_state.borrow_mut();
+                                    let ok = state
+                                        .upsert_preset(ExportPreset::from_export_options(
+                                            name, &options,
+                                        ))
+                                        .is_ok();
+                                    if ok {
+                                        ui_state::save_export_presets_state(&state);
+                                    }
+                                    ok
+                                };
+                                if ok {
+                                    let state = presets_state.borrow();
                                     refresh_preset_dropdown(
                                         &preset_dropdown,
                                         &state,
@@ -1018,27 +1024,33 @@ pub fn build_toolbar(
                     if selected == 0 {
                         return;
                     }
-                    let mut state = presets_state.borrow_mut();
-                    let Some(existing_name) = state
-                        .presets
-                        .get((selected - 1) as usize)
-                        .map(|preset| preset.name.clone())
-                    else {
-                        return;
+                    let ok = {
+                        let mut state = presets_state.borrow_mut();
+                        let Some(existing_name) = state
+                            .presets
+                            .get((selected - 1) as usize)
+                            .map(|preset| preset.name.clone())
+                        else {
+                            return;
+                        };
+                        let options = collect_export_options(
+                            &vc_combo,
+                            &ct_combo,
+                            &or_combo,
+                            &crf_slider,
+                            &ac_combo,
+                            &ab_entry,
+                        );
+                        let ok = state
+                            .upsert_preset(ExportPreset::from_export_options(existing_name, &options))
+                            .is_ok();
+                        if ok {
+                            ui_state::save_export_presets_state(&state);
+                        }
+                        ok
                     };
-                    let options = collect_export_options(
-                        &vc_combo,
-                        &ct_combo,
-                        &or_combo,
-                        &crf_slider,
-                        &ac_combo,
-                        &ab_entry,
-                    );
-                    if state
-                        .upsert_preset(ExportPreset::from_export_options(existing_name, &options))
-                        .is_ok()
-                    {
-                        ui_state::save_export_presets_state(&state);
+                    if ok {
+                        let state = presets_state.borrow();
                         refresh_preset_dropdown(
                             &preset_dropdown,
                             &state,
@@ -1056,16 +1068,23 @@ pub fn build_toolbar(
                     if selected == 0 {
                         return;
                     }
-                    let mut state = presets_state.borrow_mut();
-                    let Some(existing_name) = state
-                        .presets
-                        .get((selected - 1) as usize)
-                        .map(|preset| preset.name.clone())
-                    else {
-                        return;
+                    let ok = {
+                        let mut state = presets_state.borrow_mut();
+                        let Some(existing_name) = state
+                            .presets
+                            .get((selected - 1) as usize)
+                            .map(|preset| preset.name.clone())
+                        else {
+                            return;
+                        };
+                        let ok = state.delete_preset(&existing_name);
+                        if ok {
+                            ui_state::save_export_presets_state(&state);
+                        }
+                        ok
                     };
-                    if state.delete_preset(&existing_name) {
-                        ui_state::save_export_presets_state(&state);
+                    if ok {
+                        let state = presets_state.borrow();
                         refresh_preset_dropdown(&preset_dropdown, &state, None);
                     }
                 });
