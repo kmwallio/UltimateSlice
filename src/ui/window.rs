@@ -4082,6 +4082,13 @@ pub fn build_window(
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
         })
     };
+
+    // ── Media browser ─────────────────────────────────────────────────────
+    let (browser, clear_media_selection, force_rebuild_media_browser) =
+        media_browser::build_media_browser(library.clone(), on_source_selected.clone(), on_relink_media_gui.clone());
+
+    // Now that both on_source_selected and force_rebuild_media_browser exist,
+    // fill in the real relink implementation.
     *on_relink_media_impl.borrow_mut() = Some({
         let window_weak = window_weak.clone();
         let project = project.clone();
@@ -4090,6 +4097,9 @@ pub fn build_window(
         let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
+        let inspector_view = inspector_view.clone();
+        let force_rebuild_media_browser = force_rebuild_media_browser.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
         Rc::new(move || {
             let Some(win) = window_weak.upgrade() else {
                 return;
@@ -4111,6 +4121,9 @@ pub fn build_window(
             let source_marks = source_marks.clone();
             let on_source_selected = on_source_selected.clone();
             let on_project_changed = on_project_changed.clone();
+            let inspector_view = inspector_view.clone();
+            let force_rebuild_media_browser = force_rebuild_media_browser.clone();
+            let timeline_panel_cell = timeline_panel_cell.clone();
             let win_for_result = win.clone();
             dialog.select_folder(Some(&win), gio::Cancellable::NONE, move |result| {
                 let Ok(folder) = result else { return };
@@ -4180,11 +4193,25 @@ pub fn build_window(
                 log::info!("[relink] calling on_project_changed");
                 on_project_changed();
                 log::info!("[relink] on_project_changed returned");
-                // After the full refresh chain, verify the final state.
+
+                // Belt-and-suspenders: explicitly refresh availability, inspector,
+                // and media browser after on_project_changed, in case the impl
+                // didn't fully propagate (e.g., deferred reload timing).
                 let remaining_missing = {
                     let proj = project.borrow();
-                    let lib = library.borrow();
-                    collect_missing_source_paths(&proj, &lib).len()
+                    let mut lib = library.borrow_mut();
+                    let mut st = timeline_state.borrow_mut();
+                    let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                    let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
+                    drop(st);
+                    inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
+                    drop(proj);
+                    drop(lib);
+                    force_rebuild_media_browser();
+                    if let Some(ref w) = *timeline_panel_cell.borrow() {
+                        w.queue_draw();
+                    }
+                    mp.len()
                 };
                 let msg = if summary.remapped.is_empty() && !summary.unresolved.is_empty() {
                     format!(
@@ -4215,9 +4242,6 @@ pub fn build_window(
         })
     });
 
-    // ── Media browser ─────────────────────────────────────────────────────
-    let (browser, clear_media_selection, force_rebuild_media_browser) =
-        media_browser::build_media_browser(library.clone(), on_source_selected.clone(), on_relink_media_gui.clone());
     // ── on_close_preview: deselect media + hide preview + reset source state ──
     *on_close_preview_impl.borrow_mut() = Some({
         let clear_media_selection = clear_media_selection.clone();
