@@ -1679,7 +1679,7 @@ struct NativeKeyframeParams {
 }
 
 /// Parse children of an `<adjust-transform>` Start element until its matching End.
-/// Extracts `<param name="position">` and `<param name="Scale">` keyframes;
+/// Extracts `<param name="position">` and `<param name="scale">` keyframes;
 /// collects other children as unknown fragments for round-trip preservation.
 fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyframeParams> {
     let mut result = NativeKeyframeParams::default();

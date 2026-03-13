@@ -850,19 +850,31 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 );
                 {
                     let mut adjust_transform = BytesStart::new("adjust-transform");
-                    adjust_transform.push_attribute((
-                        "position",
-                        format!("{} {}", position_x, position_y).as_str(),
-                    ));
-                    adjust_transform.push_attribute((
-                        "scale",
-                        format!("{} {}", clip.scale, clip.scale).as_str(),
-                    ));
-                    adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
-                    let has_transform_kfs = !clip.position_x_keyframes.is_empty()
-                        || !clip.position_y_keyframes.is_empty()
-                        || !clip.scale_keyframes.is_empty()
-                        || !clip.rotate_keyframes.is_empty();
+                    let has_position_kfs = !clip.position_x_keyframes.is_empty()
+                        || !clip.position_y_keyframes.is_empty();
+                    let has_scale_kfs = !clip.scale_keyframes.is_empty();
+                    let has_rotation_kfs = !clip.rotate_keyframes.is_empty();
+                    let has_transform_kfs =
+                        has_position_kfs || has_scale_kfs || has_rotation_kfs;
+                    // FCP omits inline attrs for properties that have keyframes
+                    if !has_position_kfs {
+                        adjust_transform.push_attribute((
+                            "position",
+                            format!("{} {}", position_x, position_y).as_str(),
+                        ));
+                    }
+                    if !has_scale_kfs {
+                        adjust_transform.push_attribute((
+                            "scale",
+                            format!("{} {}", clip.scale, clip.scale).as_str(),
+                        ));
+                    }
+                    if !has_rotation_kfs {
+                        adjust_transform.push_attribute((
+                            "rotation",
+                            clip.rotate.to_string().as_str(),
+                        ));
+                    }
                     if has_transform_kfs {
                         writer.write_event(Event::Start(adjust_transform))?;
                         write_transform_keyframe_params(&mut writer, clip, project)?;
@@ -1465,17 +1477,25 @@ fn write_strict_clip_body(
 
         // adjust-transform
         let mut adjust_transform = BytesStart::new("adjust-transform");
-        adjust_transform.push_attribute((
-            "position",
-            format!("{} {}", position_x, position_y).as_str(),
-        ));
-        adjust_transform
-            .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
-        adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
-        let has_transform_kfs = !clip.position_x_keyframes.is_empty()
-            || !clip.position_y_keyframes.is_empty()
-            || !clip.scale_keyframes.is_empty()
-            || !clip.rotate_keyframes.is_empty();
+        let has_position_kfs = !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty();
+        let has_scale_kfs = !clip.scale_keyframes.is_empty();
+        let has_rotation_kfs = !clip.rotate_keyframes.is_empty();
+        let has_transform_kfs = has_position_kfs || has_scale_kfs || has_rotation_kfs;
+        // FCP omits inline attrs for properties that have keyframes
+        if !has_position_kfs {
+            adjust_transform.push_attribute((
+                "position",
+                format!("{} {}", position_x, position_y).as_str(),
+            ));
+        }
+        if !has_scale_kfs {
+            adjust_transform
+                .push_attribute(("scale", format!("{} {}", clip.scale, clip.scale).as_str()));
+        }
+        if !has_rotation_kfs {
+            adjust_transform.push_attribute(("rotation", clip.rotate.to_string().as_str()));
+        }
         if has_transform_kfs {
             writer.write_event(Event::Start(adjust_transform))?;
             write_transform_keyframe_params(writer, clip, project)?;
@@ -2745,18 +2765,10 @@ fn write_transform_keyframe_params(
 ) -> Result<()> {
     let fps = &project.frame_rate;
 
-    // Position keyframes
+    // Position keyframes — FCP omits value attr on <param> when keyframes present
     if !clip.position_x_keyframes.is_empty() || !clip.position_y_keyframes.is_empty() {
         let mut param = BytesStart::new("param");
         param.push_attribute(("name", "position"));
-        let (static_x, static_y) = internal_position_to_fcpxml(
-            clip.position_x,
-            clip.position_y,
-            project.width,
-            project.height,
-            clip.scale,
-        );
-        param.push_attribute(("value", format!("{} {}", static_x, static_y).as_str()));
         writer.write_event(Event::Start(param))?;
 
         let kfa = BytesStart::new("keyframeAnimation");
@@ -2812,11 +2824,10 @@ fn write_transform_keyframe_params(
         writer.write_event(Event::End(BytesEnd::new("param")))?;
     }
 
-    // Scale keyframes
+    // Scale keyframes — FCP uses lowercase "scale"
     if !clip.scale_keyframes.is_empty() {
         let mut param = BytesStart::new("param");
-        param.push_attribute(("name", "Scale"));
-        param.push_attribute(("value", format!("{} {}", clip.scale, clip.scale).as_str()));
+        param.push_attribute(("name", "scale"));
         writer.write_event(Event::Start(param))?;
 
         let kfa = BytesStart::new("keyframeAnimation");
@@ -2842,7 +2853,6 @@ fn write_transform_keyframe_params(
     if !clip.rotate_keyframes.is_empty() {
         let mut param = BytesStart::new("param");
         param.push_attribute(("name", "rotation"));
-        param.push_attribute(("value", clip.rotate.to_string().as_str()));
         writer.write_event(Event::Start(param))?;
 
         let kfa = BytesStart::new("keyframeAnimation");
@@ -4508,7 +4518,7 @@ mod tests {
             xml.contains("<adjust-transform"),
             "missing adjust-transform"
         );
-        assert!(xml.contains("<param name=\"Scale\""), "missing Scale param");
+        assert!(xml.contains("<param name=\"scale\""), "missing scale param");
         assert!(
             xml.contains("<param name=\"rotation\""),
             "missing rotation param"
@@ -4863,7 +4873,7 @@ mod tests {
         assert!(xml.contains("<adjust-blend amount=\"0.75\""));
         assert!(xml.contains("<adjust-crop mode=\"trim\">"));
         assert!(xml.contains("<crop-rect left=\"1\" right=\"2\" top=\"3\" bottom=\"4\""));
-        assert!(xml.contains("<param name=\"Scale\""));
+        assert!(xml.contains("<param name=\"scale\""));
 
         let _ = std::fs::remove_dir_all(&root);
     }
