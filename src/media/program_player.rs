@@ -361,6 +361,8 @@ pub struct ProgramClip {
     pub shadows_tint: f64,
     /// Whether the source file contains an audio stream.
     pub has_audio: bool,
+    /// True when this clip is a still image (PNG, JPEG, etc.).
+    pub is_image: bool,
     /// Chroma key enabled flag.
     pub chroma_key_enabled: bool,
     /// Chroma key target color as 0xRRGGBB.
@@ -6701,7 +6703,7 @@ impl ProgramPlayer {
         } else {
             None
         };
-        let imagefreeze = if clip.is_freeze_frame() {
+        let imagefreeze = if clip.is_freeze_frame() || clip.is_image {
             gst::ElementFactory::make("imagefreeze").build().ok()
         } else {
             None
@@ -9131,7 +9133,7 @@ impl ProgramPlayer {
         let need_flip = clip.flip_h || clip.flip_v;
         let need_title = !clip.title_text.is_empty();
         let need_chroma_key = clip.chroma_key_enabled;
-        let need_freeze_hold = clip.is_freeze_frame();
+        let need_freeze_hold = clip.is_freeze_frame() || clip.is_image;
 
         // Temperature/tint needs either coloradj_rgb (preferred) or
         // videobalance (hue-rotation fallback).
@@ -10561,6 +10563,7 @@ mod tests {
             shadows_warmth: 0.0,
             shadows_tint: 0.0,
             has_audio: true,
+            is_image: false,
             chroma_key_enabled: false,
             chroma_key_color: 0x00FF00,
             chroma_key_tolerance: 0.3,

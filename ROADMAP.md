@@ -32,6 +32,7 @@ Tracking docs:
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
+- [x] Still-image detection by extension (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) with 4-second default duration
 - [x] GStreamer Discoverer probes duration and source timecode on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
 - [x] Thumbnails auto-refresh when extraction completes (debounced batch redraw) without requiring manual panel/window redraw
@@ -73,6 +74,7 @@ Tracking docs:
 - [x] **Delete** — Delete/Backspace removes selected clip
 - [x] **Play/Pause** — Space bar toggles player
 - [x] Tool indicator overlay (Razor mode)
+- [x] **Image clips** — still images (PNG, JPEG, etc.) placed as `ClipKind::Image` with 4 s default, unlimited trim-out, `imagefreeze` playback, and `tpad`-based export
 
 ### Undo / Redo System
 - [x] `EditCommand` trait with `execute` / `undo` / `description`

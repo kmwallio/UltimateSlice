@@ -9,10 +9,11 @@ The **Media Library** panel (left side) holds all source clips available for you
 3. Choose one or more video, audio, or image files from the file chooser.
 4. Imported items appear in the list showing the clip name and filename.
 5. GStreamer probes each file on import to determine its duration and extract source timecode (creation date/time) when available.
+6. **Still images** (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) are detected by file extension and assigned a **4-second default duration**. They are classified as image clips rather than video or audio.
 
 You can also drag files directly from your file manager into the **Media Library** pane to import them.
 
-Supported formats depend on your installed GStreamer plugins (any format `playbin` can decode).
+Supported formats depend on your installed GStreamer plugins (any format `playbin` can decode). Still images are supported natively.
 
 ## Browsing and Selecting
 

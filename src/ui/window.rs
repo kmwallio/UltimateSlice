@@ -258,6 +258,7 @@ fn lookup_source_timecode_base_ns(
 struct SourcePlacementInfo {
     is_audio_only: bool,
     has_audio: bool,
+    is_image: bool,
     source_timecode_base_ns: Option<u64>,
 }
 
@@ -269,6 +270,9 @@ fn lookup_source_placement_info(
     let item = library.iter().find(|item| item.source_path == source_path);
     let mut is_audio_only = item.map(|item| item.is_audio_only).unwrap_or(false);
     let mut has_audio = item.map(|item| item.has_audio).unwrap_or(false);
+    let is_image = item
+        .map(|item| item.is_image)
+        .unwrap_or_else(|| crate::model::clip::is_image_file(source_path));
 
     if item.is_none() || (!has_audio && !is_audio_only) {
         let uri = format!("file://{source_path}");
@@ -277,9 +281,16 @@ fn lookup_source_placement_info(
         has_audio = metadata.has_audio;
     }
 
+    // Images are never audio-only; override Discoverer misclassification.
+    if is_image {
+        is_audio_only = false;
+        has_audio = false;
+    }
+
     SourcePlacementInfo {
         is_audio_only,
         has_audio,
+        is_image,
         source_timecode_base_ns: lookup_source_timecode_base_ns(library, project, source_path),
     }
 }
@@ -357,7 +368,7 @@ fn build_source_placement_plan_by_track_id(
     source_monitor_auto_link_av: bool,
 ) -> SourcePlacementPlan {
     let auto_link_pair =
-        source_monitor_auto_link_av && !source_info.is_audio_only && source_info.has_audio;
+        source_monitor_auto_link_av && !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
     let video_track_idx =
         find_preferred_track_index_by_id(project, preferred_track_id, TrackKind::Video);
     let audio_track_idx =
@@ -412,7 +423,9 @@ fn build_source_placement_plan_by_track_id(
     } else {
         TrackKind::Video
     };
-    let clip_kind = if target_kind == TrackKind::Audio {
+    let clip_kind = if source_info.is_image {
+        ClipKind::Image
+    } else if target_kind == TrackKind::Audio {
         ClipKind::Audio
     } else {
         ClipKind::Video
@@ -613,6 +626,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: Some(42),
         };
 
@@ -669,6 +683,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -692,6 +707,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -714,11 +730,13 @@ mod tests {
         let audio_only = SourcePlacementInfo {
             is_audio_only: true,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: None,
         };
         let silent_video = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: false,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -741,6 +759,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -761,6 +780,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: false,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -806,6 +826,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: true,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -830,6 +851,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: true,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -847,6 +869,7 @@ mod tests {
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: true,
+            is_image: false,
             source_timecode_base_ns: None,
         };
 
@@ -2391,6 +2414,7 @@ pub fn build_window(
                         SourcePlacementInfo {
                             is_audio_only: marks.is_audio_only,
                             has_audio: marks.has_audio,
+                            is_image: marks.is_image,
                             source_timecode_base_ns: marks.source_timecode_base_ns,
                         }
                     } else {
@@ -2410,7 +2434,7 @@ pub fn build_window(
                         (0, duration_ns)
                     }
                 };
-                let auto_link_pair = !source_info.is_audio_only && source_info.has_audio;
+                let auto_link_pair = !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
                 let video_track_idx =
                     find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Video);
                 let audio_track_idx =
@@ -2451,10 +2475,15 @@ pub fn build_window(
                 }
 
                 if let Some(track) = proj.tracks.get_mut(track_idx) {
-                    let kind = match track.kind {
-                        TrackKind::Video => ClipKind::Video,
-                        TrackKind::Audio => ClipKind::Audio,
+                    let kind = if source_info.is_image {
+                        ClipKind::Image
+                    } else {
+                        match track.kind {
+                            TrackKind::Video => ClipKind::Video,
+                            TrackKind::Audio => ClipKind::Audio,
+                        }
                     };
+                    let media_dur = if source_info.is_image { None } else { Some(duration_ns) };
                     let clip = build_source_clip(
                         &source_path,
                         src_in,
@@ -2463,7 +2492,7 @@ pub fn build_window(
                         kind,
                         source_info.source_timecode_base_ns,
                         None,
-                        Some(duration_ns),
+                        media_dur,
                     );
                     let _ = add_clip_to_track(track, clip, magnetic_mode);
                     proj.dirty = true;
@@ -3288,6 +3317,7 @@ pub fn build_window(
             let source_info = SourcePlacementInfo {
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
+                is_image: marks.is_image,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -3311,6 +3341,7 @@ pub fn build_window(
                     let timeline_start = proj.tracks[primary_target.track_index].duration();
                     let magnetic_mode_for_placement =
                         magnetic_mode && !placement_plan.uses_linked_pair();
+                    let media_dur_opt = if source_info.is_image { None } else { Some(media_dur) };
                     for (track_idx, clip) in build_source_clips_for_plan(
                         &placement_plan,
                         &path,
@@ -3318,7 +3349,7 @@ pub fn build_window(
                         out_ns,
                         timeline_start,
                         source_info.source_timecode_base_ns,
-                        Some(media_dur),
+                        media_dur_opt,
                     ) {
                         let _ = add_clip_to_track(
                             &mut proj.tracks[track_idx],
@@ -3352,6 +3383,7 @@ pub fn build_window(
             let source_info = SourcePlacementInfo {
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
+                is_image: marks.is_image,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -3380,6 +3412,7 @@ pub fn build_window(
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
+                let media_dur_opt = if source_info.is_image { None } else { Some(media_dur) };
                 for (track_idx, clip) in build_source_clips_for_plan(
                     &placement_plan,
                     &path,
@@ -3387,7 +3420,7 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
-                    Some(media_dur),
+                    media_dur_opt,
                 ) {
                     track_changes.push(insert_clip_at_playhead_on_track(
                         &mut proj.tracks[track_idx],
@@ -3446,6 +3479,7 @@ pub fn build_window(
             let source_info = SourcePlacementInfo {
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
+                is_image: marks.is_image,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -3477,6 +3511,7 @@ pub fn build_window(
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
+                let media_dur_opt = if source_info.is_image { None } else { Some(media_dur) };
                 for (track_idx, clip) in build_source_clips_for_plan(
                     &placement_plan,
                     &path,
@@ -3484,7 +3519,7 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
-                    Some(media_dur),
+                    media_dur_opt,
                 ) {
                     track_changes.push(overwrite_clip_range_on_track(
                         &mut proj.tracks[track_idx],
@@ -3593,6 +3628,7 @@ pub fn build_window(
             m.display_pos_ns = 0;
             m.is_audio_only = source_info.is_audio_only;
             m.has_audio = source_info.has_audio;
+            m.is_image = source_info.is_image;
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
         })
     };
@@ -3817,6 +3853,7 @@ pub fn build_window(
                             shadows_tint: c.shadows_tint as f64,
                             has_audio: !c.is_freeze_frame()
                                 && !suppress_embedded_audio_ids.contains(&c.id),
+                            is_image: c.kind == ClipKind::Image,
                             chroma_key_enabled: c.chroma_key_enabled,
                             chroma_key_color: c.chroma_key_color,
                             chroma_key_tolerance: c.chroma_key_tolerance,

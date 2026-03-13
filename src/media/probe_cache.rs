@@ -9,6 +9,8 @@ pub struct ProbeResult {
     #[allow(dead_code)]
     pub has_audio: bool,
     pub source_timecode_base_ns: Option<u64>,
+    /// True when the file is a still image (PNG, JPEG, etc.).
+    pub is_image: bool,
 }
 
 /// Asynchronous media probe cache.
@@ -37,8 +39,9 @@ impl MediaProbeCache {
         std::thread::spawn(move || {
             while let Ok(path) = work_rx.recv() {
                 let uri = format!("file://{path}");
+                let is_image = crate::model::clip::is_image_file(&path);
                 let (duration_ns, is_audio_only, has_audio, source_timecode_base_ns) =
-                    probe_media_bg(&uri);
+                    probe_media_bg(&uri, is_image);
                 if tx
                     .send(ProbeResult {
                         path,
@@ -46,6 +49,7 @@ impl MediaProbeCache {
                         is_audio_only,
                         has_audio,
                         source_timecode_base_ns,
+                        is_image,
                     })
                     .is_err()
                 {
@@ -91,8 +95,17 @@ impl MediaProbeCache {
     }
 }
 
+/// Default duration for still-image clips: 4 seconds.
+const IMAGE_DEFAULT_DURATION_NS: u64 = 4_000_000_000;
+
 /// Single Discoverer call that returns duration, audio-only flag, has-audio flag, and timecode.
-fn probe_media_bg(uri: &str) -> (u64, bool, bool, Option<u64>) {
+fn probe_media_bg(uri: &str, is_image: bool) -> (u64, bool, bool, Option<u64>) {
+    // For still images, skip the Discoverer entirely — images have no
+    // meaningful duration or audio streams.
+    if is_image {
+        return (IMAGE_DEFAULT_DURATION_NS, false, false, None);
+    }
+
     use gstreamer_pbutils::Discoverer;
     let fallback = (10 * 1_000_000_000, false, true, None);
     let Ok(()) = gstreamer::init() else {

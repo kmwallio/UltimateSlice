@@ -150,6 +150,7 @@ pub fn build_media_browser(
                             item.duration_ns = result.duration_ns;
                             item.is_audio_only = result.is_audio_only;
                             item.has_audio = result.has_audio;
+                            item.is_image = result.is_image;
                             if item.source_timecode_base_ns.is_none() {
                                 item.source_timecode_base_ns = result.source_timecode_base_ns;
                             }

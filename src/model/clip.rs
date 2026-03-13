@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Common image file extensions (lowercase).
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "svg", "heic", "heif",
+];
+
+/// Returns `true` when `path` has a file extension matching a known still-image
+/// format.  Used across import, placement, playback, and export to distinguish
+/// image clips from video/audio.
+pub fn is_image_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    IMAGE_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
 /// Type of media a clip contains
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClipKind {
@@ -688,8 +703,12 @@ impl Clip {
 
     /// Maximum allowed `source_out` value, derived from the probed media
     /// duration.  Returns `None` when the media duration is unknown (legacy
-    /// clips or FCPXML imports without a probe result).
+    /// clips or FCPXML imports without a probe result), or when the clip is
+    /// a still image (images can be extended to any timeline length).
     pub fn max_source_out(&self) -> Option<u64> {
+        if self.kind == ClipKind::Image {
+            return None;
+        }
         self.media_duration_ns
     }
 
@@ -2129,5 +2148,46 @@ mod tests {
         assert_eq!(clip.max_source_out(), None);
         clip.media_duration_ns = Some(8_000_000_000);
         assert_eq!(clip.max_source_out(), Some(8_000_000_000));
+    }
+
+    #[test]
+    fn test_is_image_file() {
+        assert!(is_image_file("photo.png"));
+        assert!(is_image_file("/path/to/PHOTO.PNG"));
+        assert!(is_image_file("image.jpg"));
+        assert!(is_image_file("image.jpeg"));
+        assert!(is_image_file("image.gif"));
+        assert!(is_image_file("image.bmp"));
+        assert!(is_image_file("image.tiff"));
+        assert!(is_image_file("image.tif"));
+        assert!(is_image_file("image.webp"));
+        assert!(is_image_file("image.heic"));
+        assert!(is_image_file("image.heif"));
+        assert!(is_image_file("image.svg"));
+        assert!(!is_image_file("video.mp4"));
+        assert!(!is_image_file("audio.mp3"));
+        assert!(!is_image_file("file.txt"));
+        assert!(!is_image_file(""));
+    }
+
+    #[test]
+    fn test_image_clip_max_source_out_always_none() {
+        let mut clip = Clip::new("photo.png", 4_000_000_000, 0, ClipKind::Image);
+        clip.media_duration_ns = Some(4_000_000_000);
+        // Image clips should always return None for max_source_out
+        // so they can be extended to any length.
+        assert_eq!(clip.max_source_out(), None);
+    }
+
+    #[test]
+    fn test_image_clip_duration_uses_source_range() {
+        let mut clip = Clip::new("photo.png", 4_000_000_000, 0, ClipKind::Image);
+        clip.source_in = 0;
+        clip.source_out = 4_000_000_000;
+        assert_eq!(clip.duration(), 4_000_000_000);
+
+        // Extending the clip by moving source_out increases the duration
+        clip.source_out = 10_000_000_000;
+        assert_eq!(clip.duration(), 10_000_000_000);
     }
 }

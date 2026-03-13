@@ -14,6 +14,9 @@ pub struct MediaItem {
     /// True when the file has at least one audio stream.
     /// Set asynchronously after background probe completes.
     pub has_audio: bool,
+    /// True when the file is a still image (PNG, JPEG, etc.).
+    /// Set asynchronously after background probe completes.
+    pub is_image: bool,
     /// Optional absolute source time reference for the start of the media.
     pub source_timecode_base_ns: Option<u64>,
 }
@@ -33,6 +36,7 @@ impl MediaItem {
             label,
             is_audio_only: false,
             has_audio: false,
+            is_image: false,
             source_timecode_base_ns: None,
         }
     }
@@ -59,6 +63,8 @@ pub struct SourceMarks {
     pub is_audio_only: bool,
     /// True when the loaded source has at least one audio stream.
     pub has_audio: bool,
+    /// True when the loaded source is a still image.
+    pub is_image: bool,
     /// Optional absolute source time reference for the start of the loaded media.
     pub source_timecode_base_ns: Option<u64>,
 }
@@ -74,6 +80,7 @@ impl Default for SourceMarks {
             frame_ns: 41_666_667, // 24 fps default
             is_audio_only: false,
             has_audio: false,
+            is_image: false,
             source_timecode_base_ns: None,
         }
     }

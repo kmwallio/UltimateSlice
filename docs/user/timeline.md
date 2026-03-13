@@ -103,11 +103,22 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ### Join Through Edit (`Ctrl+Shift+B`)
 
-- Select one side of a join-safe through-edit cut (or select both clips), then press **Ctrl+Shift+B**.
+- Select one side of a join-safe through-edit cut (or select both clips), then press **Ctrl+Shift+B`.
 - UltimateSlice merges the two adjacent segments back into a single clip when the boundary is through-edit-safe and clip metadata/effect settings are compatible.
 - The merged clip keeps the left segment identity/timing and carries forward the right segment's outgoing transition metadata (if any).
 - Join Through Edit is unavailable when metadata/effect settings have diverged between the two segments or when the selection resolves to multiple candidate boundaries.
 - Also available from the right-click clip context menu as **Join Through Edit**.
+
+## Image Clips
+
+Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeline like video clips.
+
+- **Default duration**: Images are imported with a **4-second** default duration.
+- **Placement**: Images are always placed on a **Video track** as `ClipKind::Image`. No linked audio clip is created.
+- **Extending duration**: Drag the right edge (trim-out handle) of an image clip to extend it to any length — there is no upper limit.
+- **Shortening duration**: Drag the right edge inward to shorten the clip.
+- **Color/effects**: All color correction, grading, LUT, transform, title, and chroma key controls work on image clips, just as they do on video clips.
+- **Export**: Image clips are exported with the correct duration using the FFmpeg `tpad` hold filter, consistent with freeze-frame video clips.
 
 ### Multi-Select (staged rollout)
 

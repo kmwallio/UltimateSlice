@@ -197,6 +197,9 @@ pub fn export_project(
     // Inputs: primary video clips (0..primary_clips.len())
     for clip in &primary_clips {
         let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
+        if clip.kind == ClipKind::Image {
+            cmd.arg("-loop").arg("1");
+        }
         cmd.arg("-ss")
             .arg(format!("{in_s:.6}"))
             .arg("-t")
@@ -208,6 +211,9 @@ pub fn export_project(
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
     for clip in &secondary_clips_flat {
         let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
+        if clip.kind == ClipKind::Image {
+            cmd.arg("-loop").arg("1");
+        }
         cmd.arg("-ss")
             .arg(format!("{in_s:.6}"))
             .arg("-t")
@@ -1195,6 +1201,10 @@ fn video_input_seek_and_duration(
             frame_duration_s.max(0.001),
         );
     }
+    // Still images: seek to 0, decode a single frame.
+    if clip.kind == ClipKind::Image {
+        return (0.0, frame_duration_s.max(0.001));
+    }
     (
         clip.source_in as f64 / 1_000_000_000.0,
         clip.source_duration() as f64 / 1_000_000_000.0,
@@ -1202,7 +1212,7 @@ fn video_input_seek_and_duration(
 }
 
 fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -> String {
-    if clip.is_freeze_frame() {
+    if clip.is_freeze_frame() || clip.kind == ClipKind::Image {
         let hold_s = clip.duration() as f64 / 1_000_000_000.0;
         let frame_s = frame_duration_s.max(0.001);
         let pad_s = (hold_s - frame_s).max(0.0);
