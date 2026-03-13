@@ -632,6 +632,37 @@ impl Clip {
         changed
     }
 
+    /// Retain only keyframes in a single vec that fall within `[start_ns, end_ns)`,
+    /// then rebase their `time_ns` so `start_ns` maps to 0.
+    fn retain_and_rebase_keyframes(kfs: &mut Vec<NumericKeyframe>, start_ns: u64, end_ns: u64) {
+        kfs.retain(|kf| kf.time_ns >= start_ns && kf.time_ns < end_ns);
+        for kf in kfs.iter_mut() {
+            kf.time_ns = kf.time_ns.saturating_sub(start_ns);
+        }
+    }
+
+    /// Filter all 17 keyframe vectors to the clip-local time range `[start_ns, end_ns)`,
+    /// rebasing retained keyframes so `start_ns` maps to time 0.
+    pub fn retain_keyframes_in_local_range(&mut self, start_ns: u64, end_ns: u64) {
+        Self::retain_and_rebase_keyframes(&mut self.brightness_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.contrast_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.saturation_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.temperature_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.tint_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.volume_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.pan_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.rotate_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_left_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_right_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_top_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_bottom_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.speed_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.scale_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.opacity_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.position_x_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.position_y_keyframes, start_ns, end_ns);
+    }
+
     pub fn new(
         source_path: impl Into<String>,
         source_out: u64,

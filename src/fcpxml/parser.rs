@@ -5148,4 +5148,78 @@ mod tests {
         );
         assert!((clip.shadows_tint - 0.7).abs() < 1e-5, "shadows_tint");
     }
+
+    #[test]
+    fn test_parse_silence_removal_shared_asset_clips() {
+        // Regression: silence-removal creates multiple clips from the same source
+        // with different start times, sharing a single <asset>.
+        // Verify source_in/source_out are parsed correctly (relative to timecode base).
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+    <resources>
+        <format id="r1" name="FFVideoFormat1080p24" frameDuration="1/24s" width="1920" height="1080"/>
+        <asset id="a1" name="C0381" start="1700856/24s" format="r1" hasVideo="1" hasAudio="1">
+            <media-rep kind="original-media" src="file:///tmp/C0381.MP4"/>
+        </asset>
+    </resources>
+    <library><event><project name="Test">
+        <sequence duration="546/24s" format="r1" tcFormat="NDF"><spine>
+            <asset-clip ref="a1" offset="0/24s" duration="50/24s" start="1700856/24s" name="C0381"
+                us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                us:source-timecode-base-ns="70869000000000"/>
+            <asset-clip ref="a1" offset="50/24s" duration="475/24s" start="1700967/24s" name="C0381"
+                us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                us:source-timecode-base-ns="70869000000000"/>
+            <asset-clip ref="a1" offset="525/24s" duration="21/24s" start="1701495/24s" name="C0381"
+                us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                us:source-timecode-base-ns="70869000000000"/>
+        </spine></sequence>
+    </project></event></library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse silence-removal XML");
+        let clips: Vec<_> = project.tracks[0].clips.iter().collect();
+        assert_eq!(clips.len(), 3, "expected 3 clips");
+
+        let base_ns: u64 = 70_869_000_000_000;
+
+        // Clip 1: start=1700856/24s, source_in should be 0 (start == base)
+        let c1_expected_source_in = 0u64;
+        assert_eq!(clips[0].source_in, c1_expected_source_in,
+            "clip 1 source_in: {} != {}", clips[0].source_in, c1_expected_source_in);
+        let c1_dur = parse_fcpxml_time("50/24s").unwrap();
+        assert_eq!(clips[0].source_out, c1_expected_source_in + c1_dur,
+            "clip 1 source_out");
+        assert_eq!(clips[0].source_timecode_base_ns, Some(base_ns));
+
+        // Clip 2: start=1700967/24s, source_in = (1700967/24 - 70869) seconds
+        let c2_start_ns = parse_fcpxml_time("1700967/24s").unwrap();
+        let c2_expected_source_in = c2_start_ns - base_ns;
+        assert_eq!(clips[1].source_in, c2_expected_source_in,
+            "clip 2 source_in: {} != {} ({:.6}s != {:.6}s)",
+            clips[1].source_in, c2_expected_source_in,
+            clips[1].source_in as f64 / 1e9, c2_expected_source_in as f64 / 1e9);
+        let c2_dur = parse_fcpxml_time("475/24s").unwrap();
+        assert_eq!(clips[1].source_out, c2_expected_source_in + c2_dur,
+            "clip 2 source_out");
+
+        // Clip 3: start=1701495/24s
+        let c3_start_ns = parse_fcpxml_time("1701495/24s").unwrap();
+        let c3_expected_source_in = c3_start_ns - base_ns;
+        assert_eq!(clips[2].source_in, c3_expected_source_in,
+            "clip 3 source_in: {} != {} ({:.6}s != {:.6}s)",
+            clips[2].source_in, c3_expected_source_in,
+            clips[2].source_in as f64 / 1e9, c3_expected_source_in as f64 / 1e9);
+        let c3_dur = parse_fcpxml_time("21/24s").unwrap();
+        assert_eq!(clips[2].source_out, c3_expected_source_in + c3_dur,
+            "clip 3 source_out");
+
+        // Verify source_in values are reasonable seconds into the file
+        assert!(clips[0].source_in == 0, "clip 1 starts at file beginning");
+        assert!(clips[1].source_in > 4_000_000_000 && clips[1].source_in < 5_000_000_000,
+            "clip 2 source_in should be ~4.625s, got {}s", clips[1].source_in as f64 / 1e9);
+        assert!(clips[2].source_in > 26_000_000_000 && clips[2].source_in < 27_000_000_000,
+            "clip 3 source_in should be ~26.625s, got {}s", clips[2].source_in as f64 / 1e9);
+    }
 }

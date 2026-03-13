@@ -115,8 +115,26 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         None
     };
 
+    // Build a map from source path → shared asset ID so that multiple clips
+    // referencing the same source file share a single <asset> element.
+    let asset_id_by_source: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        for track in project.video_tracks().chain(project.audio_tracks()) {
+            for clip in &track.clips {
+                let src = clip
+                    .fcpxml_original_source_path
+                    .as_deref()
+                    .unwrap_or(&clip.source_path)
+                    .to_string();
+                map.entry(src)
+                    .or_insert_with(|| format!("a_{}", sanitize_id(&clip.id)));
+            }
+        }
+        map
+    };
+
     // <resources>
-    write_resources(project, &mut writer, options, export_ctx.as_ref())?;
+    write_resources(project, &mut writer, options, export_ctx.as_ref(), &asset_id_by_source)?;
 
     // <library>
     let mut library = BytesStart::new("library");
@@ -230,13 +248,16 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                       lane: Option<i32>,
                                       parent_clip: Option<&crate::model::clip::Clip>|
          -> Result<u64> {
-            let asset_ref = format!("a_{}", sanitize_id(&clip.id));
-
-            // Look up probed media info for this clip and its parent.
             let clip_source = clip
                 .fcpxml_original_source_path
                 .as_deref()
                 .unwrap_or(&clip.source_path);
+            let asset_ref = asset_id_by_source
+                .get(clip_source)
+                .cloned()
+                .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
+
+            // Look up probed media info for this clip and its parent.
             let clip_media = export_ctx
                 .as_ref()
                 .and_then(|ctx| ctx.media.get(clip_source));
@@ -506,7 +527,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 crate::model::track::TrackKind::Audio => "audio",
             };
             for (clip_idx, clip) in track.clips.iter().enumerate() {
-                let asset_ref = format!("a_{}", sanitize_id(&clip.id));
+                let clip_source_key = clip
+                    .fcpxml_original_source_path
+                    .as_deref()
+                    .unwrap_or(&clip.source_path);
+                let asset_ref = asset_id_by_source
+                    .get(clip_source_key)
+                    .cloned()
+                    .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
                 let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
                 let source_start_ns =
@@ -2372,6 +2400,7 @@ fn write_resources(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     options: WriterOptions,
     export_ctx: Option<&ExportContext>,
+    asset_id_by_source: &HashMap<String, String>,
 ) -> Result<()> {
     let strip_unknown_fields = options.strict_dtd;
     let mut resources = BytesStart::new("resources");
@@ -2455,16 +2484,23 @@ fn write_resources(
         }
     }
 
-    // Asset resources for each unique clip.
-    // hasVideo/hasAudio describe the MEDIA FILE capabilities, not which
-    // track the clip lives on, so we use probed resolution to decide.
+    // Asset resources — deduplicated by source path so clips from the same
+    // media file share a single <asset> element.
+    let mut written_asset_sources: std::collections::HashSet<String> = std::collections::HashSet::new();
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
-            let asset_id = format!("a_{}", sanitize_id(&clip.id));
             let export_source_path = clip
                 .fcpxml_original_source_path
                 .as_deref()
                 .unwrap_or(&clip.source_path);
+            // Skip if we already wrote an asset for this source path.
+            if !written_asset_sources.insert(export_source_path.to_string()) {
+                continue;
+            }
+            let asset_id = asset_id_by_source
+                .get(export_source_path)
+                .cloned()
+                .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
             let uri = fcpxml_media_src_uri(export_source_path);
 
             // Use export context for accurate timecode and format, with fallbacks.
@@ -4928,8 +4964,8 @@ mod tests {
         let srcs = media_rep_src_values(&xml);
         assert_eq!(
             srcs.len(),
-            3,
-            "three clips should produce three media-rep refs"
+            2,
+            "two unique source files should produce two media-rep refs (deduplicated)"
         );
         let library_uri_prefix = format!(
             "file://{}/",

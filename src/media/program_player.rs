@@ -9260,6 +9260,16 @@ impl ProgramPlayer {
                 if !Self::slot_satisfies_clip(&self.slots[slot_idx], desired_clip) {
                     continue;
                 }
+                // When the source in-point changes (e.g. silence-removal
+                // sub-clips), force a full rebuild instead of reusing the
+                // decoder.  Seeking a reused uridecodebin to a different
+                // source range within the same file can produce stale frames
+                // from the previous position on some demuxer/codec paths.
+                if desired_clip.source_in_ns != current_clip.source_in_ns
+                    || desired_clip.source_out_ns != current_clip.source_out_ns
+                {
+                    continue;
+                }
                 matched = Some((unmatched_idx, slot_idx));
                 break;
             }

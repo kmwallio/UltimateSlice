@@ -1800,6 +1800,73 @@ fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Detect silent intervals in a source clip's audio track using ffmpeg's `silencedetect` filter.
+///
+/// Returns `(silence_start_sec, silence_end_sec)` pairs relative to `source_in_ns`.
+/// Returns an empty vec if the source has no audio stream.
+pub(crate) fn detect_silence(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    noise_db: f64,
+    min_duration: f64,
+) -> Result<Vec<(f64, f64)>> {
+    let ffmpeg = find_ffmpeg()?;
+    if !probe_has_audio(&ffmpeg, source_path) {
+        return Ok(Vec::new());
+    }
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    // source_out_ns is an absolute position, not a duration — compute the duration
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let af = format!("silencedetect=noise={noise_db}dB:d={min_duration}");
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-af",
+            &af,
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg silencedetect: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut intervals = Vec::new();
+    let mut pending_start: Option<f64> = None;
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("silence_start: ") {
+            let val_str = &line[pos + "silence_start: ".len()..];
+            if let Some(val) = val_str.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()) {
+                pending_start = Some(val);
+            }
+        }
+        if let Some(pos) = line.find("silence_end: ") {
+            let val_str = &line[pos + "silence_end: ".len()..];
+            if let Some(end_val) = val_str.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(start_val) = pending_start.take() {
+                    intervals.push((start_val, end_val));
+                }
+            }
+        }
+    }
+    // Handle trailing silence_start with no silence_end
+    if let Some(start_val) = pending_start {
+        intervals.push((start_val, duration_sec));
+    }
+    Ok(intervals)
+}
+
 /// Find the ffmpeg binary, checking PATH and common install locations.
 pub(crate) fn find_ffmpeg() -> Result<String> {
     // First try the name directly (respects the process PATH)

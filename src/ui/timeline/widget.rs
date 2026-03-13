@@ -208,6 +208,8 @@ pub struct TimelineState {
     pub on_clip_selected: Option<Rc<dyn Fn(Option<String>)>>,
     /// Callback fired when user requests audio sync: Vec<(clip_id, source_path, source_in, source_out, timeline_start, track_id)>
     pub on_sync_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
+    /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
+    pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
@@ -260,6 +262,7 @@ impl TimelineState {
             on_drop_clip: None,
             on_clip_selected: None,
             on_sync_audio: None,
+            on_remove_silent_parts: None,
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
@@ -836,6 +839,21 @@ impl TimelineState {
         true
     }
 
+    fn can_remove_silent_parts(&self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() != 1 {
+            return false;
+        }
+        let clip_id = ids.iter().next().unwrap();
+        let proj = self.project.borrow();
+        proj.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| &c.id == clip_id)
+            .map(|c| c.kind != ClipKind::Image)
+            .unwrap_or(false)
+    }
+
     fn clip_context_menu_actionability(&self) -> ClipContextMenuActionability {
         ClipContextMenuActionability {
             join_through_edit: self.can_join_selected_through_edit(),
@@ -844,6 +862,7 @@ impl TimelineState {
             unlink_selected: self.can_unlink_selected_clips(),
             align_grouped: self.can_align_selected_groups_by_timecode(),
             sync_audio: self.can_sync_selected_clips_by_audio(),
+            remove_silent_parts: self.can_remove_silent_parts(),
         }
     }
 
@@ -2222,6 +2241,104 @@ pub fn open_freeze_frame_dialog(state: Rc<RefCell<TimelineState>>, area: Drawing
     dialog.present();
 }
 
+#[allow(deprecated)]
+pub fn open_remove_silent_parts_dialog(state: Rc<RefCell<TimelineState>>) {
+    if !state.borrow().can_remove_silent_parts() {
+        return;
+    }
+
+    // Gather clip info before showing dialog
+    let (clip_id, track_id, source_path, source_in, source_out) = {
+        let st = state.borrow();
+        let ids = st.selected_ids_or_primary();
+        let clip_id = ids.iter().next().unwrap().clone();
+        let proj = st.project.borrow();
+        let mut info = None;
+        for track in &proj.tracks {
+            if let Some(c) = track.clips.iter().find(|c| c.id == clip_id) {
+                info = Some((
+                    c.id.clone(),
+                    track.id.clone(),
+                    c.source_path.clone(),
+                    c.source_in,
+                    c.source_out,
+                ));
+                break;
+            }
+        }
+        match info {
+            Some(i) => i,
+            None => return,
+        }
+    };
+
+    let dialog = gtk::Dialog::builder()
+        .title("Remove Silent Parts")
+        .default_width(360)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Remove", gtk::ResponseType::Accept);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+
+    let noise_label = gtk::Label::new(Some("Silence threshold (dBFS):"));
+    noise_label.set_halign(gtk::Align::Start);
+    let noise_spin = gtk::SpinButton::with_range(-60.0, -10.0, 1.0);
+    noise_spin.set_digits(0);
+    noise_spin.set_value(-50.0);
+    noise_spin.set_halign(gtk::Align::Start);
+    noise_spin.set_hexpand(false);
+
+    let dur_label = gtk::Label::new(Some("Minimum silence duration (seconds):"));
+    dur_label.set_halign(gtk::Align::Start);
+    let dur_spin = gtk::SpinButton::with_range(0.1, 5.0, 0.1);
+    dur_spin.set_digits(1);
+    dur_spin.set_value(0.5);
+    dur_spin.set_halign(gtk::Align::Start);
+    dur_spin.set_hexpand(false);
+
+    let hint = gtk::Label::new(Some(
+        "Audio below the threshold is considered silence (VU meter scale).\n\
+         Green zone starts at \u{2212}18 dBFS. Try \u{2212}50 for speech, \u{2212}40 for noisy rooms.",
+    ));
+    hint.set_halign(gtk::Align::Start);
+    hint.add_css_class("dim-label");
+
+    body.append(&noise_label);
+    body.append(&noise_spin);
+    body.append(&dur_label);
+    body.append(&dur_spin);
+    body.append(&hint);
+    dialog.content_area().append(&body);
+
+    dialog.connect_response(move |d, resp| {
+        if resp == gtk::ResponseType::Accept {
+            let noise_db = noise_spin.value();
+            let min_duration = dur_spin.value().max(0.1);
+            let st = state.borrow();
+            if let Some(ref cb) = st.on_remove_silent_parts {
+                cb(
+                    clip_id.clone(),
+                    track_id.clone(),
+                    source_path.clone(),
+                    source_in,
+                    source_out,
+                    noise_db,
+                    min_duration,
+                );
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
 fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     let before = target.clone();
     target.brightness = source.brightness;
@@ -2314,6 +2431,7 @@ struct ClipContextMenuActionability {
     unlink_selected: bool,
     align_grouped: bool,
     sync_audio: bool,
+    remove_silent_parts: bool,
 }
 
 impl ClipContextMenuActionability {
@@ -2324,6 +2442,7 @@ impl ClipContextMenuActionability {
             || self.unlink_selected
             || self.align_grouped
             || self.sync_audio
+            || self.remove_silent_parts
     }
 }
 
@@ -2334,6 +2453,7 @@ fn apply_clip_context_menu_actionability(
     btn_unlink_selected: &gtk::Button,
     btn_align_grouped: &gtk::Button,
     btn_sync_audio: &gtk::Button,
+    btn_remove_silent_parts: &gtk::Button,
     actionability: ClipContextMenuActionability,
 ) -> bool {
     let set_state = |button: &gtk::Button, actionable: bool| {
@@ -2346,6 +2466,7 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_unlink_selected, actionability.unlink_selected);
     set_state(btn_align_grouped, actionability.align_grouped);
     set_state(btn_sync_audio, actionability.sync_audio);
+    set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
     actionability.any()
 }
 
@@ -2418,12 +2539,18 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     btn_sync_audio.set_tooltip_text(Some(
         "Align selected clips using audio cross-correlation (requires 2+ clips with audio)",
     ));
+    let btn_remove_silent_parts = gtk::Button::with_label("Remove Silent Parts\u{2026}");
+    btn_remove_silent_parts.add_css_class("flat");
+    btn_remove_silent_parts.set_tooltip_text(Some(
+        "Detect and remove silent segments from this clip using ffmpeg silencedetect",
+    ));
     clip_context_box.append(&btn_join_through_edit);
     clip_context_box.append(&btn_freeze_frame);
     clip_context_box.append(&btn_link_selected);
     clip_context_box.append(&btn_unlink_selected);
     clip_context_box.append(&btn_align_grouped);
     clip_context_box.append(&btn_sync_audio);
+    clip_context_box.append(&btn_remove_silent_parts);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -2576,6 +2703,17 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_remove_silent_parts.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            open_remove_silent_parts_dialog(state.clone());
         });
     }
 
@@ -2943,6 +3081,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_unlink_selected,
                                 &btn_align_grouped,
                                 &btn_sync_audio,
+                                &btn_remove_silent_parts,
                                 actionability,
                             ) {
                                 clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -6821,6 +6960,7 @@ mod tests {
         assert!(!actionability.unlink_selected);
         assert!(!actionability.align_grouped);
         assert!(!actionability.sync_audio);
+        assert!(actionability.remove_silent_parts);
         assert!(actionability.any());
     }
 
@@ -6841,6 +6981,7 @@ mod tests {
         assert!(!actionability.unlink_selected);
         assert!(!actionability.align_grouped);
         assert!(actionability.sync_audio);
+        assert!(!actionability.remove_silent_parts);
         assert!(actionability.any());
     }
 

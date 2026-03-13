@@ -1649,6 +1649,199 @@ fn apply_audio_sync_results(
     }
 }
 
+/// Apply silence removal results: split the original clip into non-silent sub-clips,
+/// pack them back-to-back, and optionally shift subsequent clips in magnetic mode.
+fn apply_remove_silent_parts_results(
+    clip_id: &str,
+    track_id: &str,
+    silence_intervals: &[(f64, f64)],
+    project: &Rc<RefCell<Project>>,
+    timeline_state: &Rc<RefCell<crate::ui::timeline::TimelineState>>,
+    on_project_changed: &Rc<dyn Fn()>,
+    window: Option<&gtk::ApplicationWindow>,
+) {
+    use crate::undo::SetTrackClipsCommand;
+
+    // No silence found → nothing to do
+    if silence_intervals.is_empty() {
+        if let Some(win) = window {
+            flash_window_status_title(
+                win,
+                project,
+                "No silence detected — clip unchanged",
+            );
+        }
+        return;
+    }
+
+    // Find the original clip and its track
+    let (original_clip, old_clips, clip_duration_ns) = {
+        let proj = project.borrow();
+        let track = match proj.tracks.iter().find(|t| t.id == track_id) {
+            Some(t) => t,
+            None => {
+                if let Some(win) = window {
+                    flash_window_status_title(win, project, "Silence removal failed — track not found");
+                }
+                return;
+            }
+        };
+        let clip = match track.clips.iter().find(|c| c.id == clip_id) {
+            Some(c) => c.clone(),
+            None => {
+                if let Some(win) = window {
+                    flash_window_status_title(win, project, "Silence removal failed — clip not found");
+                }
+                return;
+            }
+        };
+        let dur = clip.source_out.saturating_sub(clip.source_in);
+        (clip, track.clips.clone(), dur)
+    };
+
+    let clip_duration_sec = clip_duration_ns as f64 / 1_000_000_000.0;
+
+    // Invert silence intervals to get non-silent segments (in seconds, relative to source_in)
+    let mut non_silent: Vec<(f64, f64)> = Vec::new();
+    let mut cursor = 0.0_f64;
+    for &(sil_start, sil_end) in silence_intervals {
+        let sil_start = sil_start.max(0.0);
+        let sil_end = sil_end.min(clip_duration_sec);
+        if sil_start > cursor {
+            non_silent.push((cursor, sil_start));
+        }
+        cursor = sil_end;
+    }
+    if cursor < clip_duration_sec {
+        non_silent.push((cursor, clip_duration_sec));
+    }
+
+    // Filter out degenerate sub-segments shorter than 250ms (6 frames at 24fps)
+    let min_segment_sec = 0.25;
+    non_silent.retain(|&(s, e)| (e - s) >= min_segment_sec);
+
+    if non_silent.is_empty() {
+        if let Some(win) = window {
+            flash_window_status_title(
+                win,
+                project,
+                "Entire clip is silent — no segments to keep",
+            );
+        }
+        return;
+    }
+
+    // If non-silent covers the entire clip (no silence removed), nothing to do
+    if non_silent.len() == 1 {
+        let (s, e) = non_silent[0];
+        if (s - 0.0).abs() < 0.001 && (e - clip_duration_sec).abs() < 0.001 {
+            if let Some(win) = window {
+                flash_window_status_title(win, project, "No silence detected — clip unchanged");
+            }
+            return;
+        }
+    }
+
+    let speed = original_clip.speed;
+    let original_timeline_start = original_clip.timeline_start;
+    let original_source_in = original_clip.source_in;
+
+    // Build sub-clips for each non-silent segment
+    let mut sub_clips: Vec<Clip> = Vec::new();
+    let mut timeline_cursor = original_timeline_start;
+    for &(seg_start_sec, seg_end_sec) in &non_silent {
+        let seg_start_ns = (seg_start_sec * 1_000_000_000.0).round() as u64;
+        let seg_end_ns = (seg_end_sec * 1_000_000_000.0).round() as u64;
+        let seg_duration_ns = seg_end_ns.saturating_sub(seg_start_ns);
+
+        let mut sub = original_clip.clone();
+        sub.id = uuid::Uuid::new_v4().to_string();
+        sub.source_in = original_source_in + seg_start_ns;
+        sub.source_out = original_source_in + seg_end_ns;
+        sub.timeline_start = timeline_cursor;
+
+        // Keyframes are in clip-local timeline time. Convert source-relative boundaries
+        // to local-timeline coordinates (dividing by speed if != 1.0).
+        let local_start = if speed != 0.0 && speed != 1.0 {
+            (seg_start_ns as f64 / speed).round() as u64
+        } else {
+            seg_start_ns
+        };
+        let local_end = if speed != 0.0 && speed != 1.0 {
+            (seg_end_ns as f64 / speed).round() as u64
+        } else {
+            seg_end_ns
+        };
+        sub.retain_keyframes_in_local_range(local_start, local_end);
+
+        // Clear transition on all sub-clips except possibly the last
+        sub.transition_after = String::new();
+        sub.transition_after_ns = 0;
+
+        // Timeline duration accounts for speed
+        let timeline_duration = if speed != 0.0 {
+            (seg_duration_ns as f64 / speed).round() as u64
+        } else {
+            seg_duration_ns
+        };
+        timeline_cursor += timeline_duration;
+        sub_clips.push(sub);
+    }
+
+    let total_new_duration = timeline_cursor - original_timeline_start;
+    let original_timeline_duration = if speed != 0.0 {
+        (clip_duration_ns as f64 / speed).round() as u64
+    } else {
+        clip_duration_ns
+    };
+    let duration_removed = original_timeline_duration.saturating_sub(total_new_duration);
+
+    // Build the new clip list for this track
+    let magnetic_mode = timeline_state.borrow().magnetic_mode;
+    let mut new_clips: Vec<Clip> = Vec::new();
+    let mut found_original = false;
+    for clip in &old_clips {
+        if clip.id == clip_id {
+            found_original = true;
+            new_clips.extend(sub_clips.iter().cloned());
+        } else {
+            let mut c = clip.clone();
+            // In magnetic mode, shift subsequent clips left to close the gap
+            if found_original && magnetic_mode && duration_removed > 0 {
+                c.timeline_start = c.timeline_start.saturating_sub(duration_removed);
+            }
+            new_clips.push(c);
+        }
+    }
+    new_clips.sort_by_key(|c| c.timeline_start);
+
+    // Execute via undo history
+    {
+        let mut st = timeline_state.borrow_mut();
+        let proj_rc = st.project.clone();
+        let mut proj = proj_rc.borrow_mut();
+        let cmd = SetTrackClipsCommand {
+            track_id: track_id.to_string(),
+            old_clips,
+            new_clips,
+            label: "Remove silent parts".to_string(),
+        };
+        st.history.execute(Box::new(cmd), &mut proj);
+        proj.dirty = true;
+    }
+
+    on_project_changed();
+
+    if let Some(win) = window {
+        let msg = format!(
+            "Removed {} silent segment(s) — {} sub-clip(s) remain",
+            silence_intervals.len(),
+            sub_clips.len()
+        );
+        flash_window_status_title(win, project, &msg);
+    }
+}
+
 fn export_displayed_frame_to_image(
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     out_path: &std::path::Path,
@@ -3006,6 +3199,85 @@ pub fn build_window(
                         .map(|r| (r.clip_id, r.offset_ns, r.confidence))
                         .collect();
                     let _ = tx.send(results);
+                });
+            },
+        ));
+    }
+
+    // Shared flag: true while silence detection is running (read by status bar timer).
+    let silence_detect_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
+    // Wire on_remove_silent_parts — spawns a background thread for ffmpeg silencedetect.
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
+        // Result: (clip_id, track_id, silence_intervals)
+        let silence_rx: Rc<
+            RefCell<Option<std::sync::mpsc::Receiver<(String, String, Vec<(f64, f64)>)>>>,
+        > = Rc::new(RefCell::new(None));
+        let silence_rx_for_timer = silence_rx.clone();
+        let silence_detect_in_progress_timer = silence_detect_in_progress.clone();
+        // Poll timer for silence detection results
+        {
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            let timeline_state = timeline_state.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let rx_opt = silence_rx_for_timer.borrow();
+                if let Some(ref rx) = *rx_opt {
+                    if let Ok((clip_id, track_id, silence_intervals)) = rx.try_recv() {
+                        drop(rx_opt);
+                        silence_rx_for_timer.borrow_mut().take();
+                        silence_detect_in_progress_timer.set(false);
+                        apply_remove_silent_parts_results(
+                            &clip_id,
+                            &track_id,
+                            &silence_intervals,
+                            &project,
+                            &timeline_state,
+                            &on_project_changed,
+                            window_weak.upgrade().as_ref(),
+                        );
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        let silence_detect_in_progress_cb = silence_detect_in_progress.clone();
+        timeline_state.borrow_mut().on_remove_silent_parts = Some(Rc::new(
+            move |clip_id: String,
+                  track_id: String,
+                  source_path: String,
+                  source_in: u64,
+                  source_out: u64,
+                  noise_db: f64,
+                  min_duration: f64| {
+                if silence_rx.borrow().is_some() {
+                    return; // Already in progress
+                }
+                silence_detect_in_progress_cb.set(true);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = proj.title.clone();
+                    drop(proj);
+                    win.set_title(Some(&format!(
+                        "UltimateSlice — {title} (Detecting silence...)"
+                    )));
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *silence_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    let result = crate::media::export::detect_silence(
+                        &source_path,
+                        source_in,
+                        source_out,
+                        noise_db,
+                        min_duration,
+                    );
+                    let intervals = result.unwrap_or_default();
+                    let _ = tx.send((clip_id, track_id, intervals));
                 });
             },
         ));
@@ -5183,6 +5455,7 @@ pub fn build_window(
         let player = player.clone();
         let source_marks = source_marks.clone();
         let audio_sync_in_progress = audio_sync_in_progress.clone();
+        let silence_detect_in_progress = silence_detect_in_progress.clone();
         let inspector_view = inspector_view.clone();
         let preferences_state = preferences_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
@@ -5233,11 +5506,15 @@ pub fn build_window(
             let prerender_active = prerender_progress.in_flight;
             let bg_active = bg_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
-            if proxy_active || prerender_active || syncing_audio || bg_active {
+            let detecting_silence = silence_detect_in_progress.get();
+            if proxy_active || prerender_active || syncing_audio || detecting_silence || bg_active {
                 status_label.set_visible(true);
                 let mut parts = Vec::new();
                 if syncing_audio {
                     parts.push("Syncing audio…".to_string());
+                }
+                if detecting_silence {
+                    parts.push("Detecting silence…".to_string());
                 }
                 if proxy_active {
                     parts.push(format!(
