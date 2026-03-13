@@ -7543,8 +7543,11 @@ impl ProgramPlayer {
         let mut nodes: Vec<String> = Vec::new();
         for (i, (clip, _, _, _, source_is_proxy)) in inputs.iter().enumerate() {
             if use_transition_xfade {
+                // Apply LUT at source resolution (before downscale) so it
+                // processes the same pixel values as the export path.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}[pv{i}]",
+                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                     Self::prerender_build_rotation_filter(clip, false),
@@ -7554,7 +7557,6 @@ impl ProgramPlayer {
                         i,
                     ),
                     fps.max(1),
-                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_color_filter(clip),
                     Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                     Self::prerender_build_grading_filter(clip),
@@ -7564,13 +7566,14 @@ impl ProgramPlayer {
             } else if i == 0 {
                 if clip.chroma_key_enabled {
                     // Chroma key needs alpha: convert early so pad fills transparent.
+                    // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}[pv{i}]",
+                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
                         fps.max(1),
-                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_color_filter(clip),
                         Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                         Self::prerender_build_grading_filter(clip),
@@ -7579,13 +7582,14 @@ impl ProgramPlayer {
                         Self::prerender_build_chroma_key_filter(clip),
                     ));
                 } else {
+                    // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}[pv{i}]",
+                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
                         fps.max(1),
-                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_color_filter(clip),
                         Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                         Self::prerender_build_grading_filter(clip),
@@ -7595,12 +7599,13 @@ impl ProgramPlayer {
                 }
             } else {
                 // Overlay tracks: convert to yuva420p early so pad fills transparent.
+                // Apply LUT at source resolution before format/scale for parity.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS,format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
                     Self::prerender_build_rotation_filter(clip, true),
-                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_color_filter(clip),
                     Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                     Self::prerender_build_grading_filter(clip),
@@ -7684,9 +7689,9 @@ impl ProgramPlayer {
             .arg("-c:v")
             .arg("libx264")
             .arg("-preset")
-            .arg("ultrafast")
+            .arg("veryfast")
             .arg("-crf")
-            .arg("30")
+            .arg("20")
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-movflags")
