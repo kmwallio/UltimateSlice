@@ -963,6 +963,13 @@ pub struct ProgramPlayer {
     prerender_pending_priority: HashMap<String, u64>,
     /// Failed prerender job keys (skip immediate retry churn).
     prerender_failed: HashSet<String>,
+    /// Keys whose prerender jobs have been superseded by a newer request for
+    /// the same boundary region.  Results for these keys are discarded on arrival.
+    prerender_superseded: HashSet<String>,
+    /// Latest pending prerender key per boundary region `(start_ns, end_ns)`.
+    /// Used to detect and supersede stale jobs when a new request arrives for
+    /// the same region with a different signature.
+    prerender_boundary_latest: HashMap<(u64, u64), String>,
     /// Result channel for background prerender jobs.
     prerender_result_rx: mpsc::Receiver<PrerenderJobResult>,
     /// Sender cloned into background prerender workers.
@@ -1496,6 +1503,8 @@ impl ProgramPlayer {
                 prerender_pending: HashSet::new(),
                 prerender_pending_priority: HashMap::new(),
                 prerender_failed: HashSet::new(),
+                prerender_superseded: HashSet::new(),
+                prerender_boundary_latest: HashMap::new(),
                 prerender_result_rx,
                 prerender_result_tx,
                 prerender_cache_root,
@@ -1601,6 +1610,8 @@ impl ProgramPlayer {
         self.prerender_pending.clear();
         self.prerender_pending_priority.clear();
         self.prerender_failed.clear();
+        self.prerender_superseded.clear();
+        self.prerender_boundary_latest.clear();
         self.prerender_active_clips = None;
         self.current_prerender_segment_key = None;
         self.prerender_total_requested = 0;
@@ -4501,6 +4512,18 @@ impl ProgramPlayer {
         while let Ok(result) = self.prerender_result_rx.try_recv() {
             self.prerender_pending.remove(&result.key);
             self.prerender_pending_priority.remove(&result.key);
+            // Discard results for superseded jobs — their output is stale.
+            if self.prerender_superseded.remove(&result.key) {
+                log::debug!(
+                    "background_prerender: discarding superseded key={} path={}",
+                    result.key,
+                    result.path
+                );
+                if Path::new(&result.path).exists() {
+                    let _ = std::fs::remove_file(&result.path);
+                }
+                continue;
+            }
             if !self.background_prerender {
                 if Path::new(&result.path).exists() {
                     let _ = std::fs::remove_file(&result.path);
@@ -4648,6 +4671,12 @@ impl ProgramPlayer {
 
     fn maybe_request_background_prerender_segment(&mut self, boundary_ns: u64, active: &[usize]) {
         const TRANSITION_OVERLAP_PAD_FRAMES: u64 = 2;
+        // Suppress prerender while the user is actively dragging a transform
+        // control; the intermediate states are ephemeral and would waste
+        // CPU/disk.  The final state is prerendered after the drag ends.
+        if self.transform_live {
+            return;
+        }
         let transition_spec = self.transition_overlap_prerender_spec_at(boundary_ns, active);
         let transition_prerender_allowed =
             transition_spec.is_some() && matches!(self.playback_priority, PlaybackPriority::Smooth);
@@ -4699,6 +4728,21 @@ impl ProgramPlayer {
             || self.prerender_failed.contains(&key)
         {
             return;
+        }
+        // Supersede any stale pending job for the same boundary region.
+        // This keeps at most one in-flight job per region and frees a queue
+        // slot so the fresh request passes admission.
+        let boundary_region = (segment_start_ns, segment_end_ns);
+        if let Some(old_key) = self.prerender_boundary_latest.insert(boundary_region, key.clone()) {
+            if old_key != key && self.prerender_pending.remove(&old_key) {
+                self.prerender_pending_priority.remove(&old_key);
+                self.prerender_superseded.insert(old_key.clone());
+                log::debug!(
+                    "background_prerender: superseded key={} for boundary {:?}",
+                    old_key,
+                    boundary_region
+                );
+            }
         }
         let path = self.prerender_cache_root.join(format!("{key}.mp4"));
         if path.exists() {
