@@ -371,7 +371,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             let primary_track = &project.tracks[primary_idx];
             for (clip_idx, clip) in primary_track.clips.iter().enumerate() {
                 let source_start = write_asset_clip_start(&mut writer, clip, None, None)?;
-                write_strict_clip_body(&mut writer, clip, project)?;
+                write_strict_clip_body(&mut writer, clip, project, source_start)?;
 
                 // Nest connected clips whose offset falls within this primary clip's range.
                 // A connected clip belongs to the last primary clip whose timeline_start
@@ -396,7 +396,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 Some(ct.lane),
                                 Some(clip),
                             )?;
-                            write_strict_clip_body(&mut writer, conn_clip, project)?;
+                            write_strict_clip_body(&mut writer, conn_clip, project, conn_source_start)?;
                             // audio-channel-source after connected clip's own anchors (none here)
                             write_strict_audio_channel_sources(
                                 &mut writer,
@@ -468,7 +468,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 for clip in &track.clips {
                     let source_start =
                         write_asset_clip_start(&mut writer, clip, Some(ct.lane), None)?;
-                    write_strict_clip_body(&mut writer, clip, project)?;
+                    write_strict_clip_body(&mut writer, clip, project, source_start)?;
                     write_strict_audio_channel_sources(
                         &mut writer,
                         clip,
@@ -509,10 +509,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 let asset_ref = format!("a_{}", sanitize_id(&clip.id));
                 let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
-                let start = ns_to_fcpxml_time(
-                    clip.source_timecode_start_ns().unwrap_or(clip.source_in),
-                    &project.frame_rate,
-                );
+                let source_start_ns =
+                    clip.source_timecode_start_ns().unwrap_or(clip.source_in);
+                let start = ns_to_fcpxml_time(source_start_ns, &project.frame_rate);
 
                 let mut asset_clip = BytesStart::new("asset-clip");
                 asset_clip.push_attribute(("ref", asset_ref.as_str()));
@@ -877,7 +876,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     if has_transform_kfs {
                         writer.write_event(Event::Start(adjust_transform))?;
-                        write_transform_keyframe_params(&mut writer, clip, project)?;
+                        write_transform_keyframe_params(
+                            &mut writer,
+                            clip,
+                            project,
+                            source_start_ns,
+                        )?;
                         writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
                     } else {
                         writer.write_event(Event::Empty(adjust_transform))?;
@@ -888,7 +892,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         .push_attribute(("opacity", clip.opacity.to_string().as_str()));
                     if !clip.opacity_keyframes.is_empty() {
                         writer.write_event(Event::Start(adjust_compositing))?;
-                        write_opacity_keyframe_params(&mut writer, clip, &project.frame_rate)?;
+                        write_opacity_keyframe_params(
+                            &mut writer,
+                            clip,
+                            &project.frame_rate,
+                            source_start_ns,
+                        )?;
                         writer.write_event(Event::End(BytesEnd::new("adjust-compositing")))?;
                     } else {
                         writer.write_event(Event::Empty(adjust_compositing))?;
@@ -905,7 +914,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             &mut writer,
                             clip,
                             &project.frame_rate,
-                            0,
+                            source_start_ns,
                             false,
                         )?;
                         writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
@@ -924,7 +933,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             &mut writer,
                             clip,
                             &project.frame_rate,
-                            0,
+                            source_start_ns,
                             false,
                         )?;
                         writer.write_event(Event::End(BytesEnd::new("adjust-panner")))?;
@@ -1441,6 +1450,7 @@ fn write_strict_clip_body(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     clip: &crate::model::clip::Clip,
     project: &Project,
+    source_start_ns: u64,
 ) -> Result<()> {
     // timeMap
     if let Some(fragment) = preserved_unknown_time_map_fragment(clip) {
@@ -1498,7 +1508,7 @@ fn write_strict_clip_body(
         }
         if has_transform_kfs {
             writer.write_event(Event::Start(adjust_transform))?;
-            write_transform_keyframe_params(writer, clip, project)?;
+            write_transform_keyframe_params(writer, clip, project, source_start_ns)?;
             writer.write_event(Event::End(BytesEnd::new("adjust-transform")))?;
         } else {
             writer.write_event(Event::Empty(adjust_transform))?;
@@ -1509,7 +1519,7 @@ fn write_strict_clip_body(
         adjust_blend.push_attribute(("amount", clip.opacity.to_string().as_str()));
         if !clip.opacity_keyframes.is_empty() {
             writer.write_event(Event::Start(adjust_blend))?;
-            write_opacity_keyframe_params(writer, clip, &project.frame_rate)?;
+            write_opacity_keyframe_params(writer, clip, &project.frame_rate, source_start_ns)?;
             writer.write_event(Event::End(BytesEnd::new("adjust-blend")))?;
         } else {
             writer.write_event(Event::Empty(adjust_blend))?;
@@ -2758,10 +2768,13 @@ fn integrate_speed_distance_to_time_ns(
 }
 
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for transform properties.
+/// `source_start_ns` is the FCPXML `start` attribute value in nanoseconds — keyframe times
+/// are offset by this amount so they appear in absolute source time as FCP expects.
 fn write_transform_keyframe_params(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     clip: &crate::model::clip::Clip,
     project: &Project,
+    source_start_ns: u64,
 ) -> Result<()> {
     let fps = &project.frame_rate;
 
@@ -2808,7 +2821,11 @@ fn write_transform_keyframe_params(
             let (fx, fy) =
                 internal_position_to_fcpxml(ix, iy, project.width, project.height, scale_at_t);
             let mut kf_elem = BytesStart::new("keyframe");
-            kf_elem.push_attribute(("time", ns_to_fcpxml_time(t, fps).as_str()));
+            // Offset clip-local time back to absolute source time for FCP
+            kf_elem.push_attribute((
+                "time",
+                ns_to_fcpxml_time(t + source_start_ns, fps).as_str(),
+            ));
             kf_elem.push_attribute(("value", format!("{} {}", fx, fy).as_str()));
             writer.write_event(Event::Empty(kf_elem))?;
         }
@@ -2832,7 +2849,11 @@ fn write_transform_keyframe_params(
 
         for kf in &sorted {
             let mut kf_elem = BytesStart::new("keyframe");
-            kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+            // Offset clip-local time back to absolute source time for FCP
+            kf_elem.push_attribute((
+                "time",
+                ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
+            ));
             kf_elem.push_attribute(("value", format!("{} {}", kf.value, kf.value).as_str()));
             writer.write_event(Event::Empty(kf_elem))?;
         }
@@ -2856,7 +2877,11 @@ fn write_transform_keyframe_params(
 
         for kf in &sorted {
             let mut kf_elem = BytesStart::new("keyframe");
-            kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+            // Offset clip-local time back to absolute source time for FCP
+            kf_elem.push_attribute((
+                "time",
+                ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
+            ));
             kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
             writer.write_event(Event::Empty(kf_elem))?;
         }
@@ -2873,6 +2898,7 @@ fn write_opacity_keyframe_params(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     clip: &crate::model::clip::Clip,
     fps: &crate::model::project::FrameRate,
+    source_start_ns: u64,
 ) -> Result<()> {
     if clip.opacity_keyframes.is_empty() {
         return Ok(());
@@ -2892,7 +2918,11 @@ fn write_opacity_keyframe_params(
 
     for kf in &sorted {
         let mut kf_elem = BytesStart::new("keyframe");
-        kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
+        // Offset clip-local time back to absolute source time for FCP
+        kf_elem.push_attribute((
+            "time",
+            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
+        ));
         kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
         kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
         writer.write_event(Event::Empty(kf_elem))?;
@@ -4616,6 +4646,95 @@ mod tests {
         assert!((loaded_clip.pan_keyframes[0].value + 0.2).abs() < 0.001);
         assert_eq!(loaded_clip.pan_keyframes[1].time_ns, 2_000_000_000);
         assert!((loaded_clip.pan_keyframes[1].value - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_write_read_transform_keyframe_round_trip_with_source_offset() {
+        // When source_in != 0, writer must add source_in to clip-local keyframe
+        // times so FCPXML contains absolute source times. Parser must subtract
+        // source_in back to get clip-local times.
+        use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
+        use crate::model::track::Track;
+
+        let source_in_ns = 10_000_000_000u64; // 10 seconds into source
+
+        let mut project = Project::new("OffsetRT");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/clip.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.source_in = source_in_ns;
+        clip.source_out = source_in_ns + 5_000_000_000;
+        clip.scale_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 1.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        clip.rotate_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 45.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        clip.opacity_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+
+        // FCPXML keyframe times should be absolute (source_in + local)
+        // 10s + 0s = 10s, 10s + 2s = 12s → in rational time at 24fps
+        // The written FCPXML should NOT have keyframes at time="0s"
+        // since source_in is 10s.
+        assert!(
+            !xml.contains("time=\"0s\"")
+                && !xml.contains("time=\"0/24s\""),
+            "keyframe times should be absolute, not clip-local: {xml}"
+        );
+
+        // Now parse it back and verify clip-local times are restored
+        let loaded = crate::fcpxml::parser::parse_fcpxml(&xml).expect("parse should succeed");
+        let loaded_clip = &loaded.video_tracks().next().unwrap().clips[0];
+
+        // Scale: vendor attrs take priority, so they should be clip-local
+        assert_eq!(loaded_clip.scale_keyframes.len(), 2);
+        assert_eq!(loaded_clip.scale_keyframes[0].time_ns, 0);
+        assert_eq!(loaded_clip.scale_keyframes[1].time_ns, 2_000_000_000);
+        assert!((loaded_clip.scale_keyframes[0].value - 0.5).abs() < 0.001);
+        assert!((loaded_clip.scale_keyframes[1].value - 1.5).abs() < 0.001);
+
+        // Rotation
+        assert_eq!(loaded_clip.rotate_keyframes.len(), 2);
+        assert_eq!(loaded_clip.rotate_keyframes[0].time_ns, 0);
+        assert_eq!(loaded_clip.rotate_keyframes[1].time_ns, 2_000_000_000);
+
+        // Opacity
+        assert_eq!(loaded_clip.opacity_keyframes.len(), 2);
+        assert_eq!(loaded_clip.opacity_keyframes[0].time_ns, 0);
+        assert_eq!(loaded_clip.opacity_keyframes[1].time_ns, 2_000_000_000);
     }
 
     #[test]
