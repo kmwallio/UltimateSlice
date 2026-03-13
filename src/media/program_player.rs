@@ -6854,9 +6854,31 @@ impl ProgramPlayer {
 
         // Build chain: downscale to preview processing resolution EARLY so all effects
         // process at target size instead of source resolution (e.g. 5.3K for GoPro).
-        // Order: convertscale to target res → [crop + alpha repad] → [effects]
-        // → zoom/position → rotate/flip → title.
+        // Order: [capssetter] → convertscale to target res → [crop + alpha repad]
+        // → [effects] → zoom/position → rotate/flip → title.
         let mut chain: Vec<gst::Element> = Vec::new();
+        // 0. When a real-time LUT is active, override the source colorimetry
+        //    to BT.709 full-range.  Many camera files (S-Log3 HEVC, etc.) carry
+        //    unknown/unset colorimetry; GStreamer's default YUV→RGB conversion
+        //    for unknown sources diverges from FFmpeg's swscale default, causing
+        //    a systematic RGB offset (~4 RMSE) that the steep LUT amplifies into
+        //    a visible pink/magenta cast.  Setting BT.709 via capssetter reduces
+        //    the post-LUT RMSE from ~6.4 to ~2.8 (measured with S-Log3 33-pt LUT).
+        if lut.is_some() {
+            if let Some(cs) = gst::ElementFactory::make("capssetter")
+                .property("join", true)
+                .property(
+                    "caps",
+                    &gst::Caps::builder("video/x-raw")
+                        .field("colorimetry", "1:3:5:1")
+                        .build(),
+                )
+                .build()
+                .ok()
+            {
+                chain.push(cs);
+            }
+        }
         // 1. Convert + downscale to project resolution in a single pass.
         if let Some(ref e) = convertscale {
             chain.push(e.clone());
