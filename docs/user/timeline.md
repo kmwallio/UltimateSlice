@@ -264,8 +264,10 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 
 ## Keyframes panel (dopesheet)
 
-- Use the **Keyframes** pane on the right sidebar to edit keyframe timing visually for the currently selected clip.
+- Use the **Show/Hide Keyframes** button on the right side of the track-management bar to toggle the panel (hidden by default).
+- The dopesheet appears as a resizable panel between the timeline tracks and the track-management bar. Drag the split handle to resize the dopesheet area.
 - The dopesheet shows per-property lanes with keyframe points and value-curve overlays; drag points left/right to retime.
+- **◀ Prev / Next ▶** buttons jump the playhead to the previous or next keyframe across all properties (same as **Alt+Left/Right**).
 - **Ctrl/Cmd+Click** toggles a keyframe in the current dopesheet selection.
 - **Shift+Click** on a keyframe selects a same-lane range between the anchor and the clicked keyframe.
 - **Add @ Playhead** adds a keyframe at the playhead on the selected lane.

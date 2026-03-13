@@ -3,7 +3,7 @@ use crate::model::project::Project;
 use crate::ui::timeline::TimelineState;
 use crate::undo::SetTrackClipsCommand;
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, Label, Orientation, ScrolledWindow};
+use gtk4::{self as gtk, Box as GBox, Button, DrawingArea, Label, Orientation};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -316,6 +316,7 @@ pub fn build_keyframe_editor(
     project: Rc<RefCell<Project>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     on_project_changed: Rc<dyn Fn()>,
+    on_seek: Rc<dyn Fn(u64)>,
 ) -> (GBox, Rc<KeyframeEditorView>) {
     let root = GBox::new(Orientation::Vertical, 6);
     root.set_margin_top(4);
@@ -327,6 +328,12 @@ pub fn build_keyframe_editor(
     root.append(&title);
 
     let controls = GBox::new(Orientation::Horizontal, 6);
+    let prev_btn = Button::with_label("◀ Prev");
+    prev_btn.add_css_class("small-btn");
+    prev_btn.set_tooltip_text(Some("Jump to previous keyframe (Alt+Left)"));
+    let next_btn = Button::with_label("Next ▶");
+    next_btn.add_css_class("small-btn");
+    next_btn.set_tooltip_text(Some("Jump to next keyframe (Alt+Right)"));
     let add_btn = Button::with_label("Add @ Playhead");
     add_btn.add_css_class("small-btn");
     let remove_btn = Button::with_label("Remove");
@@ -345,6 +352,8 @@ pub fn build_keyframe_editor(
     interp_dropdown.set_selected(0);
     interp_dropdown.set_tooltip_text(Some("Interpolation for added/selected keyframes"));
     interp_dropdown.set_hexpand(true);
+    controls.append(&prev_btn);
+    controls.append(&next_btn);
     controls.append(&add_btn);
     controls.append(&remove_btn);
     controls.append(&interp_dropdown);
@@ -366,12 +375,7 @@ pub fn build_keyframe_editor(
     area.set_vexpand(true);
     area.set_content_width(480);
     area.set_focusable(true);
-
-    let scroller = ScrolledWindow::new();
-    scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scroller.set_min_content_height(190);
-    scroller.set_child(Some(&area));
-    root.append(&scroller);
+    root.append(&area);
 
     let state = Rc::new(RefCell::new(EditorState::default()));
     let view = Rc::new(KeyframeEditorView {
@@ -436,6 +440,66 @@ pub fn build_keyframe_editor(
     zoom_reset_btn.connect_clicked({
         let apply_zoom = apply_zoom.clone();
         move |_| apply_zoom(1.0)
+    });
+
+    // ── Prev / Next keyframe navigation ──────────────────────────────────
+    prev_btn.connect_clicked({
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_seek = on_seek.clone();
+        let area = area.clone();
+        move |_| {
+            let (clip_id, playhead) = {
+                let st = timeline_state.borrow();
+                (st.selected_clip_id.clone(), st.playhead_ns)
+            };
+            let Some(clip_id) = clip_id else { return };
+            let proj = project.borrow();
+            if let Some(ns) = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .and_then(|clip| {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    clip.prev_keyframe_local_ns(local)
+                        .map(|lt| clip.timeline_start.saturating_add(lt))
+                })
+            {
+                drop(proj);
+                on_seek(ns);
+                area.queue_draw();
+            }
+        }
+    });
+    next_btn.connect_clicked({
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_seek = on_seek.clone();
+        let area = area.clone();
+        move |_| {
+            let (clip_id, playhead) = {
+                let st = timeline_state.borrow();
+                (st.selected_clip_id.clone(), st.playhead_ns)
+            };
+            let Some(clip_id) = clip_id else { return };
+            let proj = project.borrow();
+            if let Some(ns) = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .and_then(|clip| {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    clip.next_keyframe_local_ns(local)
+                        .map(|lt| clip.timeline_start.saturating_add(lt))
+                })
+            {
+                drop(proj);
+                on_seek(ns);
+                area.queue_draw();
+            }
+        }
     });
 
     update_area_height(&area, &state);

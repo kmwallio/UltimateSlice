@@ -3715,8 +3715,35 @@ pub fn build_window(
 
     let (timeline_panel, timeline_area) =
         build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
+
+    // Extract the track-management bar from timeline_panel so we can place
+    // the keyframe dopesheet between the timeline and the bar.
+    let timeline_bar_widget = timeline_panel.last_child();
+    if let Some(ref bar) = timeline_bar_widget {
+        timeline_panel.remove(bar);
+    }
     timeline_scroll.set_child(Some(&timeline_panel));
-    root_vpaned.set_end_child(Some(&timeline_scroll));
+
+    // Vertical Paned: top = timeline scroll, bottom = keyframe dopesheet.
+    // The dopesheet is added later (see keyframe editor section below).
+    let timeline_paned = Paned::new(Orientation::Vertical);
+    timeline_paned.set_vexpand(true);
+    timeline_paned.set_hexpand(true);
+    timeline_paned.set_start_child(Some(&timeline_scroll));
+    timeline_paned.set_resize_start_child(true);
+    timeline_paned.set_shrink_start_child(false);
+    timeline_paned.set_resize_end_child(true);
+    timeline_paned.set_shrink_end_child(false);
+
+    // Outer vbox: Paned on top, fixed bar at bottom.
+    let timeline_outer_vbox = gtk::Box::new(Orientation::Vertical, 0);
+    timeline_outer_vbox.set_vexpand(true);
+    timeline_outer_vbox.set_hexpand(true);
+    timeline_outer_vbox.append(&timeline_paned);
+    if let Some(ref bar) = timeline_bar_widget {
+        timeline_outer_vbox.append(bar);
+    }
+    root_vpaned.set_end_child(Some(&timeline_outer_vbox));
 
     // Fill in the timeline area cell so the poll timer + stop button can redraw it.
     *timeline_panel_cell.borrow_mut() = Some(timeline_area.clone().upcast::<gtk4::Widget>());
@@ -4195,26 +4222,66 @@ pub fn build_window(
     transitions_revealer.set_child(Some(&transitions_list));
     right_sidebar.append(&transitions_revealer);
 
-    let keyframes_header = gtk::Box::new(Orientation::Horizontal, 6);
-    let keyframes_title = gtk::Label::new(Some("Keyframes"));
-    keyframes_title.set_halign(gtk::Align::Start);
-    keyframes_title.set_hexpand(true);
-    let keyframes_toggle = gtk::Button::with_label("Hide Keyframes");
-    keyframes_toggle.add_css_class("small-btn");
-    keyframes_header.append(&keyframes_title);
-    keyframes_header.append(&keyframes_toggle);
-    right_sidebar.append(&keyframes_header);
-
-    let keyframes_revealer = gtk::Revealer::new();
-    keyframes_revealer.set_reveal_child(true);
+    // ── Keyframe dopesheet (resizable via Paned) ───────────────────────────
+    let dopesheet_on_seek: Rc<dyn Fn(u64)> = {
+        let timeline_state = timeline_state.clone();
+        let prog_player = prog_player.clone();
+        let inspector_view = inspector_view.clone();
+        let project = project.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
+        Rc::new(move |ns: u64| {
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.playhead_ns = ns;
+            }
+            prog_player.borrow_mut().seek(ns);
+            let proj = project.borrow();
+            inspector_view.update_keyframe_indicator(&proj, ns);
+            if let Some(ref w) = *timeline_panel_cell.borrow() {
+                w.queue_draw();
+            }
+        })
+    };
     let (keyframe_editor_widget, keyframe_editor_view) = keyframe_editor::build_keyframe_editor(
         project.clone(),
         timeline_state.clone(),
         on_project_changed.clone(),
+        dopesheet_on_seek,
     );
-    keyframes_revealer.set_child(Some(&keyframe_editor_widget));
-    right_sidebar.append(&keyframes_revealer);
+    keyframe_editor_widget.set_size_request(-1, 120);
+    // Wrap in a vertical-only ScrolledWindow so the dopesheet is usable on
+    // small displays. The DrawingArea's own EventControllerScroll (pan/zoom)
+    // fires first (target phase, returns Stop) so the outer scroller won't
+    // intercept those events.
+    let keyframe_scroller = ScrolledWindow::new();
+    keyframe_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    keyframe_scroller.set_child(Some(&keyframe_editor_widget));
+    keyframe_scroller.set_visible(false);
+    timeline_paned.set_end_child(Some(&keyframe_scroller));
+    // Default split: allocate ~70% to timeline, ~30% to dopesheet.
+    // We'll set a reasonable initial position after the first allocation.
+    {
+        let paned = timeline_paned.clone();
+        paned.connect_map(move |p| {
+            let total = p.allocation().height();
+            if total > 0 && p.position() == 0 {
+                p.set_position((total as f64 * 0.7) as i32);
+            }
+        });
+    }
     *keyframe_editor_cell.borrow_mut() = Some(keyframe_editor_view);
+
+    // Add spacer + toggle button to the track-management bar.
+    let keyframes_toggle = gtk::Button::with_label("Show Keyframes");
+    keyframes_toggle.add_css_class("small-btn");
+    if let Some(ref bar_widget) = timeline_bar_widget {
+        if let Ok(bar) = bar_widget.clone().downcast::<gtk::Box>() {
+            let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+            spacer.set_hexpand(true);
+            bar.append(&spacer);
+            bar.append(&keyframes_toggle);
+        }
+    }
 
     {
         let revealer = transitions_revealer.clone();
@@ -4229,15 +4296,21 @@ pub fn build_window(
         });
     }
     {
-        let revealer = keyframes_revealer.clone();
+        let scroller = keyframe_scroller.clone();
+        let paned = timeline_paned.clone();
         keyframes_toggle.connect_clicked(move |btn| {
-            let show = !revealer.reveals_child();
-            revealer.set_reveal_child(show);
-            btn.set_label(if show {
-                "Hide Keyframes"
+            let visible = scroller.is_visible();
+            scroller.set_visible(!visible);
+            if !visible {
+                // Restoring: set a sensible split.
+                let total = paned.allocation().height();
+                if total > 0 {
+                    paned.set_position((total as f64 * 0.7) as i32);
+                }
+                btn.set_label("Hide Keyframes");
             } else {
-                "Show Keyframes"
-            });
+                btn.set_label("Show Keyframes");
+            }
         });
     }
 
@@ -4289,10 +4362,65 @@ pub fn build_window(
     background_render_toggle.set_child(Some(&background_render_row));
     background_render_toggle.add_css_class("round");
     background_render_toggle.add_css_class("flat");
+    // ── Media Browser toggle ──
+    let media_browser_toggle = gtk::ToggleButton::new();
+    media_browser_toggle.set_active(true);
+    let media_browser_row = gtk::Box::new(Orientation::Horizontal, 4);
+    let media_browser_icon = gtk::Image::from_icon_name("view-reveal-symbolic");
+    let media_browser_text = gtk::Label::new(Some("Media Browser"));
+    media_browser_row.append(&media_browser_icon);
+    media_browser_row.append(&media_browser_text);
+    media_browser_toggle.set_child(Some(&media_browser_row));
+    media_browser_toggle.add_css_class("round");
+    media_browser_toggle.add_css_class("flat");
+    {
+        let panel = left_vpaned.clone();
+        let icon = media_browser_icon.clone();
+        media_browser_toggle.connect_toggled(move |btn| {
+            let show = btn.is_active();
+            panel.set_visible(show);
+            icon.set_icon_name(Some(if show {
+                "view-reveal-symbolic"
+            } else {
+                "view-conceal-symbolic"
+            }));
+        });
+    }
+
+    // ── Inspector toggle ──
+    let inspector_toggle = gtk::ToggleButton::new();
+    inspector_toggle.set_active(true);
+    let inspector_toggle_row = gtk::Box::new(Orientation::Horizontal, 4);
+    let inspector_toggle_icon = gtk::Image::from_icon_name("view-reveal-symbolic");
+    let inspector_toggle_text = gtk::Label::new(Some("Inspector"));
+    inspector_toggle_row.append(&inspector_toggle_icon);
+    inspector_toggle_row.append(&inspector_toggle_text);
+    inspector_toggle.set_child(Some(&inspector_toggle_row));
+    inspector_toggle.add_css_class("round");
+    inspector_toggle.add_css_class("flat");
+    {
+        let sidebar = right_sidebar.clone();
+        let icon = inspector_toggle_icon.clone();
+        inspector_toggle.connect_toggled(move |btn| {
+            let show = btn.is_active();
+            sidebar.set_visible(show);
+            icon.set_icon_name(Some(if show {
+                "view-reveal-symbolic"
+            } else {
+                "view-conceal-symbolic"
+            }));
+        });
+    }
+
+    status_bar.append(&media_browser_toggle);
     status_bar.append(&track_levels_toggle);
     status_bar.append(&background_render_toggle);
     status_bar.append(&status_label);
     status_bar.append(&status_progress);
+    let status_spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    status_spacer.set_hexpand(true);
+    status_bar.append(&status_spacer);
+    status_bar.append(&inspector_toggle);
 
     // Wrap main content + status bar in a vertical box
     let outer_vbox = gtk::Box::new(Orientation::Vertical, 0);

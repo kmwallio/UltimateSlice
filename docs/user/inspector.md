@@ -120,7 +120,8 @@ The selected mode applies to new keyframes created by "Set Keyframe" buttons, an
 
 ### Keyframes panel (dopesheet, phase 1)
 
-- A dedicated **Keyframes** panel appears in the right sidebar (below the Transitions section). Use the panel toggle button to hide/show it.
+- A dedicated **Hide/Show Keyframes** button appears on the right side of the timeline track-management bar.
+- The dopesheet appears as a resizable panel between the timeline tracks and the track-management bar. Drag the split handle to resize.
 - The panel renders a per-lane dopesheet for the selected clip: **Scale, Opacity, Position X/Y, Volume, Pan, Speed, Rotate, Crop Left/Right/Top/Bottom**.
 - Use lane checkboxes to show/hide lanes while editing.
 - Lanes now include a value-curve overlay so you can see both **timing** and **value shape** per property.

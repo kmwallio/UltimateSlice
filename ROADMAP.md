@@ -266,7 +266,7 @@ Tracking docs:
   - [x] Animation mode: "Record Keyframes" toggle (`Shift+K`) auto-creates keyframes on transform drags and slider changes
   - [x] Additional interpolation modes: EaseIn, EaseOut, EaseInOut with cubic bezier evaluation (preview), quadratic FFmpeg expressions (export), FCPXML `interp` attribute round-trip, Inspector dropdown, and MCP `interpolation` parameter
 - [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
-  - [x] Phase 1: Dopesheet panel in the right sidebar with per-lane visibility toggles, keyframe point selection (including additive/range multi-select), drag-to-retime, add/remove controls, interpolation apply control, value-curve overlays, keyboard delete/nudge controls, time zoom/pan controls, and full undo/redo integration.
+  - [x] Phase 1: Dopesheet panel appears as a dedicated panel beneath the timeline tracks (with show/hide control on the track-management bar), includes per-lane visibility toggles, keyframe point selection (including additive/range multi-select), drag-to-retime, add/remove controls, interpolation apply control, value-curve overlays, keyboard delete/nudge controls, time zoom/pan controls, and full undo/redo integration.
   - [ ] Phase 2: Bezier-handle curve editing for per-segment shape/tangent authoring.
 
 ### Program Monitor
