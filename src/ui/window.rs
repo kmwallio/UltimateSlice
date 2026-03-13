@@ -4104,141 +4104,244 @@ pub fn build_window(
             let Some(win) = window_weak.upgrade() else {
                 return;
             };
-            let offline_count = {
+            let missing_paths = {
                 let proj = project.borrow();
                 let lib = library.borrow();
-                collect_missing_source_paths(&proj, &lib).len()
+                collect_missing_source_paths(&proj, &lib)
             };
-            if offline_count == 0 {
+            if missing_paths.is_empty() {
                 flash_window_status_title(&win, &project, "No offline media to relink");
                 return;
             }
-            let dialog = gtk::FileDialog::new();
-            dialog.set_title("Relink Missing Media — Choose Search Folder");
-            let project = project.clone();
-            let library = library.clone();
-            let timeline_state = timeline_state.clone();
-            let source_marks = source_marks.clone();
-            let on_source_selected = on_source_selected.clone();
-            let on_project_changed = on_project_changed.clone();
-            let inspector_view = inspector_view.clone();
-            let force_rebuild_media_browser = force_rebuild_media_browser.clone();
-            let timeline_panel_cell = timeline_panel_cell.clone();
-            let win_for_result = win.clone();
-            dialog.select_folder(Some(&win), gio::Cancellable::NONE, move |result| {
-                let Ok(folder) = result else { return };
-                let Some(root_path) = folder.path() else { return };
-                if !root_path.is_dir() {
-                    flash_window_status_title(&win_for_result, &project, "Relink failed: invalid folder");
-                    return;
-                }
-                let summary = {
-                    let mut proj = project.borrow_mut();
-                    let mut lib = library.borrow_mut();
-                    relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root_path)
-                };
-                log::info!(
-                    "[relink] scanned={} remapped={} unresolved={} clips={} library={}",
-                    summary.scanned_files,
-                    summary.remapped.len(),
-                    summary.unresolved.len(),
-                    summary.updated_clip_count,
-                    summary.updated_library_count,
-                );
-                for (from, to) in &summary.remapped {
-                    log::info!("[relink]   {} → {}", from, to);
-                }
-                for path in &summary.unresolved {
-                    log::info!("[relink]   unresolved: {}", path);
-                }
-                let remapped_source = {
-                    let current_path = source_marks.borrow().path.clone();
-                    if current_path.is_empty() {
-                        None
-                    } else {
-                        summary.remapped.iter().find_map(|(from, to)| {
-                            if from == &current_path {
-                                Some(to.clone())
-                            } else {
-                                None
+
+            if missing_paths.len() == 1 {
+                // Single missing file: use a file picker for direct replacement.
+                let old_path = missing_paths[0].clone();
+                let dialog = gtk::FileDialog::new();
+                let fname = std::path::Path::new(&old_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                dialog.set_title(&format!("Relink — Select replacement for {}", fname));
+                let filter = gtk::FileFilter::new();
+                filter.add_mime_type("video/*");
+                filter.add_mime_type("audio/*");
+                filter.add_mime_type("image/*");
+                filter.set_name(Some("Media Files"));
+                let filters = gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                let all_filter = gtk::FileFilter::new();
+                all_filter.add_pattern("*");
+                all_filter.set_name(Some("All Files"));
+                filters.append(&all_filter);
+                dialog.set_filters(Some(&filters));
+
+                let project = project.clone();
+                let library = library.clone();
+                let timeline_state = timeline_state.clone();
+                let source_marks = source_marks.clone();
+                let on_source_selected = on_source_selected.clone();
+                let on_project_changed = on_project_changed.clone();
+                let inspector_view = inspector_view.clone();
+                let force_rebuild_media_browser = force_rebuild_media_browser.clone();
+                let timeline_panel_cell = timeline_panel_cell.clone();
+                let win_for_result = win.clone();
+                dialog.open(Some(&win), gio::Cancellable::NONE, move |result| {
+                    let Ok(file) = result else { return };
+                    let Some(new_file_path) = file.path() else { return };
+                    let new_path_str = new_file_path.to_string_lossy().to_string();
+
+                    // Replace old_path → new_path_str in project clips and library
+                    let (clip_count, lib_count) = {
+                        let mut proj = project.borrow_mut();
+                        let mut lib = library.borrow_mut();
+                        let mut cc = 0usize;
+                        for track in proj.tracks.iter_mut() {
+                            for clip in track.clips.iter_mut() {
+                                if clip.source_path == old_path {
+                                    clip.source_path = new_path_str.clone();
+                                    cc += 1;
+                                }
                             }
-                        })
+                        }
+                        let mut lc = 0usize;
+                        for item in lib.iter_mut() {
+                            if item.source_path == old_path {
+                                item.source_path = new_path_str.clone();
+                                lc += 1;
+                            }
+                        }
+                        if cc > 0 {
+                            proj.dirty = true;
+                        }
+                        (cc, lc)
+                    };
+                    log::info!(
+                        "[relink] direct: {} → {} (clips={}, lib={})",
+                        old_path, new_path_str, clip_count, lib_count,
+                    );
+
+                    // Refresh source monitor if the relinked path was loaded
+                    {
+                        let current_path = source_marks.borrow().path.clone();
+                        if current_path == old_path {
+                            let duration_ns = library
+                                .borrow()
+                                .iter()
+                                .find(|item| item.source_path == new_path_str)
+                                .map(|item| item.duration_ns)
+                                .unwrap_or_else(|| source_marks.borrow().duration_ns);
+                            on_source_selected(new_path_str.clone(), duration_ns);
+                        }
                     }
-                };
-                if let Some(new_path) = remapped_source {
-                    let duration_ns = {
-                        let marks = source_marks.borrow();
-                        let fallback = marks.duration_ns;
-                        drop(marks);
-                        library
+
+                    // Refresh availability + project changed + belt-and-suspenders
+                    {
+                        let proj = project.borrow();
+                        let mut lib = library.borrow_mut();
+                        let mut st = timeline_state.borrow_mut();
+                        refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                    }
+                    on_project_changed();
+                    {
+                        let proj = project.borrow();
+                        let mut lib = library.borrow_mut();
+                        let mut st = timeline_state.borrow_mut();
+                        let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
+                        drop(st);
+                        inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
+                        drop(proj);
+                        drop(lib);
+                        force_rebuild_media_browser();
+                        if let Some(ref w) = *timeline_panel_cell.borrow() {
+                            w.queue_draw();
+                        }
+                    }
+
+                    let msg = format!(
+                        "Relinked: {}\n→ {}\n({} clip(s), {} library item(s) updated)",
+                        old_path, new_path_str, clip_count, lib_count,
+                    );
+                    log::info!("[relink] result: {}", msg.replace('\n', " | "));
+                    let alert = gtk::AlertDialog::builder()
+                        .message("Relink Complete")
+                        .detail(&msg)
+                        .buttons(["OK"])
+                        .build();
+                    alert.show(Some(&win_for_result));
+                });
+            } else {
+                // Multiple missing files: scan a folder for matching filenames.
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title(&format!(
+                    "Relink {} Missing Files — Choose Search Folder",
+                    missing_paths.len(),
+                ));
+                let project = project.clone();
+                let library = library.clone();
+                let timeline_state = timeline_state.clone();
+                let source_marks = source_marks.clone();
+                let on_source_selected = on_source_selected.clone();
+                let on_project_changed = on_project_changed.clone();
+                let inspector_view = inspector_view.clone();
+                let force_rebuild_media_browser = force_rebuild_media_browser.clone();
+                let timeline_panel_cell = timeline_panel_cell.clone();
+                let win_for_result = win.clone();
+                dialog.select_folder(Some(&win), gio::Cancellable::NONE, move |result| {
+                    let Ok(folder) = result else { return };
+                    let Some(root_path) = folder.path() else { return };
+                    if !root_path.is_dir() {
+                        flash_window_status_title(&win_for_result, &project, "Relink failed: invalid folder");
+                        return;
+                    }
+                    let summary = {
+                        let mut proj = project.borrow_mut();
+                        let mut lib = library.borrow_mut();
+                        relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root_path)
+                    };
+                    log::info!(
+                        "[relink] scanned={} remapped={} unresolved={} clips={} library={}",
+                        summary.scanned_files,
+                        summary.remapped.len(),
+                        summary.unresolved.len(),
+                        summary.updated_clip_count,
+                        summary.updated_library_count,
+                    );
+
+                    // Refresh source monitor if the relinked path was loaded
+                    let remapped_source = {
+                        let current_path = source_marks.borrow().path.clone();
+                        if current_path.is_empty() {
+                            None
+                        } else {
+                            summary.remapped.iter().find_map(|(from, to)| {
+                                if from == &current_path { Some(to.clone()) } else { None }
+                            })
+                        }
+                    };
+                    if let Some(new_path) = remapped_source {
+                        let duration_ns = library
                             .borrow()
                             .iter()
                             .find(|item| item.source_path == new_path)
                             .map(|item| item.duration_ns)
-                            .unwrap_or(fallback)
-                    };
-                    on_source_selected(new_path, duration_ns);
-                }
-                {
-                    let proj = project.borrow();
-                    let mut lib = library.borrow_mut();
-                    let mut st = timeline_state.borrow_mut();
-                    let missing = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
-                    log::info!(
-                        "[relink] after refresh: still_missing={}, lib_items={}",
-                        missing.len(),
-                        lib.iter().filter(|i| i.is_missing).count(),
-                    );
-                }
-                log::info!("[relink] calling on_project_changed");
-                on_project_changed();
-                log::info!("[relink] on_project_changed returned");
+                            .unwrap_or_else(|| source_marks.borrow().duration_ns);
+                        on_source_selected(new_path, duration_ns);
+                    }
 
-                // Belt-and-suspenders: explicitly refresh availability, inspector,
-                // and media browser after on_project_changed, in case the impl
-                // didn't fully propagate (e.g., deferred reload timing).
-                let remaining_missing = {
-                    let proj = project.borrow();
-                    let mut lib = library.borrow_mut();
-                    let mut st = timeline_state.borrow_mut();
-                    let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
-                    let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
-                    drop(st);
-                    inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
-                    drop(proj);
-                    drop(lib);
-                    force_rebuild_media_browser();
-                    if let Some(ref w) = *timeline_panel_cell.borrow() {
-                        w.queue_draw();
+                    // Refresh availability + project changed + belt-and-suspenders
+                    {
+                        let proj = project.borrow();
+                        let mut lib = library.borrow_mut();
+                        let mut st = timeline_state.borrow_mut();
+                        refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
                     }
-                    mp.len()
-                };
-                let msg = if summary.remapped.is_empty() && !summary.unresolved.is_empty() {
-                    format!(
-                        "No matching files found.\n{} file(s) still offline.\n({} files scanned under selected folder)",
-                        summary.unresolved.len(),
-                        summary.scanned_files,
-                    )
-                } else {
-                    let mut lines = Vec::new();
-                    lines.push(format!("{} file(s) relinked", summary.remapped.len()));
-                    if !summary.unresolved.is_empty() {
-                        lines.push(format!("{} file(s) still unresolved", summary.unresolved.len()));
-                    }
-                    if remaining_missing > 0 {
-                        lines.push(format!("{} offline item(s) remaining", remaining_missing));
-                    }
-                    lines.push(format!("({} files scanned)", summary.scanned_files));
-                    lines.join("\n")
-                };
-                log::info!("[relink] result: {}", msg.replace('\n', " | "));
-                let alert = gtk::AlertDialog::builder()
-                    .message("Relink Results")
-                    .detail(&msg)
-                    .buttons(["OK"])
-                    .build();
-                alert.show(Some(&win_for_result));
-            });
+                    on_project_changed();
+                    let remaining_missing = {
+                        let proj = project.borrow();
+                        let mut lib = library.borrow_mut();
+                        let mut st = timeline_state.borrow_mut();
+                        let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
+                        drop(st);
+                        inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
+                        drop(proj);
+                        drop(lib);
+                        force_rebuild_media_browser();
+                        if let Some(ref w) = *timeline_panel_cell.borrow() {
+                            w.queue_draw();
+                        }
+                        mp.len()
+                    };
+
+                    let msg = if summary.remapped.is_empty() && !summary.unresolved.is_empty() {
+                        format!(
+                            "No matching files found.\n{} file(s) still offline.\n({} files scanned under selected folder)",
+                            summary.unresolved.len(),
+                            summary.scanned_files,
+                        )
+                    } else {
+                        let mut lines = Vec::new();
+                        lines.push(format!("{} file(s) relinked", summary.remapped.len()));
+                        if !summary.unresolved.is_empty() {
+                            lines.push(format!("{} file(s) still unresolved", summary.unresolved.len()));
+                        }
+                        if remaining_missing > 0 {
+                            lines.push(format!("{} offline item(s) remaining", remaining_missing));
+                        }
+                        lines.push(format!("({} files scanned)", summary.scanned_files));
+                        lines.join("\n")
+                    };
+                    log::info!("[relink] result: {}", msg.replace('\n', " | "));
+                    let alert = gtk::AlertDialog::builder()
+                        .message("Relink Results")
+                        .detail(&msg)
+                        .buttons(["OK"])
+                        .build();
+                    alert.show(Some(&win_for_result));
+                });
+            }
         })
     });
 
