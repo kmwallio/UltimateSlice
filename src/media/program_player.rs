@@ -4603,6 +4603,14 @@ impl ProgramPlayer {
                 c.midtones.to_bits().hash(&mut hasher);
                 c.highlights.to_bits().hash(&mut hasher);
                 c.lut_path.hash(&mut hasher);
+                c.exposure.to_bits().hash(&mut hasher);
+                c.black_point.to_bits().hash(&mut hasher);
+                c.highlights_warmth.to_bits().hash(&mut hasher);
+                c.highlights_tint.to_bits().hash(&mut hasher);
+                c.midtones_warmth.to_bits().hash(&mut hasher);
+                c.midtones_tint.to_bits().hash(&mut hasher);
+                c.shadows_warmth.to_bits().hash(&mut hasher);
+                c.shadows_tint.to_bits().hash(&mut hasher);
                 c.chroma_key_enabled.hash(&mut hasher);
                 c.chroma_key_color.hash(&mut hasher);
                 c.chroma_key_tolerance.to_bits().hash(&mut hasher);
