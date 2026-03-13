@@ -1289,6 +1289,117 @@ mod tests {
         assert_eq!(project.tracks[0].clips[0].source_path, expected);
         assert_eq!(library[0].source_path, expected);
 
+        // Verify that refresh_media_availability_state clears is_missing
+        // after relink (this is the chain the GUI follows).
+        assert!(
+            library[0].is_missing,
+            "before refresh, is_missing should still be true (relink only updates path)"
+        );
+        let timeline_project = Rc::new(RefCell::new(project.clone()));
+        let mut timeline_state = TimelineState::new(timeline_project);
+        let missing =
+            refresh_media_availability_state(&project, library.as_mut_slice(), &mut timeline_state);
+        assert!(
+            missing.is_empty(),
+            "after refresh, no paths should be missing; got {:?}",
+            missing
+        );
+        assert!(
+            !library[0].is_missing,
+            "library item.is_missing should be false after refresh"
+        );
+        assert!(
+            timeline_state.missing_media_paths.is_empty(),
+            "timeline missing_media_paths should be empty after refresh"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Simulate the full GUI relink sequence including the library sync that
+    /// happens inside on_project_changed_impl.
+    #[test]
+    fn relink_full_gui_chain_clears_missing_state() {
+        let root = std::env::temp_dir().join(format!(
+            "ultimateslice-relink-chain-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let nested = root.join("footage/day1");
+        std::fs::create_dir_all(&nested).expect("create test dirs");
+        let target = nested.join("shot.mp4");
+        std::fs::write(&target, b"test").expect("write target");
+
+        let missing_path = "/old/footage/day1/shot.mp4";
+        let mut project = Project::new("RelinkChain");
+        project.tracks[0].clips.clear();
+        project.tracks[1].clips.clear();
+        project.tracks[0].add_clip(build_source_clip(
+            missing_path, 0, 1_000_000_000, 0,
+            ClipKind::Video, None, None, None,
+        ));
+        let mut library = vec![MediaItem::new(missing_path, 1_000_000_000)];
+        assert!(library[0].is_missing, "precondition: item is missing");
+
+        // Step 1: relink (same as GUI callback)
+        let summary = relink_missing_media_under_root(&mut project, library.as_mut_slice(), &root);
+        assert_eq!(summary.remapped.len(), 1, "should remap 1 file");
+
+        let expected = target.to_string_lossy().to_string();
+        assert_eq!(project.tracks[0].clips[0].source_path, expected);
+        assert_eq!(library[0].source_path, expected);
+
+        // Step 2: refresh_media_availability_state (same as GUI callback)
+        let timeline_project = Rc::new(RefCell::new(project.clone()));
+        let mut st = TimelineState::new(timeline_project);
+        let missing1 = refresh_media_availability_state(&project, library.as_mut_slice(), &mut st);
+        assert!(missing1.is_empty(), "step 2: no missing; got {:?}", missing1);
+        assert!(!library[0].is_missing, "step 2: is_missing should be false");
+        assert!(st.missing_media_paths.is_empty(), "step 2: timeline clear");
+
+        // Step 3: Simulate on_project_changed_impl library sync
+        // (collect media_from_project → update existing → add new)
+        {
+            let mut media_seen: HashSet<&str> = HashSet::new();
+            let media_from_project: Vec<(String, u64, Option<u64>)> = project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| media_seen.insert(c.source_path.as_str()))
+                .map(|c| (c.source_path.clone(), c.source_out, c.source_timecode_base_ns))
+                .collect();
+
+            let seen: HashSet<String> = library.iter().map(|i| i.source_path.clone()).collect();
+            for (path, dur, stc) in &media_from_project {
+                if let Some(item) = library.iter_mut().find(|i| i.source_path == *path) {
+                    if item.duration_ns == 0 && *dur > 0 {
+                        item.duration_ns = *dur;
+                    }
+                    if item.source_timecode_base_ns.is_none() && stc.is_some() {
+                        item.source_timecode_base_ns = *stc;
+                    }
+                }
+            }
+            let new_items: Vec<_> = media_from_project
+                .into_iter()
+                .filter(|(path, _, _)| !seen.contains(path))
+                .collect();
+            for (path, dur, stc) in new_items {
+                let mut item = MediaItem::new(path, dur);
+                item.source_timecode_base_ns = stc;
+                library.push(item);
+            }
+        }
+
+        // Step 4: second refresh_media_availability_state (inside on_project_changed_impl)
+        let missing2 = refresh_media_availability_state(&project, library.as_mut_slice(), &mut st);
+        assert!(missing2.is_empty(), "step 4: no missing; got {:?}", missing2);
+        assert!(!library[0].is_missing, "step 4: is_missing should be false");
+        assert!(st.missing_media_paths.is_empty(), "step 4: timeline clear");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -4059,19 +4170,47 @@ pub fn build_window(
                     let proj = project.borrow();
                     let mut lib = library.borrow_mut();
                     let mut st = timeline_state.borrow_mut();
-                    refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                    let missing = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                    log::info!(
+                        "[relink] after refresh: still_missing={}, lib_items={}",
+                        missing.len(),
+                        lib.iter().filter(|i| i.is_missing).count(),
+                    );
                 }
+                log::info!("[relink] calling on_project_changed");
                 on_project_changed();
-                flash_window_status_title(
-                    &win_for_result,
-                    &project,
-                    &format!(
-                        "Relink: {} remapped, {} unresolved ({} scanned)",
-                        summary.remapped.len(),
+                log::info!("[relink] on_project_changed returned");
+                // After the full refresh chain, verify the final state.
+                let remaining_missing = {
+                    let proj = project.borrow();
+                    let lib = library.borrow();
+                    collect_missing_source_paths(&proj, &lib).len()
+                };
+                let msg = if summary.remapped.is_empty() && !summary.unresolved.is_empty() {
+                    format!(
+                        "No matching files found.\n{} file(s) still offline.\n({} files scanned under selected folder)",
                         summary.unresolved.len(),
-                        summary.scanned_files
-                    ),
-                );
+                        summary.scanned_files,
+                    )
+                } else {
+                    let mut lines = Vec::new();
+                    lines.push(format!("{} file(s) relinked", summary.remapped.len()));
+                    if !summary.unresolved.is_empty() {
+                        lines.push(format!("{} file(s) still unresolved", summary.unresolved.len()));
+                    }
+                    if remaining_missing > 0 {
+                        lines.push(format!("{} offline item(s) remaining", remaining_missing));
+                    }
+                    lines.push(format!("({} files scanned)", summary.scanned_files));
+                    lines.join("\n")
+                };
+                log::info!("[relink] result: {}", msg.replace('\n', " | "));
+                let alert = gtk::AlertDialog::builder()
+                    .message("Relink Results")
+                    .detail(&msg)
+                    .buttons(["OK"])
+                    .build();
+                alert.show(Some(&win_for_result));
             });
         })
     });
@@ -4393,7 +4532,13 @@ pub fn build_window(
                 let proj = project.borrow();
                 let mut lib = library.borrow_mut();
                 let mut st = timeline_state.borrow_mut();
-                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st)
+                let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                log::debug!(
+                    "[on_project_changed] missing_count={} lib_missing_count={}",
+                    mp.len(),
+                    lib.iter().filter(|i| i.is_missing).count(),
+                );
+                mp
             };
             {
                 let proj = project.borrow();
