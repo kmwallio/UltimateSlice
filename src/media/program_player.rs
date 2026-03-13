@@ -7514,6 +7514,7 @@ impl ProgramPlayer {
         let Ok(ffmpeg) = crate::media::export::find_ffmpeg() else {
             return false;
         };
+        let color_caps = crate::media::export::detect_color_filter_capabilities(&ffmpeg);
         if let Some(parent) = Path::new(output_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -7555,7 +7556,7 @@ impl ProgramPlayer {
                     fps.max(1),
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_color_filter(clip),
-                    Self::prerender_build_temperature_tint_filter(clip),
+                    Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                     Self::prerender_build_grading_filter(clip),
                     Self::prerender_build_denoise_filter(clip),
                     Self::prerender_build_sharpen_filter(clip),
@@ -7571,7 +7572,7 @@ impl ProgramPlayer {
                         fps.max(1),
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_color_filter(clip),
-                        Self::prerender_build_temperature_tint_filter(clip),
+                        Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                         Self::prerender_build_grading_filter(clip),
                         Self::prerender_build_denoise_filter(clip),
                         Self::prerender_build_sharpen_filter(clip),
@@ -7586,7 +7587,7 @@ impl ProgramPlayer {
                         fps.max(1),
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_color_filter(clip),
-                        Self::prerender_build_temperature_tint_filter(clip),
+                        Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                         Self::prerender_build_grading_filter(clip),
                         Self::prerender_build_denoise_filter(clip),
                         Self::prerender_build_sharpen_filter(clip),
@@ -7601,7 +7602,7 @@ impl ProgramPlayer {
                     Self::prerender_build_rotation_filter(clip, true),
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_color_filter(clip),
-                    Self::prerender_build_temperature_tint_filter(clip),
+                    Self::prerender_build_temperature_tint_filter(clip, &color_caps),
                     Self::prerender_build_grading_filter(clip),
                     Self::prerender_build_denoise_filter(clip),
                     Self::prerender_build_sharpen_filter(clip),
@@ -7741,21 +7742,64 @@ impl ProgramPlayer {
     }
 
     fn prerender_build_color_filter(clip: &ProgramClip) -> String {
-        if clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0 {
+        let has_color = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
+        let has_exposure = clip.exposure.abs() > f64::EPSILON;
+        if has_color || has_exposure {
+            // Use the same calibrated videobalance mapping as export so that
+            // proxy-mode preview matches the final render.
+            let preview_params = Self::compute_videobalance_params(
+                clip.brightness,
+                clip.contrast,
+                clip.saturation,
+                6500.0, // temperature handled by separate filter
+                0.0,    // tint handled by separate filter
+                0.0,    // shadows handled by grading filter
+                0.0,    // midtones handled by grading filter
+                0.0,    // highlights handled by grading filter
+                clip.exposure,
+                0.0,  // black_point handled by grading filter
+                0.0,  // warmth/tint handled by grading filter
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                true,
+                true,
+            );
+            let contrast_t = clip.contrast.clamp(0.0, 2.0);
+            let contrast_delta = contrast_t - 1.0;
+            let contrast_brightness_bias =
+                0.26 * contrast_delta - 0.08 * contrast_delta * contrast_delta;
             format!(
                 ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
-                clip.brightness.clamp(-1.0, 1.0),
-                clip.contrast.clamp(0.0, 2.0),
-                clip.saturation.clamp(0.0, 2.0)
+                (preview_params.brightness + contrast_brightness_bias).clamp(-1.0, 1.0),
+                preview_params.contrast,
+                preview_params.saturation
             )
         } else {
             String::new()
         }
     }
 
-    fn prerender_build_temperature_tint_filter(clip: &ProgramClip) -> String {
+    fn prerender_build_temperature_tint_filter(
+        clip: &ProgramClip,
+        caps: &crate::media::export::ColorFilterCapabilities,
+    ) -> String {
         let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
         let has_tint = clip.tint.abs() > 0.001;
+        // Use frei0r coloradj_RGB when available — same calibrated path as export.
+        if caps.use_coloradj_frei0r && (has_temp || has_tint) {
+            let cp = crate::media::export::compute_export_coloradj_params(
+                clip.temperature,
+                clip.tint,
+            );
+            return format!(
+                ",frei0r=filter_name=coloradj_RGB:filter_params={:.6}|{:.6}|{:.6}|0.333",
+                cp.r, cp.g, cp.b
+            );
+        }
+        // Fallback when frei0r is unavailable.
         let mut f = String::new();
         if has_temp {
             f.push_str(&format!(
@@ -7827,13 +7871,32 @@ impl ProgramPlayer {
     }
 
     fn prerender_build_grading_filter(clip: &ProgramClip) -> String {
-        if clip.shadows != 0.0 || clip.midtones != 0.0 || clip.highlights != 0.0 {
-            let s = clip.shadows.clamp(-1.0, 1.0);
-            let m = clip.midtones.clamp(-1.0, 1.0);
-            let h = clip.highlights.clamp(-1.0, 1.0);
-            format!(
-                ",colorbalance=rs={s:.4}:gs={s:.4}:bs={s:.4}:rm={m:.4}:gm={m:.4}:bm={m:.4}:rh={h:.4}:gh={h:.4}:bh={h:.4}"
-            )
+        let has_grading = clip.shadows != 0.0
+            || clip.midtones != 0.0
+            || clip.highlights != 0.0
+            || clip.black_point != 0.0
+            || clip.highlights_warmth != 0.0
+            || clip.highlights_tint != 0.0
+            || clip.midtones_warmth != 0.0
+            || clip.midtones_tint != 0.0
+            || clip.shadows_warmth != 0.0
+            || clip.shadows_tint != 0.0;
+        if has_grading {
+            // Use the same parabola-matched lutrgb as export for proxy parity.
+            let p = Self::compute_export_3point_params(
+                clip.shadows,
+                clip.midtones,
+                clip.highlights,
+                clip.black_point,
+                clip.highlights_warmth,
+                clip.highlights_tint,
+                clip.midtones_warmth,
+                clip.midtones_tint,
+                clip.shadows_warmth,
+                clip.shadows_tint,
+            );
+            let parabola = ThreePointParabola::from_params(&p);
+            parabola.to_lutrgb_filter()
         } else {
             String::new()
         }

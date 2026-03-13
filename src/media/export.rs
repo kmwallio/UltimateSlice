@@ -16,9 +16,9 @@ pub enum ExportProgress {
 }
 
 #[derive(Debug, Clone, Default)]
-struct ColorFilterCapabilities {
-    use_coloradj_frei0r: bool,
-    three_point_frei0r_module: Option<String>,
+pub(crate) struct ColorFilterCapabilities {
+    pub(crate) use_coloradj_frei0r: bool,
+    pub(crate) three_point_frei0r_module: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1142,7 +1142,7 @@ fn build_grading_filter_with_caps(
     }
 }
 
-fn compute_export_coloradj_params(
+pub(crate) fn compute_export_coloradj_params(
     temperature: f64,
     tint: f64,
 ) -> crate::media::program_player::ColorAdjRGBParams {
@@ -1650,7 +1650,7 @@ fn check_frei0r_module_support(ffmpeg: &str, module_name: &str, probe_params: &s
         .unwrap_or(false)
 }
 
-fn detect_color_filter_capabilities(ffmpeg: &str) -> ColorFilterCapabilities {
+pub(crate) fn detect_color_filter_capabilities(ffmpeg: &str) -> ColorFilterCapabilities {
     if !check_filter_support(ffmpeg, "frei0r") {
         return ColorFilterCapabilities::default();
     }
