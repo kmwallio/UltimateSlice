@@ -117,13 +117,19 @@ Set a scale keyframe on a clip at an absolute timeline time:
 python3 tools/mcp_call.py set_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000,"value":1.35}'
 ```
 
+Set a keyframe with custom Bezier controls for its outgoing segment:
+
+```bash
+python3 tools/mcp_call.py set_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000,"value":1.35,"bezier_controls":{"x1":0.20,"y1":0.05,"x2":0.80,"y2":0.95}}'
+```
+
 Remove the keyframe for that property at the same timeline time:
 
 ```bash
 python3 tools/mcp_call.py remove_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000}'
 ```
 
-Use `list_clips` to discover `clip_id` values and inspect phase-1 keyframe arrays (`scale_keyframes`, `opacity_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `volume_keyframes`).
+Use `list_clips` to discover `clip_id` values and inspect phase-1 keyframe arrays (`scale_keyframes`, `opacity_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `volume_keyframes`). Keyframes may include optional `bezier_controls` for custom tangent-authored segments.
 
 ## `.mcp.json` server entry
 

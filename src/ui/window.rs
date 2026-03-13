@@ -6493,6 +6493,7 @@ fn handle_mcp_command(
             timeline_pos_ns,
             value,
             interpolation,
+            bezier_controls,
             reply,
         } => {
             let Some(property) = Phase1KeyframeProperty::parse(&property) else {
@@ -6528,6 +6529,20 @@ fn handle_mcp_command(
                                     value,
                                     interp,
                                 ));
+                            if let (Some(local_ns), Some((x1, y1, x2, y2))) =
+                                (keyframe_time_ns, bezier_controls)
+                            {
+                                let keyframes = clip.keyframes_for_phase1_property_mut(property);
+                                if let Some(kf) = keyframes.iter_mut().find(|kf| kf.time_ns == local_ns)
+                                {
+                                    kf.bezier_controls = Some(crate::model::clip::BezierControls {
+                                        x1: x1.clamp(0.0, 1.0),
+                                        y1: y1.clamp(0.0, 1.0),
+                                        x2: x2.clamp(0.0, 1.0),
+                                        y2: y2.clamp(0.0, 1.0),
+                                    });
+                                }
+                            }
                             proj.dirty = true;
                             found = true;
                             break 'outer;
@@ -6541,7 +6556,13 @@ fn handle_mcp_command(
                     "clip_id": clip_id,
                     "property": property.as_str(),
                     "timeline_pos_ns": timeline_pos_ns,
-                    "clip_local_time_ns": keyframe_time_ns
+                    "clip_local_time_ns": keyframe_time_ns,
+                    "bezier_controls": bezier_controls.map(|(x1, y1, x2, y2)| json!({
+                        "x1": x1.clamp(0.0, 1.0),
+                        "y1": y1.clamp(0.0, 1.0),
+                        "x2": x2.clamp(0.0, 1.0),
+                        "y2": y2.clamp(0.0, 1.0),
+                    }))
                 }))
                 .ok();
             if found {

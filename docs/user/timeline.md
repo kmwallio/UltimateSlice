@@ -267,6 +267,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Use the **Show/Hide Keyframes** button on the right side of the track-management bar to toggle the panel (hidden by default).
 - The dopesheet appears as a resizable panel between the timeline tracks and the track-management bar. Drag the split handle to resize the dopesheet area.
 - The dopesheet shows per-property lanes with keyframe points and value-curve overlays; drag points left/right to retime.
+- When a keyframe is selected and has a following keyframe in the same lane, the segment shows Bezier handles. Drag either handle to shape the segment curve live; the exact handle shape is preserved in preview/runtime, while the interpolation dropdown reflects the nearest preset mode.
 - **◀ Prev / Next ▶** buttons jump the playhead to the previous or next keyframe across all properties (same as **Alt+Left/Right**).
 - **Ctrl/Cmd+Click** toggles a keyframe in the current dopesheet selection.
 - **Shift+Click** on a keyframe selects a same-lane range between the anchor and the clicked keyframe.

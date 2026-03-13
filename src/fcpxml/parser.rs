@@ -1588,6 +1588,7 @@ fn apply_native_time_map(
             time_ns: 0,
             value: first_speed,
             interpolation: points[0].interp,
+            bezier_controls: None,
         });
         for segment_idx in 1..segment_speeds.len() {
             let boundary_time_ns = points[segment_idx].time_ns.saturating_sub(base_time_ns);
@@ -1600,11 +1601,13 @@ fn apply_native_time_map(
                 time_ns: boundary_time_ns,
                 value: incoming,
                 interpolation: points[segment_idx - 1].interp,
+                bezier_controls: None,
             });
             speed_keyframes.push(NumericKeyframe {
                 time_ns: boundary_time_ns,
                 value: outgoing,
                 interpolation: points[segment_idx].interp,
+                bezier_controls: None,
             });
         }
         clip.speed_keyframes = speed_keyframes;
@@ -1710,12 +1713,14 @@ fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeK
                                     time_ns: *time_ns,
                                     value: sx,
                                     interpolation: *interp,
+                                    bezier_controls: None,
                                 });
                             } else if let Ok(s) = val_str.parse::<f64>() {
                                 result.scale_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: s,
                                     interpolation: *interp,
+                                    bezier_controls: None,
                                 });
                             }
                         }
@@ -1727,6 +1732,7 @@ fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeK
                                     time_ns: *time_ns,
                                     value: r,
                                     interpolation: *interp,
+                                    bezier_controls: None,
                                 });
                             }
                         }
@@ -1783,6 +1789,7 @@ fn parse_adjust_blend_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyfr
                                     time_ns: *time_ns,
                                     value: v,
                                     interpolation: *interp,
+                                    bezier_controls: None,
                                 });
                             }
                         }
@@ -1889,6 +1896,7 @@ fn parse_adjust_volume_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
                                     time_ns: *time_ns,
                                     value: linear,
                                     interpolation: *interp,
+                                    bezier_controls: None,
                                 });
                             }
                         }
@@ -1944,6 +1952,7 @@ fn parse_adjust_panner_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
                                     time_ns: *time_ns,
                                     value: pan,
                                     interpolation: *interp,
+                                    bezier_controls: None,
                                 });
                             }
                         }
@@ -2069,11 +2078,13 @@ fn apply_native_transform_keyframes(
                 time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: ix,
                 interpolation: interp,
+                bezier_controls: None,
             });
             y_kfs.push(NumericKeyframe {
                 time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: iy,
                 interpolation: interp,
+                bezier_controls: None,
             });
         }
         clip.position_x_keyframes = x_kfs;

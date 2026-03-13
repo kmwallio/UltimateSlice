@@ -816,6 +816,71 @@ fn has_transform_keyframes(clip: &Clip) -> bool {
         || !clip.crop_bottom_keyframes.is_empty()
 }
 
+#[inline]
+fn bezier_component(p1: f64, p2: f64, s: f64) -> f64 {
+    let s2 = s * s;
+    let s3 = s2 * s;
+    let inv = 1.0 - s;
+    3.0 * inv * inv * s * p1 + 3.0 * inv * s2 * p2 + s3
+}
+
+#[inline]
+fn bezier_component_derivative(p1: f64, p2: f64, s: f64) -> f64 {
+    let s2 = s * s;
+    3.0 * (1.0 - s) * (1.0 - s) * p1 + 6.0 * (1.0 - s) * s * (p2 - p1) + 3.0 * s2 * (1.0 - p2)
+}
+
+fn cubic_bezier_ease_controls(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let mut s = t;
+    for _ in 0..8 {
+        let bx = bezier_component(x1, x2, s);
+        let dx = bezier_component_derivative(x1, x2, s);
+        if dx.abs() < 1e-12 {
+            break;
+        }
+        s -= (bx - t) / dx;
+        s = s.clamp(0.0, 1.0);
+    }
+    bezier_component(y1, y2, s)
+}
+
+fn build_custom_eased_t_expr(
+    t_expr: &str,
+    controls: (f64, f64, f64, f64),
+    samples: usize,
+) -> String {
+    let samples = samples.max(4);
+    let (x1, y1, x2, y2) = controls;
+    let mut ys = Vec::with_capacity(samples + 1);
+    for i in 0..=samples {
+        let t = i as f64 / samples as f64;
+        ys.push(cubic_bezier_ease_controls(x1, y1, x2, y2, t));
+    }
+    let mut expr = format!("{:.10}", ys[samples]);
+    for i in (1..=samples).rev() {
+        let t0 = (i - 1) as f64 / samples as f64;
+        let t1 = i as f64 / samples as f64;
+        let y0 = ys[i - 1];
+        let y1s = ys[i];
+        let seg_expr = if (y1s - y0).abs() < 1e-12 {
+            format!("{:.10}", y0)
+        } else {
+            format!(
+                "{y0:.10}+({y1s:.10}-{y0:.10})*(({t_expr}-{t0:.10})/{span:.10})",
+                span = (t1 - t0).max(1e-9)
+            )
+        };
+        expr = format!("if(lt({t_expr},{t1:.10}),{seg_expr},{expr})");
+    }
+    expr
+}
+
 fn build_keyframed_property_expression(
     keyframes: &[NumericKeyframe],
     default_value: f64,
@@ -828,17 +893,24 @@ fn build_keyframed_property_expression(
     let mut sorted: Vec<&NumericKeyframe> = keyframes.iter().collect();
     sorted.sort_by_key(|kf| kf.time_ns);
     // Deduplicate by time (last wins)
-    let mut deduped: Vec<(u64, f64, KeyframeInterpolation)> = Vec::with_capacity(sorted.len());
+    let mut deduped: Vec<(u64, f64, KeyframeInterpolation, Option<(f64, f64, f64, f64)>)> =
+        Vec::with_capacity(sorted.len());
     for kf in &sorted {
         let v = kf.value.clamp(min_value, max_value);
+        let controls = if kf.bezier_controls.is_some() {
+            Some(kf.segment_control_points())
+        } else {
+            None
+        };
         if let Some(last) = deduped.last_mut() {
             if last.0 == kf.time_ns {
                 last.1 = v;
                 last.2 = kf.interpolation;
+                last.3 = controls;
                 continue;
             }
         }
-        deduped.push((kf.time_ns, v, kf.interpolation));
+        deduped.push((kf.time_ns, v, kf.interpolation, controls));
     }
 
     if deduped.is_empty() {
@@ -850,23 +922,27 @@ fn build_keyframed_property_expression(
 
     let mut expr = format!(
         "{:.10}",
-        deduped.last().map(|(_, v, _)| *v).unwrap_or(default_value)
+        deduped.last().map(|(_, v, _, _)| *v).unwrap_or(default_value)
     );
     for i in (1..deduped.len()).rev() {
-        let (left_ns, left_value, interp) = deduped[i - 1];
-        let (right_ns, right_value, _) = deduped[i];
+        let (left_ns, left_value, interp, controls) = deduped[i - 1];
+        let (right_ns, right_value, _, _) = deduped[i];
         let left_s = left_ns as f64 / 1_000_000_000.0;
         let right_s = right_ns as f64 / 1_000_000_000.0;
         let span_s = (right_s - left_s).max(1e-9);
         // Compute normalized t for this segment
         let t_expr = format!("(({time_var})-{left_s:.9})/{span_s:.9}");
         // Apply easing to t
-        let eased_t = match interp {
-            KeyframeInterpolation::Linear => t_expr.clone(),
-            KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
-            KeyframeInterpolation::EaseOut => format!("(1-pow(1-({t_expr}),2))"),
-            KeyframeInterpolation::EaseInOut => {
-                format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
+        let eased_t = if let Some(controls) = controls {
+            build_custom_eased_t_expr(&t_expr, controls, 8)
+        } else {
+            match interp {
+                KeyframeInterpolation::Linear => t_expr.clone(),
+                KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
+                KeyframeInterpolation::EaseOut => format!("(1-pow(1-({t_expr}),2))"),
+                KeyframeInterpolation::EaseInOut => {
+                    format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
+                }
             }
         };
         let segment_expr =
@@ -876,7 +952,7 @@ fn build_keyframed_property_expression(
             right_s = right_s
         );
     }
-    let (first_ns, first_value, _) = deduped[0];
+    let (first_ns, first_value, _, _) = deduped[0];
     let first_s = first_ns as f64 / 1_000_000_000.0;
     format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
 }
@@ -2012,11 +2088,13 @@ mod tests {
                     time_ns: 500_000_000,
                     value: 0.5,
                     interpolation: KeyframeInterpolation::Linear,
+                    bezier_controls: None,
                 },
                 NumericKeyframe {
                     time_ns: 1_000_000_000,
                     value: 1.0,
                     interpolation: KeyframeInterpolation::Linear,
+                    bezier_controls: None,
                 },
             ],
             0.25,
@@ -2036,11 +2114,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.3,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.9,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let filter = build_volume_filter(&clip);
@@ -2065,11 +2145,13 @@ mod tests {
                 time_ns: 0,
                 value: -1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let expr = build_pan_expression(&clip);
@@ -2092,11 +2174,13 @@ mod tests {
                 time_ns: 0,
                 value: -0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let mut graph = String::new();
@@ -2132,6 +2216,7 @@ mod tests {
             time_ns: 0,
             value: 20.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         assert!(has_transform_keyframes(&clip));
 
@@ -2140,6 +2225,7 @@ mod tests {
             time_ns: 0,
             value: 42.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         assert!(has_transform_keyframes(&clip));
     }
@@ -2153,11 +2239,13 @@ mod tests {
                 time_ns: 0,
                 value: -45.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 45.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let f = build_rotation_filter(&clip, false);
@@ -2173,11 +2261,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 100.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let f = build_crop_filter(&clip, 1920, 1080, false);
@@ -2194,11 +2284,13 @@ mod tests {
                 time_ns: 0,
                 value: -0.25,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let f = build_color_filter(&clip);
@@ -2254,11 +2346,13 @@ mod tests {
                 time_ns: 0,
                 value: 3200.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 7800.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.tint_keyframes = vec![
@@ -2266,11 +2360,13 @@ mod tests {
                 time_ns: 0,
                 value: -0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let f = build_temperature_tint_filter(&clip);

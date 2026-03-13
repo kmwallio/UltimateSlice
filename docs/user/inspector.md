@@ -125,6 +125,7 @@ The selected mode applies to new keyframes created by "Set Keyframe" buttons, an
 - The panel renders a per-lane dopesheet for the selected clip: **Scale, Opacity, Position X/Y, Volume, Pan, Speed, Rotate, Crop Left/Right/Top/Bottom**.
 - Use lane checkboxes to show/hide lanes while editing.
 - Lanes now include a value-curve overlay so you can see both **timing** and **value shape** per property.
+- Selected keyframe segments expose Bezier handles in the dopesheet; dragging a handle updates the segment shape live and preserves exact tangent controls for preview/runtime (the interpolation preset UI reflects the nearest mode).
 - Click a keyframe point to select it; drag it horizontally to retime it within the clip duration.
 - **Ctrl/Cmd+Click** toggles a keyframe in the current selection.
 - **Shift+Click** on a keyframe selects a same-lane range between the current anchor keyframe and the clicked keyframe.

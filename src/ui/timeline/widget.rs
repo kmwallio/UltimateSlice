@@ -7734,22 +7734,26 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 2.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.volume_keyframes = vec![NumericKeyframe {
             time_ns: 500_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
 
         let markers = clip_keyframe_marker_geometry(&clip, 200.0, 300.0, TRACK_LABEL_WIDTH, 800.0);
@@ -7774,11 +7778,13 @@ mod tests {
                 time_ns: 200_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
 
@@ -7801,6 +7807,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.scale_keyframes = vec![mk(0)];
         clip.opacity_keyframes = vec![mk(0)];
@@ -7825,6 +7832,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.scale_keyframes = vec![mk(1_000_000_000)];
         clip.position_x_keyframes = vec![mk(1_000_000_000)];
@@ -7843,6 +7851,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.opacity_keyframes = vec![mk(2_000_000_000)];
         clip.crop_bottom_keyframes = vec![mk(5_000_000_000)];
@@ -7858,6 +7867,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.scale_keyframes = vec![mk(100_000_000), mk(500_000_000), mk(1_200_000_000)];
         clip.opacity_keyframes = vec![mk(500_000_000), mk(900_000_000)];
@@ -7876,6 +7886,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.crop_left_keyframes = vec![mk(1_500_000_000)];
         clip.crop_right_keyframes = vec![mk(2_500_000_000)];

@@ -98,6 +98,15 @@ impl KeyframeInterpolation {
             Self::EaseInOut => cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, t),
         }
     }
+
+    pub fn control_points(self) -> (f64, f64, f64, f64) {
+        match self {
+            Self::Linear => (1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0),
+            Self::EaseIn => (0.42, 0.0, 1.0, 1.0),
+            Self::EaseOut => (0.0, 0.0, 0.58, 1.0),
+            Self::EaseInOut => (0.42, 0.0, 0.58, 1.0),
+        }
+    }
 }
 
 /// Evaluate a cubic bezier curve with control points (x1,y1) and (x2,y2)
@@ -144,12 +153,39 @@ fn bezier_component_derivative(p1: f64, p2: f64, s: f64) -> f64 {
     3.0 * (1.0 - s) * (1.0 - s) * p1 + 6.0 * (1.0 - s) * s * (p2 - p1) + 3.0 * s2 * (1.0 - p2)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BezierControls {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NumericKeyframe {
     pub time_ns: u64,
     pub value: f64,
     #[serde(default)]
     pub interpolation: KeyframeInterpolation,
+    /// Optional outgoing custom cubic-bezier controls for the segment from
+    /// this keyframe to the next keyframe in the same lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bezier_controls: Option<BezierControls>,
+}
+
+impl NumericKeyframe {
+    pub fn segment_control_points(&self) -> (f64, f64, f64, f64) {
+        if let Some(ref bezier) = self.bezier_controls {
+            (
+                bezier.x1.clamp(0.0, 1.0),
+                bezier.y1.clamp(0.0, 1.0),
+                bezier.x2.clamp(0.0, 1.0),
+                bezier.y2.clamp(0.0, 1.0),
+            )
+        } else {
+            self.interpolation.control_points()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -545,6 +581,7 @@ impl Clip {
         for kf in keyframes.iter_mut() {
             if kf.time_ns == local_time_ns {
                 kf.interpolation = interpolation;
+                kf.bezier_controls = None;
                 updated += 1;
             }
         }
@@ -755,7 +792,8 @@ impl Clip {
                     return next.value;
                 }
                 let t = (local_timeline_ns.saturating_sub(prev.time_ns)) as f64 / span as f64;
-                let eased_t = prev.interpolation.ease(t);
+                let (x1, y1, x2, y2) = prev.segment_control_points();
+                let eased_t = cubic_bezier_ease(x1, y1, x2, y2, t);
                 return prev.value + (next.value - prev.value) * eased_t;
             }
             prev = next;
@@ -903,11 +941,13 @@ impl Clip {
         if let Some(existing) = keyframes.iter_mut().find(|kf| kf.time_ns == local_time_ns) {
             existing.value = clamped_value;
             existing.interpolation = interpolation;
+            existing.bezier_controls = None;
         } else {
             keyframes.push(NumericKeyframe {
                 time_ns: local_time_ns,
                 value: clamped_value,
                 interpolation,
+                bezier_controls: None,
             });
             keyframes.sort_by_key(|kf| kf.time_ns);
         }
@@ -1509,11 +1549,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let v = Clip::evaluate_keyframed_value(&keyframes, 500_000_000, 9.0);
@@ -1527,11 +1569,13 @@ mod tests {
                 time_ns: 100,
                 value: 2.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 300,
                 value: 6.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         assert!((Clip::evaluate_keyframed_value(&keyframes, 50, 9.0) - 2.0).abs() < 1e-9);
@@ -1545,16 +1589,19 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 0,
                 value: 3.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 10,
                 value: 5.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         assert!((Clip::evaluate_keyframed_value(&keyframes, 0, 0.0) - 3.0).abs() < 1e-9);
@@ -1568,11 +1615,13 @@ mod tests {
                 time_ns: 0,
                 value: -1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let local_ns = 2_500_000_000_u64.saturating_sub(clip.timeline_start);
@@ -1640,16 +1689,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 1.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.position_x_keyframes.push(NumericKeyframe {
             time_ns: 3_000_000_000,
             value: 0.2,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         // next from 0 -> 1s (scale)
@@ -1690,6 +1742,7 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         let one_frame_24fps = 1_000_000_000 / 24; // ~41.6ms
@@ -1713,16 +1766,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 2.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.position_y_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.3,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         // next from 0 -> 1s (deduplicated)
@@ -1746,16 +1802,19 @@ mod tests {
             time_ns: 500_000_000,
             value: 0.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.volume_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.scale_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 1.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         // Volume nav: 0 → 500ms → 2s
@@ -1811,11 +1870,13 @@ mod tests {
                 time_ns: 0,
                 value: -2.0, // clamp to -1.0
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 2.0, // clamp to 1.0
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let local = 500_000_000;
@@ -1941,11 +2002,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::EaseIn,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 100.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         // At t=0.5 (500ms), EaseIn should give a value less than 50 (slow start)
@@ -1961,11 +2024,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::EaseOut,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 100.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         // At t=0.5, EaseOut should give a value greater than 50 (fast start)
@@ -1982,11 +2047,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 100.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
@@ -2019,16 +2086,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 1.2,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::EaseOut,
+            bezier_controls: None,
         });
         clip.position_x_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.3,
             interpolation: KeyframeInterpolation::EaseIn,
+            bezier_controls: None,
         });
 
         let removed = clip.remove_all_phase1_keyframes_at_local_ns(1_000_000_000);
@@ -2045,11 +2115,13 @@ mod tests {
             time_ns: 500_000_000,
             value: 1.1,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.volume_keyframes.push(NumericKeyframe {
             time_ns: 500_000_000,
             value: 0.6,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         let updated = clip.set_phase1_keyframe_interpolation_at_local_ns(
@@ -2074,16 +2146,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 1.4,
             interpolation: KeyframeInterpolation::EaseOut,
+            bezier_controls: None,
         });
         clip.scale_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 2.2,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.75,
             interpolation: KeyframeInterpolation::EaseIn,
+            bezier_controls: None,
         });
 
         let moved = clip.move_all_phase1_keyframes_local_ns(&[(1_000_000_000, 2_000_000_000)]);

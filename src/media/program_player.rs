@@ -10910,11 +10910,13 @@ mod tests {
             time_ns: 0,
             value: 0.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.position_x_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         assert!(!clip_can_fully_occlude(&clip));
     }
@@ -10928,11 +10930,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let vol = clip.volume_at_timeline_ns(2_500_000_000);
@@ -10948,11 +10952,13 @@ mod tests {
                 time_ns: 0,
                 value: 4000.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 8000.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let temp = clip.temperature_at_timeline_ns(2_500_000_000);
@@ -10973,16 +10979,19 @@ mod tests {
                 time_ns: 617_642_015,
                 value: -0.82,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_129_974_732,
                 value: -0.82,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 4_709_284_968,
                 value: 0.67,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
 

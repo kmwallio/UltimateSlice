@@ -1,4 +1,6 @@
-use crate::model::clip::{Clip, KeyframeInterpolation, NumericKeyframe, Phase1KeyframeProperty};
+use crate::model::clip::{
+    BezierControls, Clip, KeyframeInterpolation, NumericKeyframe, Phase1KeyframeProperty,
+};
 use crate::model::project::Project;
 use crate::ui::timeline::TimelineState;
 use crate::undo::SetTrackClipsCommand;
@@ -13,6 +15,7 @@ const ROW_H: f64 = 26.0;
 const LABEL_W: f64 = 110.0;
 const H_PADDING: f64 = 8.0;
 const KEYFRAME_HIT_RADIUS: f64 = 7.0;
+const HANDLE_HIT_RADIUS: f64 = 8.0;
 
 #[derive(Clone, Copy)]
 struct LaneDef {
@@ -90,6 +93,16 @@ struct KeyframePoint {
     local_time_ns: u64,
 }
 
+#[derive(Clone, Copy)]
+struct SegmentHandleGeometry {
+    source_local_ns: u64,
+    source_xy: (f64, f64),
+    next_xy: (f64, f64),
+    out_handle_xy: (f64, f64),
+    in_handle_xy: (f64, f64),
+    controls: (f64, f64, f64, f64),
+}
+
 #[derive(Clone)]
 struct DragState {
     track_id: String,
@@ -102,11 +115,25 @@ struct DragState {
 }
 
 #[derive(Clone)]
+struct HandleDragState {
+    track_id: String,
+    clip_id: String,
+    property: Phase1KeyframeProperty,
+    source_local_ns: u64,
+    start_x: f64,
+    start_y: f64,
+    handle_idx: usize, // 0 = outgoing handle, 1 = incoming handle
+    original_track_clips: Vec<Clip>,
+}
+
+#[derive(Clone)]
 struct EditorState {
     visible_properties: HashSet<Phase1KeyframeProperty>,
     selected_points: HashSet<KeyframePoint>,
     primary_point: Option<KeyframePoint>,
     drag: Option<DragState>,
+    handle_drag: Option<HandleDragState>,
+    handle_preview_controls: Option<(KeyframePoint, (f64, f64, f64, f64))>,
     zoom_x: f64,
     scroll_px: f64,
 }
@@ -118,6 +145,8 @@ impl Default for EditorState {
             selected_points: HashSet::new(),
             primary_point: None,
             drag: None,
+            handle_drag: None,
+            handle_preview_controls: None,
             zoom_x: 1.0,
             scroll_px: 0.0,
         }
@@ -140,6 +169,8 @@ impl KeyframeEditorView {
         state.selected_points.clear();
         state.primary_point = None;
         state.drag = None;
+        state.handle_drag = None;
+        state.handle_preview_controls = None;
     }
 }
 
@@ -220,6 +251,50 @@ fn dropdown_idx_to_interp(idx: u32) -> KeyframeInterpolation {
     }
 }
 
+fn interpolation_control_points(interp: KeyframeInterpolation) -> (f64, f64, f64, f64) {
+    interp.control_points()
+}
+
+fn nearest_interp_for_controls(controls: (f64, f64, f64, f64)) -> KeyframeInterpolation {
+    let candidates = [
+        KeyframeInterpolation::Linear,
+        KeyframeInterpolation::EaseIn,
+        KeyframeInterpolation::EaseOut,
+        KeyframeInterpolation::EaseInOut,
+    ];
+    let mut best = KeyframeInterpolation::Linear;
+    let mut best_dist = f64::INFINITY;
+    for cand in candidates {
+        let p = interpolation_control_points(cand);
+        let dist = (controls.0 - p.0).powi(2)
+            + (controls.1 - p.1).powi(2)
+            + (controls.2 - p.2).powi(2)
+            + (controls.3 - p.3).powi(2);
+        if dist < best_dist {
+            best_dist = dist;
+            best = cand;
+        }
+    }
+    best
+}
+
+fn handle_points_for_controls(
+    source_xy: (f64, f64),
+    next_xy: (f64, f64),
+    controls: (f64, f64, f64, f64),
+) -> ((f64, f64), (f64, f64)) {
+    (
+        (
+            source_xy.0 + (next_xy.0 - source_xy.0) * controls.0,
+            source_xy.1 + (next_xy.1 - source_xy.1) * controls.1,
+        ),
+        (
+            source_xy.0 + (next_xy.0 - source_xy.0) * controls.2,
+            source_xy.1 + (next_xy.1 - source_xy.1) * controls.3,
+        ),
+    )
+}
+
 fn move_keyframe_in_property(
     clip: &mut Clip,
     property: Phase1KeyframeProperty,
@@ -242,6 +317,7 @@ fn move_keyframe_in_property(
             time_ns: to_local_ns,
             value: moved.value,
             interpolation: moved.interpolation,
+            bezier_controls: None,
         });
         keyframes.sort_by_key(|kf| kf.time_ns);
     }
@@ -291,6 +367,48 @@ fn lane_y_for_value(row_y: f64, property: Phase1KeyframeProperty, value: f64) ->
     let y_top = row_y + 4.0;
     let y_bottom = row_y + ROW_H - 4.0;
     y_bottom - t * (y_bottom - y_top)
+}
+
+fn selected_segment_geometry(
+    clip: &Clip,
+    lanes: &[LaneDef],
+    primary: KeyframePoint,
+    width: f64,
+    zoom_x: f64,
+    scroll_px: f64,
+) -> Option<SegmentHandleGeometry> {
+    let lane_idx = lanes.iter().position(|lane| lane.property == primary.property)?;
+    let row_y = HEADER_H + lane_idx as f64 * ROW_H;
+    let duration_ns = clip.duration().max(1);
+    let lane_keyframes = clip.keyframes_for_phase1_property(primary.property);
+    let src_idx = lane_keyframes
+        .iter()
+        .position(|kf| kf.time_ns.min(duration_ns) == primary.local_time_ns)?;
+    if src_idx + 1 >= lane_keyframes.len() {
+        return None;
+    }
+    let src = &lane_keyframes[src_idx];
+    let next = &lane_keyframes[src_idx + 1];
+    let src_local = src.time_ns.min(duration_ns);
+    let next_local = next.time_ns.min(duration_ns);
+    if next_local <= src_local {
+        return None;
+    }
+    let src_x = local_ns_to_x(src_local, duration_ns, width, zoom_x, scroll_px);
+    let src_y = lane_y_for_value(row_y, primary.property, src.value);
+    let next_x = local_ns_to_x(next_local, duration_ns, width, zoom_x, scroll_px);
+    let next_y = lane_y_for_value(row_y, primary.property, next.value);
+    let controls = src.segment_control_points();
+    let (out_handle_xy, in_handle_xy) =
+        handle_points_for_controls((src_x, src_y), (next_x, next_y), controls);
+    Some(SegmentHandleGeometry {
+        source_local_ns: src_local,
+        source_xy: (src_x, src_y),
+        next_xy: (next_x, next_y),
+        out_handle_xy,
+        in_handle_xy,
+        controls,
+    })
 }
 
 fn selected_clip_playhead_fraction(project: &Project, timeline_state: &TimelineState) -> f64 {
@@ -524,6 +642,8 @@ pub fn build_keyframe_editor(
                     if st.primary_point.map(|point| point.property) == Some(lane.property) {
                         st.primary_point = None;
                         st.drag = None;
+                        st.handle_drag = None;
+                        st.handle_preview_controls = None;
                     }
                 }
             }
@@ -545,6 +665,7 @@ pub fn build_keyframe_editor(
             let selected_points = st.selected_points.clone();
             let zoom_x = st.zoom_x;
             let scroll_px = st.scroll_px;
+            let handle_preview_controls = st.handle_preview_controls;
             drop(st);
 
             cr.set_source_rgb(0.10, 0.10, 0.10);
@@ -680,6 +801,52 @@ pub fn build_keyframe_editor(
                     cr.arc(x, y, radius, 0.0, std::f64::consts::TAU);
                     cr.stroke().ok();
                 }
+
+                if let Some(primary_point) = primary {
+                    if primary_point.property == lane.property {
+                        if let Some(geom) = selected_segment_geometry(
+                            clip,
+                            &lanes,
+                            primary_point,
+                            width,
+                            zoom_x,
+                            scroll_px,
+                        ) {
+                            if geom.source_local_ns == primary_point.local_time_ns {
+                                let mut geom = geom;
+                                if let Some((preview_point, controls)) = handle_preview_controls {
+                                    if preview_point == primary_point {
+                                        geom.controls = controls;
+                                        let (out_xy, in_xy) = handle_points_for_controls(
+                                            geom.source_xy,
+                                            geom.next_xy,
+                                            controls,
+                                        );
+                                        geom.out_handle_xy = out_xy;
+                                        geom.in_handle_xy = in_xy;
+                                    }
+                                }
+                                cr.set_source_rgba(lane.color.0, lane.color.1, lane.color.2, 0.55);
+                                cr.set_line_width(1.0);
+                                cr.move_to(geom.source_xy.0, geom.source_xy.1);
+                                cr.line_to(geom.out_handle_xy.0, geom.out_handle_xy.1);
+                                cr.move_to(geom.next_xy.0, geom.next_xy.1);
+                                cr.line_to(geom.in_handle_xy.0, geom.in_handle_xy.1);
+                                cr.stroke().ok();
+
+                                cr.set_source_rgba(0.98, 0.83, 0.20, 0.95);
+                                for (hx, hy) in [geom.out_handle_xy, geom.in_handle_xy] {
+                                    cr.rectangle(hx - 4.0, hy - 4.0, 8.0, 8.0);
+                                    cr.fill().ok();
+                                    cr.set_source_rgba(0.10, 0.10, 0.10, 0.85);
+                                    cr.rectangle(hx - 4.0, hy - 4.0, 8.0, 8.0);
+                                    cr.stroke().ok();
+                                    cr.set_source_rgba(0.98, 0.83, 0.20, 0.95);
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             let local_playhead = clip
@@ -725,6 +892,8 @@ pub fn build_keyframe_editor(
                 state_mut.selected_points.clear();
                 state_mut.primary_point = None;
                 state_mut.drag = None;
+                state_mut.handle_drag = None;
+                state_mut.handle_preview_controls = None;
                 area.queue_draw();
                 return;
             };
@@ -732,6 +901,32 @@ pub fn build_keyframe_editor(
             let proj = project.borrow();
             let clip = &proj.tracks[track_idx].clips[clip_idx];
             let duration_ns = clip.duration().max(1);
+            if let Some(primary) = state_mut.primary_point {
+                if let Some(geom) =
+                    selected_segment_geometry(clip, &lanes, primary, width, zoom_x, scroll_px)
+                {
+                    let d_out_x = x - geom.out_handle_xy.0;
+                    let d_out_y = y - geom.out_handle_xy.1;
+                    let d_in_x = x - geom.in_handle_xy.0;
+                    let d_in_y = y - geom.in_handle_xy.1;
+                    let out_hit =
+                        d_out_x * d_out_x + d_out_y * d_out_y <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS;
+                    let in_hit =
+                        d_in_x * d_in_x + d_in_y * d_in_y <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS;
+                    if out_hit || in_hit {
+                        state_mut.handle_preview_controls = None;
+                        if let Some(kf) = clip
+                            .keyframes_for_phase1_property(primary.property)
+                            .iter()
+                            .find(|kf| kf.time_ns.min(duration_ns) == primary.local_time_ns)
+                        {
+                            interp_dropdown.set_selected(interp_to_dropdown_idx(kf.interpolation));
+                        }
+                        area.queue_draw();
+                        return;
+                    }
+                }
+            }
 
             let mut hit: Option<KeyframePoint> = None;
             for (row_idx, lane) in lanes.iter().enumerate() {
@@ -761,6 +956,7 @@ pub fn build_keyframe_editor(
             let additive = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                 || mods.contains(gtk::gdk::ModifierType::META_MASK);
             let range = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            state_mut.handle_preview_controls = None;
 
             if let Some(point) = hit {
                 if range {
@@ -811,10 +1007,14 @@ pub fn build_keyframe_editor(
                     local_time_ns: x_to_local_ns(x, duration_ns, width, zoom_x, scroll_px),
                 });
                 state_mut.drag = None;
+                state_mut.handle_drag = None;
+                state_mut.handle_preview_controls = None;
             } else {
                 state_mut.selected_points.clear();
                 state_mut.primary_point = None;
                 state_mut.drag = None;
+                state_mut.handle_drag = None;
+                state_mut.handle_preview_controls = None;
             }
             area.queue_draw();
         }
@@ -863,6 +1063,51 @@ pub fn build_keyframe_editor(
             };
             let clip = &proj.tracks[track_idx].clips[clip_idx];
             let duration_ns = clip.duration().max(1);
+            if let Some(geom) = selected_segment_geometry(
+                clip,
+                &lanes,
+                primary_point,
+                width,
+                zoom_x,
+                scroll_px,
+            ) {
+                let d_out_x = x - geom.out_handle_xy.0;
+                let d_out_y = y - geom.out_handle_xy.1;
+                if d_out_x * d_out_x + d_out_y * d_out_y <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS {
+                    state_mut.drag = None;
+                    state_mut.handle_drag = Some(HandleDragState {
+                        track_id,
+                        clip_id,
+                        property: primary_point.property,
+                        source_local_ns: primary_point.local_time_ns,
+                        start_x: x,
+                        start_y: y,
+                        handle_idx: 0,
+                        original_track_clips: proj.tracks[track_idx].clips.clone(),
+                    });
+                    state_mut.handle_preview_controls =
+                        Some((primary_point, interpolation_control_points(clip.keyframes_for_phase1_property(primary_point.property).iter().find(|kf| kf.time_ns.min(duration_ns) == primary_point.local_time_ns).map(|kf| kf.interpolation).unwrap_or(KeyframeInterpolation::Linear))));
+                    return;
+                }
+                let d_in_x = x - geom.in_handle_xy.0;
+                let d_in_y = y - geom.in_handle_xy.1;
+                if d_in_x * d_in_x + d_in_y * d_in_y <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS {
+                    state_mut.drag = None;
+                    state_mut.handle_drag = Some(HandleDragState {
+                        track_id,
+                        clip_id,
+                        property: primary_point.property,
+                        source_local_ns: primary_point.local_time_ns,
+                        start_x: x,
+                        start_y: y,
+                        handle_idx: 1,
+                        original_track_clips: proj.tracks[track_idx].clips.clone(),
+                    });
+                    state_mut.handle_preview_controls =
+                        Some((primary_point, interpolation_control_points(clip.keyframes_for_phase1_property(primary_point.property).iter().find(|kf| kf.time_ns.min(duration_ns) == primary_point.local_time_ns).map(|kf| kf.interpolation).unwrap_or(KeyframeInterpolation::Linear))));
+                    return;
+                }
+            }
             let kx = local_ns_to_x(
                 primary_point.local_time_ns.min(duration_ns),
                 duration_ns,
@@ -893,6 +1138,8 @@ pub fn build_keyframe_editor(
                 start_x: x,
                 original_track_clips: proj.tracks[track_idx].clips.clone(),
             });
+            state_mut.handle_drag = None;
+            state_mut.handle_preview_controls = None;
         }
     });
 
@@ -900,8 +1147,56 @@ pub fn build_keyframe_editor(
         let project = project.clone();
         let state = state.clone();
         let area = area.clone();
-        move |_gesture, dx, _dy| {
+        move |_gesture, dx, dy| {
             let mut state_mut = state.borrow_mut();
+            if let Some(handle_drag) = state_mut.handle_drag.clone() {
+                let width = area.width().max(1) as f64;
+                let zoom_x = state_mut.zoom_x;
+                let scroll_px = state_mut.scroll_px;
+                let lanes = visible_lanes(&state_mut);
+                let proj = project.borrow();
+                let Some(track) = proj.tracks.iter().find(|t| t.id == handle_drag.track_id) else {
+                    return;
+                };
+                let Some(current_idx) = track.clips.iter().position(|c| c.id == handle_drag.clip_id) else {
+                    return;
+                };
+                let clip = &track.clips[current_idx];
+                let primary = KeyframePoint {
+                    property: handle_drag.property,
+                    local_time_ns: handle_drag.source_local_ns,
+                };
+                let Some(geom) =
+                    selected_segment_geometry(clip, &lanes, primary, width, zoom_x, scroll_px)
+                else {
+                    return;
+                };
+
+                let target_x = handle_drag.start_x + dx;
+                let target_y = handle_drag.start_y + dy;
+                let seg_dx = geom.next_xy.0 - geom.source_xy.0;
+                if seg_dx.abs() < f64::EPSILON {
+                    return;
+                }
+                let seg_dy = geom.next_xy.1 - geom.source_xy.1;
+                let nx = ((target_x - geom.source_xy.0) / seg_dx).clamp(0.0, 1.0);
+                let ny = if seg_dy.abs() < f64::EPSILON {
+                    0.5
+                } else {
+                    ((target_y - geom.source_xy.1) / seg_dy).clamp(0.0, 1.0)
+                };
+                let mut controls = geom.controls;
+                if handle_drag.handle_idx == 0 {
+                    controls.0 = nx.min((controls.2 - 0.02).max(0.0));
+                    controls.1 = ny;
+                } else {
+                    controls.2 = nx.max((controls.0 + 0.02).min(1.0));
+                    controls.3 = ny;
+                }
+                state_mut.handle_preview_controls = Some((primary, controls));
+                area.queue_draw();
+                return;
+            }
             let Some(drag_state) = state_mut.drag.clone() else {
                 return;
             };
@@ -982,10 +1277,80 @@ pub fn build_keyframe_editor(
         let on_project_changed = on_project_changed.clone();
         let area = area.clone();
         move |_gesture, _x, _y| {
-            let drag_state_opt = {
+            let (drag_state_opt, handle_drag_opt, handle_preview_opt) = {
                 let mut st = state.borrow_mut();
-                st.drag.take()
+                (
+                    st.drag.take(),
+                    st.handle_drag.take(),
+                    st.handle_preview_controls.take(),
+                )
             };
+            if let Some(handle_drag) = handle_drag_opt {
+                if let Some((preview_point, controls)) = handle_preview_opt {
+                    if preview_point.property == handle_drag.property
+                        && preview_point.local_time_ns == handle_drag.source_local_ns
+                    {
+                        let next_interp = nearest_interp_for_controls(controls);
+                        {
+                            let mut proj = project.borrow_mut();
+                            if let Some(track) =
+                                proj.tracks.iter_mut().find(|t| t.id == handle_drag.track_id)
+                            {
+                                if let Some(current_idx) =
+                                    track.clips.iter().position(|c| c.id == handle_drag.clip_id)
+                                {
+                                    let clip = &mut track.clips[current_idx];
+                                    let keyframes =
+                                        clip.keyframes_for_phase1_property_mut(handle_drag.property);
+                                    if let Some(kf) = keyframes
+                                        .iter_mut()
+                                        .find(|kf| kf.time_ns == handle_drag.source_local_ns)
+                                    {
+                                        let next_bezier = BezierControls {
+                                            x1: controls.0.clamp(0.0, 1.0),
+                                            y1: controls.1.clamp(0.0, 1.0),
+                                            x2: controls.2.clamp(0.0, 1.0),
+                                            y2: controls.3.clamp(0.0, 1.0),
+                                        };
+                                        if kf.interpolation != next_interp
+                                            || kf.bezier_controls
+                                                != Some(next_bezier.clone())
+                                        {
+                                            kf.interpolation = next_interp;
+                                            kf.bezier_controls = Some(next_bezier);
+                                            proj.dirty = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let new_track_clips = {
+                    let proj = project.borrow();
+                    proj.tracks
+                        .iter()
+                        .find(|t| t.id == handle_drag.track_id)
+                        .map(|t| t.clips.clone())
+                        .unwrap_or_default()
+                };
+                if new_track_clips != handle_drag.original_track_clips {
+                    let cmd = SetTrackClipsCommand {
+                        track_id: handle_drag.track_id.clone(),
+                        old_clips: handle_drag.original_track_clips,
+                        new_clips: new_track_clips,
+                        label: "Adjust keyframe easing".to_string(),
+                    };
+                    {
+                        let mut ts = timeline_state.borrow_mut();
+                        let mut proj = project.borrow_mut();
+                        ts.history.execute(Box::new(cmd), &mut proj);
+                    }
+                    on_project_changed();
+                }
+                area.queue_draw();
+                return;
+            }
             let Some(drag_state) = drag_state_opt else {
                 return;
             };
@@ -1306,8 +1671,9 @@ pub fn build_keyframe_editor(
                         .iter_mut()
                         .find(|kf| kf.time_ns == point.local_time_ns)
                     {
-                        if kf.interpolation != interpolation {
+                        if kf.interpolation != interpolation || kf.bezier_controls.is_some() {
                             kf.interpolation = interpolation;
+                            kf.bezier_controls = None;
                             changed_any = true;
                         }
                     }

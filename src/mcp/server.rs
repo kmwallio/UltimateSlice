@@ -698,7 +698,17 @@ fn tools_list() -> Value {
                     "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property to keyframe." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
                     "value": { "type": "number", "description": "Property value at this keyframe time." },
-                    "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." }
+                    "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." },
+                    "bezier_controls": {
+                        "type": "object",
+                        "description": "Optional custom cubic-bezier controls for the outgoing segment from this keyframe. Values are normalized 0.0..1.0.",
+                        "properties": {
+                            "x1": { "type": "number" },
+                            "y1": { "type": "number" },
+                            "x2": { "type": "number" },
+                            "y2": { "type": "number" }
+                        }
+                    }
                 },
                 "required": ["clip_id", "property", "value"]
             }
@@ -1264,6 +1274,14 @@ fn dispatch_tool_payload(
                 .get("interpolation")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            bezier_controls: args.get("bezier_controls").and_then(|v| {
+                let obj = v.as_object()?;
+                let x1 = obj.get("x1")?.as_f64()?;
+                let y1 = obj.get("y1")?.as_f64()?;
+                let x2 = obj.get("x2")?.as_f64()?;
+                let y2 = obj.get("y2")?.as_f64()?;
+                Some((x1, y1, x2, y2))
+            }),
             reply: tx,
         },
         "remove_clip_keyframe" => McpCommand::RemoveClipKeyframe {

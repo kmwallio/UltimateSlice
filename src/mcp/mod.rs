@@ -236,6 +236,7 @@ pub enum McpCommand {
         timeline_pos_ns: Option<u64>,
         value: f64,
         interpolation: Option<String>,
+        bezier_controls: Option<(f64, f64, f64, f64)>,
         reply: SyncSender<Value>,
     },
     RemoveClipKeyframe {

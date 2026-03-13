@@ -3533,11 +3533,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 2.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -3562,6 +3564,7 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 2.0,
             interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+            bezier_controls: None,
         }];
         track.add_clip(clip);
         project.tracks.push(track);
@@ -3582,11 +3585,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 2.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -3815,16 +3820,19 @@ mod tests {
             time_ns: 250_000_000,
             value: 0.7,
             interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+            bezier_controls: None,
         }];
         clip.volume_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 250_000_000,
             value: 0.9,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.pan_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 250_000_000,
             value: 0.2,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         track.add_clip(clip);
         project.tracks.push(track);
@@ -3870,11 +3878,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.5,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -3957,11 +3967,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.5,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4076,62 +4088,74 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.75,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.opacity_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 250_000_000,
             value: 0.5,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.position_x_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 500_000_000,
             value: 0.25,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.position_y_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 500_000_000,
             value: -0.5,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.volume_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 0,
             value: 0.8,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.pan_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 500_000_000,
             value: -0.25,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.brightness_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 0,
             value: -0.2,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.contrast_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 1.4,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.saturation_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.7,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.temperature_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 7500.0,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.tint_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.3,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         project.dirty = true;
 
@@ -4462,11 +4486,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.scale_keyframes = vec![
@@ -4474,11 +4500,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 5_000_000_000,
                 value: 1.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.volume_keyframes = vec![
@@ -4486,11 +4514,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.pan_keyframes = vec![
@@ -4498,11 +4528,13 @@ mod tests {
                 time_ns: 0,
                 value: -0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.rotate_keyframes = vec![
@@ -4510,11 +4542,13 @@ mod tests {
                 time_ns: 0,
                 value: -30.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 45.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.crop_left_keyframes = vec![
@@ -4522,11 +4556,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 120.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4609,11 +4645,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.3,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.pan_keyframes = vec![
@@ -4621,11 +4659,13 @@ mod tests {
                 time_ns: 0,
                 value: -0.2,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.4,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4669,11 +4709,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 1.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.rotate_keyframes = vec![
@@ -4681,11 +4723,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 45.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.opacity_keyframes = vec![
@@ -4693,11 +4737,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4939,11 +4985,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 500_000_000,
                 value: 0.75,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+                bezier_controls: None,
             },
         ];
         let mut clip_b = Clip::new(
@@ -4960,11 +5008,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 750_000_000,
                 value: 1.2,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip_a);
@@ -5102,11 +5152,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 500_000_000,
                 value: 0.8,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseIn,
+                bezier_controls: None,
             },
         ];
         video_1.add_clip(clip_a);
@@ -5126,11 +5178,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 750_000_000,
                 value: 1.15,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+                bezier_controls: None,
             },
         ];
         video_2.add_clip(clip_b);
@@ -5149,6 +5203,7 @@ mod tests {
             time_ns: 250_000_000,
             value: -0.25,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         audio_1.add_clip(clip_c);
 
@@ -5434,6 +5489,7 @@ mod tests {
             time_ns: 0,
             value: 0.8,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         track.add_clip(clip);
         project.tracks.push(track);
