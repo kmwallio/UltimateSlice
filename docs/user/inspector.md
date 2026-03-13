@@ -118,6 +118,23 @@ The selected mode applies to new keyframes created by "Set Keyframe" buttons, an
 - Keyboard shortcuts: **Alt+Left** / **Alt+Right** to navigate between keyframes.
 - Click a keyframe tick on the timeline clip body to select the clip and seek the playhead to that keyframe.
 
+### Keyframes panel (dopesheet, phase 1)
+
+- A dedicated **Keyframes** panel appears in the right sidebar (below the Transitions section). Use the panel toggle button to hide/show it.
+- The panel renders a per-lane dopesheet for the selected clip: **Scale, Opacity, Position X/Y, Volume, Pan, Speed, Rotate, Crop Left/Right/Top/Bottom**.
+- Use lane checkboxes to show/hide lanes while editing.
+- Lanes now include a value-curve overlay so you can see both **timing** and **value shape** per property.
+- Click a keyframe point to select it; drag it horizontally to retime it within the clip duration.
+- **Ctrl/Cmd+Click** toggles a keyframe in the current selection.
+- **Shift+Click** on a keyframe selects a same-lane range between the current anchor keyframe and the clicked keyframe.
+- **Add @ Playhead** inserts/updates a keyframe on the selected lane at the current playhead position, using the panel's interpolation mode.
+- **Remove** deletes the current keyframe selection.
+- **Apply Interp** applies the chosen interpolation mode to the current keyframe selection.
+- Keyboard edits (when the keyframes panel has focus): **Delete/Backspace** removes selected keyframe(s); **Left/Right** nudges selected keyframe(s) by 1 frame; **Shift+Left/Right** nudges selected keyframe(s) by 10 frames.
+- Time-scale controls: **− / + / 100%** buttons adjust or reset dopesheet zoom. **Ctrl+Scroll** also zooms the dopesheet, centered around the playhead position.
+- Dopesheet panning: use the mouse wheel/trackpad scroll gesture over the panel to pan across time when zoomed in.
+- Keyframe panel edits participate in global undo/redo history.
+
 ### Animation mode (Record Keyframes)
 
 - The **⏺ Record Keyframes** toggle button (or **Shift+K**) activates animation mode.

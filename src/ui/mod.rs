@@ -1,5 +1,6 @@
 pub mod color_scopes;
 pub mod inspector;
+pub mod keyframe_editor;
 pub mod media_browser;
 pub mod preferences;
 pub mod preview;

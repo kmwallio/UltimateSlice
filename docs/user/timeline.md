@@ -262,9 +262,23 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Preview shows transition fade ramps at clip boundaries for cross-dissolve markers.
 - Transitions are designed to be extensible: future transition types will appear in the same pane.
 
+## Keyframes panel (dopesheet)
+
+- Use the **Keyframes** pane on the right sidebar to edit keyframe timing visually for the currently selected clip.
+- The dopesheet shows per-property lanes with keyframe points and value-curve overlays; drag points left/right to retime.
+- **Ctrl/Cmd+Click** toggles a keyframe in the current dopesheet selection.
+- **Shift+Click** on a keyframe selects a same-lane range between the anchor and the clicked keyframe.
+- **Add @ Playhead** adds a keyframe at the playhead on the selected lane.
+- **Remove** deletes selected keyframe(s).
+- **Apply Interp** applies the selected interpolation mode (Linear / Ease In / Ease Out / Ease In/Out) to selected keyframe(s).
+- Lane visibility toggles let you focus on specific animated properties while editing.
+- Keyboard edits (panel focus): **Delete/Backspace** removes selected keyframe(s), **Left/Right** nudges by 1 frame, and **Shift+Left/Right** nudges by 10 frames.
+- Time-scale controls: use **− / + / 100%** in the panel header row or **Ctrl+Scroll** over the dopesheet to zoom in/out.
+- Scroll over the dopesheet to pan along time when zoomed in.
+
 ## Undo / Redo
 
-All clip moves, trims, splits, deletions, track add/remove operations, and transition application are undoable.
+All clip moves, trims, splits, deletions, track add/remove operations, transition application, and keyframe panel edits are undoable.
 
 - `Ctrl+Z` — Undo
 - `Ctrl+Y` or `Ctrl+Shift+Z` — Redo

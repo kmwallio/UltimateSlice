@@ -88,6 +88,13 @@ All Inspector controls are mouse-driven sliders and text fields. Transform edits
 | `Shift + Arrow` | Nudge selected clip position by 0.1 |
 | `+` | Increase selected clip scale |
 | `-` | Decrease selected clip scale |
+| `Ctrl`/`Cmd` + Click *(Keyframes panel focused)* | Toggle clicked keyframe in dopesheet selection |
+| `Shift+Click` *(Keyframes panel focused)* | Select same-lane keyframe range from anchor to clicked keyframe |
+| `Delete` / `Backspace` *(Keyframes panel focused)* | Remove selected dopesheet keyframe(s) |
+| `←` / `→` *(Keyframes panel focused)* | Nudge selected dopesheet keyframe(s) by 1 frame |
+| `Shift + ←` / `Shift + →` *(Keyframes panel focused)* | Nudge selected dopesheet keyframe(s) by 10 frames |
+| `Ctrl + Scroll` *(Keyframes panel focused)* | Zoom dopesheet time scale in/out |
+| `Scroll` *(Keyframes panel focused)* | Pan dopesheet time view |
 
 ---
 

@@ -7,7 +7,9 @@ use crate::model::track::TrackKind;
 use crate::recent;
 use crate::ui::timecode;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
-use crate::ui::{inspector, media_browser, preferences, preview, program_monitor, toolbar};
+use crate::ui::{
+    inspector, keyframe_editor, media_browser, preferences, preview, program_monitor, toolbar,
+};
 use crate::undo::TrackClipsChange;
 use glib;
 use gtk4::prelude::*;
@@ -367,8 +369,10 @@ fn build_source_placement_plan_by_track_id(
     source_info: SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
 ) -> SourcePlacementPlan {
-    let auto_link_pair =
-        source_monitor_auto_link_av && !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
+    let auto_link_pair = source_monitor_auto_link_av
+        && !source_info.is_audio_only
+        && source_info.has_audio
+        && !source_info.is_image;
     let video_track_idx =
         find_preferred_track_index_by_id(project, preferred_track_id, TrackKind::Video);
     let audio_track_idx =
@@ -1855,6 +1859,8 @@ pub fn build_window(
     // timeline_panel_cell is shared between the inspector's on_audio_changed callback
     // and the program monitor poll timer. Declare it early (filled in after timeline build).
     let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+    let keyframe_editor_cell: Rc<RefCell<Option<Rc<keyframe_editor::KeyframeEditorView>>>> =
+        Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
     let transform_overlay_cell: Rc<
         RefCell<Option<Rc<crate::ui::transform_overlay::TransformOverlay>>>,
@@ -2189,6 +2195,7 @@ pub fn build_window(
         let inspector_view = inspector_view.clone();
         let project = project.clone();
         let transform_overlay_cell = transform_overlay_cell.clone();
+        let keyframe_editor_cell = keyframe_editor_cell.clone();
         let timeline_state_for_sel = timeline_state.clone();
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
@@ -2201,16 +2208,22 @@ pub fn build_window(
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
                     sync_transform_overlay_to_playhead(to, &proj, clip_id.as_deref(), playhead_ns);
                 }
+                if let Some(ref editor) = *keyframe_editor_cell.borrow() {
+                    editor.clear_selection();
+                    editor.queue_redraw();
+                }
             }));
     }
     {
         let prog_player = prog_player.clone();
         let pending_program_seek_ticket = pending_program_seek_ticket.clone();
+        let keyframe_editor_cell = keyframe_editor_cell.clone();
         timeline_state.borrow_mut().on_seek = Some(Rc::new(move |ns| {
             let ticket = pending_program_seek_ticket.get().wrapping_add(1);
             pending_program_seek_ticket.set(ticket);
             let prog_player_seek = prog_player.clone();
             let pending_program_seek_ticket_check = pending_program_seek_ticket.clone();
+            let keyframe_editor_cell = keyframe_editor_cell.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
                 if pending_program_seek_ticket_check.get() != ticket {
                     return;
@@ -2233,6 +2246,9 @@ pub fn build_window(
                             pp.borrow().complete_playing_pulse();
                         },
                     );
+                }
+                if let Some(ref editor) = *keyframe_editor_cell.borrow() {
+                    editor.queue_redraw();
                 }
             });
         }));
@@ -2434,7 +2450,8 @@ pub fn build_window(
                         (0, duration_ns)
                     }
                 };
-                let auto_link_pair = !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
+                let auto_link_pair =
+                    !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
                 let video_track_idx =
                     find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Video);
                 let audio_track_idx =
@@ -2483,7 +2500,11 @@ pub fn build_window(
                             TrackKind::Audio => ClipKind::Audio,
                         }
                     };
-                    let media_dur = if source_info.is_image { None } else { Some(duration_ns) };
+                    let media_dur = if source_info.is_image {
+                        None
+                    } else {
+                        Some(duration_ns)
+                    };
                     let clip = build_source_clip(
                         &source_path,
                         src_in,
@@ -2993,6 +3014,7 @@ pub fn build_window(
         let picture_a_poll = picture_a.clone();
         let picture_b_poll = picture_b.clone();
         let transform_overlay_poll = transform_overlay_cell.clone();
+        let keyframe_editor_poll = keyframe_editor_cell.clone();
         let timeline_state_poll = timeline_state.clone();
         let inspector_view_poll = inspector_view.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
@@ -3180,6 +3202,9 @@ pub fn build_window(
                     let proj = project.borrow();
                     inspector_view_poll.update_keyframed_sliders(&proj, pos_ns);
                 }
+                if let Some(ref editor) = *keyframe_editor_poll.borrow() {
+                    editor.queue_redraw();
+                }
                 last_pos_ns_c.set(pos_ns);
             }
             glib::ControlFlow::Continue
@@ -3341,7 +3366,11 @@ pub fn build_window(
                     let timeline_start = proj.tracks[primary_target.track_index].duration();
                     let magnetic_mode_for_placement =
                         magnetic_mode && !placement_plan.uses_linked_pair();
-                    let media_dur_opt = if source_info.is_image { None } else { Some(media_dur) };
+                    let media_dur_opt = if source_info.is_image {
+                        None
+                    } else {
+                        Some(media_dur)
+                    };
                     for (track_idx, clip) in build_source_clips_for_plan(
                         &placement_plan,
                         &path,
@@ -3412,7 +3441,11 @@ pub fn build_window(
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
-                let media_dur_opt = if source_info.is_image { None } else { Some(media_dur) };
+                let media_dur_opt = if source_info.is_image {
+                    None
+                } else {
+                    Some(media_dur)
+                };
                 for (track_idx, clip) in build_source_clips_for_plan(
                     &placement_plan,
                     &path,
@@ -3511,7 +3544,11 @@ pub fn build_window(
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
-                let media_dur_opt = if source_info.is_image { None } else { Some(media_dur) };
+                let media_dur_opt = if source_info.is_image {
+                    None
+                } else {
+                    Some(media_dur)
+                };
                 for (track_idx, clip) in build_source_clips_for_plan(
                     &placement_plan,
                     &path,
@@ -3700,6 +3737,7 @@ pub fn build_window(
         let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
         let transform_overlay_cell = transform_overlay_cell.clone();
+        let keyframe_editor_cell = keyframe_editor_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
         let picture_a = picture_a.clone();
@@ -3746,6 +3784,9 @@ pub fn build_window(
                 let playhead_ns = timeline_state.borrow().playhead_ns;
                 inspector_view.update(&proj, selected.as_deref(), playhead_ns);
                 inspector_view.update_keyframe_indicator(&proj, playhead_ns);
+                if let Some(ref editor) = *keyframe_editor_cell.borrow() {
+                    editor.queue_redraw();
+                }
 
                 // Sync transform overlay: show handles when a clip is selected,
                 // using keyframe-interpolated values at the current playhead.
@@ -4154,6 +4195,27 @@ pub fn build_window(
     transitions_revealer.set_child(Some(&transitions_list));
     right_sidebar.append(&transitions_revealer);
 
+    let keyframes_header = gtk::Box::new(Orientation::Horizontal, 6);
+    let keyframes_title = gtk::Label::new(Some("Keyframes"));
+    keyframes_title.set_halign(gtk::Align::Start);
+    keyframes_title.set_hexpand(true);
+    let keyframes_toggle = gtk::Button::with_label("Hide Keyframes");
+    keyframes_toggle.add_css_class("small-btn");
+    keyframes_header.append(&keyframes_title);
+    keyframes_header.append(&keyframes_toggle);
+    right_sidebar.append(&keyframes_header);
+
+    let keyframes_revealer = gtk::Revealer::new();
+    keyframes_revealer.set_reveal_child(true);
+    let (keyframe_editor_widget, keyframe_editor_view) = keyframe_editor::build_keyframe_editor(
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+    );
+    keyframes_revealer.set_child(Some(&keyframe_editor_widget));
+    right_sidebar.append(&keyframes_revealer);
+    *keyframe_editor_cell.borrow_mut() = Some(keyframe_editor_view);
+
     {
         let revealer = transitions_revealer.clone();
         transitions_toggle.connect_clicked(move |btn| {
@@ -4163,6 +4225,18 @@ pub fn build_window(
                 "Hide Transitions"
             } else {
                 "Show Transitions"
+            });
+        });
+    }
+    {
+        let revealer = keyframes_revealer.clone();
+        keyframes_toggle.connect_clicked(move |btn| {
+            let show = !revealer.reveals_child();
+            revealer.set_reveal_child(show);
+            btn.set_label(if show {
+                "Hide Keyframes"
+            } else {
+                "Show Keyframes"
             });
         });
     }
