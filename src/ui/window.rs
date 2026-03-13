@@ -457,6 +457,7 @@ fn build_source_clips_for_plan(
     source_out_ns: u64,
     timeline_start_ns: u64,
     source_timecode_base_ns: Option<u64>,
+    media_duration_ns: Option<u64>,
 ) -> Vec<(usize, Clip)> {
     plan.targets
         .iter()
@@ -469,6 +470,7 @@ fn build_source_clips_for_plan(
                 target.clip_kind.clone(),
                 source_timecode_base_ns,
                 plan.link_group_id.as_deref(),
+                media_duration_ns,
             );
             if target.mute_embedded_audio {
                 clip.volume = 0.0;
@@ -486,6 +488,7 @@ fn build_source_clip(
     kind: ClipKind,
     source_timecode_base_ns: Option<u64>,
     link_group_id: Option<&str>,
+    media_duration_ns: Option<u64>,
 ) -> Clip {
     let mut clip = Clip::new(
         source_path.to_string(),
@@ -497,6 +500,7 @@ fn build_source_clip(
     clip.source_out = source_out_ns;
     clip.source_timecode_base_ns = source_timecode_base_ns;
     clip.link_group_id = link_group_id.map(str::to_string);
+    clip.media_duration_ns = media_duration_ns;
     clip
 }
 
@@ -637,6 +641,7 @@ mod tests {
             300,
             1_000,
             source_info.source_timecode_base_ns,
+            None,
         );
         let link_group_id = plan.link_group_id.as_deref();
         assert_eq!(created.len(), 2);
@@ -853,6 +858,7 @@ mod tests {
             ClipKind::Video,
             None,
             None,
+            None,
         ));
         project.tracks[1].add_clip(build_source_clip(
             "/tmp/existing-audio.wav",
@@ -860,6 +866,7 @@ mod tests {
             1_000_000_000,
             1_500_000_000,
             ClipKind::Audio,
+            None,
             None,
             None,
         ));
@@ -876,6 +883,7 @@ mod tests {
             source_in,
             source_out,
             playhead,
+            None,
             None,
         ) {
             let _ = insert_clip_at_playhead_on_track(
@@ -923,6 +931,7 @@ mod tests {
             ClipKind::Video,
             None,
             None,
+            None,
         ));
         project.tracks[1].add_clip(build_source_clip(
             "/tmp/existing-audio-overwrite.wav",
@@ -930,6 +939,7 @@ mod tests {
             2_000_000_000,
             0,
             ClipKind::Audio,
+            None,
             None,
             None,
         ));
@@ -946,6 +956,7 @@ mod tests {
             source_in,
             source_out,
             range_start,
+            None,
             None,
         ) {
             let _ = overwrite_clip_range_on_track(
@@ -2416,6 +2427,7 @@ pub fn build_window(
                             ClipKind::Video,
                             source_info.source_timecode_base_ns,
                             Some(link_group_id.as_str()),
+                            Some(duration_ns),
                         );
                         proj.tracks[video_idx].add_clip(video_clip);
                     }
@@ -2428,6 +2440,7 @@ pub fn build_window(
                             ClipKind::Audio,
                             source_info.source_timecode_base_ns,
                             Some(link_group_id.as_str()),
+                            Some(duration_ns),
                         );
                         proj.tracks[audio_idx].add_clip(audio_clip);
                     }
@@ -2450,6 +2463,7 @@ pub fn build_window(
                         kind,
                         source_info.source_timecode_base_ns,
                         None,
+                        Some(duration_ns),
                     );
                     let _ = add_clip_to_track(track, clip, magnetic_mode);
                     proj.dirty = true;
@@ -3270,6 +3284,7 @@ pub fn build_window(
             let path = marks.path.clone();
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
+            let media_dur = marks.duration_ns;
             let source_info = SourcePlacementInfo {
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
@@ -3303,6 +3318,7 @@ pub fn build_window(
                         out_ns,
                         timeline_start,
                         source_info.source_timecode_base_ns,
+                        Some(media_dur),
                     ) {
                         let _ = add_clip_to_track(
                             &mut proj.tracks[track_idx],
@@ -3332,6 +3348,7 @@ pub fn build_window(
             let path = marks.path.clone();
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
+            let media_dur = marks.duration_ns;
             let source_info = SourcePlacementInfo {
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
@@ -3370,6 +3387,7 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    Some(media_dur),
                 ) {
                     track_changes.push(insert_clip_at_playhead_on_track(
                         &mut proj.tracks[track_idx],
@@ -3424,6 +3442,7 @@ pub fn build_window(
             let path = marks.path.clone();
             let in_ns = marks.in_ns;
             let out_ns = marks.out_ns;
+            let media_dur = marks.duration_ns;
             let source_info = SourcePlacementInfo {
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
@@ -3465,6 +3484,7 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    Some(media_dur),
                 ) {
                     track_changes.push(overwrite_clip_range_on_track(
                         &mut proj.tracks[track_idx],
@@ -5520,6 +5540,7 @@ fn handle_mcp_command(
                         source_out_ns,
                         timeline_start_ns,
                         source_info.source_timecode_base_ns,
+                        None,
                     ) {
                         created_clip_ids.push(clip.id.clone());
                         let _ = add_clip_to_track(
@@ -5867,6 +5888,7 @@ fn handle_mcp_command(
                 if let Some(idx) = track.clips.iter().position(|c| c.id == clip_id) {
                     track.clips[idx].source_in = source_in_ns;
                     track.clips[idx].source_out = source_out_ns;
+                    track.clips[idx].clamp_source_out();
                     if magnetic_mode {
                         track.compact_gap_free();
                     }
@@ -5892,8 +5914,13 @@ fn handle_mcp_command(
             for track in proj.tracks.iter_mut() {
                 if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
                     let new_in = (clip.source_in as i64 + delta_ns).max(0) as u64;
-                    let new_out =
+                    let mut new_out =
                         (clip.source_out as i64 + delta_ns).max(new_in as i64 + 1_000_000) as u64;
+                    if let Some(max) = clip.max_source_out() {
+                        if new_out > max {
+                            new_out = max;
+                        }
+                    }
                     clip.source_in = new_in;
                     clip.source_out = new_out;
                     proj.dirty = true;
@@ -5950,6 +5977,7 @@ fn handle_mcp_command(
                         if let Some(li) = left_idx {
                             track.clips[li].source_out =
                                 (track.clips[li].source_out as i64 + delta_ns).max(0) as u64;
+                            track.clips[li].clamp_source_out();
                         }
                         if let Some(ri) = right_idx {
                             track.clips[ri].source_in =
@@ -6879,6 +6907,7 @@ fn handle_mcp_command(
                     source_out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    None,
                 ) {
                     created_clip_ids.push(clip.id.clone());
                     track_changes.push(insert_clip_at_playhead_on_track(
@@ -6985,6 +7014,7 @@ fn handle_mcp_command(
                     source_out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    None,
                 ) {
                     created_clip_ids.push(clip.id.clone());
                     track_changes.push(overwrite_clip_range_on_track(

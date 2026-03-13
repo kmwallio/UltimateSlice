@@ -486,6 +486,11 @@ pub struct Clip {
     /// When present, source clip start timecode is `source_timecode_base_ns + source_in`.
     #[serde(default)]
     pub source_timecode_base_ns: Option<u64>,
+    /// Full probed duration of the source media file, in nanoseconds.
+    /// Used to clamp `source_out` during trim operations so clips cannot
+    /// be expanded beyond their actual running time.
+    #[serde(default)]
+    pub media_duration_ns: Option<u64>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -666,6 +671,7 @@ impl Clip {
             group_id: None,
             link_group_id: None,
             source_timecode_base_ns: None,
+            media_duration_ns: None,
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
@@ -678,6 +684,34 @@ impl Clip {
     /// Raw source material duration (source_out − source_in), unaffected by speed.
     pub fn source_duration(&self) -> u64 {
         self.source_out.saturating_sub(self.source_in)
+    }
+
+    /// Maximum allowed `source_out` value, derived from the probed media
+    /// duration.  Returns `None` when the media duration is unknown (legacy
+    /// clips or FCPXML imports without a probe result).
+    pub fn max_source_out(&self) -> Option<u64> {
+        self.media_duration_ns
+    }
+
+    /// Clamp `source_out` so it does not exceed the source media duration.
+    pub fn clamp_source_out(&mut self) {
+        if let Some(max) = self.max_source_out() {
+            if self.source_out > max {
+                self.source_out = max;
+            }
+        }
+    }
+
+    /// Convert a timeline-space delta to source-space using the clip's speed.
+    pub fn timeline_to_source_delta(&self, timeline_delta_ns: i64) -> i64 {
+        let speed = self.speed.max(0.01);
+        (timeline_delta_ns as f64 * speed) as i64
+    }
+
+    /// Convert a timeline-space duration to source-space using the clip's speed.
+    pub fn timeline_to_source_dur(&self, timeline_dur_ns: u64) -> u64 {
+        let speed = self.speed.max(0.01);
+        (timeline_dur_ns as f64 * speed) as u64
     }
 
     pub fn evaluate_keyframed_value(
@@ -2039,5 +2073,61 @@ mod tests {
         assert_eq!(clip.scale_keyframes[0].time_ns, 2_000_000_000);
         assert!((clip.scale_keyframes[0].value - 1.4).abs() < 1e-9);
         assert_eq!(clip.opacity_keyframes[0].time_ns, 2_000_000_000);
+    }
+
+    #[test]
+    fn test_timeline_to_source_delta_speed_1() {
+        let clip = make_test_clip(10_000_000_000, 0);
+        assert_eq!(clip.timeline_to_source_delta(1_000_000_000), 1_000_000_000);
+        assert_eq!(clip.timeline_to_source_delta(-500_000_000), -500_000_000);
+    }
+
+    #[test]
+    fn test_timeline_to_source_delta_speed_2() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 2.0;
+        // At 2x speed, 1s on timeline = 2s in source
+        assert_eq!(clip.timeline_to_source_delta(1_000_000_000), 2_000_000_000);
+        assert_eq!(clip.timeline_to_source_delta(-1_000_000_000), -2_000_000_000);
+    }
+
+    #[test]
+    fn test_timeline_to_source_dur_half_speed() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 0.5;
+        // At 0.5x speed, 2s on timeline = 1s in source
+        assert_eq!(clip.timeline_to_source_dur(2_000_000_000), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_clamp_source_out_with_media_duration() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.media_duration_ns = Some(5_000_000_000);
+        clip.clamp_source_out();
+        assert_eq!(clip.source_out, 5_000_000_000);
+    }
+
+    #[test]
+    fn test_clamp_source_out_without_media_duration() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        // No media_duration_ns — clamp is a no-op
+        clip.clamp_source_out();
+        assert_eq!(clip.source_out, 10_000_000_000);
+    }
+
+    #[test]
+    fn test_clamp_source_out_already_within_bounds() {
+        let mut clip = make_test_clip(3_000_000_000, 0);
+        clip.media_duration_ns = Some(5_000_000_000);
+        clip.clamp_source_out();
+        assert_eq!(clip.source_out, 3_000_000_000);
+    }
+
+    #[test]
+    fn test_max_source_out() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        assert_eq!(clip.max_source_out(), None);
+        clip.media_duration_ns = Some(8_000_000_000);
+        assert_eq!(clip.max_source_out(), Some(8_000_000_000));
     }
 }

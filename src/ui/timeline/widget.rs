@@ -3550,8 +3550,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             // 1. Update the trimmed clip
                             let mut new_ts = original_timeline_start;
                             if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                let source_drag = clip.timeline_to_source_delta(snapped_drag);
                                 let new_source_in =
-                                    (original_source_in as i64 + snapped_drag).max(0) as u64;
+                                    (original_source_in as i64 + source_drag).max(0) as u64;
                                 // Check valid duration (source_in < source_out)
                                 if new_source_in < clip.source_out.saturating_sub(1_000_000) {
                                     clip.source_in = new_source_in;
@@ -3624,7 +3625,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
                                 if new_timeline_end > tl_start + 1_000_000 {
                                     let new_dur = new_timeline_end - tl_start;
-                                    let new_source_out = orig_clip.source_in + new_dur;
+                                    let new_source_dur = orig_clip.timeline_to_source_dur(new_dur);
+                                    let mut new_source_out = orig_clip.source_in + new_source_dur;
+                                    if let Some(max) = orig_clip.max_source_out() {
+                                        new_source_out = new_source_out.min(max);
+                                    }
 
                                     // Update target clip
                                     if let Some(clip) =
@@ -3663,8 +3668,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                     track.clips.iter_mut().find(|c| &c.id == clip_id)
                                 {
                                     if snapped_ns > clip.source_in + 1_000_000 {
-                                        let offset = snapped_ns.saturating_sub(clip.timeline_start);
-                                        clip.source_out = clip.source_in + offset;
+                                        let tl_offset = snapped_ns.saturating_sub(clip.timeline_start);
+                                        let source_offset = clip.timeline_to_source_dur(tl_offset);
+                                        clip.source_out = clip.source_in + source_offset;
+                                        clip.clamp_source_out();
                                     }
                                 }
                             }
@@ -3698,21 +3705,20 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 if let Some(left) =
                                     track.clips.iter_mut().find(|c| &c.id == &left_clip_id)
                                 {
-                                    let new_dur = new_cut_pos - left.timeline_start;
-                                    left.source_out = left.source_in + new_dur;
+                                    let new_tl_dur = new_cut_pos - left.timeline_start;
+                                    let new_source_dur = left.timeline_to_source_dur(new_tl_dur);
+                                    left.source_out = left.source_in + new_source_dur;
+                                    left.clamp_source_out();
                                 }
                                 // Update Right
                                 if let Some(right) =
                                     track.clips.iter_mut().find(|c| &c.id == &right_clip_id)
                                 {
-                                    // Right source_in increases if we move cut right.
+                                    let source_drag = right.timeline_to_source_delta(drag_ns);
                                     let new_right_in =
-                                        (original_right_in as i64 + drag_ns).max(0) as u64;
-                                    // Basic bounds check (simplified)
-                                    // if new_right_in < right.source_out.saturating_sub(1_000_000) {
+                                        (original_right_in as i64 + source_drag).max(0) as u64;
                                     right.source_in = new_right_in;
                                     right.timeline_start = new_cut_pos;
-                                    // }
                                 }
                             }
                         }
@@ -3724,14 +3730,23 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         original_source_out,
                         drag_start_ns,
                     } => {
-                        let delta = current_ns as i64 - drag_start_ns as i64;
-                        let new_source_in = (original_source_in as i64 + delta).max(0) as u64;
-                        let new_source_out = (original_source_out as i64 + delta)
-                            .max(new_source_in as i64 + 1_000_000)
-                            as u64;
+                        let tl_delta = current_ns as i64 - drag_start_ns as i64;
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.tracks.iter_mut().find(|t| &t.id == track_id) {
                             if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                let source_delta = clip.timeline_to_source_delta(tl_delta);
+                                let mut new_source_in = (original_source_in as i64 + source_delta).max(0) as u64;
+                                let mut new_source_out = (original_source_out as i64 + source_delta)
+                                    .max(new_source_in as i64 + 1_000_000)
+                                    as u64;
+                                // Clamp out to media duration
+                                if let Some(max) = clip.max_source_out() {
+                                    if new_source_out > max {
+                                        let over = new_source_out - max;
+                                        new_source_out = max;
+                                        new_source_in = new_source_in.saturating_sub(over);
+                                    }
+                                }
                                 clip.source_in = new_source_in;
                                 clip.source_out = new_source_out;
                             }
@@ -3791,6 +3806,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                     left.source_out = (i128::from(orig_out) + clamped_delta)
                                         .max(i128::from(left_in) + 1_000_000)
                                         as u64;
+                                    left.clamp_source_out();
                                 }
                             }
 
