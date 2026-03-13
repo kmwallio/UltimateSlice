@@ -2810,13 +2810,6 @@ fn write_transform_keyframe_params(
             let mut kf_elem = BytesStart::new("keyframe");
             kf_elem.push_attribute(("time", ns_to_fcpxml_time(t, fps).as_str()));
             kf_elem.push_attribute(("value", format!("{} {}", fx, fy).as_str()));
-            let pos_interp = clip
-                .position_x_keyframes
-                .iter()
-                .find(|kf| kf.time_ns == t)
-                .map(|kf| kf.interpolation)
-                .unwrap_or_default();
-            kf_elem.push_attribute(("interp", pos_interp.to_fcpxml()));
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2841,7 +2834,6 @@ fn write_transform_keyframe_params(
             let mut kf_elem = BytesStart::new("keyframe");
             kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
             kf_elem.push_attribute(("value", format!("{} {}", kf.value, kf.value).as_str()));
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2866,7 +2858,6 @@ fn write_transform_keyframe_params(
             let mut kf_elem = BytesStart::new("keyframe");
             kf_elem.push_attribute(("time", ns_to_fcpxml_time(kf.time_ns, fps).as_str()));
             kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
