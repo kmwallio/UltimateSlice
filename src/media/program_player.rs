@@ -9466,6 +9466,156 @@ impl ProgramPlayer {
         );
     }
 
+    /// Remove excess slots for clips that are no longer active, keeping
+    /// slots for clips that are still playing.  This avoids a full
+    /// teardown+rebuild cycle which can corrupt GstVideoAggregator segment
+    /// state when compositor pads are released and immediately re-requested.
+    ///
+    /// The key difference from the disabled incremental path: we flush the
+    /// compositor (seek_simple) AFTER removing pads, then re-seek remaining
+    /// decoders so they emit fresh segments.  This resets the aggregator's
+    /// internal timing/segment state that otherwise causes ≤1 fps or a
+    /// gst_segment_to_stream_time assertion crash.
+    fn shrink_slots_to_active(
+        &mut self,
+        timeline_pos: u64,
+        desired: &[usize],
+        was_playing: bool,
+    ) {
+        let started = Instant::now();
+        let desired_set: HashSet<usize> = desired.iter().copied().collect();
+        log::info!(
+            "shrink_slots_to_active: START timeline_pos={}ns slots={} -> {} was_playing={}",
+            timeline_pos,
+            self.slots.len(),
+            desired.len(),
+            was_playing
+        );
+
+        // 1. Flush pads being removed to unblock aggregation.
+        for slot in &self.slots {
+            if !desired_set.contains(&slot.clip_idx) {
+                if let Some(ref pad) = slot.compositor_pad {
+                    let _ = pad.send_event(gst::event::FlushStart::new());
+                }
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    let _ = pad.send_event(gst::event::FlushStart::new());
+                }
+            }
+        }
+
+        // 2. Drain all slots, partition into keep vs remove, then tear down
+        //    the expired ones individually.
+        let (keep, remove): (Vec<VideoSlot>, Vec<VideoSlot>) = self
+            .slots
+            .drain(..)
+            .partition(|s| desired_set.contains(&s.clip_idx));
+        self.slots = keep;
+        for slot in remove {
+            self.teardown_single_slot(slot);
+        }
+
+        // 3. Update bookkeeping.
+        self.prerender_active_clips = None;
+        self.current_prerender_segment_key = None;
+        self.current_idx = desired.last().copied();
+        self.pipeline.set_start_time(gst::ClockTime::ZERO);
+        self.teardown_prepreroll_sidecars();
+
+        // 4. Align compositor z-order with desired clip order.
+        let slot_for_clip: HashMap<usize, usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.clip_idx, i))
+            .collect();
+        for (zorder_offset, &clip_idx) in desired.iter().enumerate() {
+            if let Some(&slot_idx) = slot_for_clip.get(&clip_idx) {
+                if let Some(ref pad) = self.slots[slot_idx].compositor_pad {
+                    pad.set_property("zorder", (zorder_offset + 1) as u32);
+                }
+            }
+        }
+
+        // 5. Update effects properties on retained slots.
+        for slot_idx in 0..self.slots.len() {
+            let clip_idx = self.slots[slot_idx].clip_idx;
+            let clip = &self.clips[clip_idx];
+            self.update_slot_effects(slot_idx, clip, timeline_pos);
+        }
+
+        // 6. Flush compositor + audiomixer to reset aggregator timing after
+        //    the topology change (pad removal).  This is the critical step
+        //    that prevents the segment-format-mismatch crash.
+        let baseline = self.snapshot_arrival_seqs();
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        let _ = self
+            .audiomixer
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+
+        // 7. Re-seek remaining decoders so they emit fresh segments aligned
+        //    with the compositor's reset timing.
+        let seek_flags = if was_playing {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+        } else {
+            self.clip_seek_flags()
+        };
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            if was_playing {
+                let ok = Self::seek_slot_decoder_with_retry(
+                    slot,
+                    clip,
+                    timeline_pos,
+                    seek_flags,
+                    self.frame_duration_ns,
+                );
+                if !ok {
+                    log::warn!(
+                        "shrink_slots_to_active: seek FAILED for clip {}",
+                        clip.id
+                    );
+                    if let Some(ref pad) = slot.compositor_pad {
+                        let _ = pad.send_event(gst::event::Eos::new());
+                    }
+                    if let Some(ref pad) = slot.audio_mixer_pad {
+                        let _ = pad.send_event(gst::event::Eos::new());
+                    }
+                }
+            } else {
+                let _ =
+                    Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+            }
+        }
+
+        // 8. Wait for preroll and compositor arrivals.
+        self.wait_for_paused_preroll();
+        let budget = if was_playing {
+            self.adaptive_arrival_wait_ms(1500)
+        } else {
+            1200
+        };
+        self.wait_for_compositor_arrivals(&baseline, budget);
+
+        // 9. Restore playback state.
+        if was_playing {
+            let _ = self.pipeline.set_state(gst::State::Playing);
+        }
+        self.apply_transition_effects(timeline_pos);
+
+        if was_playing {
+            self.record_rebuild_duration_ms(started.elapsed().as_millis() as u64);
+        }
+        log::info!(
+            "shrink_slots_to_active: END timeline_pos={}ns slots={} elapsed_ms={}",
+            timeline_pos,
+            self.slots.len(),
+            started.elapsed().as_millis()
+        );
+    }
+
     fn try_use_background_prerender_slots(
         &mut self,
         timeline_pos: u64,
@@ -9630,16 +9780,33 @@ impl ProgramPlayer {
                 self.continue_decoders_at(timeline_pos, &desired, &plan);
                 return;
             }
+
+            // Shrink path: when desired clips are a strict subset of the
+            // current slots (some clips ended), remove excess slots instead
+            // of a full teardown+rebuild.  A full rebuild releases ALL
+            // compositor pads and re-requests them, which can corrupt the
+            // GstVideoAggregator's internal segment state and cause a
+            // gst_segment_to_stream_time assertion crash.
+            //
+            // The shrink path flushes the compositor AFTER removing pads,
+            // then re-seeks retained decoders — this properly resets the
+            // aggregator timing without tearing down slots that are still
+            // producing valid frames.
+            if !bypass_continue_for_prerender
+                && desired.len() < self.slots.len()
+                && !desired.is_empty()
+                && desired
+                    .iter()
+                    .all(|&ci| self.slots.iter().any(|s| s.clip_idx == ci))
+            {
+                self.shrink_slots_to_active(timeline_pos, &desired, was_playing);
+                return;
+            }
         }
 
-        // Incremental boundary paths are disabled.  Both add-only and
-        // remove-only paths suffer from the same GstVideoAggregator limitation:
-        // after topology changes (adding or removing compositor sink pads),
-        // the aggregator's internal timing/segment state must be reset via
-        // compositor.seek_simple (src-pad seek).  Skipping that reset causes
-        // retained decoders to produce ≤1 frame/sec (remove-only) or freeze
-        // entirely (add-only).  The proven full-rebuild path handles all
-        // transitions correctly.
+        // The add-only incremental path is still disabled: adding compositor
+        // sink pads mid-stream without a full rebuild causes the aggregator
+        // to freeze.  The full-rebuild path handles add-only transitions.
         #[allow(unused)]
         const INCREMENTAL_BOUNDARY: bool = false;
 
