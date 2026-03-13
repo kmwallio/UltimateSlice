@@ -22,7 +22,8 @@ const THUMB_H: i32 = 90;
 pub fn build_media_browser(
     library: Rc<RefCell<Vec<MediaItem>>>,
     on_source_selected: Rc<dyn Fn(String, u64)>,
-) -> (GBox, Rc<dyn Fn()>) {
+    on_relink_media: Rc<dyn Fn()>,
+) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
     let vbox = GBox::new(Orientation::Vertical, 4);
     vbox.set_width_request(240);
 
@@ -44,6 +45,16 @@ pub fn build_media_browser(
     header_import_btn.set_tooltip_text(Some("Import Media…"));
     header_import_btn.set_visible(!library.borrow().is_empty());
     header_row.append(&header_import_btn);
+
+    let header_relink_btn = Button::with_label("Relink…");
+    header_relink_btn.add_css_class("browser-header-import");
+    header_relink_btn.set_tooltip_text(Some("Relink selected offline media"));
+    header_relink_btn.set_visible(false);
+    {
+        let on_relink_media = on_relink_media.clone();
+        header_relink_btn.connect_clicked(move |_| on_relink_media());
+    }
+    header_row.append(&header_relink_btn);
 
     vbox.append(&header_row);
 
@@ -88,7 +99,7 @@ pub fn build_media_browser(
     flow_box.add_css_class("media-grid");
     scroll.set_child(Some(&flow_box));
     vbox.append(&scroll);
-    let flow_box_paths = Rc::new(RefCell::new(Vec::<String>::new()));
+    let flow_box_paths = Rc::new(RefCell::new(Vec::<(String, bool)>::new()));
 
     // Populate from existing library items (e.g. after project load).
     {
@@ -98,17 +109,21 @@ pub fn build_media_browser(
                 &item.label,
                 &item.source_path,
                 item.duration_ns,
+                item.is_missing,
                 &thumb_cache,
             );
             flow_box.insert(&child, -1);
-            flow_box_paths.borrow_mut().push(item.source_path.clone());
+            flow_box_paths
+                .borrow_mut()
+                .push((item.source_path.clone(), item.is_missing));
         }
     }
 
-    // Selection → fire on_source_selected.
+    // Selection → fire on_source_selected + toggle relink button.
     {
         let library = library.clone();
         let on_source_selected = on_source_selected.clone();
+        let header_relink_btn = header_relink_btn.clone();
         flow_box.connect_selected_children_changed(move |fb| {
             let selected = fb.selected_children();
             if let Some(child) = selected.first() {
@@ -117,9 +132,13 @@ pub fn build_media_browser(
                 if let Some(item) = lib.get(idx) {
                     let path = item.source_path.clone();
                     let dur = item.duration_ns;
+                    let is_missing = item.is_missing;
                     drop(lib);
+                    header_relink_btn.set_visible(is_missing);
                     on_source_selected(path, dur);
                 }
+            } else {
+                header_relink_btn.set_visible(false);
             }
         });
     }
@@ -316,7 +335,23 @@ pub fn build_media_browser(
         })
     };
 
-    (vbox, clear_selection)
+    let force_rebuild: Rc<dyn Fn()> = {
+        let library = library.clone();
+        let flow_box = flow_box.clone();
+        let thumb_cache = thumb_cache.clone();
+        let flow_box_paths = flow_box_paths.clone();
+        let header_relink_btn = header_relink_btn.clone();
+        Rc::new(move || {
+            let lib = library.borrow();
+            if !flowbox_matches_library(&flow_box_paths.borrow(), &lib) {
+                rebuild_flowbox(&flow_box, &lib, &thumb_cache, &flow_box_paths);
+                // After rebuild the selection is cleared, hide relink button.
+                header_relink_btn.set_visible(false);
+            }
+        })
+    };
+
+    (vbox, clear_selection, force_rebuild)
 }
 
 /// Build a single thumbnail grid cell.
@@ -324,6 +359,7 @@ fn make_grid_item(
     label: &str,
     path: &str,
     duration_ns: u64,
+    is_missing: bool,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
 ) -> FlowBoxChild {
     // Kick off thumbnail loading — but only after the media has been probed
@@ -377,8 +413,18 @@ fn make_grid_item(
     name_label.add_css_class("clip-name");
     cell.append(&name_label);
 
+    let offline_label = Label::new(Some("OFFLINE"));
+    offline_label.set_halign(gtk::Align::Center);
+    offline_label.add_css_class("media-offline-badge");
+    offline_label.set_visible(is_missing);
+    cell.append(&offline_label);
+
     let child = FlowBoxChild::new();
     child.set_child(Some(&cell));
+    child.set_tooltip_text(Some(path));
+    if is_missing {
+        child.add_css_class("media-missing-item");
+    }
     // Drag source: payload = "{source_path}|{duration_ns}"
     let drag_src = gtk::DragSource::new();
     drag_src.set_actions(gdk4::DragAction::COPY);
@@ -417,12 +463,12 @@ pub fn probe_media_metadata(uri: &str) -> MediaProbeMetadata {
     }
 }
 
-fn flowbox_matches_library(current_paths: &[String], lib: &[MediaItem]) -> bool {
-    current_paths.len() == lib.len()
-        && current_paths
+fn flowbox_matches_library(current_entries: &[(String, bool)], lib: &[MediaItem]) -> bool {
+    current_entries.len() == lib.len()
+        && current_entries
             .iter()
             .zip(lib.iter())
-            .all(|(a, b)| a == &b.source_path)
+            .all(|((path, missing), item)| path == &item.source_path && *missing == item.is_missing)
 }
 
 fn queue_flowbox_thumbnail_draws(fb: &FlowBox) {
@@ -447,7 +493,7 @@ fn import_path_into_library(
     flow_box: &FlowBox,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
     probe_cache: &Rc<RefCell<MediaProbeCache>>,
-    flow_box_paths: &Rc<RefCell<Vec<String>>>,
+    flow_box_paths: &Rc<RefCell<Vec<(String, bool)>>>,
 ) -> Option<(String, u64, FlowBoxChild)> {
     if path_str.is_empty() {
         return None;
@@ -457,10 +503,13 @@ fn import_path_into_library(
     let duration_ns = 0; // placeholder until probe completes
     let item = MediaItem::new(path_str.clone(), duration_ns);
     let label = item.label.clone();
+    let is_missing = item.is_missing;
     library.borrow_mut().push(item);
-    let child = make_grid_item(&label, &path_str, duration_ns, thumb_cache);
+    let child = make_grid_item(&label, &path_str, duration_ns, is_missing, thumb_cache);
     flow_box.insert(&child, -1);
-    flow_box_paths.borrow_mut().push(path_str.clone());
+    flow_box_paths
+        .borrow_mut()
+        .push((path_str.clone(), is_missing));
     Some((path_str, duration_ns, child))
 }
 
@@ -491,7 +540,7 @@ fn rebuild_flowbox(
     fb: &FlowBox,
     lib: &[MediaItem],
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
-    flow_box_paths: &Rc<RefCell<Vec<String>>>,
+    flow_box_paths: &Rc<RefCell<Vec<(String, bool)>>>,
 ) {
     while let Some(child) = fb.first_child() {
         fb.remove(&child);
@@ -503,9 +552,10 @@ fn rebuild_flowbox(
             &item.label,
             &item.source_path,
             item.duration_ns,
+            item.is_missing,
             thumb_cache,
         );
         fb.insert(&child, -1);
-        paths.push(item.source_path.clone());
+        paths.push((item.source_path.clone(), item.is_missing));
     }
 }

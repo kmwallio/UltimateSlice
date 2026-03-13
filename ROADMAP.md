@@ -152,7 +152,7 @@ Tracking docs:
 - [x] JSON-RPC 2.0 over stdio (MCP 2024-11-05 protocol)
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
-- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
+- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`, `relink_media`
 - [x] MCP performance profiling tool `get_performance_snapshot` (prerender queue/transition hit-rate/rebuild telemetry snapshot)
 - [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
 - [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
@@ -496,9 +496,9 @@ Tracking docs:
 - [ ] Auto-backup with versioned history (timestamped backups to dedicated directory with restore UI)
 
 ### Media Management
-- [ ] Relink dialog — general-purpose UI to find and repoint all offline/missing media
+- [x] Relink dialog — general-purpose UI to find and repoint all offline/missing media
 - [ ] Bins / folders — hierarchical media browser organization for large projects
-- [ ] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
+- [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
 - [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
 - [ ] Metadata display & filtering — show resolution, codec, frame rate, duration, file size in media browser
 

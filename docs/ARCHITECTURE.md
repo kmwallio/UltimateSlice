@@ -379,8 +379,9 @@ Before declaring a task finished, agents must verify via MCP:
 | `save_export_preset` | Create or overwrite a named export preset |
 | `delete_export_preset` | Delete a named export preset |
 | `export_with_preset` | Export to a path using a named export preset |
-| `list_library` | Items in the media library (not yet on timeline) |
+| `list_library` | Items in the media library (not yet on timeline), including missing/offline status |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
+| `relink_media` | Recursively scan a root folder and remap missing media paths to matching files |
 | `reorder_track` | Move a track from one index to another (undoable) |
 | `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
 | `create_project` | Discard the current project and start a new empty one (optional title) |

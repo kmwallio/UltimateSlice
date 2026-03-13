@@ -19,11 +19,14 @@ pub struct MediaItem {
     pub is_image: bool,
     /// Optional absolute source time reference for the start of the media.
     pub source_timecode_base_ns: Option<u64>,
+    /// True when the source file path cannot be resolved on disk.
+    pub is_missing: bool,
 }
 
 impl MediaItem {
     pub fn new(source_path: impl Into<String>, duration_ns: u64) -> Self {
         let source_path = source_path.into();
+        let is_missing = !source_path_exists(&source_path);
         let label = std::path::Path::new(&source_path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -38,8 +41,13 @@ impl MediaItem {
             has_audio: false,
             is_image: false,
             source_timecode_base_ns: None,
+            is_missing,
         }
     }
+}
+
+pub fn source_path_exists(source_path: &str) -> bool {
+    std::fs::metadata(source_path).is_ok()
 }
 
 /// In/out marks and current source for the source preview monitor.

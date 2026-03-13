@@ -256,6 +256,219 @@ fn lookup_source_timecode_base_ns(
         })
 }
 
+fn collect_media_source_paths(project: &Project, library: &[MediaItem]) -> HashSet<String> {
+    let mut paths: HashSet<String> = project
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .map(|clip| clip.source_path.clone())
+        .collect();
+    paths.extend(library.iter().map(|item| item.source_path.clone()));
+    paths
+}
+
+fn build_media_availability_index(project: &Project, library: &[MediaItem]) -> HashMap<String, bool> {
+    let mut availability = HashMap::new();
+    for path in collect_media_source_paths(project, library) {
+        availability.insert(
+            path.clone(),
+            crate::model::media_library::source_path_exists(&path),
+        );
+    }
+    availability
+}
+
+fn refresh_media_availability_state(
+    project: &Project,
+    library: &mut [MediaItem],
+    timeline_state: &mut TimelineState,
+) -> HashSet<String> {
+    let availability = build_media_availability_index(project, library);
+    let missing_paths: HashSet<String> = availability
+        .iter()
+        .filter_map(|(path, exists)| if *exists { None } else { Some(path.clone()) })
+        .collect();
+    for item in library.iter_mut() {
+        item.is_missing = missing_paths.contains(&item.source_path);
+    }
+    timeline_state.missing_media_paths = missing_paths.clone();
+    missing_paths
+}
+
+fn collect_missing_source_paths(project: &Project, library: &[MediaItem]) -> Vec<String> {
+    let availability = build_media_availability_index(project, library);
+    let mut missing: Vec<String> = availability
+        .into_iter()
+        .filter_map(|(path, exists)| if exists { None } else { Some(path) })
+        .collect();
+    missing.sort_unstable();
+    missing
+}
+
+fn collect_files_recursive(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+}
+
+fn path_tail_match_score(original: &std::path::Path, candidate: &std::path::Path) -> usize {
+    let orig_parts: Vec<String> = original
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    let cand_parts: Vec<String> = candidate
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    let mut score = 0usize;
+    while score < orig_parts.len() && score < cand_parts.len() {
+        let oi = orig_parts.len() - 1 - score;
+        let ci = cand_parts.len() - 1 - score;
+        if !orig_parts[oi].eq_ignore_ascii_case(&cand_parts[ci]) {
+            break;
+        }
+        score += 1;
+    }
+    score
+}
+
+fn choose_relink_candidate(
+    original_path: &str,
+    candidates: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    if candidates.len() == 1 {
+        return candidates.first().cloned();
+    }
+    let original = std::path::Path::new(original_path);
+    let original_depth = original.components().count() as i64;
+    let mut best_score = 0usize;
+    let mut best_depth_delta = i64::MAX;
+    let mut best_path: Option<std::path::PathBuf> = None;
+    for candidate in candidates {
+        let score = path_tail_match_score(original, candidate);
+        if score == 0 {
+            continue;
+        }
+        let depth_delta = (candidate.components().count() as i64 - original_depth).abs();
+        let candidate_str = candidate.to_string_lossy();
+        let best_str = best_path.as_ref().map(|p| p.to_string_lossy());
+        if score > best_score {
+            best_score = score;
+            best_depth_delta = depth_delta;
+            best_path = Some(candidate.clone());
+            continue;
+        }
+        if score == best_score && depth_delta < best_depth_delta {
+            best_depth_delta = depth_delta;
+            best_path = Some(candidate.clone());
+            continue;
+        }
+        if score == best_score
+            && depth_delta == best_depth_delta
+            && best_str
+                .as_ref()
+                .is_none_or(|best| candidate_str.as_ref() < best.as_ref())
+        {
+            best_path = Some(candidate.clone());
+        }
+    }
+    best_path
+}
+
+#[derive(Debug, Clone)]
+struct RelinkSummary {
+    scanned_files: usize,
+    remapped: Vec<(String, String)>,
+    unresolved: Vec<String>,
+    updated_clip_count: usize,
+    updated_library_count: usize,
+}
+
+fn relink_missing_media_under_root(
+    project: &mut Project,
+    library: &mut [MediaItem],
+    root: &std::path::Path,
+) -> RelinkSummary {
+    let missing = collect_missing_source_paths(project, library);
+    let mut scanned_files: Vec<std::path::PathBuf> = Vec::new();
+    collect_files_recursive(root, &mut scanned_files);
+
+    let mut by_name: HashMap<String, Vec<std::path::PathBuf>> = HashMap::new();
+    for path in &scanned_files {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        by_name
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .push(path.clone());
+    }
+
+    let mut remapped: Vec<(String, String)> = Vec::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    for original in missing {
+        let key = std::path::Path::new(&original)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_ascii_lowercase());
+        let Some(key) = key else {
+            unresolved.push(original);
+            continue;
+        };
+        let Some(candidates) = by_name.get(&key) else {
+            unresolved.push(original);
+            continue;
+        };
+        let Some(chosen) = choose_relink_candidate(&original, candidates) else {
+            unresolved.push(original);
+            continue;
+        };
+        remapped.push((original, chosen.to_string_lossy().to_string()));
+    }
+
+    let remap_map: HashMap<String, String> = remapped.iter().cloned().collect();
+    let mut updated_clip_count = 0usize;
+    for track in project.tracks.iter_mut() {
+        for clip in track.clips.iter_mut() {
+            if let Some(new_path) = remap_map.get(&clip.source_path) {
+                if clip.source_path != *new_path {
+                    clip.source_path = new_path.clone();
+                    updated_clip_count += 1;
+                }
+            }
+        }
+    }
+    let mut updated_library_count = 0usize;
+    for item in library.iter_mut() {
+        if let Some(new_path) = remap_map.get(&item.source_path) {
+            if item.source_path != *new_path {
+                item.source_path = new_path.clone();
+                updated_library_count += 1;
+            }
+        }
+    }
+    if updated_clip_count > 0 {
+        project.dirty = true;
+    }
+
+    unresolved.sort_unstable();
+    RelinkSummary {
+        scanned_files: scanned_files.len(),
+        remapped,
+        unresolved,
+        updated_clip_count,
+        updated_library_count,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SourcePlacementInfo {
     is_audio_only: bool,
@@ -1006,6 +1219,77 @@ mod tests {
             .iter()
             .all(|clip| clip.timeline_start == range_start));
         assert!(project.tracks.iter().all(|track| track.clips.len() == 3));
+    }
+
+    #[test]
+    fn choose_relink_candidate_prefers_longest_tail_match() {
+        let original = "/media/shoot/day1/camA/scene01/clip.mp4";
+        let candidates = vec![
+            std::path::PathBuf::from("/tmp/other/clip.mp4"),
+            std::path::PathBuf::from("/mnt/archive/day1/camA/scene01/clip.mp4"),
+        ];
+        let chosen = choose_relink_candidate(original, &candidates).expect("candidate");
+        assert_eq!(
+            chosen,
+            std::path::PathBuf::from("/mnt/archive/day1/camA/scene01/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn choose_relink_candidate_breaks_ties_deterministically() {
+        let original = "/media/shoot/day1/camA/clip.mp4";
+        let candidates = vec![
+            std::path::PathBuf::from("/z-archive/day1/camA/clip.mp4"),
+            std::path::PathBuf::from("/a-archive/day1/camA/clip.mp4"),
+        ];
+        let chosen = choose_relink_candidate(original, &candidates).expect("candidate");
+        assert_eq!(
+            chosen,
+            std::path::PathBuf::from("/a-archive/day1/camA/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn relink_missing_media_remaps_project_and_library_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "ultimateslice-relink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let nested = root.join("show/day1/camA");
+        std::fs::create_dir_all(&nested).expect("create relink test dirs");
+        let target = nested.join("clip.mp4");
+        std::fs::write(&target, b"test").expect("write target media");
+
+        let mut project = Project::new("Relink");
+        project.tracks[0].clips.clear();
+        project.tracks[1].clips.clear();
+        let missing_path = "/missing/media/show/day1/camA/clip.mp4";
+        project.tracks[0].add_clip(build_source_clip(
+            missing_path,
+            0,
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+            None,
+            None,
+            None,
+        ));
+        let mut library = vec![MediaItem::new(missing_path, 1_000_000_000)];
+        let summary = relink_missing_media_under_root(&mut project, library.as_mut_slice(), &root);
+
+        assert_eq!(summary.updated_clip_count, 1);
+        assert_eq!(summary.updated_library_count, 1);
+        assert_eq!(summary.unresolved.len(), 0);
+        assert_eq!(summary.remapped.len(), 1);
+        let expected = target.to_string_lossy().to_string();
+        assert_eq!(project.tracks[0].clips[0].source_path, expected);
+        assert_eq!(library[0].source_path, expected);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -1865,6 +2149,15 @@ pub fn build_window(
     let transform_overlay_cell: Rc<
         RefCell<Option<Rc<crate::ui::transform_overlay::TransformOverlay>>>,
     > = Rc::new(RefCell::new(None));
+    let on_relink_media_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_relink_media_gui: Rc<dyn Fn()> = {
+        let cb = on_relink_media_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() {
+                f();
+            }
+        })
+    };
     let (inspector_box, inspector_view) = inspector::build_inspector(
         project.clone(),
         // on_clip_changed: name changes → full project-changed cycle
@@ -2185,6 +2478,12 @@ pub fn build_window(
         .bg_removal_model_available
         .set(bg_removal_cache.borrow().is_available());
 
+    // Wire inspector "Relink…" button to the shared relink callback.
+    {
+        let cb = on_relink_media_gui.clone();
+        inspector_view.relink_btn.connect_clicked(move |_| cb());
+    }
+
     // Wire timeline's on_project_changed + on_seek + on_play_pause
     {
         let cb = on_project_changed.clone();
@@ -2200,8 +2499,11 @@ pub fn build_window(
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
-                let playhead_ns = timeline_state_for_sel.borrow().playhead_ns;
-                inspector_view.update(&proj, clip_id.as_deref(), playhead_ns);
+                let (playhead_ns, missing_paths) = {
+                    let st = timeline_state_for_sel.borrow();
+                    (st.playhead_ns, st.missing_media_paths.clone())
+                };
+                inspector_view.update(&proj, clip_id.as_deref(), playhead_ns, Some(&missing_paths));
                 inspector_view.update_keyframe_indicator(&proj, playhead_ns);
                 // Sync transform overlay handles with selection state,
                 // using keyframe-interpolated values at the current playhead.
@@ -3669,10 +3971,114 @@ pub fn build_window(
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
         })
     };
+    *on_relink_media_impl.borrow_mut() = Some({
+        let window_weak = window_weak.clone();
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let source_marks = source_marks.clone();
+        let on_source_selected = on_source_selected.clone();
+        let on_project_changed = on_project_changed.clone();
+        Rc::new(move || {
+            let Some(win) = window_weak.upgrade() else {
+                return;
+            };
+            let offline_count = {
+                let proj = project.borrow();
+                let lib = library.borrow();
+                collect_missing_source_paths(&proj, &lib).len()
+            };
+            if offline_count == 0 {
+                flash_window_status_title(&win, &project, "No offline media to relink");
+                return;
+            }
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Relink Missing Media — Choose Search Folder");
+            let project = project.clone();
+            let library = library.clone();
+            let timeline_state = timeline_state.clone();
+            let source_marks = source_marks.clone();
+            let on_source_selected = on_source_selected.clone();
+            let on_project_changed = on_project_changed.clone();
+            let win_for_result = win.clone();
+            dialog.select_folder(Some(&win), gio::Cancellable::NONE, move |result| {
+                let Ok(folder) = result else { return };
+                let Some(root_path) = folder.path() else { return };
+                if !root_path.is_dir() {
+                    flash_window_status_title(&win_for_result, &project, "Relink failed: invalid folder");
+                    return;
+                }
+                let summary = {
+                    let mut proj = project.borrow_mut();
+                    let mut lib = library.borrow_mut();
+                    relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root_path)
+                };
+                log::info!(
+                    "[relink] scanned={} remapped={} unresolved={} clips={} library={}",
+                    summary.scanned_files,
+                    summary.remapped.len(),
+                    summary.unresolved.len(),
+                    summary.updated_clip_count,
+                    summary.updated_library_count,
+                );
+                for (from, to) in &summary.remapped {
+                    log::info!("[relink]   {} → {}", from, to);
+                }
+                for path in &summary.unresolved {
+                    log::info!("[relink]   unresolved: {}", path);
+                }
+                let remapped_source = {
+                    let current_path = source_marks.borrow().path.clone();
+                    if current_path.is_empty() {
+                        None
+                    } else {
+                        summary.remapped.iter().find_map(|(from, to)| {
+                            if from == &current_path {
+                                Some(to.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                };
+                if let Some(new_path) = remapped_source {
+                    let duration_ns = {
+                        let marks = source_marks.borrow();
+                        let fallback = marks.duration_ns;
+                        drop(marks);
+                        library
+                            .borrow()
+                            .iter()
+                            .find(|item| item.source_path == new_path)
+                            .map(|item| item.duration_ns)
+                            .unwrap_or(fallback)
+                    };
+                    on_source_selected(new_path, duration_ns);
+                }
+                {
+                    let proj = project.borrow();
+                    let mut lib = library.borrow_mut();
+                    let mut st = timeline_state.borrow_mut();
+                    refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                }
+                on_project_changed();
+                flash_window_status_title(
+                    &win_for_result,
+                    &project,
+                    &format!(
+                        "Relink: {} remapped, {} unresolved ({} scanned)",
+                        summary.remapped.len(),
+                        summary.unresolved.len(),
+                        summary.scanned_files
+                    ),
+                );
+            });
+        })
+    });
 
     // ── Media browser ─────────────────────────────────────────────────────
-    let (browser, clear_media_selection) =
-        media_browser::build_media_browser(library.clone(), on_source_selected.clone());
+    let (browser, clear_media_selection, force_rebuild_media_browser) =
+        media_browser::build_media_browser(library.clone(), on_source_selected.clone(), on_relink_media_gui.clone());
     // ── on_close_preview: deselect media + hide preview + reset source state ──
     *on_close_preview_impl.borrow_mut() = Some({
         let clear_media_selection = clear_media_selection.clone();
@@ -3773,6 +4179,7 @@ pub fn build_window(
         let mcp_light_refresh_next = mcp_light_refresh_next.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+        let force_rebuild_media_browser = force_rebuild_media_browser.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             let use_light_refresh = mcp_light_refresh_next.replace(false);
@@ -3808,9 +4215,6 @@ pub fn build_window(
             ) = {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
-                let playhead_ns = timeline_state.borrow().playhead_ns;
-                inspector_view.update(&proj, selected.as_deref(), playhead_ns);
-                inspector_view.update_keyframe_indicator(&proj, playhead_ns);
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.queue_redraw();
                 }
@@ -3984,6 +4388,31 @@ pub fn build_window(
                     lib.push(item);
                 }
             }
+
+            let missing_paths = {
+                let proj = project.borrow();
+                let mut lib = library.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st)
+            };
+            {
+                let proj = project.borrow();
+                let (selected, playhead_ns) = {
+                    let st = timeline_state.borrow();
+                    (st.selected_clip_id.clone(), st.playhead_ns)
+                };
+                inspector_view.update(
+                    &proj,
+                    selected.as_deref(),
+                    playhead_ns,
+                    Some(&missing_paths),
+                );
+                inspector_view.update_keyframe_indicator(&proj, playhead_ns);
+            }
+
+            // Synchronously rebuild media browser grid so offline badges and
+            // source paths are always current (don't wait for the 100ms timer).
+            force_rebuild_media_browser();
 
             // Reload program player — preserve current position so the monitor
             // doesn't jump to 0 on every project change (e.g., clip name edit).
@@ -6961,6 +7390,7 @@ fn handle_mcp_command(
                         "duration_s":  item.duration_ns as f64 / 1_000_000_000.0,
                         "is_audio_only": item.is_audio_only,
                         "has_audio": item.has_audio,
+                        "is_missing": item.is_missing,
                     })
                 })
                 .collect();
@@ -6984,6 +7414,12 @@ fn handle_mcp_command(
             item.source_timecode_base_ns = source_timecode_base_ns;
             let label = item.label.clone();
             library.borrow_mut().push(item);
+            {
+                let proj = project.borrow();
+                let mut lib = library.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+            }
             reply
                 .send(json!({
                     "success": true,
@@ -6991,9 +7427,48 @@ fn handle_mcp_command(
                     "duration_ns": duration_ns,
                     "is_audio_only": audio_only,
                     "has_audio": has_audio,
-                    "source_timecode_base_ns": source_timecode_base_ns
+                    "source_timecode_base_ns": source_timecode_base_ns,
+                    "is_missing": !crate::model::media_library::source_path_exists(&path)
                 }))
                 .ok();
+        }
+
+        McpCommand::RelinkMedia { root_path, reply } => {
+            let root = std::path::PathBuf::from(&root_path);
+            if !root.is_dir() {
+                reply
+                    .send(json!({"success": false, "error": "root_path must be an existing directory"}))
+                    .ok();
+                return;
+            }
+            let summary = {
+                let mut proj = project.borrow_mut();
+                let mut lib = library.borrow_mut();
+                relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root)
+            };
+            {
+                let proj = project.borrow();
+                let mut lib = library.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "root_path": root_path,
+                    "scanned_files": summary.scanned_files,
+                    "updated_clip_count": summary.updated_clip_count,
+                    "updated_library_count": summary.updated_library_count,
+                    "remapped": summary.remapped.iter().map(|(old_path, new_path)| json!({
+                        "old_path": old_path,
+                        "new_path": new_path
+                    })).collect::<Vec<_>>(),
+                    "unresolved": summary.unresolved,
+                }))
+                .ok();
+            if summary.updated_clip_count > 0 || summary.updated_library_count > 0 {
+                on_project_changed_full();
+            }
         }
 
         McpCommand::ReorderTrack {

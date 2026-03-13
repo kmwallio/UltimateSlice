@@ -236,6 +236,8 @@ pub struct TimelineState {
     keyframe_marquee_selection: Option<KeyframeMarqueeSelection>,
     /// Callback fired when the active tool changes (via keyboard shortcut).
     pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
+    /// Set of source paths currently resolved as missing/offline.
+    pub missing_media_paths: HashSet<String>,
 }
 
 impl TimelineState {
@@ -272,7 +274,12 @@ impl TimelineState {
             selected_keyframe_local_times: HashMap::new(),
             keyframe_marquee_selection: None,
             on_tool_changed: None,
+            missing_media_paths: HashSet::new(),
         }
+    }
+
+    pub fn source_is_missing(&self, source_path: &str) -> bool {
+        self.missing_media_paths.contains(source_path)
     }
 
     pub fn ns_to_x(&self, ns: u64) -> f64 {
@@ -5723,6 +5730,7 @@ fn draw_clip(
             .as_ref()
             .map(|p| !p.is_empty())
             .unwrap_or(false);
+        let has_missing_badge = st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
             .as_ref()
@@ -5787,6 +5795,22 @@ fn draw_clip(
                 rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
                 cr.fill().ok();
                 cr.set_source_rgb(0.4, 0.8, 1.0);
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
+                badge_right = bx - 8.0;
+            }
+        }
+
+        if has_missing_badge && cw > 95.0 {
+            let badge = "OFFLINE";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(1.0, 0.45, 0.45);
                 let _ = cr.move_to(bx, by);
                 let _ = cr.show_text(badge);
                 badge_right = bx - 8.0;

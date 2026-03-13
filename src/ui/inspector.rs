@@ -8,6 +8,7 @@ use gtk4::{
     Separator,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 const VOLUME_DB_MIN: f64 = -100.0;
@@ -43,6 +44,8 @@ fn interp_idx_to_enum(idx: u32) -> KeyframeInterpolation {
 pub struct InspectorView {
     pub name_entry: Entry,
     pub path_value: Label,
+    pub path_status_value: Label,
+    pub relink_btn: gtk4::Button,
     pub in_value: Label,
     pub out_value: Label,
     pub dur_value: Label,
@@ -147,7 +150,13 @@ impl InspectorView {
 
     /// Refresh all fields to show the given clip, or clear if None.
     /// `playhead_ns` is used to display keyframe-evaluated values for animated properties.
-    pub fn update(&self, project: &Project, clip_id: Option<&str>, playhead_ns: u64) {
+    pub fn update(
+        &self,
+        project: &Project,
+        clip_id: Option<&str>,
+        playhead_ns: u64,
+        missing_media_paths: Option<&HashSet<String>>,
+    ) {
         use crate::model::clip::ClipKind;
 
         let clip = clip_id.and_then(|id| {
@@ -185,12 +194,23 @@ impl InspectorView {
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
 
                 self.name_entry.set_text(&c.label);
-                self.path_value.set_text(
-                    std::path::Path::new(&c.source_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(&c.source_path),
-                );
+                self.path_value.set_text(&c.source_path);
+                self.path_value.set_tooltip_text(Some(&c.source_path));
+                let is_missing = missing_media_paths
+                    .map(|paths| paths.contains(&c.source_path))
+                    .unwrap_or_else(|| !crate::model::media_library::source_path_exists(&c.source_path));
+                if is_missing {
+                    self.path_status_value
+                        .set_text("Offline — source file is missing");
+                    self.path_status_value.remove_css_class("dim-label");
+                    self.path_status_value.add_css_class("offline-label");
+                    self.relink_btn.set_visible(true);
+                } else {
+                    self.path_status_value.set_text("Online");
+                    self.path_status_value.remove_css_class("offline-label");
+                    self.path_status_value.add_css_class("dim-label");
+                    self.relink_btn.set_visible(false);
+                }
                 self.clip_color_label_combo
                     .set_selected(clip_color_label_index(c.color_label));
                 self.in_value.set_text(&ns_to_timecode(c.source_in));
@@ -333,6 +353,7 @@ impl InspectorView {
                     .set_selected(clip_color_label_index(ClipColorLabel::None));
                 for l in [
                     &self.path_value,
+                    &self.path_status_value,
                     &self.in_value,
                     &self.out_value,
                     &self.dur_value,
@@ -340,6 +361,10 @@ impl InspectorView {
                 ] {
                     l.set_text("—");
                 }
+                self.path_value.set_tooltip_text(None);
+                self.path_status_value.remove_css_class("offline-label");
+                self.path_status_value.add_css_class("dim-label");
+                self.relink_btn.set_visible(false);
                 self.brightness_slider.set_value(0.0);
                 self.contrast_slider.set_value(1.0);
                 self.saturation_slider.set_value(1.0);
@@ -605,7 +630,18 @@ pub fn build_inspector(
     path_value.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
     path_value.set_max_width_chars(22);
     path_value.add_css_class("clip-path");
+    path_value.set_selectable(true);
     content_box.append(&path_value);
+    row_label(&content_box, "Media Status");
+    let path_status_value = value_label("—");
+    path_status_value.add_css_class("dim-label");
+    content_box.append(&path_status_value);
+
+    let relink_btn = gtk4::Button::with_label("Relink…");
+    relink_btn.set_tooltip_text(Some("Relink offline media by searching a folder"));
+    relink_btn.add_css_class("small-btn");
+    relink_btn.set_visible(false);
+    content_box.append(&relink_btn);
 
     content_box.append(&Separator::new(Orientation::Horizontal));
 
@@ -3114,6 +3150,8 @@ pub fn build_inspector(
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
+        path_status_value,
+        relink_btn,
         in_value,
         out_value,
         dur_value,

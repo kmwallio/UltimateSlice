@@ -269,6 +269,21 @@ entry:focus {
     color: #888;
 }
 
+.offline-label {
+    color: #ff8a80;
+    font-size: 12px;
+}
+
+.media-offline-badge {
+    color: #ff8a80;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.media-missing-item {
+    box-shadow: inset 0 0 0 1px rgba(255, 138, 128, 0.45);
+}
+
 /* ── Preview / program monitor panels ──────────────────────────────────── */
 .preview-panel {
     background-color: #131315;

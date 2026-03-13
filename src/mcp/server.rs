@@ -613,6 +613,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "relink_media",
+            "description": "Attempt to relink missing/offline media by recursively scanning a root folder and remapping missing source paths to matching files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "root_path": { "type": "string", "description": "Absolute folder path to scan for replacement media files." }
+                },
+                "required": ["root_path"]
+            }
+        },
+        {
             "name": "reorder_track",
             "description": "Move a track from one position to another (0-based indices).",
             "inputSchema": {
@@ -1221,6 +1232,10 @@ fn dispatch_tool_payload(
 
         "import_media" => McpCommand::ImportMedia {
             path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "relink_media" => McpCommand::RelinkMedia {
+            root_path: args["root_path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 

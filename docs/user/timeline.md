@@ -178,6 +178,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Link behavior is intentionally narrower than clip grouping: trims remain independent in this first pass.
 - Right-clicking a selected clip opens a context menu that only shows currently actionable clip operations (for example Link/Unlink when applicable), so link editing is available without extra disabled entries.
 - Linked clips show a **LINK** badge in the timeline so linked relationships stay visible even when nothing is selected.
+- Clips whose source files are unavailable show an **OFFLINE** badge in the timeline clip header.
 - When a linked selection spans multiple clips, non-primary linked peers also get a cyan inset border so they stay visually distinct from the primary selected clip.
 
 ## Keyboard Shortcuts

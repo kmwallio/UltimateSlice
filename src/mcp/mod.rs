@@ -196,6 +196,10 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    RelinkMedia {
+        root_path: String,
+        reply: SyncSender<Value>,
+    },
     ReorderTrack {
         from_index: usize,
         to_index: usize,
