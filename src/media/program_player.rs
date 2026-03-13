@@ -162,6 +162,75 @@ pub(crate) struct ThreePointParams {
     pub(crate) white_b: f64,
 }
 
+/// Quadratic (parabola) coefficients for one channel of the frei0r
+/// 3-point-color-balance transfer curve.  The plugin fits y = a·x² + b·x + c
+/// through (black_c, 0), (gray_c, 0.5), (white_c, 1.0) where x is the
+/// normalised input pixel value and y is the output (both 0–1).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ThreePointParabolaCoeffs {
+    pub(crate) a: f64,
+    pub(crate) b: f64,
+    pub(crate) c: f64,
+}
+
+impl ThreePointParabolaCoeffs {
+    /// Solve the quadratic passing through (x1, 0), (x2, 0.5), (x3, 1.0).
+    pub(crate) fn from_control_points(x1: f64, x2: f64, x3: f64) -> Self {
+        // System: a·x1² + b·x1 + c = 0
+        //         a·x2² + b·x2 + c = 0.5
+        //         a·x3² + b·x3 + c = 1.0
+        let d1 = x2 - x1;
+        let d2 = x3 - x1;
+        let d3 = x3 - x2;
+        // Guard against degenerate/nearly-coincident control points.
+        if d1.abs() < 1e-9 || d2.abs() < 1e-9 || d3.abs() < 1e-9 {
+            // Fall back to identity.
+            return Self { a: 0.0, b: 1.0, c: 0.0 };
+        }
+        let a = (1.0 / d2 - 0.5 / d1) / d3;
+        let b = 0.5 / d1 - a * (x2 + x1);
+        let c = -(a * x1 * x1 + b * x1);
+        Self { a, b, c }
+    }
+}
+
+/// Per-channel parabola coefficients matching the frei0r 3-point plugin.
+#[derive(Debug, Clone)]
+pub(crate) struct ThreePointParabola {
+    pub(crate) r: ThreePointParabolaCoeffs,
+    pub(crate) g: ThreePointParabolaCoeffs,
+    pub(crate) b: ThreePointParabolaCoeffs,
+}
+
+impl ThreePointParabola {
+    pub(crate) fn from_params(p: &ThreePointParams) -> Self {
+        Self {
+            r: ThreePointParabolaCoeffs::from_control_points(p.black_r, p.gray_r, p.white_r),
+            g: ThreePointParabolaCoeffs::from_control_points(p.black_g, p.gray_g, p.white_g),
+            b: ThreePointParabolaCoeffs::from_control_points(p.black_b, p.gray_b, p.white_b),
+        }
+    }
+
+    /// Format as an FFmpeg `lutrgb` filter expression.  `val` is 0–255 integer.
+    /// output = clamp(a·(val/255)² + b·(val/255) + c, 0, 1) · 255
+    ///        = clamp(A·val² + B·val + C, 0, 255)
+    /// where A = a/255, B = b, C = c·255.
+    pub(crate) fn to_lutrgb_filter(&self) -> String {
+        fn chan_expr(tag: &str, c: &ThreePointParabolaCoeffs) -> String {
+            let a = c.a / 255.0;
+            let b = c.b;
+            let cv = c.c * 255.0;
+            format!("{tag}='clip({a:.6}*val*val+{b:.6}*val+{cv:.4},0,255)'")
+        }
+        format!(
+            ",lutrgb={}:{}:{}",
+            chan_expr("r", &self.r),
+            chan_expr("g", &self.g),
+            chan_expr("b", &self.b),
+        )
+    }
+}
+
 /// Role of a clip within a transition overlap region.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TransitionRole {
@@ -8613,22 +8682,24 @@ impl ProgramPlayer {
         // ── Per-tone warmth/tint → per-channel RGB offsets ──────────────
         // Warmth: positive = warm (red boost, blue cut), negative = cool.
         // Tint: positive = magenta (green cut, R+B boost), negative = green.
-        // Scale factor chosen to give visible but non-destructive shifts.
-        let warmth_scale = 0.12;
-        let tint_scale = 0.10;
+        // Scale factor chosen for visible creative shifts at slider extremes
+        // while keeping the 3-point curve within usable bounds.
+        // At ±1.0 slider: response=1.35, shift=±0.47 warmth / ±0.38 tint.
+        let warmth_scale = 0.35;
+        let tint_scale = 0.28;
         let shadows_endpoint_boost = 1.30;
 
-        // In 3-point curve space, all warmth axes are inverted relative to
-        // the UI's visual semantics. Negate so UI remains conventional:
-        // slider right = warmer, slider left = cooler.
+        // Warmth positive = warm (red boost, blue cut in 3-point curve space).
+        // Tint positive = magenta (green cut); negated because 3-point
+        // adds tint directly to green channel.
         let sw =
-            -Self::compute_tonal_axis_response(shadows_warmth) * warmth_scale * shadows_endpoint_boost;
+            Self::compute_tonal_axis_response(shadows_warmth) * warmth_scale * shadows_endpoint_boost;
         let st =
-            Self::compute_tonal_axis_response(shadows_tint) * tint_scale * shadows_endpoint_boost;
-        let mw = -Self::compute_tonal_axis_response(midtones_warmth) * warmth_scale;
-        let mt = Self::compute_tonal_axis_response(midtones_tint) * tint_scale;
-        let hw = -Self::compute_tonal_axis_response(highlights_warmth) * warmth_scale;
-        let ht = Self::compute_tonal_axis_response(highlights_tint) * tint_scale;
+            -Self::compute_tonal_axis_response(shadows_tint) * tint_scale * shadows_endpoint_boost;
+        let mw = Self::compute_tonal_axis_response(midtones_warmth) * warmth_scale;
+        let mt = -Self::compute_tonal_axis_response(midtones_tint) * tint_scale;
+        let hw = Self::compute_tonal_axis_response(highlights_warmth) * warmth_scale;
+        let ht = -Self::compute_tonal_axis_response(highlights_tint) * tint_scale;
 
         // Per-channel: warmth shifts R↔B, tint shifts G↔(R+B).
         let black_r = (black + bp + sw - st * 0.5).clamp(0.0, 0.95);
@@ -10084,7 +10155,7 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
 mod tests {
     use super::{
         clip_can_fully_occlude, CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame,
-        ShortFrameCache, TransitionPrerenderSpec, VideoSlot,
+        ShortFrameCache, ThreePointParabola, TransitionPrerenderSpec, VideoSlot,
     };
     use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
     use gstreamer as gst;
@@ -11820,24 +11891,28 @@ mod tests {
     }
 
     #[test]
-    fn threepoint_negative_shadows_warmth_maps_to_curve_space_red() {
+    fn threepoint_positive_shadows_warmth_produces_warm_red() {
+        // Positive warmth = warm (red boost in shadows).
+        // In 3-point space: black_r raised, black_b lowered.
         let p =
-            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0);
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
         assert!(
             p.black_r > p.black_b + 0.20,
-            "negative shadows warmth should raise curve-space red control: black_r={}, black_b={}",
+            "positive shadows warmth should raise red: black_r={}, black_b={}",
             p.black_r,
             p.black_b
         );
     }
 
     #[test]
-    fn threepoint_positive_shadows_warmth_maps_to_curve_space_blue() {
+    fn threepoint_negative_shadows_warmth_produces_cool_blue() {
+        // Negative warmth = cool (blue boost in shadows).
+        // In 3-point space: black_b raised, black_r lowered.
         let p =
-            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0);
         assert!(
             p.black_b > p.black_r + 0.20,
-            "positive shadows warmth should raise curve-space blue control: black_r={}, black_b={}",
+            "negative shadows warmth should raise blue: black_r={}, black_b={}",
             p.black_r,
             p.black_b
         );
@@ -11845,20 +11920,57 @@ mod tests {
 
     #[test]
     fn threepoint_shadows_tint_changes_curve_space_channels() {
+        // Positive tint = magenta (green cut): black_g should be LOWER.
+        // Negative tint = green (green boost): black_g should be HIGHER.
         let magenta =
             ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
         let green = ProgramPlayer::compute_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         );
         assert!(
-            magenta.black_g > green.black_g,
-            "positive/negative tint should diverge in curve-space green control: magenta_g={}, green_g={}",
+            magenta.black_g < green.black_g,
+            "magenta tint (+1) should cut green more than green tint (-1): magenta_g={}, green_g={}",
             magenta.black_g,
             green.black_g
         );
         assert!(
-            magenta.black_r < green.black_r && magenta.black_b < green.black_b,
-            "positive/negative tint should diverge in curve-space red/blue controls"
+            magenta.black_r > green.black_r && magenta.black_b > green.black_b,
+            "magenta tint should boost R+B more than green tint"
+        );
+    }
+
+    #[test]
+    fn threepoint_parabola_identity_at_neutral() {
+        // At neutral params (black=0, gray=0.5, white=1.0), the parabola
+        // should be identity: y = x.
+        let p = ProgramPlayer::compute_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        );
+        let para = ThreePointParabola::from_params(&p);
+        // Check a few sample values.
+        for &x in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            let yr = para.r.a * x * x + para.r.b * x + para.r.c;
+            assert!(
+                (yr - x).abs() < 0.05,
+                "neutral red parabola at x={}: expected ~{}, got {}",
+                x, x, yr
+            );
+        }
+    }
+
+    #[test]
+    fn threepoint_parabola_matches_frei0r_at_midgray() {
+        // The frei0r plugin maps gray_c → 0.5.  Verify our parabola does too.
+        let p = ProgramPlayer::compute_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        );
+        let para = ThreePointParabola::from_params(&p);
+        let x = p.gray_r;
+        let y = para.r.a * x * x + para.r.b * x + para.r.c;
+        assert!(
+            (y - 0.5).abs() < 0.001,
+            "gray_r={}: parabola at gray should be 0.5, got {}",
+            x, y
         );
     }
 

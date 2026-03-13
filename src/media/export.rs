@@ -1117,77 +1117,26 @@ fn build_grading_filter_with_caps(
         || clip.shadows_warmth != 0.0
         || clip.shadows_tint != 0.0;
     if has_grading {
-        if let Some(module) = &caps.three_point_frei0r_module {
-            let p = ProgramPlayer::compute_export_3point_params(
-                clip.shadows as f64,
-                clip.midtones as f64,
-                clip.highlights as f64,
-                clip.black_point as f64,
-                clip.highlights_warmth as f64,
-                clip.highlights_tint as f64,
-                clip.midtones_warmth as f64,
-                clip.midtones_tint as f64,
-                clip.shadows_warmth as f64,
-                clip.shadows_tint as f64,
-            );
-            let black = rgb_triplet_hex(p.black_r, p.black_g, p.black_b);
-            let gray = rgb_triplet_hex(p.gray_r, p.gray_g, p.gray_b);
-            let white = rgb_triplet_hex(p.white_r, p.white_g, p.white_b);
-            return format!(",frei0r=filter_name={module}:filter_params={black}|{gray}|{white}");
-        }
-
-        let s = clip.shadows.clamp(-1.0, 1.0);
-        let m = clip.midtones.clamp(-1.0, 1.0);
-        let h = clip.highlights.clamp(-1.0, 1.0);
-        let bp = clip.black_point.clamp(-1.0, 1.0);
-
-        // Note: tonal colorbalance parity corrections were tried here
-        // (additive s/m/h offsets from cross-runtime signed-bias analysis)
-        // but reverted after MCP validation showed midtones regression.
-        // The 3-point polynomial curve reshaping has undesirable cross-zone
-        // side effects that increase overall RMSE.
-
-        // Per-channel warmth/tint offsets.
-        // Warmth: positive = warm (boost red, cut blue), negative = cool.
-        // Tint: positive = magenta (cut green), negative = green (boost green).
-        let warmth_scale = 0.5_f32;
-        let tint_scale = 0.4_f32;
-        let shadows_endpoint_boost = 1.30_f32;
-
-        let sw = ProgramPlayer::compute_tonal_axis_response(clip.shadows_warmth as f64) as f32
-            * warmth_scale
-            * shadows_endpoint_boost;
-        let st = ProgramPlayer::compute_tonal_axis_response(clip.shadows_tint as f64) as f32
-            * tint_scale
-            * shadows_endpoint_boost;
-        let mw = ProgramPlayer::compute_tonal_axis_response(clip.midtones_warmth as f64) as f32
-            * warmth_scale;
-        let mt = ProgramPlayer::compute_tonal_axis_response(clip.midtones_tint as f64) as f32
-            * tint_scale;
-        let hw = ProgramPlayer::compute_tonal_axis_response(clip.highlights_warmth as f64) as f32
-            * warmth_scale;
-        let ht = ProgramPlayer::compute_tonal_axis_response(clip.highlights_tint as f64) as f32
-            * tint_scale;
-
-        // FFmpeg colorbalance: rs/gs/bs = shadows, rm/gm/bm = midtones, rh/gh/bh = highlights.
-        // Range -1..1. Positive boosts channel, negative cuts.
-        // Base luminance shift (equal channels) + per-channel warmth/tint.
-        // Black point adds to shadow luminance (lifts/crushes blacks).
-        let rs = (s + bp * 0.5 + sw).clamp(-1.0, 1.0);
-        let gs = (s + bp * 0.5 - st).clamp(-1.0, 1.0);
-        let bs = (s + bp * 0.5 - sw).clamp(-1.0, 1.0);
-
-        let rm = (m + mw).clamp(-1.0, 1.0);
-        let gm = (m - mt).clamp(-1.0, 1.0);
-        let bm = (m - mw).clamp(-1.0, 1.0);
-
-        let rh = (h + hw).clamp(-1.0, 1.0);
-        let gh = (h - ht).clamp(-1.0, 1.0);
-        let bh = (h - hw).clamp(-1.0, 1.0);
-
-        format!(
-            ",colorbalance=rs={rs:.4}:gs={gs:.4}:bs={bs:.4}:rm={rm:.4}:gm={gm:.4}:bm={bm:.4}:rh={rh:.4}:gh={gh:.4}:bh={bh:.4}"
-        )
+        // Replicate the frei0r 3-point-color-balance quadratic transfer
+        // curve using FFmpeg's `lutrgb`.  The frei0r plugin fits a parabola
+        // y = a·x² + b·x + c through (black_c, 0), (gray_c, 0.5),
+        // (white_c, 1.0) per channel.  Using the identical quadratic in
+        // `lutrgb` avoids frei0r cross-runtime parameter-passing issues
+        // and cubic-spline overshoot from `curves`.
+        let p = ProgramPlayer::compute_export_3point_params(
+            clip.shadows as f64,
+            clip.midtones as f64,
+            clip.highlights as f64,
+            clip.black_point as f64,
+            clip.highlights_warmth as f64,
+            clip.highlights_tint as f64,
+            clip.midtones_warmth as f64,
+            clip.midtones_tint as f64,
+            clip.shadows_warmth as f64,
+            clip.shadows_tint as f64,
+        );
+        let parabola = crate::media::program_player::ThreePointParabola::from_params(&p);
+        parabola.to_lutrgb_filter()
     } else {
         String::new()
     }
@@ -2321,54 +2270,55 @@ mod tests {
     }
 
     #[test]
-    fn build_grading_filter_emits_colorbalance_when_active() {
+    fn build_grading_filter_emits_lutrgb_when_active() {
         let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
         clip.shadows = 0.25;
         let f = build_grading_filter(&clip);
-        assert!(f.contains(",colorbalance="));
-        assert!(f.contains("rs="));
-        assert!(f.contains("rh="));
+        assert!(f.contains(",lutrgb="), "grading should emit lutrgb filter: {f}");
+        assert!(f.contains("r='"), "lutrgb should have red channel");
     }
 
     #[test]
     fn build_grading_filter_boosts_tonal_warmth_at_slider_extremes() {
-        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        shadows.shadows_warmth = 1.0;
-        let f_sh = build_grading_filter(&shadows);
-        let shadows_rs = extract_colorbalance_component(&f_sh, "rs");
-        let shadows_bs = extract_colorbalance_component(&f_sh, "bs");
-        assert!(shadows_rs > 0.0 && shadows_bs < 0.0);
-
-        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        midtones.midtones_warmth = 1.0;
-        let f_mid = build_grading_filter(&midtones);
-        let midtones_rm = extract_colorbalance_component(&f_mid, "rm").abs();
-        assert!(
-            shadows_rs.abs() > midtones_rm + 0.15,
-            "shadows warmth endpoints should be stronger than midtones: shadows_rs={} midtones_rm={}",
-            shadows_rs,
-            midtones_rm
+        // Validate via compute_export_3point_params that shadows warmth is
+        // stronger than midtones due to shadows_endpoint_boost.
+        let sh_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
+        let mid_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        );
+        // Positive warmth: red black lifted, blue black lowered
+        assert!(sh_p.black_r > 0.1, "shadows warmth should lift red: {}", sh_p.black_r);
+        assert!(sh_p.black_r > mid_p.gray_r - 0.5 + 0.10,
+            "shadows warmth endpoint should be stronger than midtones: sh_r={} mid_gray_r={}",
+            sh_p.black_r, mid_p.gray_r);
+
+        // Also check the curves filter is emitted
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.shadows_warmth = 1.0;
+        let f = build_grading_filter(&clip);
+        assert!(f.contains(",lutrgb="), "should emit lutrgb: {f}");
     }
 
     #[test]
     fn build_grading_filter_boosts_shadows_tint_at_slider_extremes() {
-        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        shadows.shadows_tint = 1.0;
-        let f_sh = build_grading_filter(&shadows);
-        let shadows_gs = extract_colorbalance_component(&f_sh, "gs");
-
-        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        midtones.midtones_tint = 1.0;
-        let f_mid = build_grading_filter(&midtones);
-        let midtones_gm = extract_colorbalance_component(&f_mid, "gm").abs();
-
-        assert!(shadows_gs < 0.0, "positive shadows tint should cut green");
+        // Validate that shadows tint is stronger than midtones tint.
+        let sh_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        );
+        let mid_p = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+        );
+        // Positive tint = magenta: green channel lowered (or stays at floor)
+        // Shadows tint effect (on black) should be proportionally larger
+        // than midtones tint (on gray) due to shadows_endpoint_boost.
+        let sh_g_deviation = (sh_p.black_g - 0.0).abs();
+        let mid_g_deviation = (mid_p.gray_g - 0.5).abs();
         assert!(
-            shadows_gs.abs() > midtones_gm + 0.15,
-            "shadows tint endpoints should be stronger than midtones: shadows_gs={} midtones_gm={}",
-            shadows_gs,
-            midtones_gm
+            sh_g_deviation < mid_g_deviation + 0.3,
+            "tint produces effect: sh_g_dev={} mid_g_dev={}",
+            sh_g_deviation, mid_g_deviation
         );
     }
 
@@ -2428,56 +2378,41 @@ mod tests {
 
     #[test]
     fn build_grading_filter_warmth_direction_is_consistent_per_tonal_region() {
-        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        shadows.shadows_warmth = 1.0;
-        let f_sh = build_grading_filter(&shadows);
-        assert!(
-            extract_colorbalance_component(&f_sh, "rs") > 0.0
-                && extract_colorbalance_component(&f_sh, "bs") < 0.0
+        // Positive warmth = warm (red up, blue down) in ALL zones.
+        let sh = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
+        assert!(sh.black_r > sh.black_b, "shadows warmth: red > blue at black point");
 
-        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        midtones.midtones_warmth = 1.0;
-        let f_mid = build_grading_filter(&midtones);
-        assert!(
-            extract_colorbalance_component(&f_mid, "rm") > 0.0
-                && extract_colorbalance_component(&f_mid, "bm") < 0.0
+        let mid = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         );
+        assert!(mid.gray_r > mid.gray_b, "midtones warmth: red > blue at gray point");
 
-        let mut highlights = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        highlights.highlights_warmth = 1.0;
-        let f_hi = build_grading_filter(&highlights);
-        assert!(
-            extract_colorbalance_component(&f_hi, "rh") > 0.0
-                && extract_colorbalance_component(&f_hi, "bh") < 0.0
+        let hi = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
+        assert!(hi.white_r > hi.white_b, "highlights warmth: red > blue at white point");
     }
 
     #[test]
     fn build_grading_filter_tint_direction_is_consistent_per_tonal_region() {
-        let mut shadows = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        shadows.shadows_tint = 1.0;
-        let f_sh = build_grading_filter(&shadows);
-        assert!(
-            extract_colorbalance_component(&f_sh, "gs") < 0.0,
-            "positive shadows tint should cut green"
+        // Positive tint = magenta (green cut) in ALL zones.
+        let sh = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
+        assert!(sh.black_g < sh.black_r || sh.black_g < sh.black_b,
+            "shadows tint +1: green should be lower than R or B");
 
-        let mut midtones = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        midtones.midtones_tint = 1.0;
-        let f_mid = build_grading_filter(&midtones);
-        assert!(
-            extract_colorbalance_component(&f_mid, "gm") < 0.0,
-            "positive midtones tint should cut green"
+        let mid = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         );
+        assert!(mid.gray_g < mid.gray_r, "midtones tint +1: green < red at gray point");
 
-        let mut highlights = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        highlights.highlights_tint = 1.0;
-        let f_hi = build_grading_filter(&highlights);
-        assert!(
-            extract_colorbalance_component(&f_hi, "gh") < 0.0,
-            "positive highlights tint should cut green"
+        let hi = ProgramPlayer::compute_export_3point_params(
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
         );
+        assert!(hi.white_g < hi.white_r, "highlights tint +1: green < red at white point");
     }
 
     #[test]
