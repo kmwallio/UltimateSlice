@@ -234,6 +234,11 @@ pub enum McpCommand {
         opacity: f64,
         reply: SyncSender<Value>,
     },
+    SetClipBlendMode {
+        clip_id: String,
+        blend_mode: String,
+        reply: SyncSender<Value>,
+    },
     SetClipKeyframe {
         clip_id: String,
         property: String,

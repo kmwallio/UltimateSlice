@@ -913,6 +913,17 @@ fn parse_asset_clip(
                     _ => ClipColorLabel::None,
                 };
             }
+            if let Some(v) = attrs.get("us:blend-mode") {
+                clip.blend_mode = match v.as_str() {
+                    "multiply" => crate::model::clip::BlendMode::Multiply,
+                    "screen" => crate::model::clip::BlendMode::Screen,
+                    "overlay" => crate::model::clip::BlendMode::Overlay,
+                    "add" => crate::model::clip::BlendMode::Add,
+                    "difference" => crate::model::clip::BlendMode::Difference,
+                    "soft_light" => crate::model::clip::BlendMode::SoftLight,
+                    _ => crate::model::clip::BlendMode::Normal,
+                };
+            }
             if let Some(v) = attrs.get("us:temperature") {
                 clip.temperature = v.parse().unwrap_or(6500.0);
             }

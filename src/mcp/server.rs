@@ -700,6 +700,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_blend_mode",
+            "description": "Set compositing blend mode for a clip by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":     { "type": "string", "description": "Clip id (from list_clips)." },
+                    "blend_mode":  { "type": "string", "enum": ["normal", "multiply", "screen", "overlay", "add", "difference", "soft_light"], "description": "Blend mode for compositing." }
+                },
+                "required": ["clip_id", "blend_mode"]
+            }
+        },
+        {
             "name": "set_clip_keyframe",
             "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) for a clip at a timeline position.",
             "inputSchema": {
@@ -1278,6 +1290,11 @@ fn dispatch_tool_payload(
         "set_clip_opacity" => McpCommand::SetClipOpacity {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             opacity: args["opacity"].as_f64().unwrap_or(1.0),
+            reply: tx,
+        },
+        "set_clip_blend_mode" => McpCommand::SetClipBlendMode {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            blend_mode: args["blend_mode"].as_str().unwrap_or("normal").to_string(),
             reply: tx,
         },
         "set_clip_keyframe" => McpCommand::SetClipKeyframe {

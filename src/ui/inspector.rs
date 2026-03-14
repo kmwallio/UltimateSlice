@@ -90,6 +90,7 @@ pub struct InspectorView {
     pub flip_v_btn: gtk4::ToggleButton,
     pub scale_slider: Scale,
     pub opacity_slider: Scale,
+    pub blend_mode_dropdown: gtk4::DropDown,
     pub position_x_slider: Scale,
     pub position_y_slider: Scale,
     // Title / text overlay
@@ -215,6 +216,12 @@ impl InspectorView {
                 }
                 self.clip_color_label_combo
                     .set_selected(clip_color_label_index(c.color_label));
+                self.blend_mode_dropdown.set_selected(
+                    crate::model::clip::BlendMode::ALL
+                        .iter()
+                        .position(|m| *m == c.blend_mode)
+                        .unwrap_or(0) as u32,
+                );
                 self.in_value.set_text(&ns_to_timecode(c.source_in));
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
@@ -395,6 +402,7 @@ impl InspectorView {
                 self.flip_v_btn.set_active(false);
                 self.scale_slider.set_value(1.0);
                 self.opacity_slider.set_value(1.0);
+                self.blend_mode_dropdown.set_selected(0);
                 self.position_x_slider.set_value(0.0);
                 self.position_y_slider.set_value(0.0);
                 self.title_entry.set_text("");
@@ -1058,6 +1066,16 @@ pub fn build_inspector(
     opacity_keyframe_row.append(&opacity_remove_keyframe_btn);
     transform_inner.append(&opacity_keyframe_row);
 
+    row_label(&transform_inner, "Blend Mode");
+    let blend_mode_dropdown = gtk4::DropDown::from_strings(&[
+        "Normal", "Multiply", "Screen", "Overlay", "Add", "Difference", "Soft Light",
+    ]);
+    blend_mode_dropdown.set_selected(0);
+    blend_mode_dropdown.set_halign(gtk4::Align::Start);
+    blend_mode_dropdown.set_hexpand(true);
+    blend_mode_dropdown.set_tooltip_text(Some("Compositing blend mode"));
+    transform_inner.append(&blend_mode_dropdown);
+
     row_label(&transform_inner, "Position X");
     let position_x_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
     position_x_slider.set_value(0.0);
@@ -1552,6 +1570,36 @@ pub fn build_inspector(
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                             clip.color_label = color_label;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_clip_changed();
+            }
+        });
+    }
+
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        blend_mode_dropdown.connect_selected_notify(move |combo| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let mode = crate::model::clip::BlendMode::ALL
+                    .get(combo.selected() as usize)
+                    .copied()
+                    .unwrap_or_default();
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.blend_mode = mode;
                             proj.dirty = true;
                             break;
                         }
@@ -3408,6 +3456,7 @@ pub fn build_inspector(
         flip_v_btn,
         scale_slider,
         opacity_slider,
+        blend_mode_dropdown,
         position_x_slider,
         position_y_slider,
         title_entry,

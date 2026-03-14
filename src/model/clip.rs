@@ -44,6 +44,56 @@ impl Default for ClipColorLabel {
     }
 }
 
+/// Compositing blend mode for a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Add,
+    Difference,
+    SoftLight,
+}
+
+impl BlendMode {
+    pub const ALL: &'static [BlendMode] = &[
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Add,
+        BlendMode::Difference,
+        BlendMode::SoftLight,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            BlendMode::Normal => "Normal",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::Add => "Add",
+            BlendMode::Difference => "Difference",
+            BlendMode::SoftLight => "Soft Light",
+        }
+    }
+
+    pub fn ffmpeg_mode(&self) -> &'static str {
+        match self {
+            BlendMode::Normal => "normal",
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Overlay => "overlay",
+            BlendMode::Add => "addition",
+            BlendMode::Difference => "difference",
+            BlendMode::SoftLight => "softlight",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyframeInterpolation {
@@ -438,6 +488,9 @@ pub struct Clip {
     /// Optional opacity keyframes over clip-local timeline.
     #[serde(default)]
     pub opacity_keyframes: Vec<NumericKeyframe>,
+    /// Compositing blend mode: Normal, Multiply, Screen, Overlay, Add, Difference, SoftLight.
+    #[serde(default)]
+    pub blend_mode: BlendMode,
     /// Horizontal position offset: −1.0 (clip anchored to left edge) to 1.0 (right edge).
     /// Meaningful when scale ≠ 1.0. Default 0.0 (centered).
     #[serde(default)]
@@ -726,6 +779,7 @@ impl Clip {
             scale_keyframes: Vec::new(),
             opacity: 1.0,
             opacity_keyframes: Vec::new(),
+            blend_mode: BlendMode::Normal,
             position_x: 0.0,
             position_x_keyframes: Vec::new(),
             position_y: 0.0,

@@ -4864,6 +4864,7 @@ pub fn build_window(
                             scale_keyframes: c.scale_keyframes.clone(),
                             opacity: c.opacity,
                             opacity_keyframes: c.opacity_keyframes.clone(),
+                            blend_mode: c.blend_mode,
                             position_x: c.position_x,
                             position_x_keyframes: c.position_x_keyframes.clone(),
                             position_y: c.position_y,
@@ -6210,6 +6211,7 @@ fn handle_mcp_command(
                                 "pan":              c.pan,
                                 "scale":            c.scale,
                                 "opacity":          c.opacity,
+                                "blend_mode":       c.blend_mode.label(),
                                 "position_x":       c.position_x,
                                 "position_y":       c.position_y,
                                 "speed":            c.speed,
@@ -7478,6 +7480,48 @@ fn handle_mcp_command(
             }
             drop(proj);
             reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipBlendMode {
+            clip_id,
+            blend_mode,
+            reply,
+        } => {
+            let parsed = match blend_mode.as_str() {
+                "normal" => Some(crate::model::clip::BlendMode::Normal),
+                "multiply" => Some(crate::model::clip::BlendMode::Multiply),
+                "screen" => Some(crate::model::clip::BlendMode::Screen),
+                "overlay" => Some(crate::model::clip::BlendMode::Overlay),
+                "add" => Some(crate::model::clip::BlendMode::Add),
+                "difference" => Some(crate::model::clip::BlendMode::Difference),
+                "soft_light" => Some(crate::model::clip::BlendMode::SoftLight),
+                _ => None,
+            };
+            let Some(parsed) = parsed else {
+                reply
+                    .send(json!({"success": false, "error": "blend_mode must be one of: normal, multiply, screen, overlay, add, difference, soft_light"}))
+                    .ok();
+                return;
+            };
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.blend_mode = parsed;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply
+                .send(json!({"success": found, "clip_id": clip_id, "blend_mode": blend_mode}))
+                .ok();
             if found {
                 on_project_changed();
             }

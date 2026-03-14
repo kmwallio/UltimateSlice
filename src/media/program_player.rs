@@ -331,6 +331,8 @@ pub struct ProgramClip {
     /// Opacity multiplier for compositing: 0.0 = transparent, 1.0 = opaque.
     pub opacity: f64,
     pub opacity_keyframes: Vec<NumericKeyframe>,
+    /// Compositing blend mode.
+    pub blend_mode: crate::model::clip::BlendMode,
     /// Horizontal position offset: −1.0 (left) to 1.0 (right). Default 0.0.
     pub position_x: f64,
     pub position_x_keyframes: Vec<NumericKeyframe>,
@@ -790,6 +792,13 @@ struct VideoSlot {
     /// `transition_after_ns` and is added to timeline_pos when computing
     /// source-file seek positions.
     transition_enter_offset_ns: u64,
+    /// True when the clip uses a non-Normal blend mode.  Zoom is forced
+    /// through the effects-bin path (not compositor-pad) so the captured
+    /// buffer is at project resolution with position baked in.
+    is_blend_mode: bool,
+    /// Intended compositor alpha for blend-mode clips (used by the blend
+    /// probe since the actual compositor pad alpha is forced to 0).
+    blend_alpha: Arc<Mutex<f64>>,
 }
 
 /// Result of `compute_reuse_plan()`: whether all current decoder slots can be
@@ -874,6 +883,69 @@ enum AudioCurrentSource {
     ReverseVideoClip(usize),
 }
 
+/// Apply a single blend-mode pixel operation.  Returns the blended RGB.
+/// `s` = source (overlay), `b` = base (background).
+#[inline]
+fn blend_pixel(
+    mode: crate::model::clip::BlendMode,
+    sr: f32, sg: f32, sb: f32,
+    br: f32, bg: f32, bb: f32,
+) -> (f32, f32, f32) {
+    use crate::model::clip::BlendMode;
+    match mode {
+        BlendMode::Normal => (sr, sg, sb),
+        BlendMode::Multiply => (sr * br, sg * bg, sb * bb),
+        BlendMode::Screen => (
+            1.0 - (1.0 - sr) * (1.0 - br),
+            1.0 - (1.0 - sg) * (1.0 - bg),
+            1.0 - (1.0 - sb) * (1.0 - bb),
+        ),
+        BlendMode::Overlay => {
+            let ov = |s: f32, b: f32| -> f32 {
+                if b < 0.5 { 2.0 * s * b } else { 1.0 - 2.0 * (1.0 - s) * (1.0 - b) }
+            };
+            (ov(sr, br), ov(sg, bg), ov(sb, bb))
+        }
+        BlendMode::Add => (
+            (sr + br).min(1.0),
+            (sg + bg).min(1.0),
+            (sb + bb).min(1.0),
+        ),
+        BlendMode::Difference => (
+            (sr - br).abs(),
+            (sg - bg).abs(),
+            (sb - bb).abs(),
+        ),
+        BlendMode::SoftLight => {
+            let sl = |s: f32, b: f32| -> f32 {
+                if s <= 0.5 {
+                    b - (1.0 - 2.0 * s) * b * (1.0 - b)
+                } else {
+                    let d = if b <= 0.25 {
+                        ((16.0 * b - 12.0) * b + 4.0) * b
+                    } else {
+                        b.sqrt()
+                    };
+                    b + (2.0 * s - 1.0) * (d - b)
+                }
+            };
+            (sl(sr, br), sl(sg, bg), sl(sb, bb))
+        }
+    }
+}
+
+/// Captured overlay frame for blend-mode compositing in the preview pipeline.
+/// The blend probe on the compositor output reads these to apply pixel-accurate
+/// blend math against the real base layers.
+struct BlendOverlay {
+    data: Vec<u8>,
+    width: usize,
+    height: usize,
+    blend_mode: crate::model::clip::BlendMode,
+    opacity: f64,
+    zorder: u32,
+}
+
 pub struct ProgramPlayer {
     /// The single GStreamer pipeline containing compositor + audiomixer.
     pipeline: gst::Pipeline,
@@ -941,6 +1013,10 @@ pub struct ProgramPlayer {
     latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>>,
     /// Latest RGBA frame captured from compositor src (before preview downscale).
     latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>>,
+    /// Captured overlay frames for blend-mode clips.  Keyed by clip_idx.
+    /// The blend probe on compositor output reads these to apply per-pixel
+    /// blend math against the real base layers.
+    blend_overlays: Arc<Mutex<HashMap<usize, BlendOverlay>>>,
     /// When false, the scope appsink callback skips frame allocation (scopes panel hidden).
     scope_enabled: Arc<AtomicBool>,
     /// Monotonic counter incremented whenever a new scope frame is captured.
@@ -1087,6 +1163,8 @@ impl ProgramPlayer {
         // Shared frame store for colour scope analysis.
         let latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
         let latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
+        let blend_overlays: Arc<Mutex<HashMap<usize, BlendOverlay>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         // Flag set false when the scopes panel is hidden to skip the frame copy allocation.
         let scope_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
         let scope_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
@@ -1352,6 +1430,63 @@ impl ProgramPlayer {
             &preview_capsfilter,
             &video_sink_bin,
         ])?;
+        // Blend-mode probe on compositor output.  For each frame, reads captured
+        // overlay buffers from blend-mode clips and applies pixel-accurate blend
+        // math against the compositor's normal "over" output (where the blend-mode
+        // clips are hidden via alpha=0).  Must fire BEFORE the scope/capture probe
+        // below so scopes see the blended result.
+        {
+            let blend_ov = blend_overlays.clone();
+            if let Some(comp_src) = compositor.static_pad("src") {
+                comp_src.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                    let overlays = match blend_ov.try_lock() {
+                        Ok(g) => g,
+                        Err(_) => return gst::PadProbeReturn::Ok,
+                    };
+                    if overlays.is_empty() {
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                        let buf = buffer.make_mut();
+                        if let Ok(mut map) = buf.map_writable() {
+                            let base = map.as_mut_slice();
+                            let base_len = base.len();
+                            // Sort overlays by zorder (lower first)
+                            let mut sorted: Vec<&BlendOverlay> = overlays.values().collect();
+                            sorted.sort_by_key(|o| o.zorder);
+                            for ov in &sorted {
+                                if ov.data.len() != base_len || ov.opacity <= 0.0 {
+                                    continue;
+                                }
+                                let clip_opacity = ov.opacity as f32;
+                                let ov_data = &ov.data;
+                                for (bc, oc) in base.chunks_exact_mut(4).zip(ov_data.chunks_exact(4))
+                                {
+                                    let oa = (oc[3] as f32 / 255.0) * clip_opacity;
+                                    if oa < 1.0 / 255.0 {
+                                        continue;
+                                    }
+                                    let sr = oc[0] as f32 / 255.0;
+                                    let sg = oc[1] as f32 / 255.0;
+                                    let sb = oc[2] as f32 / 255.0;
+                                    let br = bc[0] as f32 / 255.0;
+                                    let bg = bc[1] as f32 / 255.0;
+                                    let bb = bc[2] as f32 / 255.0;
+                                    let (dr, dg, db) = blend_pixel(
+                                        ov.blend_mode, sr, sg, sb, br, bg, bb,
+                                    );
+                                    bc[0] = ((br + (dr - br) * oa).clamp(0.0, 1.0) * 255.0) as u8;
+                                    bc[1] = ((bg + (dg - bg) * oa).clamp(0.0, 1.0) * 255.0) as u8;
+                                    bc[2] = ((bb + (db - bb) * oa).clamp(0.0, 1.0) * 255.0) as u8;
+                                }
+                            }
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
+        }
+
         // Probe on compositor output: always increments cseq (cheap) but only
         // copies the full-res frame when compositor_capture_enabled is set (during
         // MCP frame export).  This avoids ~250 MB/s of unnecessary memcpy during
@@ -1522,6 +1657,7 @@ impl ProgramPlayer {
                 jkl_rate: 0.0,
                 latest_scope_frame,
                 latest_compositor_frame,
+                blend_overlays,
                 scope_enabled,
                 scope_frame_seq,
                 compositor_frame_seq,
@@ -3567,7 +3703,11 @@ impl ProgramPlayer {
             }
             // Update compositor pad alpha for this slot.
             if let Some(slot) = self.slot_for_clip(idx) {
-                if let Some(ref pad) = slot.compositor_pad {
+                if slot.is_blend_mode {
+                    if let Ok(mut a) = slot.blend_alpha.lock() {
+                        *a = opacity;
+                    }
+                } else if let Some(ref pad) = slot.compositor_pad {
                     pad.set_property("alpha", opacity);
                 }
             }
@@ -3584,7 +3724,11 @@ impl ProgramPlayer {
                 clip.opacity = opacity;
             }
             if let Some(slot) = self.slot_for_clip(i) {
-                if let Some(ref pad) = slot.compositor_pad {
+                if slot.is_blend_mode {
+                    if let Ok(mut a) = slot.blend_alpha.lock() {
+                        *a = opacity;
+                    }
+                } else if let Some(ref pad) = slot.compositor_pad {
                     pad.set_property("alpha", opacity);
                 }
             }
@@ -3595,8 +3739,13 @@ impl ProgramPlayer {
     }
 
     /// Update speed keyframes on a clip without a full pipeline rebuild.
-    /// Updates source_out to match the new speed curve and re-seeks to refresh
-    /// the preview frame.
+    /// Updates source_out to match the new speed curve.
+    ///
+    /// No decoder reseek is performed here — the flush seek required to
+    /// refresh the preview frame races with qtdemux's streaming thread and
+    /// causes a SIGSEGV (NULL stream dereference in `gst_qtdemux_push_buffer`).
+    /// The updated mapping takes effect on the next natural seek (playhead
+    /// scrub, play/pause, or timeline redraw).
     pub fn update_speed_keyframes_for_clip(
         &mut self,
         clip_id: &str,
@@ -3614,9 +3763,7 @@ impl ProgramPlayer {
             let timeline_dur_ns = clip.duration_ns();
             let source_dur = clip.integrated_source_distance_for_local_timeline_ns(timeline_dur_ns);
             clip.source_out_ns = clip.source_in_ns.saturating_add(source_dur as u64);
-            if self.state != PlayerState::Playing {
-                self.reseek_slot_for_current();
-            }
+            // No reseek — see doc comment above.
         }
         if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
             let clip = &mut self.audio_clips[i];
@@ -3873,7 +4020,15 @@ impl ProgramPlayer {
             }
             if let Some(ref pad) = slot.compositor_pad {
                 let alpha = clip.opacity_at_timeline_ns(timeline_pos).clamp(0.0, 1.0);
-                pad.set_property("alpha", alpha);
+                if slot.is_blend_mode {
+                    // Blend-mode clips are hidden from compositor (alpha=0).
+                    // Store intended alpha for the blend probe to use.
+                    if let Ok(mut a) = slot.blend_alpha.lock() {
+                        *a = alpha;
+                    }
+                } else {
+                    pad.set_property("alpha", alpha);
+                }
                 Self::apply_zoom_to_slot(slot, pad, scale, pos_x, pos_y, proc_w, proc_h);
             }
         }
@@ -3891,40 +4046,41 @@ impl ProgramPlayer {
             let tstate = self.compute_transition_state(slot.clip_idx, timeline_pos);
             if let Some(ref pad) = slot.compositor_pad {
                 let base_alpha = clip.opacity_at_timeline_ns(timeline_pos).clamp(0.0, 1.0);
-                match &tstate {
+                let effective_alpha = match &tstate {
                     Some(ts) => {
                         let t = ts.progress;
                         match (ts.kind.as_str(), ts.role) {
                             ("cross_dissolve", TransitionRole::Outgoing) => {
-                                pad.set_property("alpha", base_alpha * (1.0 - t));
+                                base_alpha * (1.0 - t)
                             }
                             ("cross_dissolve", TransitionRole::Incoming) => {
-                                pad.set_property("alpha", base_alpha * t);
+                                base_alpha * t
                             }
                             ("fade_to_black", TransitionRole::Outgoing) => {
-                                pad.set_property("alpha", base_alpha * (1.0 - 2.0 * t).max(0.0));
+                                base_alpha * (1.0 - 2.0 * t).max(0.0)
                             }
                             ("fade_to_black", TransitionRole::Incoming) => {
-                                pad.set_property("alpha", base_alpha * (2.0 * t - 1.0).max(0.0));
+                                base_alpha * (2.0 * t - 1.0).max(0.0)
                             }
                             ("wipe_right", _) | ("wipe_left", _) => {
-                                // Wipes: both clips at full alpha; crop handles reveal.
-                                pad.set_property("alpha", base_alpha);
+                                base_alpha
                             }
                             _ => {
-                                // Unknown transition: fall back to cross-dissolve behavior.
-                                let a = match ts.role {
+                                match ts.role {
                                     TransitionRole::Outgoing => base_alpha * (1.0 - t),
                                     TransitionRole::Incoming => base_alpha * t,
-                                };
-                                pad.set_property("alpha", a);
+                                }
                             }
                         }
                     }
-                    None => {
-                        // Not in a transition: restore full opacity.
-                        pad.set_property("alpha", base_alpha);
+                    None => base_alpha,
+                };
+                if slot.is_blend_mode {
+                    if let Ok(mut a) = slot.blend_alpha.lock() {
+                        *a = effective_alpha;
                     }
+                } else {
+                    pad.set_property("alpha", effective_alpha);
                 }
             }
             // Wipe transitions: animate videocrop on incoming clip to progressively reveal.
@@ -5979,7 +6135,13 @@ impl ProgramPlayer {
         // avoids dynamic caps renegotiation in the per-clip zoom branch while
         // playback is running, which can trigger decodebin/qtdemux
         // not-negotiated failures on some MP4 sources.
-        if pad.find_property("width").is_some() && pad.find_property("height").is_some() {
+        // For blend-mode clips, always use the effects-bin zoom path so the
+        // captured buffer has scale/position baked in (the compositor pad
+        // alpha is 0, so compositor-level scaling would be invisible).
+        if !slot.is_blend_mode
+            && pad.find_property("width").is_some()
+            && pad.find_property("height").is_some()
+        {
             pad.set_property("width", sw);
             pad.set_property("height", sh);
             if pad.find_property("xpos").is_some() && pad.find_property("ypos").is_some() {
@@ -6519,6 +6681,12 @@ impl ProgramPlayer {
     // ── Pipeline rebuild ───────────────────────────────────────────────────
 
     fn teardown_single_slot(&mut self, slot: VideoSlot) {
+        // Remove any captured blend overlay for this slot.
+        if slot.is_blend_mode {
+            if let Ok(mut overlays) = self.blend_overlays.lock() {
+                overlays.remove(&slot.clip_idx);
+            }
+        }
         if let Some(ref pad) = slot.compositor_pad {
             let _ = pad.send_event(gst::event::FlushStart::new());
         }
@@ -7445,6 +7613,8 @@ impl ProgramPlayer {
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,
+            is_blend_mode: false,
+            blend_alpha: Arc::new(Mutex::new(1.0)),
         })
     }
 
@@ -7710,6 +7880,8 @@ impl ProgramPlayer {
             is_prerender_slot: true,
             prerender_segment_start_ns: Some(segment_start_ns),
             transition_enter_offset_ns: 0,
+            is_blend_mode: false,
+            blend_alpha: Arc::new(Mutex::new(1.0)),
         })
     }
 
@@ -8396,6 +8568,39 @@ impl ProgramPlayer {
             });
         }
 
+        // Blend-mode capture: hide from compositor and capture overlay buffer.
+        let is_blend_mode = clip.blend_mode != crate::model::clip::BlendMode::Normal;
+        let blend_alpha = Arc::new(Mutex::new(
+            clip.opacity_at_timeline_ns(self.timeline_pos_ns).clamp(0.0, 1.0),
+        ));
+        if is_blend_mode {
+            comp_pad.set_property("alpha", 0.0_f64);
+            let blend_ov = self.blend_overlays.clone();
+            let blend_mode = clip.blend_mode;
+            let ci = clip_idx;
+            let alpha_ref = blend_alpha.clone();
+            let zorder = (zorder_offset + 1) as u32;
+            q_src.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                if let Some(buffer) = info.buffer() {
+                    if let Ok(map) = buffer.map_readable() {
+                        let data = map.as_slice().to_vec();
+                        let opacity = alpha_ref.try_lock().map(|g| *g).unwrap_or(1.0);
+                        if let Ok(mut overlays) = blend_ov.try_lock() {
+                            overlays.insert(ci, BlendOverlay {
+                                data,
+                                width: 0,  // not used — size matches compositor output
+                                height: 0,
+                                blend_mode,
+                                opacity,
+                                zorder,
+                            });
+                        }
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
+
         // Create audio path: audioconvert → [audiopanorama] → [level] → audiomixer pad.
         let (audio_conv, audio_panorama, audio_level, amix_pad) = if clip_has_audio {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
@@ -8600,6 +8805,8 @@ impl ProgramPlayer {
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,
+            is_blend_mode,
+            blend_alpha: blend_alpha.clone(),
         };
         Self::apply_transform_to_slot(
             &slot_ref_for_transform,
@@ -8660,6 +8867,8 @@ impl ProgramPlayer {
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,
+            is_blend_mode,
+            blend_alpha,
         })
     }
 
@@ -10689,6 +10898,7 @@ mod tests {
             scale_keyframes: Vec::new(),
             opacity: 1.0,
             opacity_keyframes: Vec::new(),
+            blend_mode: crate::model::clip::BlendMode::Normal,
             position_x: 0.0,
             position_x_keyframes: Vec::new(),
             position_y: 0.0,
@@ -11373,6 +11583,8 @@ mod tests {
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,
+            is_blend_mode: false,
+            blend_alpha: Arc::new(Mutex::new(1.0)),
         }
     }
 

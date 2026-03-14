@@ -444,9 +444,16 @@ pub fn export_project(
         ));
         let next_label = format!("vcomp{k}");
         let end_s = (clip.timeline_start + clip.duration()) as f64 / 1_000_000_000.0;
-        filter.push_str(&format!(
-            ";[{prev_label}][{ov_label}]overlay=x=0:y=0:enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
-        ));
+        if clip.blend_mode != crate::model::clip::BlendMode::Normal {
+            let mode = clip.blend_mode.ffmpeg_mode();
+            filter.push_str(&format!(
+                ";[{prev_label}][{ov_label}]blend=all_mode={mode}:enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
+            ));
+        } else {
+            filter.push_str(&format!(
+                ";[{prev_label}][{ov_label}]overlay=x=0:y=0:enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
+            ));
+        }
         prev_label = next_label;
     }
     // Final output video label — use the last composited label directly

@@ -579,6 +579,20 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             crate::model::clip::ClipColorLabel::Magenta => "magenta",
                         },
                     ));
+                    if clip.blend_mode != crate::model::clip::BlendMode::Normal {
+                        asset_clip.push_attribute((
+                            "us:blend-mode",
+                            match clip.blend_mode {
+                                crate::model::clip::BlendMode::Normal => "normal",
+                                crate::model::clip::BlendMode::Multiply => "multiply",
+                                crate::model::clip::BlendMode::Screen => "screen",
+                                crate::model::clip::BlendMode::Overlay => "overlay",
+                                crate::model::clip::BlendMode::Add => "add",
+                                crate::model::clip::BlendMode::Difference => "difference",
+                                crate::model::clip::BlendMode::SoftLight => "soft_light",
+                            },
+                        ));
+                    }
                     // Store color/effects as custom vendor attributes (us: prefix).
                     // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
                     asset_clip

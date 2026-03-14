@@ -19,5 +19,13 @@ impl Drop for PipelineGuard {
     fn drop(&mut self) {
         use gstreamer::prelude::*;
         let _ = self.0.set_state(gstreamer::State::Null);
+        // Wait for the Null transition to complete so streaming threads
+        // (e.g. qtdemux's gst_qtdemux_loop) have fully stopped before the
+        // pipeline and its elements are freed.  Without this, a qtdemux
+        // streaming thread can dereference a freed stream struct (SIGSEGV
+        // at offset 0x50 in gst_qtdemux_push_buffer).
+        let _ = self
+            .0
+            .state(gstreamer::ClockTime::from_seconds(5));
     }
 }
