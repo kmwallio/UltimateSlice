@@ -127,6 +127,14 @@ Clips with a speed multiplier are exported correctly:
 
 For reversed clips, export applies `reverse`/`areverse` before speed scaling so both video and audio are rendered backward.
 
+### Variable speed ramps
+
+Clips with speed keyframes use dynamic expressions for export:
+- Video: `setpts=PTS/(speed_expr)` where `speed_expr` is a piecewise interpolation of the speed keyframes (supports linear and eased curves).
+- Audio: uses the mean speed over the clip as a constant `atempo` chain (FFmpeg's `atempo` and `asetrate` filters do not support time-varying expressions). Pitch-preserving variable-speed audio (e.g. via Rubberband) is a future roadmap item.
+
+The exported clip duration matches the timeline duration computed from the speed integral.
+
 ## Keyframed Properties
 
 Export evaluates phase-1 clip keyframes with interpolation-aware curves:

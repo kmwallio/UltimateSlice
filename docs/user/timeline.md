@@ -295,7 +295,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Thumbnail strips now load progressively with adaptive tile density to keep timeline warm-up responsive on heavy media.
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
-- A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
+- A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0. Clips with speed keyframes (variable speed ramps) show a **⏲ Ramp** badge instead.
 - Clips with phase-1 keyframes show color-coded keyframe ticks/guides on the clip body (Scale, Opacity, Position X, Position Y, Volume, Pan, Rotate, Crop Left/Right/Top/Bottom), a `KF <count>` badge, and a `◆` prefix in the clip label when keyframes are present. **Click a keyframe tick** to select the clip and jump the playhead to that keyframe time.
 - Hovering a keyframe marker shows a tooltip with the clip name, keyframe time, and which properties are modified at that keyframe moment.
 - Clips can use semantic color labels (set in the Inspector) for quick visual categorization.

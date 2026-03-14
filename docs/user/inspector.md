@@ -180,6 +180,20 @@ Controls the playback speed and direction of the clip. Changing speed adjusts th
 
 Marks at **½×**, **1×**, **2×** for quick snapping.
 
+### Variable speed ramps
+
+You can create speed ramps (variable speed within a single clip) by adding **Speed** keyframes in the Keyframes panel dopesheet. For example, ramping from 1× to 2× creates a smooth acceleration effect.
+
+- Open the **Keyframes** panel and enable the **Speed** lane.
+- Position the playhead and add keyframes at the desired times with different speed values.
+- The clip's timeline duration automatically adjusts to account for the varying speed — a ramp from 1× to 0.5× will make the clip longer, while 1× to 2× will make it shorter.
+- Playback in the Program Monitor reflects the speed curve in real time.
+- Speed keyframes support all interpolation modes (Linear, Ease In, Ease Out, Ease In/Out) and custom Bezier curves for fine-tuned ramp shaping.
+
+A yellow **⏲ Ramp** badge appears on clips with speed keyframes. Reversed speed-ramped clips show **⏲ ◀ Ramp**.
+
+### Constant speed
+
 Program Monitor preview uses GStreamer rate-seek (including reverse direction). Export uses `reverse`/`areverse` (when reversed) and `setpts`/chained `atempo` (audio) for speed.
 
 A yellow **◀** badge appears on reversed clips in the timeline (e.g. **◀ 2×** for a reversed 2× speed clip). Reverse can be combined with any speed multiplier.
