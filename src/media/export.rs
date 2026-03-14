@@ -512,7 +512,7 @@ pub fn export_project(
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
-            let atempo = build_atempo(clip.speed);
+            let atempo = build_audio_speed_filter(clip);
             let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
@@ -539,7 +539,7 @@ pub fn export_project(
             let delay_ms = clip.timeline_start / 1_000_000;
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
-            let atempo = build_atempo(clip.speed);
+            let atempo = build_audio_speed_filter(clip);
             let volume_filter = build_volume_filter(clip);
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
@@ -559,7 +559,7 @@ pub fn export_project(
         let delay_ms = clip.timeline_start / 1_000_000;
         let label = format!("aa{j}");
         let areverse = if clip.reverse { "areverse," } else { "" };
-        let atempo = build_atempo(clip.speed);
+        let atempo = build_audio_speed_filter(clip);
         let volume_filter = build_volume_filter(clip);
         let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
         let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
@@ -1297,12 +1297,81 @@ fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -
         );
     }
     if !clip.speed_keyframes.is_empty() {
-        let speed_expr =
-            build_keyframed_property_expression(&clip.speed_keyframes, clip.speed, 0.05, 16.0, "T");
+        // Build a source→timeline time mapping for setpts.  Speed keyframes
+        // are in timeline coordinates, but FFmpeg's PTS is in source
+        // coordinates.  We compute (source_ns, timeline_ns) control points
+        // and build a piecewise linear expression that maps source PTS to
+        // the correct output PTS.
+        let clip_dur_ns = clip.duration();
+        let source_dur_ns = clip.source_duration();
+
+        // Collect unique timeline positions: 0, each keyframe (clamped to
+        // clip duration), and clip duration.
+        let mut timeline_points: Vec<u64> = vec![0, clip_dur_ns];
+        for kf in &clip.speed_keyframes {
+            let t = kf.time_ns.min(clip_dur_ns);
+            if !timeline_points.contains(&t) {
+                timeline_points.push(t);
+            }
+        }
+        timeline_points.sort_unstable();
+
+        // For each timeline point, compute the corresponding source position.
+        let map_points: Vec<(f64, f64)> = timeline_points
+            .iter()
+            .map(|&t_ns| {
+                let src_ns = clip
+                    .integrated_source_distance_for_local_timeline_ns(t_ns)
+                    .clamp(0.0, source_dur_ns as f64);
+                let src_s = src_ns / 1_000_000_000.0;
+                let tl_s = t_ns as f64 / 1_000_000_000.0;
+                (src_s, tl_s)
+            })
+            .collect();
+
+        // Build piecewise linear setpts expression that maps source time
+        // (T, in seconds) to output time (seconds), then convert to PTS
+        // units by dividing by TB.
+        //
+        // Expression structure:
+        //   if(lt(T,s1), lerp_0, if(lt(T,s2), lerp_1, lerp_last)) / TB
+        //
+        // Commas inside the expression are escaped as \, so FFmpeg's
+        // filtergraph parser doesn't split on them.
+        let mut expr = String::new();
+        let mut depth = 0usize;
+        for i in 0..map_points.len().saturating_sub(1) {
+            let (s0, t0) = map_points[i];
+            let (s1, t1) = map_points[i + 1];
+            let ds = s1 - s0;
+            if ds.abs() < 1e-9 {
+                continue;
+            }
+            let slope = (t1 - t0) / ds;
+            if i + 2 < map_points.len() {
+                expr.push_str(&format!(
+                    "if(lt(T\\,{s1:.10})\\,{t0:.10}+(T-{s0:.10})*{slope:.10}\\,"
+                ));
+                depth += 1;
+            } else {
+                // Last segment — no condition needed.
+                expr.push_str(&format!("{t0:.10}+(T-{s0:.10})*{slope:.10}"));
+            }
+        }
+        for _ in 0..depth {
+            expr.push(')');
+        }
+        // Fallback if expression is empty (shouldn't happen).
+        if expr.is_empty() {
+            expr = "PTS".to_string();
+        }
+
+        // Wrap: convert seconds → PTS units, trim to clip duration.
+        let dur_s = clip_dur_ns as f64 / 1_000_000_000.0;
         return if clip.reverse {
-            format!(",reverse,setpts=PTS/({speed_expr})")
+            format!(",reverse,setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS")
         } else {
-            format!(",setpts=PTS/({speed_expr})")
+            format!(",setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS")
         };
     }
     let has_speed = (clip.speed - 1.0).abs() > 0.001;
@@ -1514,6 +1583,25 @@ fn build_atempo(speed: f64) -> String {
     }
     filters.push_str(&format!("atempo={remaining:.6},"));
     filters
+}
+
+/// Build audio speed filter for a clip. When speed keyframes are present,
+/// uses the mean speed as an atempo approximation (atempo and asetrate do not
+/// support time-varying expressions). True variable-speed audio requires
+/// Rubberband, which is a separate roadmap item.
+fn build_audio_speed_filter(clip: &crate::model::clip::Clip) -> String {
+    if !clip.speed_keyframes.is_empty() {
+        // Compute mean speed over the clip's timeline duration.
+        let dur = clip.duration();
+        let mean_speed = if dur > 0 {
+            clip.integrated_source_distance_for_local_timeline_ns(dur) / dur as f64
+        } else {
+            clip.speed.clamp(0.05, 16.0)
+        };
+        build_atempo(mean_speed)
+    } else {
+        build_atempo(clip.speed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

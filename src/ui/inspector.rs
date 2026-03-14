@@ -1,4 +1,6 @@
-use crate::model::clip::{ClipColorLabel, KeyframeInterpolation, Phase1KeyframeProperty};
+use crate::model::clip::{
+    ClipColorLabel, KeyframeInterpolation, NumericKeyframe, Phase1KeyframeProperty,
+};
 use crate::model::project::Project;
 use gdk4;
 use gio;
@@ -300,7 +302,14 @@ impl InspectorView {
                 self.title_entry.set_text(&c.title_text);
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
-                self.speed_slider.set_value(c.speed);
+                // When speed keyframes are present, don't auto-update the slider —
+                // the user sets it to the desired value before clicking
+                // "Set Speed Keyframe". Auto-resetting would clobber their input.
+                // The slider updates when navigating keyframes (Prev/Next KF) or
+                // when the clip selection changes.
+                if c.speed_keyframes.is_empty() {
+                    self.speed_slider.set_value(c.speed);
+                }
                 self.reverse_check.set_active(c.reverse);
                 // LUT
                 match &c.lut_path {
@@ -578,6 +587,7 @@ pub fn build_inspector(
     on_chroma_key_changed: impl Fn() + 'static,
     on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
     on_bg_removal_changed: impl Fn() + 'static,
+    on_speed_keyframe_changed: impl Fn(&str, f64, &[NumericKeyframe]) + 'static,
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
@@ -1254,6 +1264,22 @@ pub fn build_inspector(
     speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
     speed_inner.append(&speed_slider);
 
+    let speed_keyframe_row = GBox::new(Orientation::Horizontal, 6);
+    let speed_set_keyframe_btn = Button::with_label("Set Speed Keyframe");
+    let speed_remove_keyframe_btn = Button::with_label("Remove Speed Keyframe");
+    speed_keyframe_row.append(&speed_set_keyframe_btn);
+    speed_keyframe_row.append(&speed_remove_keyframe_btn);
+    speed_inner.append(&speed_keyframe_row);
+
+    let speed_keyframe_nav_row = GBox::new(Orientation::Horizontal, 4);
+    let speed_prev_keyframe_btn = Button::with_label("◀ Prev KF");
+    speed_prev_keyframe_btn.set_tooltip_text(Some("Jump to previous speed keyframe"));
+    let speed_next_keyframe_btn = Button::with_label("Next KF ▶");
+    speed_next_keyframe_btn.set_tooltip_text(Some("Jump to next speed keyframe"));
+    speed_keyframe_nav_row.append(&speed_prev_keyframe_btn);
+    speed_keyframe_nav_row.append(&speed_next_keyframe_btn);
+    speed_inner.append(&speed_keyframe_nav_row);
+
     let reverse_check = CheckButton::with_label("Reverse (play clip backwards)");
     reverse_check.set_tooltip_text(Some(
         "Play this clip in reverse in Program Monitor preview and export. A ◀ badge appears on the timeline clip.",
@@ -1332,6 +1358,8 @@ pub fn build_inspector(
     let on_chroma_key_changed: Rc<dyn Fn()> = Rc::new(on_chroma_key_changed);
     let on_chroma_key_slider_changed: Rc<dyn Fn(f32, f32)> = Rc::new(on_chroma_key_slider_changed);
     let on_bg_removal_changed: Rc<dyn Fn()> = Rc::new(on_bg_removal_changed);
+    let on_speed_keyframe_changed: Rc<dyn Fn(&str, f64, &[NumericKeyframe])> =
+        Rc::new(on_speed_keyframe_changed);
     let current_playhead_ns: Rc<dyn Fn() -> u64> = Rc::new(current_playhead_ns);
     let on_seek_to: Rc<dyn Fn(u64)> = Rc::new(on_seek_to);
 
@@ -2544,6 +2572,91 @@ pub fn build_inspector(
         }),
         interp_provider.clone(),
     );
+    // Speed keyframe buttons use a lightweight path that updates the
+    // ProgramClip's speed data in-place without a full pipeline rebuild,
+    // avoiding GStreamer qtdemux race conditions during rapid edits.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_speed_keyframe_changed = on_speed_keyframe_changed.clone();
+        let speed_slider = speed_slider.clone();
+        let interp_provider = interp_provider.clone();
+        speed_set_keyframe_btn.connect_clicked(move |_| {
+            if *updating.borrow() {
+                return;
+            }
+            let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                return;
+            };
+            let timeline_pos_ns = current_playhead_ns();
+            let value = speed_slider.value().clamp(0.25, 4.0);
+            let interp = interp_provider();
+            let result = {
+                let mut proj = project.borrow_mut();
+                let mut found = None;
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                            Phase1KeyframeProperty::Speed,
+                            timeline_pos_ns,
+                            value,
+                            interp,
+                        );
+                        found = Some((clip.speed, clip.speed_keyframes.clone()));
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    proj.dirty = true;
+                }
+                found
+            };
+            if let Some((speed, kfs)) = result {
+                on_speed_keyframe_changed(&clip_id, speed, &kfs);
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_speed_keyframe_changed = on_speed_keyframe_changed.clone();
+        speed_remove_keyframe_btn.connect_clicked(move |_| {
+            if *updating.borrow() {
+                return;
+            }
+            let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                return;
+            };
+            let timeline_pos_ns = current_playhead_ns();
+            let result = {
+                let mut proj = project.borrow_mut();
+                let mut found = None;
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        let removed = clip.remove_phase1_keyframe_at_timeline_ns(
+                            Phase1KeyframeProperty::Speed,
+                            timeline_pos_ns,
+                        );
+                        if removed {
+                            found = Some((clip.speed, clip.speed_keyframes.clone()));
+                        }
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    proj.dirty = true;
+                }
+                found
+            };
+            if let Some((speed, kfs)) = result {
+                on_speed_keyframe_changed(&clip_id, speed, &kfs);
+            }
+        });
+    }
 
     // ── Keyframe navigation button wiring ──
     prev_keyframe_btn.connect_clicked({
@@ -2585,6 +2698,74 @@ pub fn build_inspector(
                     let local = clip.local_timeline_position_ns(playhead);
                     if let Some(next_local) = clip.next_keyframe_local_ns(local) {
                         let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    // ── Speed keyframe navigation button wiring ──
+    // Nav buttons also sync the speed slider to the keyframe value at the
+    // destination, so the user sees the correct speed for that keyframe.
+    speed_prev_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        let speed_slider = speed_slider.clone();
+        let updating = updating.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                return;
+            };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(prev_local) =
+                        clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                    {
+                        let timeline_ns = clip.timeline_start.saturating_add(prev_local);
+                        let speed_at_kf = clip.speed_at_local_timeline_ns(prev_local);
+                        drop(proj);
+                        *updating.borrow_mut() = true;
+                        speed_slider.set_value(speed_at_kf);
+                        *updating.borrow_mut() = false;
+                        on_seek_to(timeline_ns);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    speed_next_keyframe_btn.connect_clicked({
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let on_seek_to = on_seek_to.clone();
+        let speed_slider = speed_slider.clone();
+        let updating = updating.clone();
+        move |_| {
+            let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                return;
+            };
+            let playhead = current_playhead_ns();
+            let proj = project.borrow();
+            for track in &proj.tracks {
+                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    if let Some(next_local) =
+                        clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                    {
+                        let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                        let speed_at_kf = clip.speed_at_local_timeline_ns(next_local);
+                        drop(proj);
+                        *updating.borrow_mut() = true;
+                        speed_slider.set_value(speed_at_kf);
+                        *updating.borrow_mut() = false;
                         on_seek_to(timeline_ns);
                     }
                     break;
@@ -2769,33 +2950,122 @@ pub fn build_inspector(
         });
     }
 
-    // Speed slider
+    // Speed slider — when speed keyframes are present, live-update the
+    // nearest keyframe at the playhead. Without keyframes, update clip.speed.
+    // Uses a pending-update pattern to avoid re-entrancy panics: the model
+    // is updated immediately, but the ProgramPlayer sync is deferred.
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_speed_changed = on_speed_changed.clone();
+        let on_speed_keyframe_changed = on_speed_keyframe_changed.clone();
+        let current_playhead_ns = current_playhead_ns.clone();
+        let speed_kf_pending = Rc::new(Cell::new(false));
         speed_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
             }
             let speed = sl.value();
             if let Some(ref id) = *selected_clip_id.borrow() {
-                let mut proj = project.borrow_mut();
-                let mut found = false;
-                for track in &mut proj.tracks {
-                    for clip in &mut track.clips {
-                        if clip.id == *id {
-                            clip.speed = speed;
-                            found = true;
+                // Determine what changed: base speed (no keyframes), a nearby
+                // keyframe, or nothing (keyframes exist but playhead is not
+                // near any of them — the user is pre-setting the slider value
+                // before clicking "Set Speed Keyframe").
+                enum SpeedAction {
+                    BaseSpeedChanged,
+                    KeyframeUpdated {
+                        clip_id: String,
+                        base_speed: f64,
+                        kfs: Vec<crate::model::clip::NumericKeyframe>,
+                    },
+                    NoOp,
+                }
+                let action = {
+                    let mut proj = project.borrow_mut();
+                    let mut action = SpeedAction::NoOp;
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == *id) {
+                            if clip.speed_keyframes.is_empty() {
+                                clip.speed = speed;
+                                proj.dirty = true;
+                                action = SpeedAction::BaseSpeedChanged;
+                                break;
+                            }
+                            let playhead = current_playhead_ns();
+                            let local = playhead.saturating_sub(clip.timeline_start);
+                            const SNAP_NS: u64 = 20_000_000;
+                            if let Some(kf) = clip.speed_keyframes.iter_mut().find(|kf| {
+                                kf.time_ns.abs_diff(local) <= SNAP_NS
+                            }) {
+                                kf.value = speed.clamp(0.05, 16.0);
+                                let base_speed = clip.speed;
+                                let kfs = clip.speed_keyframes.clone();
+                                proj.dirty = true;
+                                action = SpeedAction::KeyframeUpdated {
+                                    clip_id: id.clone(),
+                                    base_speed,
+                                    kfs,
+                                };
+                            }
+                            break;
                         }
                     }
-                }
-                if found {
-                    proj.dirty = true;
+                    action
+                };
+                match action {
+                    SpeedAction::KeyframeUpdated { clip_id, base_speed: _, kfs: _ } => {
+                        // Coalesce rapid updates: only schedule one idle callback.
+                        // This avoids re-entrancy panics from scroll wheel or
+                        // rapid slider drags firing multiple value-changed signals
+                        // within a single GTK frame flush.
+                        if !speed_kf_pending.get() {
+                            speed_kf_pending.set(true);
+                            let cb = on_speed_keyframe_changed.clone();
+                            let pending = speed_kf_pending.clone();
+                            let project = project.clone();
+                            let clip_id_deferred = clip_id.clone();
+                            glib::idle_add_local_once(move || {
+                                pending.set(false);
+                                // Re-read the latest keyframes from the model
+                                // (they may have been updated multiple times).
+                                let proj = project.borrow();
+                                let data = proj
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .find(|c| c.id == clip_id_deferred)
+                                    .map(|c| (c.speed, c.speed_keyframes.clone()));
+                                drop(proj);
+                                if let Some((speed, kfs)) = data {
+                                    cb(&clip_id_deferred, speed, &kfs);
+                                }
+                            });
+                        }
+                    }
+                    SpeedAction::BaseSpeedChanged => {
+                        // Defer the project reload to avoid re-entrancy:
+                        // on_speed_changed → on_project_changed borrows the
+                        // project; if GTK processes another scroll event
+                        // during that borrow, the handler's borrow_mut panics.
+                        if !speed_kf_pending.get() {
+                            speed_kf_pending.set(true);
+                            let cb = on_speed_changed.clone();
+                            let pending = speed_kf_pending.clone();
+                            glib::idle_add_local_once(move || {
+                                pending.set(false);
+                                cb(speed);
+                            });
+                        }
+                    }
+                    SpeedAction::NoOp => {
+                        // Keyframes exist but playhead is not near any —
+                        // the user is adjusting the slider to a desired value
+                        // before clicking "Set Speed Keyframe". No model
+                        // update or pipeline reload needed.
+                    }
                 }
             }
-            on_speed_changed(speed);
         });
     }
 

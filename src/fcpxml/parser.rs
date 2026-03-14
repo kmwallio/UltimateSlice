@@ -1142,6 +1142,20 @@ fn parse_asset_clip(
                     clip.fcpxml_unknown_attrs.push((k.clone(), v.clone()));
                 }
             }
+            // The FCPXML `duration` attribute is the *timeline* duration.
+            // For sped-up clips, the source range is larger: source_dur = timeline_dur × speed.
+            // With speed keyframes, compute via integration over the timeline duration.
+            if !clip.speed_keyframes.is_empty() {
+                let timeline_dur = duration; // = source_out - source_in as originally parsed
+                let source_dur =
+                    clip.integrated_source_distance_for_local_timeline_ns(timeline_dur) as u64;
+                clip.source_out = clip.source_in.saturating_add(source_dur);
+            } else if (clip.speed - 1.0).abs() > 0.001 {
+                let timeline_dur = duration as f64;
+                let source_dur = (timeline_dur * clip.speed) as u64;
+                clip.source_out = clip.source_in.saturating_add(source_dur);
+            }
+
             let clip_index = track.clips.len();
             track.push_unsorted(clip);
             return Some(ActiveClipContext {

@@ -533,6 +533,23 @@ impl ProgramClip {
     }
 
     pub fn speed_at_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+        if !self.speed_keyframes.is_empty() {
+            let first_ns = self
+                .speed_keyframes
+                .iter()
+                .map(|kf| kf.time_ns)
+                .min()
+                .unwrap_or(0);
+            let last_ns = self
+                .speed_keyframes
+                .iter()
+                .map(|kf| kf.time_ns)
+                .max()
+                .unwrap_or(0);
+            if local_timeline_ns < first_ns || local_timeline_ns > last_ns {
+                return self.speed.clamp(0.05, 16.0);
+            }
+        }
         ModelClip::evaluate_keyframed_value(&self.speed_keyframes, local_timeline_ns, self.speed)
             .clamp(0.05, 16.0)
     }
@@ -551,21 +568,34 @@ impl ProgramClip {
         if self.speed_keyframes.is_empty() {
             return local_timeline_ns as f64 * self.speed.clamp(0.05, 16.0);
         }
-        const MAX_SAMPLES: u64 = 4096;
-        const STEP_NS: u64 = 8_333_333; // ~120Hz
-        let sample_count = (local_timeline_ns / STEP_NS).max(1).min(MAX_SAMPLES);
+        let mut breakpoints: Vec<u64> = Vec::with_capacity(self.speed_keyframes.len() + 2);
+        breakpoints.push(0);
+        for kf in &self.speed_keyframes {
+            if kf.time_ns > 0 && kf.time_ns < local_timeline_ns {
+                breakpoints.push(kf.time_ns);
+            }
+        }
+        breakpoints.push(local_timeline_ns);
+        breakpoints.sort_unstable();
+        breakpoints.dedup();
+
+        const SAMPLES_PER_SEGMENT: u64 = 8;
         let mut integrated = 0.0f64;
-        for i in 0..sample_count {
-            let t0 =
-                (u128::from(local_timeline_ns) * u128::from(i) / u128::from(sample_count)) as u64;
-            let t1 = (u128::from(local_timeline_ns) * u128::from(i + 1) / u128::from(sample_count))
-                as u64;
-            let dt = t1.saturating_sub(t0);
-            if dt == 0 {
+        for win in breakpoints.windows(2) {
+            let seg_start = win[0];
+            let seg_end = win[1];
+            let seg_len = seg_end - seg_start;
+            if seg_len == 0 {
                 continue;
             }
-            let mid = t0.saturating_add(dt / 2);
-            integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
+            let n = SAMPLES_PER_SEGMENT.min(seg_len / 1_000_000).max(1);
+            for j in 0..n {
+                let t0 = seg_start + (u128::from(seg_len) * u128::from(j) / u128::from(n)) as u64;
+                let t1 = seg_start + (u128::from(seg_len) * u128::from(j + 1) / u128::from(n)) as u64;
+                let dt = t1 - t0;
+                let mid = t0 + dt / 2;
+                integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
+            }
         }
         integrated
     }
@@ -580,7 +610,20 @@ impl ProgramClip {
 
     fn playback_duration_ns(&self) -> u64 {
         let src = self.source_duration_ns();
-        if self.speed > 0.0 {
+        if !self.speed_keyframes.is_empty() {
+            let min_speed = self.min_effective_speed_hint();
+            let upper = (src as f64 / min_speed) as u64 + 1_000_000_000;
+            let (mut lo, mut hi): (u64, u64) = (0, upper);
+            for _ in 0..40 {
+                let mid = lo + (hi - lo) / 2;
+                if self.integrated_source_distance_for_local_timeline_ns(mid) < src as f64 {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            hi.max(1)
+        } else if self.speed > 0.0 {
             (src as f64 / self.speed) as u64
         } else {
             src
@@ -638,7 +681,11 @@ impl ProgramClip {
             return self.source_in_ns;
         }
         let max_delta = src_span.saturating_sub(1);
-        let delta = ((offset as f64 * self.speed) as u64).min(max_delta);
+        let delta = if !self.speed_keyframes.is_empty() {
+            (self.integrated_source_distance_for_local_timeline_ns(offset) as u64).min(max_delta)
+        } else {
+            ((offset as f64 * self.speed) as u64).min(max_delta)
+        };
         if self.reverse {
             self.source_out_ns.saturating_sub(1).saturating_sub(delta)
         } else {
@@ -3544,6 +3591,37 @@ impl ProgramPlayer {
             if self.current_idx == Some(i) && self.state != PlayerState::Playing {
                 self.reseek_slot_for_current();
             }
+        }
+    }
+
+    /// Update speed keyframes on a clip without a full pipeline rebuild.
+    /// Updates source_out to match the new speed curve and re-seeks to refresh
+    /// the preview frame.
+    pub fn update_speed_keyframes_for_clip(
+        &mut self,
+        clip_id: &str,
+        speed: f64,
+        speed_keyframes: Vec<crate::model::clip::NumericKeyframe>,
+    ) {
+        let find_clip = |clips: &mut Vec<ProgramClip>| -> Option<usize> {
+            clips.iter().position(|c| c.id == clip_id)
+        };
+        if let Some(i) = find_clip(&mut self.clips) {
+            let clip = &mut self.clips[i];
+            clip.speed = speed;
+            clip.speed_keyframes = speed_keyframes.clone();
+            // Recalculate source_out based on new speed curve.
+            let timeline_dur_ns = clip.duration_ns();
+            let source_dur = clip.integrated_source_distance_for_local_timeline_ns(timeline_dur_ns);
+            clip.source_out_ns = clip.source_in_ns.saturating_add(source_dur as u64);
+            if self.state != PlayerState::Playing {
+                self.reseek_slot_for_current();
+            }
+        }
+        if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
+            let clip = &mut self.audio_clips[i];
+            clip.speed = speed;
+            clip.speed_keyframes = speed_keyframes;
         }
     }
 

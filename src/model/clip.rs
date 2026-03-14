@@ -790,14 +790,34 @@ impl Clip {
     }
 
     /// Convert a timeline-space delta to source-space using the clip's speed.
+    /// When speed keyframes are present, uses the mean speed over the clip duration.
     pub fn timeline_to_source_delta(&self, timeline_delta_ns: i64) -> i64 {
-        let speed = self.speed.max(0.01);
+        let speed = if !self.speed_keyframes.is_empty() {
+            let dur = self.duration();
+            if dur > 0 {
+                self.integrated_source_distance_for_local_timeline_ns(dur) / dur as f64
+            } else {
+                self.speed.max(0.01)
+            }
+        } else {
+            self.speed.max(0.01)
+        };
         (timeline_delta_ns as f64 * speed) as i64
     }
 
     /// Convert a timeline-space duration to source-space using the clip's speed.
+    /// When speed keyframes are present, uses the mean speed over the clip duration.
     pub fn timeline_to_source_dur(&self, timeline_dur_ns: u64) -> u64 {
-        let speed = self.speed.max(0.01);
+        let speed = if !self.speed_keyframes.is_empty() {
+            let dur = self.duration();
+            if dur > 0 {
+                self.integrated_source_distance_for_local_timeline_ns(dur) / dur as f64
+            } else {
+                self.speed.max(0.01)
+            }
+        } else {
+            self.speed.max(0.01)
+        };
         (timeline_dur_ns as f64 * speed) as u64
     }
 
@@ -966,10 +986,24 @@ impl Clip {
         value: f64,
         interpolation: KeyframeInterpolation,
     ) -> u64 {
-        let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        // For speed keyframes, don't clamp to duration() — speed keyframes
+        // define the speed curve that *determines* the duration, so they must
+        // be positioned independently of it. The clip duration adjusts to
+        // encompass whatever speed curve the keyframes define.
+        let local_time_ns = if property == Phase1KeyframeProperty::Speed {
+            timeline_pos_ns.saturating_sub(self.timeline_start)
+        } else {
+            self.local_timeline_position_ns(timeline_pos_ns)
+        };
         let clamped_value = Self::clamp_phase1_property_value(property, value);
         let keyframes = self.keyframes_for_phase1_property_mut(property);
-        if let Some(existing) = keyframes.iter_mut().find(|kf| kf.time_ns == local_time_ns) {
+        // Snap to an existing keyframe within half a frame (~20ms) to avoid
+        // creating near-duplicates when the playhead is close but not exact.
+        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
+        if let Some(existing) = keyframes
+            .iter_mut()
+            .find(|kf| kf.time_ns.abs_diff(local_time_ns) <= SNAP_TOLERANCE_NS)
+        {
             existing.value = clamped_value;
             existing.interpolation = interpolation;
             existing.bezier_controls = None;
@@ -990,10 +1024,15 @@ impl Clip {
         property: Phase1KeyframeProperty,
         timeline_pos_ns: u64,
     ) -> bool {
-        let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        let local_time_ns = if property == Phase1KeyframeProperty::Speed {
+            timeline_pos_ns.saturating_sub(self.timeline_start)
+        } else {
+            self.local_timeline_position_ns(timeline_pos_ns)
+        };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
         let before = keyframes.len();
-        keyframes.retain(|kf| kf.time_ns != local_time_ns);
+        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
+        keyframes.retain(|kf| kf.time_ns.abs_diff(local_time_ns) > SNAP_TOLERANCE_NS);
         keyframes.len() != before
     }
 
@@ -1282,6 +1321,27 @@ impl Clip {
     }
 
     pub fn speed_at_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+        if !self.speed_keyframes.is_empty() {
+            // For speed, use clip.speed (the base value) before the first keyframe
+            // and after the last keyframe, rather than holding the nearest keyframe
+            // value. This lets users set a base speed and add ramp keyframes at
+            // specific points without the base being overridden.
+            let first_ns = self
+                .speed_keyframes
+                .iter()
+                .map(|kf| kf.time_ns)
+                .min()
+                .unwrap_or(0);
+            let last_ns = self
+                .speed_keyframes
+                .iter()
+                .map(|kf| kf.time_ns)
+                .max()
+                .unwrap_or(0);
+            if local_timeline_ns < first_ns || local_timeline_ns > last_ns {
+                return self.speed.clamp(0.05, 16.0);
+            }
+        }
         Self::evaluate_keyframed_value(&self.speed_keyframes, local_timeline_ns, self.speed)
             .clamp(0.05, 16.0)
     }
@@ -1293,28 +1353,45 @@ impl Clip {
         self.speed_at_local_timeline_ns(local_ns)
     }
 
-    fn integrated_source_distance_for_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+    pub(crate) fn integrated_source_distance_for_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
         if local_timeline_ns == 0 {
             return 0.0;
         }
         if self.speed_keyframes.is_empty() {
             return local_timeline_ns as f64 * self.speed.clamp(0.05, 16.0);
         }
-        const MAX_SAMPLES: u64 = 4096;
-        const STEP_NS: u64 = 8_333_333; // ~120Hz
-        let sample_count = (local_timeline_ns / STEP_NS).max(1).min(MAX_SAMPLES);
+        // Adaptive sampling: place samples at keyframe boundaries plus a fixed
+        // number of intermediate points per segment. This gives accurate results
+        // for piecewise-linear speed curves with far fewer evaluations than the
+        // previous fixed 4096-sample approach.
+        let mut breakpoints: Vec<u64> = Vec::with_capacity(self.speed_keyframes.len() + 2);
+        breakpoints.push(0);
+        for kf in &self.speed_keyframes {
+            if kf.time_ns > 0 && kf.time_ns < local_timeline_ns {
+                breakpoints.push(kf.time_ns);
+            }
+        }
+        breakpoints.push(local_timeline_ns);
+        breakpoints.sort_unstable();
+        breakpoints.dedup();
+
+        const SAMPLES_PER_SEGMENT: u64 = 8;
         let mut integrated = 0.0f64;
-        for i in 0..sample_count {
-            let t0 =
-                (u128::from(local_timeline_ns) * u128::from(i) / u128::from(sample_count)) as u64;
-            let t1 = (u128::from(local_timeline_ns) * u128::from(i + 1) / u128::from(sample_count))
-                as u64;
-            let dt = t1.saturating_sub(t0);
-            if dt == 0 {
+        for win in breakpoints.windows(2) {
+            let seg_start = win[0];
+            let seg_end = win[1];
+            let seg_len = seg_end - seg_start;
+            if seg_len == 0 {
                 continue;
             }
-            let mid = t0.saturating_add(dt / 2);
-            integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
+            let n = SAMPLES_PER_SEGMENT.min(seg_len / 1_000_000).max(1);
+            for j in 0..n {
+                let t0 = seg_start + (u128::from(seg_len) * u128::from(j) / u128::from(n)) as u64;
+                let t1 = seg_start + (u128::from(seg_len) * u128::from(j + 1) / u128::from(n)) as u64;
+                let dt = t1 - t0;
+                let mid = t0 + dt / 2;
+                integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
+            }
         }
         integrated
     }
@@ -1329,7 +1406,22 @@ impl Clip {
 
     fn playback_duration_from_speed(&self) -> u64 {
         let src = self.source_duration();
-        if self.speed > 0.0 {
+        if !self.speed_keyframes.is_empty() {
+            // Bisect to find timeline duration T where
+            // integrated_source_distance(T) == source_duration.
+            let min_speed = self.min_effective_speed_hint();
+            let upper = (src as f64 / min_speed) as u64 + 1_000_000_000; // +1s headroom
+            let (mut lo, mut hi): (u64, u64) = (0, upper);
+            for _ in 0..40 {
+                let mid = lo + (hi - lo) / 2;
+                if self.integrated_source_distance_for_local_timeline_ns(mid) < src as f64 {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            hi.max(1)
+        } else if self.speed > 0.0 {
             (src as f64 / self.speed) as u64
         } else {
             src
@@ -2295,5 +2387,147 @@ mod tests {
         // Extending the clip by moving source_out increases the duration
         clip.source_out = 10_000_000_000;
         assert_eq!(clip.duration(), 10_000_000_000);
+    }
+
+    #[test]
+    fn test_speed_keyframes_constant_matches_scalar() {
+        // A clip with speed_keyframes all at 2× should produce the same
+        // duration as clip.speed = 2.0.
+        let src_dur: u64 = 10_000_000_000; // 10s
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 2.0;
+        let expected = clip.duration(); // 5s
+
+        let mut kf_clip = make_test_clip(src_dur, 0);
+        kf_clip.speed = 2.0;
+        kf_clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: src_dur, // far enough out
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let actual = kf_clip.duration();
+        // Allow 1% tolerance due to numerical integration
+        let tolerance = (expected as f64 * 0.01) as u64;
+        assert!(
+            actual.abs_diff(expected) <= tolerance,
+            "constant 2× keyframes: expected ~{expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn test_speed_keyframes_ramp_duration_satisfies_integral() {
+        // A 1× → 2× linear ramp over a 10s source clip.
+        // Mean speed ≈ 1.5×, so timeline duration ≈ 10/1.5 ≈ 6.67s.
+        let src_dur: u64 = 10_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 20_000_000_000, // place second KF far out so ramp spans the clip
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let dur = clip.duration();
+        // Verify: integrating speed over [0, dur] should ≈ source_duration
+        let integrated = clip.integrated_source_distance_for_local_timeline_ns(dur);
+        let src = src_dur as f64;
+        let error = (integrated - src).abs() / src;
+        assert!(
+            error < 0.02,
+            "integral over computed duration should ≈ source_duration, got {integrated} vs {src} (error {error:.4})"
+        );
+    }
+
+    #[test]
+    fn test_speed_keyframes_slow_ramp_longer_than_1x() {
+        // A 1× → 0.5× ramp should produce a longer timeline duration than 1×.
+        let src_dur: u64 = 10_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 20_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let dur = clip.duration();
+        assert!(
+            dur > src_dur,
+            "slow ramp should produce longer duration: {dur} vs {src_dur}"
+        );
+    }
+
+    #[test]
+    fn test_speed_keyframes_empty_uses_constant_speed() {
+        // No speed keyframes → should use clip.speed as before
+        let src_dur: u64 = 10_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 2.0;
+        assert_eq!(clip.duration(), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_speed_keyframes_determine_duration() {
+        // 120s of source material, base speed 1.0 → clip duration = 120s
+        let src_dur: u64 = 120_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 1.0;
+        assert_eq!(clip.duration(), 120_000_000_000);
+
+        // Adding a 4x keyframe should shorten the clip (source consumed faster).
+        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+            Phase1KeyframeProperty::Speed,
+            10_000_000_000,
+            1.0,
+            KeyframeInterpolation::Linear,
+        );
+        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+            Phase1KeyframeProperty::Speed,
+            20_000_000_000,
+            4.0,
+            KeyframeInterpolation::Linear,
+        );
+        let dur_with_ramp = clip.duration();
+        assert!(dur_with_ramp < 120_000_000_000, "4x ramp should shorten clip");
+
+        // Adding a third keyframe that ramps back to 1x changes the curve
+        // and thus the duration. The keyframe is placed wherever the user
+        // puts the playhead — it is NOT clamped or pruned.
+        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+            Phase1KeyframeProperty::Speed,
+            90_000_000_000,
+            1.0,
+            KeyframeInterpolation::Linear,
+        );
+        assert_eq!(clip.speed_keyframes.len(), 3, "all 3 keyframes should be kept");
+        // Duration changes because the speed curve changed.
+        let dur_with_three = clip.duration();
+        assert!(dur_with_three > 0);
+        assert_ne!(dur_with_three, dur_with_ramp, "3rd KF should change duration");
     }
 }

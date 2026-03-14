@@ -5863,7 +5863,7 @@ fn draw_clip(
         let _ = cr.show_text(&display_label);
 
         // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0, and "◀" when reversed
-        let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse;
+        let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
         let has_lut_badge = clip
             .lut_path
             .as_ref()
@@ -5892,7 +5892,13 @@ fn draw_clip(
             }
         }
         if has_speed_badge && cw > 60.0 {
-            let badge = if clip.reverse {
+            let badge = if !clip.speed_keyframes.is_empty() {
+                if clip.reverse {
+                    "\u{23F2} \u{25C0} Ramp".to_string()
+                } else {
+                    "\u{23F2} Ramp".to_string()
+                }
+            } else if clip.reverse {
                 if (clip.speed - 1.0).abs() > 0.01 {
                     let speed_str = if clip.speed == clip.speed.floor() {
                         format!("{}×", clip.speed as u32)

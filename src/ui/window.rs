@@ -2754,6 +2754,24 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        // on_speed_keyframe_changed: lightweight update without pipeline rebuild
+        {
+            let prog_player = prog_player.clone();
+            let timeline_panel_cell = timeline_panel_cell.clone();
+            let keyframe_editor_cell = keyframe_editor_cell.clone();
+            move |clip_id: &str, speed: f64, keyframes: &[crate::model::clip::NumericKeyframe]| {
+                prog_player
+                    .borrow_mut()
+                    .update_speed_keyframes_for_clip(clip_id, speed, keyframes.to_vec());
+                // Redraw timeline and dopesheet to reflect new duration/keyframes
+                if let Some(ref w) = *timeline_panel_cell.borrow() {
+                    w.queue_draw();
+                }
+                if let Some(ref editor) = *keyframe_editor_cell.borrow() {
+                    editor.queue_redraw();
+                }
+            }
+        },
         {
             let timeline_state = timeline_state.clone();
             move || timeline_state.borrow().playhead_ns
