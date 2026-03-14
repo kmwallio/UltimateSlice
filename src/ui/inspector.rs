@@ -2962,10 +2962,10 @@ pub fn build_inspector(
         let on_speed_keyframe_changed = on_speed_keyframe_changed.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let speed_kf_pending = Rc::new(Cell::new(false));
-        // Duration at the start of a slider drag, captured on the first
-        // value-changed tick.  Used by the deferred idle callback to
-        // proportionally rescale sibling keyframes.
-        let speed_kf_old_dur: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+        // Index of the keyframe being edited during a drag.  Locked on
+        // the first tick so that subsequent ticks (after rescaling moves
+        // keyframes) keep editing the same one.
+        let speed_kf_edit_idx: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
         speed_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
@@ -2996,27 +2996,35 @@ pub fn build_inspector(
                                 action = SpeedAction::BaseSpeedChanged;
                                 break;
                             }
-                            let playhead = current_playhead_ns();
-                            let local = playhead.saturating_sub(clip.timeline_start);
                             const SNAP_NS: u64 = 20_000_000;
-                            // Capture duration before the change on the
-                            // first tick of a drag so the deferred idle
-                            // callback can rescale siblings.
-                            if !speed_kf_pending.get() {
-                                speed_kf_old_dur.set(clip.duration());
-                            }
-                            if let Some(kf) = clip.speed_keyframes.iter_mut().find(|kf| {
-                                kf.time_ns.abs_diff(local) <= SNAP_NS
-                            }) {
-                                kf.value = speed.clamp(0.05, 16.0);
-                                let base_speed = clip.speed;
-                                let kfs = clip.speed_keyframes.clone();
-                                proj.dirty = true;
-                                action = SpeedAction::KeyframeUpdated {
-                                    clip_id: id.clone(),
-                                    base_speed,
-                                    kfs,
-                                };
+                            // On the first tick, lock onto the keyframe
+                            // nearest the playhead.  Subsequent ticks
+                            // reuse the locked index so the edit survives
+                            // any position changes.
+                            let edit_idx = if !speed_kf_pending.get() {
+                                let playhead = current_playhead_ns();
+                                let local = playhead.saturating_sub(clip.timeline_start);
+                                let idx = clip
+                                    .speed_keyframes
+                                    .iter()
+                                    .position(|kf| kf.time_ns.abs_diff(local) <= SNAP_NS);
+                                speed_kf_edit_idx.set(idx);
+                                idx
+                            } else {
+                                speed_kf_edit_idx.get()
+                            };
+                            if let Some(idx) = edit_idx {
+                                if let Some(kf) = clip.speed_keyframes.get_mut(idx) {
+                                    kf.value = speed.clamp(0.05, 16.0);
+                                    let base_speed = clip.speed;
+                                    let kfs = clip.speed_keyframes.clone();
+                                    proj.dirty = true;
+                                    action = SpeedAction::KeyframeUpdated {
+                                        clip_id: id.clone(),
+                                        base_speed,
+                                        kfs,
+                                    };
+                                }
                             }
                             break;
                         }
@@ -3035,33 +3043,10 @@ pub fn build_inspector(
                             let pending = speed_kf_pending.clone();
                             let project = project.clone();
                             let clip_id_deferred = clip_id.clone();
-                            let old_dur_cell = speed_kf_old_dur.clone();
+                            let edit_idx_cell = speed_kf_edit_idx.clone();
                             glib::idle_add_local_once(move || {
                                 pending.set(false);
-                                let old_dur = old_dur_cell.get();
-                                // Rescale sibling keyframes so they keep
-                                // their relative position after the duration
-                                // changed.  This runs once per drag, not per
-                                // tick, so it won't destabilise the pipeline.
-                                {
-                                    let mut proj = project.borrow_mut();
-                                    if let Some(clip) = proj
-                                        .tracks
-                                        .iter_mut()
-                                        .flat_map(|t| t.clips.iter_mut())
-                                        .find(|c| c.id == clip_id_deferred)
-                                    {
-                                        let new_dur = clip.duration();
-                                        if old_dur > 0 && new_dur > 0 && old_dur != new_dur {
-                                            let ratio = new_dur as f64 / old_dur as f64;
-                                            for kf in &mut clip.speed_keyframes {
-                                                kf.time_ns =
-                                                    (kf.time_ns as f64 * ratio).round() as u64;
-                                            }
-                                            clip.speed_keyframes.sort_by_key(|kf| kf.time_ns);
-                                        }
-                                    }
-                                }
+                                edit_idx_cell.set(None);
                                 // Re-read the latest keyframes from the model.
                                 let proj = project.borrow();
                                 let data = proj
