@@ -2962,126 +2962,58 @@ pub fn build_inspector(
         let on_speed_keyframe_changed = on_speed_keyframe_changed.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let speed_kf_pending = Rc::new(Cell::new(false));
-        // Index of the keyframe being edited during a drag.  Locked on
-        // the first tick so that subsequent ticks (after rescaling moves
-        // keyframes) keep editing the same one.
-        let speed_kf_edit_idx: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
         speed_slider.connect_value_changed(move |sl| {
             if *updating.borrow() {
                 return;
             }
             let speed = sl.value();
             if let Some(ref id) = *selected_clip_id.borrow() {
-                // Determine what changed: base speed (no keyframes), a nearby
-                // keyframe, or nothing (keyframes exist but playhead is not
-                // near any of them — the user is pre-setting the slider value
-                // before clicking "Set Speed Keyframe").
-                enum SpeedAction {
-                    BaseSpeedChanged,
-                    KeyframeUpdated {
-                        clip_id: String,
-                        base_speed: f64,
-                        kfs: Vec<crate::model::clip::NumericKeyframe>,
-                    },
-                    NoOp,
+                // When speed keyframes exist, the slider is just a value
+                // picker — the user clicks "Set Speed Keyframe" to apply.
+                // This avoids all the re-entrancy and pipeline crash issues
+                // that come from live-updating keyframes during drags.
+                let has_keyframes = {
+                    let proj = project.borrow();
+                    proj.tracks
+                        .iter()
+                        .flat_map(|t| t.clips.iter())
+                        .find(|c| c.id == *id)
+                        .map(|c| !c.speed_keyframes.is_empty())
+                        .unwrap_or(false)
+                };
+                if has_keyframes {
+                    // Show tooltip hint on the slider.
+                    sl.set_tooltip_text(Some("Click \"Set Speed Keyframe\" to apply"));
+                    return;
                 }
-                let action = {
+                // No keyframes: update base speed directly.
+                sl.set_tooltip_text(None);
+                let changed = {
                     let mut proj = project.borrow_mut();
-                    let mut action = SpeedAction::NoOp;
+                    let mut changed = false;
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == *id) {
-                            if clip.speed_keyframes.is_empty() {
-                                clip.speed = speed;
-                                proj.dirty = true;
-                                action = SpeedAction::BaseSpeedChanged;
-                                break;
-                            }
-                            const SNAP_NS: u64 = 20_000_000;
-                            // On the first tick, lock onto the keyframe
-                            // nearest the playhead.  Subsequent ticks
-                            // reuse the locked index so the edit survives
-                            // any position changes.
-                            let edit_idx = if !speed_kf_pending.get() {
-                                let playhead = current_playhead_ns();
-                                let local = playhead.saturating_sub(clip.timeline_start);
-                                let idx = clip
-                                    .speed_keyframes
-                                    .iter()
-                                    .position(|kf| kf.time_ns.abs_diff(local) <= SNAP_NS);
-                                speed_kf_edit_idx.set(idx);
-                                idx
-                            } else {
-                                speed_kf_edit_idx.get()
-                            };
-                            if let Some(idx) = edit_idx {
-                                if let Some(kf) = clip.speed_keyframes.get_mut(idx) {
-                                    kf.value = speed.clamp(0.05, 16.0);
-                                    let base_speed = clip.speed;
-                                    let kfs = clip.speed_keyframes.clone();
-                                    proj.dirty = true;
-                                    action = SpeedAction::KeyframeUpdated {
-                                        clip_id: id.clone(),
-                                        base_speed,
-                                        kfs,
-                                    };
-                                }
-                            }
+                            clip.speed = speed;
+                            proj.dirty = true;
+                            changed = true;
                             break;
                         }
                     }
-                    action
+                    changed
                 };
-                match action {
-                    SpeedAction::KeyframeUpdated { clip_id, base_speed: _, kfs: _ } => {
-                        // Coalesce rapid updates: only schedule one idle callback.
-                        // This avoids re-entrancy panics from scroll wheel or
-                        // rapid slider drags firing multiple value-changed signals
-                        // within a single GTK frame flush.
-                        if !speed_kf_pending.get() {
-                            speed_kf_pending.set(true);
-                            let cb = on_speed_keyframe_changed.clone();
-                            let pending = speed_kf_pending.clone();
-                            let project = project.clone();
-                            let clip_id_deferred = clip_id.clone();
-                            let edit_idx_cell = speed_kf_edit_idx.clone();
-                            glib::idle_add_local_once(move || {
-                                pending.set(false);
-                                edit_idx_cell.set(None);
-                                // Re-read the latest keyframes from the model.
-                                let proj = project.borrow();
-                                let data = proj
-                                    .tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .find(|c| c.id == clip_id_deferred)
-                                    .map(|c| (c.speed, c.speed_keyframes.clone()));
-                                drop(proj);
-                                if let Some((speed, kfs)) = data {
-                                    cb(&clip_id_deferred, speed, &kfs);
-                                }
-                            });
-                        }
-                    }
-                    SpeedAction::BaseSpeedChanged => {
-                        // Defer the project reload to avoid re-entrancy:
-                        // on_speed_changed → on_project_changed borrows the
-                        // project; if GTK processes another scroll event
-                        // during that borrow, the handler's borrow_mut panics.
-                        if !speed_kf_pending.get() {
-                            speed_kf_pending.set(true);
-                            let cb = on_speed_changed.clone();
-                            let pending = speed_kf_pending.clone();
-                            glib::idle_add_local_once(move || {
-                                pending.set(false);
-                                cb(speed);
-                            });
-                        }
-                    }
-                    SpeedAction::NoOp => {
-                        // Keyframes exist but playhead is not near any —
-                        // the user is adjusting the slider to a desired value
-                        // before clicking "Set Speed Keyframe". No model
-                        // update or pipeline reload needed.
+                if changed {
+                    // Defer the project reload to avoid re-entrancy:
+                    // on_speed_changed → on_project_changed borrows the
+                    // project; if GTK processes another scroll event
+                    // during that borrow, the handler's borrow_mut panics.
+                    if !speed_kf_pending.get() {
+                        speed_kf_pending.set(true);
+                        let cb = on_speed_changed.clone();
+                        let pending = speed_kf_pending.clone();
+                        glib::idle_add_local_once(move || {
+                            pending.set(false);
+                            cb(speed);
+                        });
                     }
                 }
             }

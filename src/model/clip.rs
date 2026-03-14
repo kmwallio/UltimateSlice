@@ -996,14 +996,24 @@ impl Clip {
             self.local_timeline_position_ns(timeline_pos_ns)
         };
         let clamped_value = Self::clamp_phase1_property_value(property, value);
+        // Capture duration before the change so we can rescale siblings.
+        let old_dur = if property == Phase1KeyframeProperty::Speed
+            && !self.speed_keyframes.is_empty()
+        {
+            Some(self.duration())
+        } else {
+            None
+        };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
         // Snap to an existing keyframe within half a frame (~20ms) to avoid
         // creating near-duplicates when the playhead is close but not exact.
         const SNAP_TOLERANCE_NS: u64 = 20_000_000;
+        let mut changed_time_ns: Option<u64> = None;
         if let Some(existing) = keyframes
             .iter_mut()
             .find(|kf| kf.time_ns.abs_diff(local_time_ns) <= SNAP_TOLERANCE_NS)
         {
+            changed_time_ns = Some(existing.time_ns);
             existing.value = clamped_value;
             existing.interpolation = interpolation;
             existing.bezier_controls = None;
@@ -1015,6 +1025,21 @@ impl Clip {
                 bezier_controls: None,
             });
             keyframes.sort_by_key(|kf| kf.time_ns);
+        }
+        // When a speed keyframe's VALUE changes (not a new insertion),
+        // proportionally rescale all OTHER keyframes so they maintain
+        // their relative position within the clip.
+        if let (Some(old_d), Some(anchor)) = (old_dur, changed_time_ns) {
+            let new_d = self.duration();
+            if old_d > 0 && new_d > 0 && old_d != new_d {
+                let ratio = new_d as f64 / old_d as f64;
+                for kf in &mut self.speed_keyframes {
+                    if kf.time_ns != anchor {
+                        kf.time_ns = (kf.time_ns as f64 * ratio).round() as u64;
+                    }
+                }
+                self.speed_keyframes.sort_by_key(|kf| kf.time_ns);
+            }
         }
         local_time_ns
     }
