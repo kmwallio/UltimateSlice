@@ -3083,6 +3083,7 @@ pub fn build_window(
 
                 if auto_link_pair && video_track_idx.is_some() && audio_track_idx.is_some() {
                     let link_group_id = uuid::Uuid::new_v4().to_string();
+                    let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                     if let Some(video_idx) = video_track_idx {
                         let video_clip = build_source_clip(
                             &source_path,
@@ -3094,7 +3095,11 @@ pub fn build_window(
                             Some(link_group_id.as_str()),
                             Some(duration_ns),
                         );
-                        proj.tracks[video_idx].add_clip(video_clip);
+                        track_changes.push(add_clip_to_track(
+                            &mut proj.tracks[video_idx],
+                            video_clip,
+                            magnetic_mode,
+                        ));
                     }
                     if let Some(audio_idx) = audio_track_idx {
                         let audio_clip = build_source_clip(
@@ -3107,10 +3112,30 @@ pub fn build_window(
                             Some(link_group_id.as_str()),
                             Some(duration_ns),
                         );
-                        proj.tracks[audio_idx].add_clip(audio_clip);
+                        track_changes.push(add_clip_to_track(
+                            &mut proj.tracks[audio_idx],
+                            audio_clip,
+                            magnetic_mode,
+                        ));
                     }
                     proj.dirty = true;
                     drop(proj);
+                    let cmd: Box<dyn crate::undo::EditCommand> = if track_changes.len() == 1 {
+                        let change = track_changes.pop().unwrap();
+                        Box::new(crate::undo::SetTrackClipsCommand {
+                            track_id: change.track_id,
+                            old_clips: change.old_clips,
+                            new_clips: change.new_clips,
+                            label: "Drop clip".to_string(),
+                        })
+                    } else {
+                        Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                            changes: track_changes,
+                            label: "Drop clip".to_string(),
+                        })
+                    };
+                    timeline_state_for_drop.borrow_mut().history.undo_stack.push(cmd);
+                    timeline_state_for_drop.borrow_mut().history.redo_stack.clear();
                     on_project_changed();
                     return;
                 }
@@ -3139,9 +3164,17 @@ pub fn build_window(
                         None,
                         media_dur,
                     );
-                    let _ = add_clip_to_track(track, clip, magnetic_mode);
+                    let change = add_clip_to_track(track, clip, magnetic_mode);
                     proj.dirty = true;
                     drop(proj);
+                    let cmd = Box::new(crate::undo::SetTrackClipsCommand {
+                        track_id: change.track_id,
+                        old_clips: change.old_clips,
+                        new_clips: change.new_clips,
+                        label: "Drop clip".to_string(),
+                    });
+                    timeline_state_for_drop.borrow_mut().history.undo_stack.push(cmd);
+                    timeline_state_for_drop.borrow_mut().history.redo_stack.clear();
                     on_project_changed();
                 }
             },
