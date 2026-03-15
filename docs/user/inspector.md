@@ -213,7 +213,50 @@ Assigns a 3D Look-Up Table (LUT) file for professional color grading. LUTs remap
 
 > **Real-time preview & export** — The LUT is applied in the Program Monitor via CPU-based trilinear interpolation at preview resolution, providing immediate visual feedback. On export, it is applied via FFmpeg's `lut3d` filter at full resolution. When proxy mode or Preview LUTs is enabled and the proxy is ready, the LUT is already baked into the proxy media — the real-time probe is automatically skipped to prevent double-application. A cyan **LUT** badge appears on the clip in the timeline when a LUT is assigned.
 
+---
+
+## Copy & Paste Color Grade
+
+You can copy all color grading values from one clip and paste them onto another. This copies only color-related properties — not audio, transforms, or other attributes.
+
+| Shortcut | Action |
+|---|---|
+| **Ctrl+Alt+C** | Copy color grade from the selected clip |
+| **Ctrl+Alt+V** | Paste color grade onto the selected clip |
+
+**Copied properties:** Brightness, Contrast, Saturation, Temperature, Tint, Exposure, Black Point, Shadows, Midtones, Highlights, per-tone Warmth/Tint, Denoise, Sharpness, and LUT path. Static values only — keyframe animations are not included.
+
+> **Tip:** Use **Ctrl+Shift+V** (Paste Attributes) to copy *all* clip attributes including audio, transforms, and effects. Use **Ctrl+Alt+V** (Paste Color Grade) when you only want to match the color look between clips.
+
+> **MCP tools:** `copy_clip_color_grade` and `paste_clip_color_grade` provide the same functionality for automation.
+
 Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacking is a future feature.
+
+---
+
+## Match Clip Colors
+
+Automatically adjusts the selected clip's color parameters so it visually matches a reference clip. Uses Reinhard-style statistical color transfer in CIE L\*a\*b\* space.
+
+### How It Works
+
+1. Samples representative frames from both the selected clip (source) and the chosen reference clip.
+2. Computes per-channel mean and standard deviation in L\*a\*b\* color space.
+3. Maps the statistical differences onto existing clip color sliders (brightness, contrast, saturation, temperature, tint).
+4. Optionally generates a 17³ 3D `.cube` LUT for fine-grained matching that sliders alone cannot express.
+
+### Using Match Color
+
+| Control | Description |
+|---|---|
+| **Match Color…** button | In the Inspector Color Correction section. Opens a dialog to select a reference clip and run matching. |
+| **Reference clip** | Dropdown of all other video/image clips in the project. |
+| **Generate LUT** | Optional checkbox. When enabled, a 3D LUT is generated and assigned to the clip in addition to slider adjustments. |
+| **Ctrl+Alt+M** | Keyboard shortcut — opens the same dialog for the selected timeline clip. |
+
+> **Undo support:** The entire operation (all slider changes + optional LUT assignment) is undoable in a single `Ctrl+Z` step.
+
+> **MCP tool:** `match_clip_colors` provides the same functionality for automation. Parameters: `source_clip_id`, `reference_clip_id`, `generate_lut` (optional boolean).
 
 ---
 

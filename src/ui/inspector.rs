@@ -103,6 +103,7 @@ pub struct InspectorView {
     // LUT (color grading)
     pub lut_path_label: Label,
     pub lut_clear_btn: Button,
+    pub match_color_btn: Button,
     /// Set true while update() runs to suppress feedback from slider signals
     pub updating: Rc<RefCell<bool>>,
     // Section containers for show/hide per clip kind
@@ -844,6 +845,15 @@ pub fn build_inspector(
     shadows_tint_slider.set_digits(2);
     shadows_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&shadows_tint_slider);
+
+    // ── Match Color button ───────────────────────────────────────────────────
+    let match_color_sep = Separator::new(Orientation::Horizontal);
+    color_inner.append(&match_color_sep);
+    let match_color_btn = Button::with_label("Match Color…");
+    match_color_btn.set_tooltip_text(Some(
+        "Automatically adjust this clip's color to match another clip",
+    ));
+    color_inner.append(&match_color_btn);
 
     // ── Chroma Key section (Video + Image only) ──────────────────────────────
     let chroma_key_section = GBox::new(Orientation::Vertical, 8);
@@ -3178,6 +3188,284 @@ pub fn build_inspector(
         });
     }
 
+    // ── Match Color button ────────────────────────────────────────────────────
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_color_changed = on_color_changed.clone();
+        let updating = updating.clone();
+        let brightness_slider = brightness_slider.clone();
+        let contrast_slider = contrast_slider.clone();
+        let saturation_slider = saturation_slider.clone();
+        let temperature_slider = temperature_slider.clone();
+        let tint_slider = tint_slider.clone();
+        let exposure_slider = exposure_slider.clone();
+        let black_point_slider = black_point_slider.clone();
+        let shadows_slider = shadows_slider.clone();
+        let midtones_slider = midtones_slider.clone();
+        let highlights_slider = highlights_slider.clone();
+        let highlights_warmth_slider = highlights_warmth_slider.clone();
+        let highlights_tint_slider = highlights_tint_slider.clone();
+        let midtones_warmth_slider = midtones_warmth_slider.clone();
+        let midtones_tint_slider = midtones_tint_slider.clone();
+        let shadows_warmth_slider = shadows_warmth_slider.clone();
+        let shadows_tint_slider = shadows_tint_slider.clone();
+        let denoise_slider = denoise_slider.clone();
+        let sharpness_slider = sharpness_slider.clone();
+        let on_lut_changed = on_lut_changed.clone();
+        let lut_path_label = lut_path_label.clone();
+        let lut_clear_btn = lut_clear_btn.clone();
+        match_color_btn.connect_clicked(move |btn| {
+            let source_id = selected_clip_id.borrow().clone();
+            let Some(source_clip_id) = source_id else {
+                return;
+            };
+
+            // Collect other video/image clips as reference candidates.
+            let proj = project.borrow();
+            let mut candidates: Vec<(String, String, String)> = Vec::new(); // (clip_id, label, track_id)
+            for track in &proj.tracks {
+                for clip in &track.clips {
+                    if clip.id != source_clip_id
+                        && (clip.kind == crate::model::clip::ClipKind::Video
+                            || clip.kind == crate::model::clip::ClipKind::Image)
+                    {
+                        candidates.push((
+                            clip.id.clone(),
+                            clip.label.clone(),
+                            track.id.clone(),
+                        ));
+                    }
+                }
+            }
+            drop(proj);
+
+            if candidates.is_empty() {
+                return;
+            }
+
+            // Build a simple dialog with a dropdown of candidate clips.
+            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            let dialog = gtk4::Window::builder()
+                .title("Match Color — Select Reference Clip")
+                .modal(true)
+                .default_width(360)
+                .default_height(160)
+                .build();
+            if let Some(ref w) = window {
+                dialog.set_transient_for(Some(w));
+            }
+
+            let vbox = GBox::new(Orientation::Vertical, 12);
+            vbox.set_margin_start(16);
+            vbox.set_margin_end(16);
+            vbox.set_margin_top(16);
+            vbox.set_margin_bottom(16);
+            dialog.set_child(Some(&vbox));
+
+            let label = Label::new(Some("Select the reference clip to match:"));
+            label.set_halign(gtk4::Align::Start);
+            vbox.append(&label);
+
+            let labels: Vec<String> = candidates.iter().map(|(_, l, _)| l.clone()).collect();
+            let string_list = gtk4::StringList::new(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            let dropdown = gtk4::DropDown::new(Some(string_list), gtk4::Expression::NONE);
+            dropdown.set_selected(0);
+            vbox.append(&dropdown);
+
+            let lut_check = CheckButton::with_label("Also generate .cube LUT for fine matching");
+            vbox.append(&lut_check);
+
+            let btn_row = GBox::new(Orientation::Horizontal, 8);
+            btn_row.set_halign(gtk4::Align::End);
+            let cancel_btn = Button::with_label("Cancel");
+            let ok_btn = Button::with_label("Match");
+            ok_btn.add_css_class("suggested-action");
+            btn_row.append(&cancel_btn);
+            btn_row.append(&ok_btn);
+            vbox.append(&btn_row);
+
+            let dialog_cancel = dialog.clone();
+            cancel_btn.connect_clicked(move |_| {
+                dialog_cancel.close();
+            });
+
+            let dialog_ok = dialog.clone();
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let on_color_changed = on_color_changed.clone();
+            let updating = updating.clone();
+            let brightness_slider = brightness_slider.clone();
+            let contrast_slider = contrast_slider.clone();
+            let saturation_slider = saturation_slider.clone();
+            let temperature_slider = temperature_slider.clone();
+            let tint_slider = tint_slider.clone();
+            let exposure_slider = exposure_slider.clone();
+            let black_point_slider = black_point_slider.clone();
+            let shadows_slider = shadows_slider.clone();
+            let midtones_slider = midtones_slider.clone();
+            let highlights_slider = highlights_slider.clone();
+            let highlights_warmth_slider = highlights_warmth_slider.clone();
+            let highlights_tint_slider = highlights_tint_slider.clone();
+            let midtones_warmth_slider = midtones_warmth_slider.clone();
+            let midtones_tint_slider = midtones_tint_slider.clone();
+            let shadows_warmth_slider = shadows_warmth_slider.clone();
+            let shadows_tint_slider = shadows_tint_slider.clone();
+            let denoise_slider = denoise_slider.clone();
+            let sharpness_slider = sharpness_slider.clone();
+            let on_lut_changed = on_lut_changed.clone();
+            let lut_path_label = lut_path_label.clone();
+            let lut_clear_btn = lut_clear_btn.clone();
+            ok_btn.connect_clicked(move |_| {
+                let idx = dropdown.selected() as usize;
+                if idx >= candidates.len() {
+                    dialog_ok.close();
+                    return;
+                }
+                let ref_clip_id = candidates[idx].0.clone();
+                let gen_lut = lut_check.is_active();
+
+                // Gather source and reference clip info.
+                let clip_info = {
+                    let proj = project.borrow();
+                    let find = |id: &str| -> Option<(String, u64, u64, String)> {
+                        for track in &proj.tracks {
+                            if let Some(c) = track.clips.iter().find(|c| c.id == id) {
+                                return Some((
+                                    c.source_path.clone(),
+                                    c.source_in,
+                                    c.source_out,
+                                    track.id.clone(),
+                                ));
+                            }
+                        }
+                        None
+                    };
+                    match (find(&source_clip_id), find(&ref_clip_id)) {
+                        (Some(s), Some(r)) => Some((s, r)),
+                        _ => None,
+                    }
+                };
+
+                let Some((src, reff)) = clip_info else {
+                    dialog_ok.close();
+                    return;
+                };
+
+                let params = crate::media::color_match::MatchColorParams {
+                    source_path: src.0,
+                    source_in_ns: src.1,
+                    source_out_ns: src.2,
+                    reference_path: reff.0,
+                    reference_in_ns: reff.1,
+                    reference_out_ns: reff.2,
+                    sample_count: 8,
+                    generate_lut: gen_lut,
+                    lut_output_dir: None,
+                };
+
+                match crate::media::color_match::run_match_color(&params) {
+                    Ok(outcome) => {
+                        let r = &outcome.slider_result;
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| c.id == source_clip_id)
+                                {
+                                    clip.brightness = r.brightness;
+                                    clip.contrast = r.contrast;
+                                    clip.saturation = r.saturation;
+                                    clip.temperature = r.temperature;
+                                    clip.tint = r.tint;
+                                    clip.exposure = r.exposure;
+                                    clip.black_point = r.black_point;
+                                    clip.shadows = r.shadows;
+                                    clip.midtones = r.midtones;
+                                    clip.highlights = r.highlights;
+                                    clip.highlights_warmth = r.highlights_warmth;
+                                    clip.highlights_tint = r.highlights_tint;
+                                    clip.midtones_warmth = r.midtones_warmth;
+                                    clip.midtones_tint = r.midtones_tint;
+                                    clip.shadows_warmth = r.shadows_warmth;
+                                    clip.shadows_tint = r.shadows_tint;
+                                    if let Some(ref lut_path) = outcome.lut_path {
+                                        clip.lut_path = Some(lut_path.clone());
+                                    }
+                                    proj.dirty = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Update sliders to reflect new values.
+                        *updating.borrow_mut() = true;
+                        brightness_slider.set_value(r.brightness as f64);
+                        contrast_slider.set_value(r.contrast as f64);
+                        saturation_slider.set_value(r.saturation as f64);
+                        temperature_slider.set_value(r.temperature as f64);
+                        tint_slider.set_value(r.tint as f64);
+                        exposure_slider.set_value(r.exposure as f64);
+                        black_point_slider.set_value(r.black_point as f64);
+                        shadows_slider.set_value(r.shadows as f64);
+                        midtones_slider.set_value(r.midtones as f64);
+                        highlights_slider.set_value(r.highlights as f64);
+                        highlights_warmth_slider.set_value(r.highlights_warmth as f64);
+                        highlights_tint_slider.set_value(r.highlights_tint as f64);
+                        midtones_warmth_slider.set_value(r.midtones_warmth as f64);
+                        midtones_tint_slider.set_value(r.midtones_tint as f64);
+                        shadows_warmth_slider.set_value(r.shadows_warmth as f64);
+                        shadows_tint_slider.set_value(r.shadows_tint as f64);
+                        *updating.borrow_mut() = false;
+
+                        // Notify about color change.
+                        on_color_changed(
+                            r.brightness,
+                            r.contrast,
+                            r.saturation,
+                            r.temperature,
+                            r.tint,
+                            denoise_slider.value() as f32,
+                            sharpness_slider.value() as f32,
+                            r.shadows,
+                            r.midtones,
+                            r.highlights,
+                            r.exposure,
+                            r.black_point,
+                            r.highlights_warmth,
+                            r.highlights_tint,
+                            r.midtones_warmth,
+                            r.midtones_tint,
+                            r.shadows_warmth,
+                            r.shadows_tint,
+                        );
+
+                        // Update LUT label if generated.
+                        if let Some(ref lut_path) = outcome.lut_path {
+                            let name = std::path::Path::new(lut_path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(lut_path)
+                                .to_string();
+                            lut_path_label.set_text(&name);
+                            lut_clear_btn.set_sensitive(true);
+                            on_lut_changed(Some(lut_path.clone()));
+                        }
+
+                        log::info!("color_match: applied to clip {source_clip_id}");
+                    }
+                    Err(e) => {
+                        log::error!("color_match failed: {e}");
+                    }
+                }
+
+                dialog_ok.close();
+            });
+
+            dialog.present();
+        });
+    }
+
     // Chroma Key enable toggle — toggling on/off changes pipeline topology → full rebuild
     {
         let project = project.clone();
@@ -3466,6 +3754,7 @@ pub fn build_inspector(
         reverse_check,
         lut_path_label,
         lut_clear_btn,
+        match_color_btn,
         updating,
         content_box,
         empty_state_label,

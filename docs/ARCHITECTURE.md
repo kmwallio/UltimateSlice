@@ -356,6 +356,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `unlink_clips` | Clear clip link groups for the provided clips and their linked peers |
 | `align_grouped_clips_by_timecode` | Align grouped clips referenced by clip ids using stored source-time metadata |
 | `sync_clips_by_audio` | Synchronize 2+ clips by FFT audio cross-correlation (first clip is anchor) |
+| `copy_clip_color_grade` | Copy color grading static values from a clip into the internal color-grade clipboard |
+| `paste_clip_color_grade` | Paste previously copied color grading values onto a target clip |
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
 | `slip_clip` | Shift a clip's source window by a delta (source_in/out move equally, timeline position fixed) |
 | `slide_clip` | Move a clip on timeline by a delta, adjusting neighbor edit points to compensate |

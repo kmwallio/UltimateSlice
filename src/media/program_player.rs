@@ -10842,7 +10842,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
-
+    use std::sync::Mutex;
     fn make_clip() -> ProgramClip {
         ProgramClip {
             id: "c1".to_string(),

@@ -157,6 +157,82 @@ struct TimelineClipboard {
     source_track_id: String,
 }
 
+/// Clipboard holding only color-grading static values (no keyframes).
+#[derive(Debug, Clone)]
+pub struct ColorGradeClipboard {
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub exposure: f32,
+    pub black_point: f32,
+    pub shadows: f32,
+    pub midtones: f32,
+    pub highlights: f32,
+    pub highlights_warmth: f32,
+    pub highlights_tint: f32,
+    pub midtones_warmth: f32,
+    pub midtones_tint: f32,
+    pub shadows_warmth: f32,
+    pub shadows_tint: f32,
+    pub denoise: f32,
+    pub sharpness: f32,
+    pub lut_path: Option<String>,
+}
+
+impl ColorGradeClipboard {
+    /// Extract color grading values from a clip.
+    pub fn from_clip(clip: &Clip) -> Self {
+        Self {
+            brightness: clip.brightness,
+            contrast: clip.contrast,
+            saturation: clip.saturation,
+            temperature: clip.temperature,
+            tint: clip.tint,
+            exposure: clip.exposure,
+            black_point: clip.black_point,
+            shadows: clip.shadows,
+            midtones: clip.midtones,
+            highlights: clip.highlights,
+            highlights_warmth: clip.highlights_warmth,
+            highlights_tint: clip.highlights_tint,
+            midtones_warmth: clip.midtones_warmth,
+            midtones_tint: clip.midtones_tint,
+            shadows_warmth: clip.shadows_warmth,
+            shadows_tint: clip.shadows_tint,
+            denoise: clip.denoise,
+            sharpness: clip.sharpness,
+            lut_path: clip.lut_path.clone(),
+        }
+    }
+
+    /// Apply color grading values to a target clip. Returns true if anything changed.
+    pub fn apply_to(&self, target: &mut Clip) -> bool {
+        let before = target.clone();
+        target.brightness = self.brightness;
+        target.contrast = self.contrast;
+        target.saturation = self.saturation;
+        target.temperature = self.temperature;
+        target.tint = self.tint;
+        target.exposure = self.exposure;
+        target.black_point = self.black_point;
+        target.shadows = self.shadows;
+        target.midtones = self.midtones;
+        target.highlights = self.highlights;
+        target.highlights_warmth = self.highlights_warmth;
+        target.highlights_tint = self.highlights_tint;
+        target.midtones_warmth = self.midtones_warmth;
+        target.midtones_tint = self.midtones_tint;
+        target.shadows_warmth = self.shadows_warmth;
+        target.shadows_tint = self.shadows_tint;
+        target.denoise = self.denoise;
+        target.sharpness = self.sharpness;
+        target.lut_path = self.lut_path.clone();
+        before != *target
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MarqueeSelection {
     start_x: f64,
@@ -226,6 +302,8 @@ pub struct TimelineState {
     pub show_track_audio_levels: bool,
     /// Single-clip timeline clipboard payload for copy/paste operations.
     clipboard: Option<TimelineClipboard>,
+    /// Color-grade-only clipboard for copy/paste color grading between clips.
+    pub color_grade_clipboard: Option<ColorGradeClipboard>,
     /// Multi-selection set (primary selection remains in `selected_clip_id`).
     selected_clip_ids: HashSet<String>,
     /// Anchor clip used for Shift+click range selection.
@@ -240,6 +318,8 @@ pub struct TimelineState {
     pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
     /// Set of source paths currently resolved as missing/offline.
     pub missing_media_paths: HashSet<String>,
+    /// Callback fired when user presses the match-color shortcut (Ctrl+Alt+M).
+    pub on_match_color: Option<Rc<dyn Fn()>>,
 }
 
 impl TimelineState {
@@ -271,6 +351,7 @@ impl TimelineState {
             track_audio_peak_db: Vec::new(),
             show_track_audio_levels: true,
             clipboard: None,
+            color_grade_clipboard: None,
             selected_clip_ids: HashSet::new(),
             selection_anchor_clip_id: None,
             marquee_selection: None,
@@ -278,6 +359,7 @@ impl TimelineState {
             keyframe_marquee_selection: None,
             on_tool_changed: None,
             missing_media_paths: HashSet::new(),
+            on_match_color: None,
         }
     }
 
@@ -1290,6 +1372,71 @@ impl TimelineState {
             old_clips,
             new_clips: std::mem::take(&mut new_clips),
             label: "Paste clip attributes".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
+    /// Copy color grading values from the selected clip into the color-grade clipboard.
+    pub fn copy_color_grade(&mut self) -> bool {
+        let Some(clip_id) = self.selected_clip_id.clone() else {
+            return false;
+        };
+        let grade = {
+            let proj = self.project.borrow();
+            proj.tracks.iter().find_map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .map(|clip| ColorGradeClipboard::from_clip(clip))
+            })
+        };
+        if let Some(payload) = grade {
+            self.color_grade_clipboard = Some(payload);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Paste color grading values from the color-grade clipboard onto the selected clip.
+    pub fn paste_color_grade(&mut self) -> bool {
+        let Some(grade) = self.color_grade_clipboard.clone() else {
+            return false;
+        };
+        let Some(selected_clip_id) = self.selected_clip_id.clone() else {
+            return false;
+        };
+
+        let (track_id, old_clips, mut new_clips) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj
+                .tracks
+                .iter()
+                .find(|t| t.clips.iter().any(|c| c.id == selected_clip_id))
+            else {
+                return false;
+            };
+            let Some(target_idx) = track.clips.iter().position(|c| c.id == selected_clip_id) else {
+                return false;
+            };
+            let old_clips = track.clips.clone();
+            let mut new_clips = old_clips.clone();
+            if !grade.apply_to(&mut new_clips[target_idx]) {
+                return false;
+            }
+            (track.id.clone(), old_clips, new_clips)
+        };
+        if old_clips == new_clips {
+            return false;
+        }
+        let cmd = SetTrackClipsCommand {
+            track_id,
+            old_clips,
+            new_clips: std::mem::take(&mut new_clips),
+            label: "Paste color grade".to_string(),
         };
         let mut proj = self.project.borrow_mut();
         self.history.execute(Box::new(cmd), &mut proj);
@@ -2341,13 +2488,32 @@ pub fn open_remove_silent_parts_dialog(state: Rc<RefCell<TimelineState>>) {
 
 fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     let before = target.clone();
+    // Color grading (primary)
     target.brightness = source.brightness;
     target.contrast = source.contrast;
     target.saturation = source.saturation;
+    target.temperature = source.temperature;
+    target.tint = source.tint;
+    // Color grading (extended)
+    target.exposure = source.exposure;
+    target.black_point = source.black_point;
+    target.shadows = source.shadows;
+    target.midtones = source.midtones;
+    target.highlights = source.highlights;
+    target.highlights_warmth = source.highlights_warmth;
+    target.highlights_tint = source.highlights_tint;
+    target.midtones_warmth = source.midtones_warmth;
+    target.midtones_tint = source.midtones_tint;
+    target.shadows_warmth = source.shadows_warmth;
+    target.shadows_tint = source.shadows_tint;
+    // Enhancement
     target.denoise = source.denoise;
     target.sharpness = source.sharpness;
+    target.lut_path = source.lut_path.clone();
+    // Audio
     target.volume = source.volume;
     target.pan = source.pan;
+    // Video effects
     target.speed = source.speed;
     target.crop_left = source.crop_left;
     target.crop_right = source.crop_right;
@@ -2356,25 +2522,33 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     target.rotate = source.rotate;
     target.flip_h = source.flip_h;
     target.flip_v = source.flip_v;
+    // Title/Text overlay
     target.title_text = source.title_text.clone();
     target.title_font = source.title_font.clone();
     target.title_color = source.title_color;
     target.title_x = source.title_x;
     target.title_y = source.title_y;
+    // Transitions
     target.transition_after = source.transition_after.clone();
     target.transition_after_ns = source.transition_after_ns;
-    target.lut_path = source.lut_path.clone();
+    // Transform
     target.scale = source.scale;
     target.opacity = source.opacity;
     target.position_x = source.position_x;
     target.position_y = source.position_y;
-    target.shadows = source.shadows;
-    target.midtones = source.midtones;
-    target.highlights = source.highlights;
+    target.blend_mode = source.blend_mode;
+    // Reverse & Freeze-frame
     target.reverse = source.reverse;
     target.freeze_frame = source.freeze_frame;
     target.freeze_frame_source_ns = source.freeze_frame_source_ns;
     target.freeze_frame_hold_duration_ns = source.freeze_frame_hold_duration_ns;
+    // Chroma key & BG removal
+    target.chroma_key_enabled = source.chroma_key_enabled;
+    target.chroma_key_color = source.chroma_key_color;
+    target.chroma_key_tolerance = source.chroma_key_tolerance;
+    target.chroma_key_softness = source.chroma_key_softness;
+    target.bg_removal_enabled = source.bg_removal_enabled;
+    target.bg_removal_threshold = source.bg_removal_threshold;
     before != *target
 }
 
@@ -4572,6 +4746,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             use gtk::gdk::Key;
             let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            let alt = modifiers.contains(gtk::gdk::ModifierType::ALT_MASK);
             let mut st = state.borrow_mut();
 
             // Track whether we need to fire on_project_changed after releasing the borrow
@@ -4599,6 +4774,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let changed = st.select_all_clips();
                     if changed {
                         notify_selection = true;
+                    }
+                    changed
+                }
+                Key::c | Key::C if ctrl && alt => st.copy_color_grade(),
+                Key::m | Key::M if ctrl && alt => {
+                    if st.selected_clip_id.is_some() {
+                        let cb = st.on_match_color.clone();
+                        drop(st);
+                        if let Some(cb) = cb {
+                            cb();
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    false
+                }
+                Key::v | Key::V if ctrl && alt => {
+                    let changed = st.paste_color_grade();
+                    if changed {
+                        notify_project = true;
                     }
                     changed
                 }

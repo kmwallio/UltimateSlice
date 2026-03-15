@@ -344,6 +344,20 @@ pub enum McpCommand {
         clip_ids: Vec<String>,
         reply: SyncSender<Value>,
     },
+    CopyClipColorGrade {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    PasteClipColorGrade {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    MatchClipColors {
+        source_clip_id: String,
+        reference_clip_id: String,
+        generate_lut: bool,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

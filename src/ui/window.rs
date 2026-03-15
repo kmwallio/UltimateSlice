@@ -3301,6 +3301,14 @@ pub fn build_window(
         ));
     }
 
+    // Wire on_match_color — triggers the inspector Match Color button via keyboard shortcut.
+    {
+        let match_btn = inspector_view.match_color_btn.clone();
+        timeline_state.borrow_mut().on_match_color = Some(Rc::new(move || {
+            match_btn.emit_clicked();
+        }));
+    }
+
     // ── Build program monitor ──────────────────────────────────────────────
     let prog_monitor_host = gtk::Box::new(Orientation::Vertical, 0);
     prog_monitor_host.set_hexpand(true);
@@ -7107,6 +7115,221 @@ fn handle_mcp_command(
                             "success": all_confident,
                             "results": result_json,
                         }))
+                        .ok();
+                }
+            }
+        }
+
+        McpCommand::CopyClipColorGrade { clip_id, reply } => {
+            let mut ts = timeline_state.borrow_mut();
+            // Temporarily set selected clip for the copy operation
+            let prev_selected = ts.selected_clip_id.clone();
+            ts.selected_clip_id = Some(clip_id.clone());
+            let ok = ts.copy_color_grade();
+            ts.selected_clip_id = prev_selected;
+            drop(ts);
+            reply.send(json!({"success": ok})).ok();
+        }
+
+        McpCommand::PasteClipColorGrade { clip_id, reply } => {
+            let mut ts = timeline_state.borrow_mut();
+            let prev_selected = ts.selected_clip_id.clone();
+            ts.selected_clip_id = Some(clip_id.clone());
+            let ok = ts.paste_color_grade();
+            ts.selected_clip_id = prev_selected;
+            drop(ts);
+            if ok {
+                on_project_changed_full();
+            }
+            reply.send(json!({"success": ok})).ok();
+        }
+
+        McpCommand::MatchClipColors {
+            source_clip_id,
+            reference_clip_id,
+            generate_lut,
+            reply,
+        } => {
+            // Collect clip info from project.
+            let clip_info: Option<(
+                String, u64, u64, String,  // source: path, in, out, track_id
+                String, u64, u64,          // ref: path, in, out
+            )> = {
+                let proj = project.borrow();
+                let find_clip = |id: &str| -> Option<(String, u64, u64, String)> {
+                    for track in &proj.tracks {
+                        if let Some(c) = track.clips.iter().find(|c| c.id == id) {
+                            return Some((
+                                c.source_path.clone(),
+                                c.source_in,
+                                c.source_out,
+                                track.id.clone(),
+                            ));
+                        }
+                    }
+                    None
+                };
+                let src = find_clip(&source_clip_id);
+                let reff = find_clip(&reference_clip_id);
+                match (src, reff) {
+                    (Some(s), Some(r)) => Some((s.0, s.1, s.2, s.3, r.0, r.1, r.2)),
+                    _ => None,
+                }
+            };
+
+            let Some((src_path, src_in, src_out, src_track_id, ref_path, ref_in, ref_out)) =
+                clip_info
+            else {
+                reply
+                    .send(json!({"success": false, "error": "Could not find source and/or reference clip"}))
+                    .ok();
+                return;
+            };
+
+            // Capture old values before modification.
+            let old_values = {
+                let proj = project.borrow();
+                proj.tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == source_clip_id)
+                    .map(|c| {
+                        (
+                            c.brightness,
+                            c.contrast,
+                            c.saturation,
+                            c.temperature,
+                            c.tint,
+                            c.exposure,
+                            c.black_point,
+                            c.shadows,
+                            c.midtones,
+                            c.highlights,
+                            c.highlights_warmth,
+                            c.highlights_tint,
+                            c.midtones_warmth,
+                            c.midtones_tint,
+                            c.shadows_warmth,
+                            c.shadows_tint,
+                            c.lut_path.clone(),
+                        )
+                    })
+            };
+            let Some(old) = old_values else {
+                reply
+                    .send(json!({"success": false, "error": "Source clip not found"}))
+                    .ok();
+                return;
+            };
+
+            let params = crate::media::color_match::MatchColorParams {
+                source_path: src_path,
+                source_in_ns: src_in,
+                source_out_ns: src_out,
+                reference_path: ref_path,
+                reference_in_ns: ref_in,
+                reference_out_ns: ref_out,
+                sample_count: 8,
+                generate_lut,
+                lut_output_dir: None,
+            };
+
+            match crate::media::color_match::run_match_color(&params) {
+                Ok(outcome) => {
+                    let r = &outcome.slider_result;
+
+                    // Build and execute undo command.
+                    let cmd = crate::undo::MatchColorCommand {
+                        clip_id: source_clip_id.clone(),
+                        track_id: src_track_id.clone(),
+                        old_brightness: old.0,
+                        old_contrast: old.1,
+                        old_saturation: old.2,
+                        old_temperature: old.3,
+                        old_tint: old.4,
+                        old_exposure: old.5,
+                        old_black_point: old.6,
+                        old_shadows: old.7,
+                        old_midtones: old.8,
+                        old_highlights: old.9,
+                        old_highlights_warmth: old.10,
+                        old_highlights_tint: old.11,
+                        old_midtones_warmth: old.12,
+                        old_midtones_tint: old.13,
+                        old_shadows_warmth: old.14,
+                        old_shadows_tint: old.15,
+                        old_lut_path: old.16,
+                        new_brightness: r.brightness,
+                        new_contrast: r.contrast,
+                        new_saturation: r.saturation,
+                        new_temperature: r.temperature,
+                        new_tint: r.tint,
+                        new_exposure: r.exposure,
+                        new_black_point: r.black_point,
+                        new_shadows: r.shadows,
+                        new_midtones: r.midtones,
+                        new_highlights: r.highlights,
+                        new_highlights_warmth: r.highlights_warmth,
+                        new_highlights_tint: r.highlights_tint,
+                        new_midtones_warmth: r.midtones_warmth,
+                        new_midtones_tint: r.midtones_tint,
+                        new_shadows_warmth: r.shadows_warmth,
+                        new_shadows_tint: r.shadows_tint,
+                        new_lut_path: outcome.lut_path.clone(),
+                    };
+
+                    {
+                        let mut ts = timeline_state.borrow_mut();
+                        let mut proj = project.borrow_mut();
+                        ts.history.execute(Box::new(cmd), &mut proj);
+                    }
+
+                    // Also assign the LUT if generated.
+                    if let Some(ref lut_path) = outcome.lut_path {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) =
+                                track.clips.iter_mut().find(|c| c.id == source_clip_id)
+                            {
+                                clip.lut_path = Some(lut_path.clone());
+                                break;
+                            }
+                        }
+                        proj.dirty = true;
+                    }
+
+                    on_project_changed_full();
+
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "applied": {
+                                "brightness": r.brightness,
+                                "contrast": r.contrast,
+                                "saturation": r.saturation,
+                                "temperature": r.temperature,
+                                "tint": r.tint,
+                                "exposure": r.exposure,
+                            },
+                            "lut_path": outcome.lut_path,
+                            "source_stats": {
+                                "mean_l": outcome.source_stats.mean_l,
+                                "std_l": outcome.source_stats.std_l,
+                                "mean_a": outcome.source_stats.mean_a,
+                                "mean_b": outcome.source_stats.mean_b,
+                            },
+                            "reference_stats": {
+                                "mean_l": outcome.reference_stats.mean_l,
+                                "std_l": outcome.reference_stats.std_l,
+                                "mean_a": outcome.reference_stats.mean_a,
+                                "mean_b": outcome.reference_stats.mean_b,
+                            },
+                        }))
+                        .ok();
+                }
+                Err(e) => {
+                    reply
+                        .send(json!({"success": false, "error": format!("{e}")}))
                         .ok();
                 }
             }

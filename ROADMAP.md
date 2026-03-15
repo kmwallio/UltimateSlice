@@ -221,6 +221,7 @@ Tracking docs:
 - [x] Roll edit mode
 - [x] Slip/slide edit modes
 - [x] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
+- [x] Copy/Paste Color Grade (Ctrl+Alt+C/V for color-grading-only copy/paste between clips)
 - [x] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
   - [x] Phase 1: Shift+click range select (same-track + cross-track time-range), Ctrl/Cmd+click toggle selection, Ctrl+A select all
   - [x] Phase 2: rubber-band marquee selection
@@ -410,7 +411,8 @@ Tracking docs:
   - [ ] Prerender keyframe interpolation — support brightness/contrast/saturation/temperature/tint keyframes in the prerender pipeline (currently only static values are applied; animated color adjustments are not visible in proxy mode)
   - [ ] Configurable prerender quality — expose CRF / encoding preset in Preferences (currently CRF 20 veryfast) to let users trade cache size and prerender speed for higher color fidelity
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
-- [ ] Advanced color grading
+- [x] Advanced color grading
+  - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.
 - [ ] Color management pipeline via OpenColorIO (OCIO)
   - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
   - [ ] OCIO config loading (ACES 2.0, Rec.709, sRGB built-in configs; user-supplied config file path in Preferences)

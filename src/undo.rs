@@ -594,6 +594,105 @@ impl EditCommand for SetClipColorCommand {
     }
 }
 
+/// Match one clip's color to another — stores all color parameters before/after.
+pub struct MatchColorCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_brightness: f32,
+    pub old_contrast: f32,
+    pub old_saturation: f32,
+    pub old_temperature: f32,
+    pub old_tint: f32,
+    pub old_exposure: f32,
+    pub old_black_point: f32,
+    pub old_shadows: f32,
+    pub old_midtones: f32,
+    pub old_highlights: f32,
+    pub old_highlights_warmth: f32,
+    pub old_highlights_tint: f32,
+    pub old_midtones_warmth: f32,
+    pub old_midtones_tint: f32,
+    pub old_shadows_warmth: f32,
+    pub old_shadows_tint: f32,
+    pub old_lut_path: Option<String>,
+    pub new_brightness: f32,
+    pub new_contrast: f32,
+    pub new_saturation: f32,
+    pub new_temperature: f32,
+    pub new_tint: f32,
+    pub new_exposure: f32,
+    pub new_black_point: f32,
+    pub new_shadows: f32,
+    pub new_midtones: f32,
+    pub new_highlights: f32,
+    pub new_highlights_warmth: f32,
+    pub new_highlights_tint: f32,
+    pub new_midtones_warmth: f32,
+    pub new_midtones_tint: f32,
+    pub new_shadows_warmth: f32,
+    pub new_shadows_tint: f32,
+    pub new_lut_path: Option<String>,
+}
+
+impl MatchColorCommand {
+    fn apply_values(&self, project: &mut Project, use_new: bool) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if use_new {
+                    clip.brightness = self.new_brightness;
+                    clip.contrast = self.new_contrast;
+                    clip.saturation = self.new_saturation;
+                    clip.temperature = self.new_temperature;
+                    clip.tint = self.new_tint;
+                    clip.exposure = self.new_exposure;
+                    clip.black_point = self.new_black_point;
+                    clip.shadows = self.new_shadows;
+                    clip.midtones = self.new_midtones;
+                    clip.highlights = self.new_highlights;
+                    clip.highlights_warmth = self.new_highlights_warmth;
+                    clip.highlights_tint = self.new_highlights_tint;
+                    clip.midtones_warmth = self.new_midtones_warmth;
+                    clip.midtones_tint = self.new_midtones_tint;
+                    clip.shadows_warmth = self.new_shadows_warmth;
+                    clip.shadows_tint = self.new_shadows_tint;
+                    clip.lut_path = self.new_lut_path.clone();
+                } else {
+                    clip.brightness = self.old_brightness;
+                    clip.contrast = self.old_contrast;
+                    clip.saturation = self.old_saturation;
+                    clip.temperature = self.old_temperature;
+                    clip.tint = self.old_tint;
+                    clip.exposure = self.old_exposure;
+                    clip.black_point = self.old_black_point;
+                    clip.shadows = self.old_shadows;
+                    clip.midtones = self.old_midtones;
+                    clip.highlights = self.old_highlights;
+                    clip.highlights_warmth = self.old_highlights_warmth;
+                    clip.highlights_tint = self.old_highlights_tint;
+                    clip.midtones_warmth = self.old_midtones_warmth;
+                    clip.midtones_tint = self.old_midtones_tint;
+                    clip.shadows_warmth = self.old_shadows_warmth;
+                    clip.shadows_tint = self.old_shadows_tint;
+                    clip.lut_path = self.old_lut_path.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+}
+
+impl EditCommand for MatchColorCommand {
+    fn execute(&self, project: &mut Project) {
+        self.apply_values(project, true);
+    }
+    fn undo(&self, project: &mut Project) {
+        self.apply_values(project, false);
+    }
+    fn description(&self) -> &str {
+        "Match clip color"
+    }
+}
+
 /// Set transition metadata on a clip boundary (clip -> next clip).
 pub struct SetClipTransitionCommand {
     pub clip_id: String,

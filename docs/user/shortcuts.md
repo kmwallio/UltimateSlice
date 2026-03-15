@@ -60,6 +60,9 @@
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
+| `Ctrl+Alt+C` | Copy color grade from selected clip |
+| `Ctrl+Alt+V` | Paste color grade onto selected clip |
+| `Ctrl+Alt+M` | Match selected clip's color to a reference clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |

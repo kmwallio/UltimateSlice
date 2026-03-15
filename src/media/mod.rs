@@ -1,5 +1,6 @@
 pub mod audio_sync;
 pub mod bg_removal_cache;
+pub mod color_match;
 pub mod cube_lut;
 pub mod export;
 pub mod player;

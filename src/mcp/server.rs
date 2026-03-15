@@ -975,6 +975,42 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_ids"]
             }
+        },
+        {
+            "name": "copy_clip_color_grade",
+            "description": "Copy color grading values from a clip into an internal clipboard. The copied grade can then be pasted onto other clips with paste_clip_color_grade. Copies static values only (brightness, contrast, saturation, temperature, tint, exposure, black_point, shadows, midtones, highlights, warmth/tint per tonal region, denoise, sharpness, lut_path).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Source clip id to copy color grade from" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "paste_clip_color_grade",
+            "description": "Paste the previously copied color grading values onto a target clip. Requires a prior copy_clip_color_grade call. Applies static color values only (no keyframes).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Target clip id to paste color grade onto" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "match_clip_colors",
+            "description": "Automatically grade a source clip to match the color appearance of a reference clip. Samples frames from both clips, analyses color statistics in CIE L*a*b* space, and computes slider adjustments (brightness, contrast, saturation, temperature, tint). Optionally generates a .cube 3D LUT for finer non-linear matching. The operation is undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_clip_id": { "type": "string", "description": "Clip id to adjust (the one that will be modified)" },
+                    "reference_clip_id": { "type": "string", "description": "Clip id to match (the target look)" },
+                    "generate_lut": { "type": "boolean", "description": "When true, also generate and assign a .cube 3D LUT for finer matching (default false)" },
+                    "sample_count": { "type": "integer", "description": "Number of frames to sample from each clip (1–20, default 8)" }
+                },
+                "required": ["source_clip_id", "reference_clip_id"]
+            }
         }
     ]})
 }
@@ -1410,6 +1446,20 @@ fn dispatch_tool_payload(
                         .collect()
                 })
                 .unwrap_or_default(),
+            reply: tx,
+        },
+        "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "paste_clip_color_grade" => McpCommand::PasteClipColorGrade {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "match_clip_colors" => McpCommand::MatchClipColors {
+            source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
+            reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
+            generate_lut: args.get("generate_lut").and_then(|v| v.as_bool()).unwrap_or(false),
             reply: tx,
         },
 
