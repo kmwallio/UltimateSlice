@@ -256,6 +256,8 @@ Automatically adjusts the selected clip's color parameters so it visually matche
 
 Match Color adjusts **all** color parameters: global controls (brightness, contrast, saturation, temperature, tint, exposure) **and** per-zone grading (shadows, midtones, highlights brightness, per-zone warmth/tint, and black point). Zone grading is estimated by classifying pixels into shadow/midtone/highlight luminance bands and computing the residual difference not covered by global adjustments.
 
+If the reference clip has existing color grading (sliders or a LUT), the match targets the **graded appearance** — not the raw source footage. When "Generate LUT" is enabled, the LUT captures only the non-linear residual that sliders cannot express, avoiding double-application of color corrections.
+
 > **Undo support:** The entire operation (all slider changes + optional LUT assignment) is undoable in a single `Ctrl+Z` step.
 
 > **MCP tool:** `match_clip_colors` provides the same functionality for automation. Parameters: `source_clip_id`, `reference_clip_id`, `generate_lut` (optional boolean).

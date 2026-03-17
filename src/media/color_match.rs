@@ -801,6 +801,226 @@ fn transfer_channel(
     }
 }
 
+/// Simulate the effect of applying `MatchColorResult` slider adjustments to a
+/// `ColorStats`, returning adjusted stats. This represents what the source
+/// would look like after sliders are applied, so the LUT can be generated for
+/// only the non-linear residual.
+pub fn simulate_slider_adjusted_stats(
+    stats: &ColorStats,
+    result: &MatchColorResult,
+) -> ColorStats {
+    // Brightness + exposure shift L* mean.
+    let l_shift = result.brightness as f64 * 100.0 + result.exposure as f64 * 50.0;
+
+    // Contrast scales L* std dev.
+    let contrast = result.contrast as f64;
+
+    // Temperature → b* shift, tint → a* shift.
+    let b_temp = temperature_to_b_delta(result.temperature);
+    let a_tint = result.tint as f64 * 40.0;
+
+    // Saturation scales chroma (a, b) std dev.
+    let sat = result.saturation as f64;
+
+    ColorStats {
+        mean_l: stats.mean_l + l_shift,
+        mean_a: stats.mean_a + a_tint,
+        mean_b: stats.mean_b + b_temp,
+        std_l: stats.std_l * contrast,
+        std_a: stats.std_a * sat,
+        std_b: stats.std_b * sat,
+        mean_r: stats.mean_r,
+        mean_g: stats.mean_g,
+        mean_b_ch: stats.mean_b_ch,
+        std_r: stats.std_r,
+        std_g: stats.std_g,
+        std_b_ch: stats.std_b_ch,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reference grading simulation
+// ---------------------------------------------------------------------------
+
+/// Color parameters from a reference clip, used to simulate its graded
+/// appearance when sampling frames for color matching.
+#[derive(Debug, Clone)]
+pub struct ReferenceGrading {
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub exposure: f32,
+    pub black_point: f32,
+    pub shadows: f32,
+    pub midtones: f32,
+    pub highlights: f32,
+    pub highlights_warmth: f32,
+    pub highlights_tint: f32,
+    pub midtones_warmth: f32,
+    pub midtones_tint: f32,
+    pub shadows_warmth: f32,
+    pub shadows_tint: f32,
+    pub lut_path: Option<String>,
+}
+
+impl ReferenceGrading {
+    /// Build from an existing clip's color parameters.
+    pub fn from_clip(clip: &Clip) -> Self {
+        Self {
+            brightness: clip.brightness,
+            contrast: clip.contrast,
+            saturation: clip.saturation,
+            temperature: clip.temperature,
+            tint: clip.tint,
+            exposure: clip.exposure,
+            black_point: clip.black_point,
+            shadows: clip.shadows,
+            midtones: clip.midtones,
+            highlights: clip.highlights,
+            highlights_warmth: clip.highlights_warmth,
+            highlights_tint: clip.highlights_tint,
+            midtones_warmth: clip.midtones_warmth,
+            midtones_tint: clip.midtones_tint,
+            shadows_warmth: clip.shadows_warmth,
+            shadows_tint: clip.shadows_tint,
+            lut_path: clip.lut_path.clone(),
+        }
+    }
+
+    /// Returns true if all parameters are at their neutral defaults.
+    pub fn is_neutral(&self) -> bool {
+        self.brightness.abs() < f32::EPSILON
+            && (self.contrast - 1.0).abs() < f32::EPSILON
+            && (self.saturation - 1.0).abs() < f32::EPSILON
+            && (self.temperature - 6500.0).abs() < f32::EPSILON
+            && self.tint.abs() < f32::EPSILON
+            && self.exposure.abs() < f32::EPSILON
+            && self.black_point.abs() < f32::EPSILON
+            && self.shadows.abs() < f32::EPSILON
+            && self.midtones.abs() < f32::EPSILON
+            && self.highlights.abs() < f32::EPSILON
+            && self.highlights_warmth.abs() < f32::EPSILON
+            && self.highlights_tint.abs() < f32::EPSILON
+            && self.midtones_warmth.abs() < f32::EPSILON
+            && self.midtones_tint.abs() < f32::EPSILON
+            && self.shadows_warmth.abs() < f32::EPSILON
+            && self.shadows_tint.abs() < f32::EPSILON
+            && self.lut_path.is_none()
+    }
+}
+
+/// Convert a temperature (Kelvin) to a Lab b* delta relative to neutral (6500K).
+/// Empirical inverse of the mapping in `estimate_slider_adjustments`:
+/// kelvin_shift = b_delta * (4000/50), so b_delta = kelvin_shift / 80.
+fn temperature_to_b_delta(kelvin: f32) -> f64 {
+    (kelvin as f64 - 6500.0) / 80.0
+}
+
+/// Apply a reference clip's color grading to sampled RGBA frames in software.
+///
+/// This applies a simplified simulation of the color pipeline:
+/// 1. Slider adjustments via per-pixel Lab-space transforms
+/// 2. LUT application via `CubeLut::apply_to_rgba_buffer`
+///
+/// The result is approximate but sufficient for computing color stats that
+/// represent the reference's graded appearance.
+pub fn apply_grading_to_frames(frames: &mut [SampledFrame], grading: &ReferenceGrading) {
+    if grading.is_neutral() {
+        return;
+    }
+
+    let has_slider_adjustments = grading.brightness.abs() > f32::EPSILON
+        || (grading.contrast - 1.0).abs() > f32::EPSILON
+        || (grading.saturation - 1.0).abs() > f32::EPSILON
+        || (grading.temperature - 6500.0).abs() > f32::EPSILON
+        || grading.tint.abs() > f32::EPSILON
+        || grading.exposure.abs() > f32::EPSILON
+        || grading.black_point.abs() > f32::EPSILON
+        || grading.shadows.abs() > f32::EPSILON
+        || grading.midtones.abs() > f32::EPSILON
+        || grading.highlights.abs() > f32::EPSILON
+        || grading.highlights_warmth.abs() > f32::EPSILON
+        || grading.highlights_tint.abs() > f32::EPSILON
+        || grading.midtones_warmth.abs() > f32::EPSILON
+        || grading.midtones_tint.abs() > f32::EPSILON
+        || grading.shadows_warmth.abs() > f32::EPSILON
+        || grading.shadows_tint.abs() > f32::EPSILON;
+
+    // Apply slider adjustments in Lab space.
+    if has_slider_adjustments {
+        let b_temp_delta = temperature_to_b_delta(grading.temperature);
+        let a_tint_delta = grading.tint as f64 * 40.0;
+        let brightness_l = grading.brightness as f64 * 100.0;
+        let exposure_l = grading.exposure as f64 * 50.0;
+        let contrast = grading.contrast as f64;
+        let saturation = grading.saturation as f64;
+        let bp_lift = grading.black_point as f64 * 15.0;
+
+        let sh_l = grading.shadows as f64 * 33.0 / ZONE_GRADING_DAMP;
+        let mid_l = grading.midtones as f64 * 33.0 / ZONE_GRADING_DAMP;
+        let hi_l = grading.highlights as f64 * 33.0 / ZONE_GRADING_DAMP;
+
+        let sh_b = grading.shadows_warmth as f64 * 30.0 / ZONE_GRADING_DAMP;
+        let sh_a = grading.shadows_tint as f64 * 20.0 / ZONE_GRADING_DAMP;
+        let mid_b = grading.midtones_warmth as f64 * 30.0 / ZONE_GRADING_DAMP;
+        let mid_a = grading.midtones_tint as f64 * 20.0 / ZONE_GRADING_DAMP;
+        let hi_b = grading.highlights_warmth as f64 * 30.0 / ZONE_GRADING_DAMP;
+        let hi_a = grading.highlights_tint as f64 * 20.0 / ZONE_GRADING_DAMP;
+
+        for frame in frames.iter_mut() {
+            for pixel in frame.data.chunks_exact_mut(4) {
+                let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
+                let (mut l, mut a, mut b_val) = srgb_to_lab(r, g, b);
+
+                // Global adjustments.
+                l += brightness_l + exposure_l;
+                l = (l - 50.0) * contrast + 50.0;
+                l += bp_lift;
+                a *= saturation;
+                b_val *= saturation;
+                a += a_tint_delta;
+                b_val += b_temp_delta;
+
+                // Zone-specific grading.
+                if l < ZONE_SHADOW_MAX {
+                    l += sh_l;
+                    a += sh_a;
+                    b_val += sh_b;
+                } else if l >= ZONE_HIGHLIGHT_MIN {
+                    l += hi_l;
+                    a += hi_a;
+                    b_val += hi_b;
+                } else {
+                    l += mid_l;
+                    a += mid_a;
+                    b_val += mid_b;
+                }
+
+                let (ro, go, bo) = lab_to_srgb(l, a, b_val);
+                pixel[0] = ro;
+                pixel[1] = go;
+                pixel[2] = bo;
+            }
+        }
+    }
+
+    // Apply LUT after slider adjustments (matches pipeline order).
+    if let Some(ref lut_path) = grading.lut_path {
+        match CubeLut::from_file(std::path::Path::new(lut_path)) {
+            Ok(lut) => {
+                for frame in frames.iter_mut() {
+                    lut.apply_to_rgba_buffer(&mut frame.data);
+                }
+            }
+            Err(e) => {
+                log::warn!("color_match: failed to load reference LUT {lut_path}: {e}");
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // High-level orchestration
 // ---------------------------------------------------------------------------
@@ -821,6 +1041,10 @@ pub struct MatchColorParams {
     pub generate_lut: bool,
     /// Directory where the generated LUT file should be saved.
     pub lut_output_dir: Option<String>,
+    /// Optional grading parameters of the reference clip. When provided,
+    /// reference frames are graded in software before computing stats so
+    /// the match targets the reference's visible appearance, not its raw source.
+    pub reference_grading: Option<ReferenceGrading>,
 }
 
 /// Outcome of a match-color operation.
@@ -856,7 +1080,7 @@ pub fn run_match_color(params: &MatchColorParams) -> Result<MatchColorOutcome> {
         return Err(anyhow!("failed to sample any frames from source clip"));
     }
 
-    let reference_frames = extract_frames_rgba(
+    let mut reference_frames = extract_frames_rgba(
         &params.reference_path,
         params.reference_in_ns,
         params.reference_out_ns,
@@ -866,6 +1090,15 @@ pub fn run_match_color(params: &MatchColorParams) -> Result<MatchColorOutcome> {
         return Err(anyhow!(
             "failed to sample any frames from reference clip"
         ));
+    }
+
+    // Apply reference clip's grading to sampled frames so stats reflect the
+    // graded appearance the user sees, not the raw source file.
+    if let Some(ref grading) = params.reference_grading {
+        if !grading.is_neutral() {
+            log::info!("color_match: applying reference grading to sampled frames");
+            apply_grading_to_frames(&mut reference_frames, grading);
+        }
     }
 
     let source_stats = compute_color_stats(&source_frames)?;
@@ -929,8 +1162,12 @@ pub fn run_match_color(params: &MatchColorParams) -> Result<MatchColorOutcome> {
         );
         let path = format!("{}/{}", dir, filename);
 
-        log::info!("color_match: generating {MATCH_LUT_SIZE}³ LUT → {path}");
-        let lut = generate_match_lut(&source_stats, &reference_stats, MATCH_LUT_SIZE);
+        // Generate the LUT from slider-adjusted source stats to reference stats.
+        // This way the LUT only captures the non-linear residual that sliders
+        // cannot express, avoiding double-application with the slider values.
+        let adjusted_source = simulate_slider_adjusted_stats(&source_stats, &slider_result);
+        log::info!("color_match: generating {MATCH_LUT_SIZE}³ residual LUT → {path}");
+        let lut = generate_match_lut(&adjusted_source, &reference_stats, MATCH_LUT_SIZE);
         lut.write_cube_file(std::path::Path::new(&path))
             .map_err(|e| anyhow!("{e}"))?;
         Some(path)
@@ -1571,6 +1808,269 @@ mod tests {
             result.highlights.abs() < 0.01,
             "highlights should be ~0, got {}",
             result.highlights
+        );
+    }
+
+    #[test]
+    fn test_reference_grading_from_neutral_is_neutral() {
+        let grading = ReferenceGrading {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+            lut_path: None,
+        };
+        assert!(grading.is_neutral(), "default grading should be neutral");
+    }
+
+    #[test]
+    fn test_reference_grading_non_neutral_brightness() {
+        let mut grading = ReferenceGrading {
+            brightness: 0.5,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+            lut_path: None,
+        };
+        assert!(!grading.is_neutral(), "brightness != 0 should be non-neutral");
+        grading.brightness = 0.0;
+        grading.lut_path = Some("/tmp/test.cube".to_string());
+        assert!(!grading.is_neutral(), "lut_path should make it non-neutral");
+    }
+
+    #[test]
+    fn test_apply_grading_brightness_shifts_luma() {
+        // Create a mid-grey RGBA frame (128,128,128,255).
+        let pixel = [128u8, 128, 128, 255];
+        let mut data = Vec::new();
+        for _ in 0..100 {
+            data.extend_from_slice(&pixel);
+        }
+        let original_data = data.clone();
+        let mut frames = vec![SampledFrame {
+            width: 10,
+            height: 10,
+            data,
+        }];
+
+        let grading = ReferenceGrading {
+            brightness: 0.3,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+            lut_path: None,
+        };
+
+        apply_grading_to_frames(&mut frames, &grading);
+
+        // Brightness > 0 should make pixels brighter.
+        let avg_orig: f64 =
+            original_data.chunks(4).map(|p| p[0] as f64).sum::<f64>() / 100.0;
+        let avg_new: f64 =
+            frames[0].data.chunks(4).map(|p| p[0] as f64).sum::<f64>() / 100.0;
+        assert!(
+            avg_new > avg_orig + 5.0,
+            "positive brightness should increase luma: orig={avg_orig}, new={avg_new}"
+        );
+    }
+
+    #[test]
+    fn test_apply_grading_saturation_shifts_chroma() {
+        // Create a colourful pixel (200, 100, 50, 255).
+        let pixel = [200u8, 100, 50, 255];
+        let mut data = Vec::new();
+        for _ in 0..100 {
+            data.extend_from_slice(&pixel);
+        }
+        let mut frames = vec![SampledFrame {
+            width: 10,
+            height: 10,
+            data,
+        }];
+
+        // Desaturate fully — should produce near-grey.
+        let grading = ReferenceGrading {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 0.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+            lut_path: None,
+        };
+
+        apply_grading_to_frames(&mut frames, &grading);
+
+        // All pixels should be approximately the same grey.
+        let p = &frames[0].data[0..4];
+        let max_spread = (p[0] as i32 - p[1] as i32)
+            .abs()
+            .max((p[1] as i32 - p[2] as i32).abs());
+        assert!(
+            max_spread < 10,
+            "saturation=0 should produce near-grey, got R={} G={} B={}",
+            p[0],
+            p[1],
+            p[2]
+        );
+    }
+
+    #[test]
+    fn test_simulate_slider_adjusted_stats() {
+        let stats = ColorStats {
+            mean_l: 50.0,
+            std_l: 20.0,
+            mean_a: 5.0,
+            std_a: 10.0,
+            mean_b: -3.0,
+            std_b: 12.0,
+            mean_r: 128.0,
+            mean_g: 128.0,
+            mean_b_ch: 128.0,
+            std_r: 30.0,
+            std_g: 30.0,
+            std_b_ch: 30.0,
+        };
+
+        // Neutral adjustments should produce same stats.
+        let neutral = MatchColorResult {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+        };
+        let result = simulate_slider_adjusted_stats(&stats, &neutral);
+        assert!((result.mean_l - 50.0).abs() < 0.1, "neutral L mean should be unchanged");
+        assert!((result.mean_a - 5.0).abs() < 0.1, "neutral a mean should be unchanged");
+        assert!((result.mean_b - (-3.0)).abs() < 0.1, "neutral b mean should be unchanged");
+
+        // Positive brightness should increase L mean.
+        let bright = MatchColorResult {
+            brightness: 0.5,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+        };
+        let result = simulate_slider_adjusted_stats(&stats, &bright);
+        assert!(
+            result.mean_l > 50.0 + 10.0,
+            "brightness=0.5 should increase L mean, got {}",
+            result.mean_l
+        );
+
+        // High contrast should increase L std.
+        let high_contrast = MatchColorResult {
+            brightness: 0.0,
+            contrast: 2.0,
+            saturation: 1.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            exposure: 0.0,
+            black_point: 0.0,
+            shadows: 0.0,
+            midtones: 0.0,
+            highlights: 0.0,
+            shadows_warmth: 0.0,
+            shadows_tint: 0.0,
+            midtones_warmth: 0.0,
+            midtones_tint: 0.0,
+            highlights_warmth: 0.0,
+            highlights_tint: 0.0,
+        };
+        let result = simulate_slider_adjusted_stats(&stats, &high_contrast);
+        assert!(
+            result.std_l > 20.0 * 1.5,
+            "contrast=2 should increase L std, got {}",
+            result.std_l
+        );
+    }
+
+    #[test]
+    fn test_temperature_to_b_delta() {
+        // Neutral should be ~0.
+        assert!(
+            temperature_to_b_delta(6500.0_f32).abs() < 1.0,
+            "6500K should be near-zero"
+        );
+        // Higher K → positive b* (warmer look in this convention).
+        assert!(
+            temperature_to_b_delta(10000.0_f32) > 5.0,
+            "10000K should shift b* positive"
+        );
+        // Lower K → negative b* (cooler look in this convention).
+        assert!(
+            temperature_to_b_delta(3000.0_f32) < -5.0,
+            "3000K should shift b* negative"
         );
     }
 }

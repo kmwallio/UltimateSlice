@@ -3341,13 +3341,17 @@ pub fn build_inspector(
                         }
                         None
                     };
+                    let ref_grading = proj.tracks.iter()
+                        .flat_map(|t| t.clips.iter())
+                        .find(|c| c.id == ref_clip_id)
+                        .map(crate::media::color_match::ReferenceGrading::from_clip);
                     match (find(&source_clip_id), find(&ref_clip_id)) {
-                        (Some(s), Some(r)) => Some((s, r)),
+                        (Some(s), Some(r)) => Some((s, r, ref_grading)),
                         _ => None,
                     }
                 };
 
-                let Some((src, reff)) = clip_info else {
+                let Some((src, reff, ref_grading)) = clip_info else {
                     dialog_ok.close();
                     return;
                 };
@@ -3362,6 +3366,7 @@ pub fn build_inspector(
                     sample_count: 8,
                     generate_lut: gen_lut,
                     lut_output_dir: None,
+                    reference_grading: ref_grading,
                 };
 
                 match crate::media::color_match::run_match_color(&params) {
@@ -3389,9 +3394,7 @@ pub fn build_inspector(
                                     clip.midtones_tint = r.midtones_tint;
                                     clip.shadows_warmth = r.shadows_warmth;
                                     clip.shadows_tint = r.shadows_tint;
-                                    if let Some(ref lut_path) = outcome.lut_path {
-                                        clip.lut_path = Some(lut_path.clone());
-                                    }
+                                    clip.lut_path = outcome.lut_path.clone();
                                     proj.dirty = true;
                                     break;
                                 }
@@ -3440,7 +3443,7 @@ pub fn build_inspector(
                             r.shadows_tint,
                         );
 
-                        // Update LUT label if generated.
+                        // Update LUT label for generated or cleared LUT.
                         if let Some(ref lut_path) = outcome.lut_path {
                             let name = std::path::Path::new(lut_path)
                                 .file_name()
@@ -3450,6 +3453,10 @@ pub fn build_inspector(
                             lut_path_label.set_text(&name);
                             lut_clear_btn.set_sensitive(true);
                             on_lut_changed(Some(lut_path.clone()));
+                        } else {
+                            lut_path_label.set_text("None");
+                            lut_clear_btn.set_sensitive(false);
+                            on_lut_changed(None);
                         }
 
                         log::info!("color_match: applied to clip {source_clip_id}");

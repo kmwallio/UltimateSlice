@@ -7187,6 +7187,7 @@ fn handle_mcp_command(
             let clip_info: Option<(
                 String, u64, u64, String,  // source: path, in, out, track_id
                 String, u64, u64,          // ref: path, in, out
+                Option<crate::media::color_match::ReferenceGrading>,
             )> = {
                 let proj = project.borrow();
                 let find_clip = |id: &str| -> Option<(String, u64, u64, String)> {
@@ -7202,15 +7203,19 @@ fn handle_mcp_command(
                     }
                     None
                 };
+                let ref_grading = proj.tracks.iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == reference_clip_id)
+                    .map(crate::media::color_match::ReferenceGrading::from_clip);
                 let src = find_clip(&source_clip_id);
                 let reff = find_clip(&reference_clip_id);
                 match (src, reff) {
-                    (Some(s), Some(r)) => Some((s.0, s.1, s.2, s.3, r.0, r.1, r.2)),
+                    (Some(s), Some(r)) => Some((s.0, s.1, s.2, s.3, r.0, r.1, r.2, ref_grading)),
                     _ => None,
                 }
             };
 
-            let Some((src_path, src_in, src_out, src_track_id, ref_path, ref_in, ref_out)) =
+            let Some((src_path, src_in, src_out, src_track_id, ref_path, ref_in, ref_out, ref_grading)) =
                 clip_info
             else {
                 reply
@@ -7265,6 +7270,7 @@ fn handle_mcp_command(
                 sample_count: 8,
                 generate_lut,
                 lut_output_dir: None,
+                reference_grading: ref_grading,
             };
 
             match crate::media::color_match::run_match_color(&params) {
