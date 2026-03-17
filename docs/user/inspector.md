@@ -254,6 +254,8 @@ Automatically adjusts the selected clip's color parameters so it visually matche
 | **Generate LUT** | Optional checkbox. When enabled, a 3D LUT is generated and assigned to the clip in addition to slider adjustments. |
 | **Ctrl+Alt+M** | Keyboard shortcut — opens the same dialog for the selected timeline clip. |
 
+Match Color adjusts **all** color parameters: global controls (brightness, contrast, saturation, temperature, tint, exposure) **and** per-zone grading (shadows, midtones, highlights brightness, per-zone warmth/tint, and black point). Zone grading is estimated by classifying pixels into shadow/midtone/highlight luminance bands and computing the residual difference not covered by global adjustments.
+
 > **Undo support:** The entire operation (all slider changes + optional LUT assignment) is undoable in a single `Ctrl+Z` step.
 
 > **MCP tool:** `match_clip_colors` provides the same functionality for automation. Parameters: `source_clip_id`, `reference_clip_id`, `generate_lut` (optional boolean).

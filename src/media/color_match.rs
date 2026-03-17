@@ -343,6 +343,136 @@ pub fn compute_color_stats(frames: &[SampledFrame]) -> Result<ColorStats> {
 }
 
 // ---------------------------------------------------------------------------
+// Per-zone (shadows / midtones / highlights) color statistics
+// ---------------------------------------------------------------------------
+
+/// L* thresholds for classifying pixels into luminance zones.
+const ZONE_SHADOW_MAX: f64 = 33.0;
+const ZONE_HIGHLIGHT_MIN: f64 = 66.0;
+
+/// Minimum fraction of total pixels a zone must have for reliable estimation.
+const ZONE_MIN_FRACTION: f64 = 0.01;
+
+/// Per-zone mean Lab values for shadows, midtones, and highlights.
+#[derive(Debug, Clone)]
+pub struct ZoneColorStats {
+    // Shadows (L* < 33)
+    pub shadow_mean_l: f64,
+    pub shadow_mean_a: f64,
+    pub shadow_mean_b: f64,
+    pub shadow_count: usize,
+
+    // Midtones (L* 33–66)
+    pub mid_mean_l: f64,
+    pub mid_mean_a: f64,
+    pub mid_mean_b: f64,
+    pub mid_count: usize,
+
+    // Highlights (L* >= 66)
+    pub hi_mean_l: f64,
+    pub hi_mean_a: f64,
+    pub hi_mean_b: f64,
+    pub hi_count: usize,
+
+    /// 5th-percentile L* (for black point estimation).
+    pub percentile_5_l: f64,
+
+    /// Total pixel count.
+    pub total_count: usize,
+}
+
+/// Compute per-zone color statistics from one or more RGBA frames.
+/// Classifies each pixel into shadow/midtone/highlight by its L* value
+/// and computes per-zone mean L*, a*, b*.
+pub fn compute_zone_color_stats(frames: &[SampledFrame]) -> Result<ZoneColorStats> {
+    if frames.is_empty() {
+        return Err(anyhow!("no frames to analyse for zone stats"));
+    }
+
+    let mut sh_sum_l = 0.0_f64;
+    let mut sh_sum_a = 0.0_f64;
+    let mut sh_sum_b = 0.0_f64;
+    let mut sh_count = 0usize;
+
+    let mut mid_sum_l = 0.0_f64;
+    let mut mid_sum_a = 0.0_f64;
+    let mut mid_sum_b = 0.0_f64;
+    let mut mid_count = 0usize;
+
+    let mut hi_sum_l = 0.0_f64;
+    let mut hi_sum_a = 0.0_f64;
+    let mut hi_sum_b = 0.0_f64;
+    let mut hi_count = 0usize;
+
+    // Collect all L* values for percentile computation.
+    let total_pixels: usize = frames
+        .iter()
+        .map(|f| (f.width as usize) * (f.height as usize))
+        .sum();
+    let mut l_values = Vec::with_capacity(total_pixels);
+
+    for frame in frames {
+        for pixel in frame.data.chunks_exact(4) {
+            let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
+            let (l, a, b_val) = srgb_to_lab(r, g, b);
+            l_values.push(l);
+
+            if l < ZONE_SHADOW_MAX {
+                sh_sum_l += l;
+                sh_sum_a += a;
+                sh_sum_b += b_val;
+                sh_count += 1;
+            } else if l >= ZONE_HIGHLIGHT_MIN {
+                hi_sum_l += l;
+                hi_sum_a += a;
+                hi_sum_b += b_val;
+                hi_count += 1;
+            } else {
+                mid_sum_l += l;
+                mid_sum_a += a;
+                mid_sum_b += b_val;
+                mid_count += 1;
+            }
+        }
+    }
+
+    let total = l_values.len();
+    if total == 0 {
+        return Err(anyhow!("frames contain no pixels"));
+    }
+
+    // 5th-percentile L* via partial sort.
+    l_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p5_idx = ((total as f64) * 0.05) as usize;
+    let percentile_5_l = l_values[p5_idx.min(total - 1)];
+
+    let safe_mean = |sum: f64, count: usize| -> f64 {
+        if count > 0 {
+            sum / count as f64
+        } else {
+            0.0
+        }
+    };
+
+    Ok(ZoneColorStats {
+        shadow_mean_l: safe_mean(sh_sum_l, sh_count),
+        shadow_mean_a: safe_mean(sh_sum_a, sh_count),
+        shadow_mean_b: safe_mean(sh_sum_b, sh_count),
+        shadow_count: sh_count,
+        mid_mean_l: safe_mean(mid_sum_l, mid_count),
+        mid_mean_a: safe_mean(mid_sum_a, mid_count),
+        mid_mean_b: safe_mean(mid_sum_b, mid_count),
+        mid_count,
+        hi_mean_l: safe_mean(hi_sum_l, hi_count),
+        hi_mean_a: safe_mean(hi_sum_a, hi_count),
+        hi_mean_b: safe_mean(hi_sum_b, hi_count),
+        hi_count,
+        percentile_5_l,
+        total_count: total,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Slider estimation
 // ---------------------------------------------------------------------------
 
@@ -369,10 +499,27 @@ pub struct MatchColorResult {
 }
 
 /// Estimate clip color parameter adjustments that would shift `source_stats`
-/// towards `reference_stats`.
+/// towards `reference_stats`. When zone stats are provided, also estimates
+/// per-zone grading parameters (shadows, midtones, highlights, warmth, tint).
 pub fn estimate_slider_adjustments(
     source_stats: &ColorStats,
     reference_stats: &ColorStats,
+) -> MatchColorResult {
+    estimate_slider_adjustments_with_zones(source_stats, reference_stats, None, None)
+}
+
+/// Damping factor for zone-specific grading adjustments. The global sliders
+/// (brightness, contrast, temperature, tint) already address part of the color
+/// shift, so zone adjustments capture only the residual differences.
+const ZONE_GRADING_DAMP: f64 = 0.7;
+
+/// Full slider estimation including zone-based grading when zone stats are
+/// provided for both source and reference.
+pub fn estimate_slider_adjustments_with_zones(
+    source_stats: &ColorStats,
+    reference_stats: &ColorStats,
+    source_zones: Option<&ZoneColorStats>,
+    reference_zones: Option<&ZoneColorStats>,
 ) -> MatchColorResult {
     // --- Brightness ---
     // L* ranges from 0–100.  Map mean-L* delta to brightness range (−1..1).
@@ -421,9 +568,17 @@ pub fn estimate_slider_adjustments(
     // Exposure is more like a stop-based adjustment.
     let exposure = (l_delta / 50.0).clamp(-1.0, 1.0) as f32;
 
-    // Leave tonal zone controls at neutral for slider-based matching.
-    // These require more sophisticated analysis (per-zone histograms)
-    // that would be better addressed by the LUT path.
+    // --- Zone-based grading ---
+    let (shadows, midtones, highlights, black_point,
+         shadows_warmth, shadows_tint_val,
+         midtones_warmth, midtones_tint_val,
+         highlights_warmth, highlights_tint_val) =
+        if let (Some(sz), Some(rz)) = (source_zones, reference_zones) {
+            estimate_zone_grading(sz, rz, l_delta, a_delta, b_delta)
+        } else {
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        };
+
     MatchColorResult {
         brightness,
         contrast,
@@ -431,17 +586,109 @@ pub fn estimate_slider_adjustments(
         temperature,
         tint,
         exposure,
-        black_point: 0.0,
-        shadows: 0.0,
-        midtones: 0.0,
-        highlights: 0.0,
-        highlights_warmth: 0.0,
-        highlights_tint: 0.0,
-        midtones_warmth: 0.0,
-        midtones_tint: 0.0,
-        shadows_warmth: 0.0,
-        shadows_tint: 0.0,
+        black_point: black_point as f32,
+        shadows: shadows as f32,
+        midtones: midtones as f32,
+        highlights: highlights as f32,
+        highlights_warmth: highlights_warmth as f32,
+        highlights_tint: highlights_tint_val as f32,
+        midtones_warmth: midtones_warmth as f32,
+        midtones_tint: midtones_tint_val as f32,
+        shadows_warmth: shadows_warmth as f32,
+        shadows_tint: shadows_tint_val as f32,
     }
+}
+
+/// Compute zone-based grading slider values from per-zone color statistics.
+///
+/// Returns (shadows, midtones, highlights, black_point,
+///          shadows_warmth, shadows_tint, midtones_warmth, midtones_tint,
+///          highlights_warmth, highlights_tint) all in −1..1.
+fn estimate_zone_grading(
+    src: &ZoneColorStats,
+    reff: &ZoneColorStats,
+    global_l_delta: f64,
+    global_a_delta: f64,
+    global_b_delta: f64,
+) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+    let total = src.total_count.max(1) as f64;
+    let min_pixels = (total * ZONE_MIN_FRACTION) as usize;
+
+    // Zone brightness: residual L* delta after removing the global L* shift.
+    // Scale: a full zone width (~33 L* units) maps to ±1.0.
+    let zone_l_scale = 33.0;
+
+    // Zone warmth: Lab b* delta (positive = warm/yellow, negative = cool/blue).
+    // Residual after removing global b* shift. Scale: ±30 b* → ±1.0.
+    let warmth_scale = 30.0;
+
+    // Zone tint: Lab a* delta (positive = magenta, negative = green).
+    // Residual after removing global a* shift. Scale: ±20 a* → ±1.0.
+    let tint_scale = 20.0;
+
+    // --- Shadows ---
+    let (sh_bright, sh_warmth, sh_tint) =
+        if src.shadow_count >= min_pixels && reff.shadow_count >= min_pixels {
+            let dl = (reff.shadow_mean_l - src.shadow_mean_l) - global_l_delta;
+            let db = (reff.shadow_mean_b - src.shadow_mean_b) - global_b_delta;
+            let da = (reff.shadow_mean_a - src.shadow_mean_a) - global_a_delta;
+            (
+                (dl / zone_l_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+                (db / warmth_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+                (da / tint_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+    // --- Midtones ---
+    let (mid_bright, mid_warmth, mid_tint) =
+        if src.mid_count >= min_pixels && reff.mid_count >= min_pixels {
+            let dl = (reff.mid_mean_l - src.mid_mean_l) - global_l_delta;
+            let db = (reff.mid_mean_b - src.mid_mean_b) - global_b_delta;
+            let da = (reff.mid_mean_a - src.mid_mean_a) - global_a_delta;
+            (
+                (dl / zone_l_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+                (db / warmth_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+                (da / tint_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+    // --- Highlights ---
+    let (hi_bright, hi_warmth, hi_tint) =
+        if src.hi_count >= min_pixels && reff.hi_count >= min_pixels {
+            let dl = (reff.hi_mean_l - src.hi_mean_l) - global_l_delta;
+            let db = (reff.hi_mean_b - src.hi_mean_b) - global_b_delta;
+            let da = (reff.hi_mean_a - src.hi_mean_a) - global_a_delta;
+            (
+                (dl / zone_l_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+                (db / warmth_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+                (da / tint_scale * ZONE_GRADING_DAMP).clamp(-1.0, 1.0),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+    // --- Black point ---
+    // Compare 5th-percentile L*. Positive delta means reference has brighter
+    // blacks → raise black point. Scale: ±15 L* → ±1.0.
+    let bp_delta = reff.percentile_5_l - src.percentile_5_l;
+    let black_point = (bp_delta / 15.0 * ZONE_GRADING_DAMP).clamp(-1.0, 1.0);
+
+    (
+        sh_bright,
+        mid_bright,
+        hi_bright,
+        black_point,
+        sh_warmth,
+        sh_tint,
+        mid_warmth,
+        mid_tint,
+        hi_warmth,
+        hi_tint,
+    )
 }
 
 /// Apply a `MatchColorResult` to a clip, overwriting its color parameters.
@@ -624,6 +871,10 @@ pub fn run_match_color(params: &MatchColorParams) -> Result<MatchColorOutcome> {
     let source_stats = compute_color_stats(&source_frames)?;
     let reference_stats = compute_color_stats(&reference_frames)?;
 
+    // Compute per-zone stats for grading estimation.
+    let source_zones = compute_zone_color_stats(&source_frames)?;
+    let reference_zones = compute_zone_color_stats(&reference_frames)?;
+
     log::info!(
         "color_match: source  L*={:.1}±{:.1} a*={:.1}±{:.1} b*={:.1}±{:.1}",
         source_stats.mean_l,
@@ -642,8 +893,27 @@ pub fn run_match_color(params: &MatchColorParams) -> Result<MatchColorOutcome> {
         reference_stats.mean_b,
         reference_stats.std_b,
     );
+    log::info!(
+        "color_match: source zones  sh={} mid={} hi={} (p5 L*={:.1})",
+        source_zones.shadow_count,
+        source_zones.mid_count,
+        source_zones.hi_count,
+        source_zones.percentile_5_l,
+    );
+    log::info!(
+        "color_match: ref    zones  sh={} mid={} hi={} (p5 L*={:.1})",
+        reference_zones.shadow_count,
+        reference_zones.mid_count,
+        reference_zones.hi_count,
+        reference_zones.percentile_5_l,
+    );
 
-    let slider_result = estimate_slider_adjustments(&source_stats, &reference_stats);
+    let slider_result = estimate_slider_adjustments_with_zones(
+        &source_stats,
+        &reference_stats,
+        Some(&source_zones),
+        Some(&reference_zones),
+    );
 
     let lut_path = if params.generate_lut {
         let dir = params
@@ -928,5 +1198,379 @@ mod tests {
         // Scale std: std 10→20, value at +1 std → should be at +2 std = 70.
         let v = transfer_channel(60.0, 50.0, 10.0, 50.0, 20.0);
         assert!((v - 70.0).abs() < 0.001, "scaled transfer: v={v}");
+    }
+
+    // --- Zone color stats tests ---
+
+    #[test]
+    fn zone_stats_uniform_midtone() {
+        // Solid grey (128,128,128) → L*≈53.6 → all pixels fall in midtones zone.
+        let w = 4u32;
+        let h = 4u32;
+        let pixel = [128u8, 128, 128, 255];
+        let data: Vec<u8> = pixel.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        let frame = SampledFrame {
+            data,
+            width: w,
+            height: h,
+        };
+        let zs = compute_zone_color_stats(&[frame]).unwrap();
+
+        assert_eq!(zs.shadow_count, 0);
+        assert!(zs.mid_count > 0, "mid_count={}", zs.mid_count);
+        assert_eq!(zs.hi_count, 0);
+        assert_eq!(zs.total_count, (w * h) as usize);
+        // L* for (128,128,128) ≈ 53.6, which is in midtones [33–66].
+        assert!(
+            (zs.mid_mean_l - 53.6).abs() < 1.0,
+            "mid_mean_l={}",
+            zs.mid_mean_l
+        );
+    }
+
+    #[test]
+    fn zone_stats_shadow_pixels() {
+        // Very dark pixel (20,20,20) → L*≈7.5 → shadow zone.
+        let w = 2u32;
+        let h = 2u32;
+        let pixel = [20u8, 20, 20, 255];
+        let data: Vec<u8> = pixel.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        let frame = SampledFrame {
+            data,
+            width: w,
+            height: h,
+        };
+        let zs = compute_zone_color_stats(&[frame]).unwrap();
+
+        assert!(zs.shadow_count > 0);
+        assert_eq!(zs.mid_count, 0);
+        assert_eq!(zs.hi_count, 0);
+        assert!(zs.shadow_mean_l < ZONE_SHADOW_MAX);
+    }
+
+    #[test]
+    fn zone_stats_highlight_pixels() {
+        // Bright pixel (240,240,240) → L*≈95 → highlight zone.
+        let w = 2u32;
+        let h = 2u32;
+        let pixel = [240u8, 240, 240, 255];
+        let data: Vec<u8> = pixel.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        let frame = SampledFrame {
+            data,
+            width: w,
+            height: h,
+        };
+        let zs = compute_zone_color_stats(&[frame]).unwrap();
+
+        assert_eq!(zs.shadow_count, 0);
+        assert_eq!(zs.mid_count, 0);
+        assert!(zs.hi_count > 0);
+        assert!(zs.hi_mean_l >= ZONE_HIGHLIGHT_MIN);
+    }
+
+    #[test]
+    fn zone_stats_mixed_zones() {
+        // Mix of dark (10,10,10) and bright (250,250,250) pixels.
+        let w = 2u32;
+        let h = 2u32;
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        // 2 dark pixels, 2 bright pixels
+        for _ in 0..2 {
+            data.extend_from_slice(&[10, 10, 10, 255]);
+        }
+        for _ in 0..2 {
+            data.extend_from_slice(&[250, 250, 250, 255]);
+        }
+        let frame = SampledFrame {
+            data,
+            width: w,
+            height: h,
+        };
+        let zs = compute_zone_color_stats(&[frame]).unwrap();
+
+        assert_eq!(zs.shadow_count, 2);
+        assert_eq!(zs.hi_count, 2);
+        assert_eq!(zs.mid_count, 0);
+        assert!(zs.shadow_mean_l < ZONE_SHADOW_MAX);
+        assert!(zs.hi_mean_l >= ZONE_HIGHLIGHT_MIN);
+        // Percentile 5 should be close to the dark pixel L*.
+        assert!(zs.percentile_5_l < ZONE_SHADOW_MAX);
+    }
+
+    #[test]
+    fn estimate_grading_identical_zones() {
+        let zs = ZoneColorStats {
+            shadow_mean_l: 15.0,
+            shadow_mean_a: 0.0,
+            shadow_mean_b: 0.0,
+            shadow_count: 100,
+            mid_mean_l: 50.0,
+            mid_mean_a: 0.0,
+            mid_mean_b: 0.0,
+            mid_count: 200,
+            hi_mean_l: 80.0,
+            hi_mean_a: 0.0,
+            hi_mean_b: 0.0,
+            hi_count: 100,
+            percentile_5_l: 5.0,
+            total_count: 400,
+        };
+        let stats = ColorStats {
+            mean_l: 50.0,
+            mean_a: 0.0,
+            mean_b: 0.0,
+            std_l: 20.0,
+            std_a: 10.0,
+            std_b: 10.0,
+            mean_r: 0.5,
+            mean_g: 0.5,
+            mean_b_ch: 0.5,
+            std_r: 0.1,
+            std_g: 0.1,
+            std_b_ch: 0.1,
+        };
+        let result =
+            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&zs), Some(&zs));
+
+        // Identical stats+zones → all grading at 0.
+        assert!(result.shadows.abs() < 0.01, "shadows={}", result.shadows);
+        assert!(result.midtones.abs() < 0.01, "midtones={}", result.midtones);
+        assert!(
+            result.highlights.abs() < 0.01,
+            "highlights={}",
+            result.highlights
+        );
+        assert!(
+            result.black_point.abs() < 0.01,
+            "black_point={}",
+            result.black_point
+        );
+        assert!(
+            result.shadows_warmth.abs() < 0.01,
+            "shadows_warmth={}",
+            result.shadows_warmth
+        );
+        assert!(
+            result.highlights_tint.abs() < 0.01,
+            "highlights_tint={}",
+            result.highlights_tint
+        );
+    }
+
+    #[test]
+    fn estimate_grading_shadow_lift() {
+        // Source has darker shadows than reference → expect positive shadows slider.
+        let stats = ColorStats {
+            mean_l: 50.0,
+            mean_a: 0.0,
+            mean_b: 0.0,
+            std_l: 20.0,
+            std_a: 10.0,
+            std_b: 10.0,
+            mean_r: 0.5,
+            mean_g: 0.5,
+            mean_b_ch: 0.5,
+            std_r: 0.1,
+            std_g: 0.1,
+            std_b_ch: 0.1,
+        };
+        let src_zones = ZoneColorStats {
+            shadow_mean_l: 10.0,
+            shadow_mean_a: 0.0,
+            shadow_mean_b: 0.0,
+            shadow_count: 100,
+            mid_mean_l: 50.0,
+            mid_mean_a: 0.0,
+            mid_mean_b: 0.0,
+            mid_count: 200,
+            hi_mean_l: 80.0,
+            hi_mean_a: 0.0,
+            hi_mean_b: 0.0,
+            hi_count: 100,
+            percentile_5_l: 3.0,
+            total_count: 400,
+        };
+        let ref_zones = ZoneColorStats {
+            shadow_mean_l: 25.0,  // brighter shadows
+            shadow_mean_a: 0.0,
+            shadow_mean_b: 0.0,
+            shadow_count: 100,
+            mid_mean_l: 50.0,
+            mid_mean_a: 0.0,
+            mid_mean_b: 0.0,
+            mid_count: 200,
+            hi_mean_l: 80.0,
+            hi_mean_a: 0.0,
+            hi_mean_b: 0.0,
+            hi_count: 100,
+            percentile_5_l: 12.0,  // brighter blacks
+            total_count: 400,
+        };
+
+        let result =
+            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&src_zones), Some(&ref_zones));
+
+        // Shadows should be lifted (positive).
+        assert!(
+            result.shadows > 0.1,
+            "shadows should be positive, got {}",
+            result.shadows
+        );
+        // Black point should also be raised (positive).
+        assert!(
+            result.black_point > 0.1,
+            "black_point should be positive, got {}",
+            result.black_point
+        );
+        // Midtones and highlights should be near 0 (no zone difference).
+        assert!(
+            result.midtones.abs() < 0.01,
+            "midtones={}",
+            result.midtones
+        );
+        assert!(
+            result.highlights.abs() < 0.01,
+            "highlights={}",
+            result.highlights
+        );
+    }
+
+    #[test]
+    fn estimate_grading_warm_highlights() {
+        // Reference has warmer highlights (higher b* in highlight zone).
+        let stats = ColorStats {
+            mean_l: 50.0,
+            mean_a: 0.0,
+            mean_b: 0.0,
+            std_l: 20.0,
+            std_a: 10.0,
+            std_b: 10.0,
+            mean_r: 0.5,
+            mean_g: 0.5,
+            mean_b_ch: 0.5,
+            std_r: 0.1,
+            std_g: 0.1,
+            std_b_ch: 0.1,
+        };
+        let src_zones = ZoneColorStats {
+            shadow_mean_l: 15.0,
+            shadow_mean_a: 0.0,
+            shadow_mean_b: 0.0,
+            shadow_count: 100,
+            mid_mean_l: 50.0,
+            mid_mean_a: 0.0,
+            mid_mean_b: 0.0,
+            mid_count: 200,
+            hi_mean_l: 80.0,
+            hi_mean_a: 0.0,
+            hi_mean_b: 0.0,
+            hi_count: 100,
+            percentile_5_l: 5.0,
+            total_count: 400,
+        };
+        let ref_zones = ZoneColorStats {
+            shadow_mean_l: 15.0,
+            shadow_mean_a: 0.0,
+            shadow_mean_b: 0.0,
+            shadow_count: 100,
+            mid_mean_l: 50.0,
+            mid_mean_a: 0.0,
+            mid_mean_b: 0.0,
+            mid_count: 200,
+            hi_mean_l: 80.0,
+            hi_mean_a: 0.0,
+            hi_mean_b: 20.0,  // warmer highlights
+            hi_count: 100,
+            percentile_5_l: 5.0,
+            total_count: 400,
+        };
+
+        let result =
+            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&src_zones), Some(&ref_zones));
+
+        // Highlights warmth should be positive (warmer).
+        assert!(
+            result.highlights_warmth > 0.1,
+            "highlights_warmth should be positive, got {}",
+            result.highlights_warmth
+        );
+        // Shadows warmth should be near 0.
+        assert!(
+            result.shadows_warmth.abs() < 0.01,
+            "shadows_warmth={}",
+            result.shadows_warmth
+        );
+    }
+
+    #[test]
+    fn estimate_grading_low_pixel_zone_stays_neutral() {
+        // Zone with very few pixels should be left at 0.
+        let stats = ColorStats {
+            mean_l: 50.0,
+            mean_a: 0.0,
+            mean_b: 0.0,
+            std_l: 20.0,
+            std_a: 10.0,
+            std_b: 10.0,
+            mean_r: 0.5,
+            mean_g: 0.5,
+            mean_b_ch: 0.5,
+            std_r: 0.1,
+            std_g: 0.1,
+            std_b_ch: 0.1,
+        };
+        let src_zones = ZoneColorStats {
+            shadow_mean_l: 15.0,
+            shadow_mean_a: 0.0,
+            shadow_mean_b: 0.0,
+            shadow_count: 2,  // very few
+            mid_mean_l: 50.0,
+            mid_mean_a: 0.0,
+            mid_mean_b: 0.0,
+            mid_count: 9998,
+            hi_mean_l: 80.0,
+            hi_mean_a: 0.0,
+            hi_mean_b: 0.0,
+            hi_count: 0,  // none
+            percentile_5_l: 45.0,
+            total_count: 10000,
+        };
+        let ref_zones = ZoneColorStats {
+            shadow_mean_l: 30.0,  // very different shadows
+            shadow_mean_a: 20.0,
+            shadow_mean_b: 20.0,
+            shadow_count: 2,  // also very few
+            mid_mean_l: 50.0,
+            mid_mean_a: 0.0,
+            mid_mean_b: 0.0,
+            mid_count: 9998,
+            hi_mean_l: 80.0,
+            hi_mean_a: 0.0,
+            hi_mean_b: 0.0,
+            hi_count: 0,
+            percentile_5_l: 45.0,
+            total_count: 10000,
+        };
+
+        let result =
+            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&src_zones), Some(&ref_zones));
+
+        // Shadow zone has < 1% pixels → should stay at 0.
+        assert!(
+            result.shadows.abs() < 0.01,
+            "shadows should be ~0 for sparse zone, got {}",
+            result.shadows
+        );
+        assert!(
+            result.shadows_warmth.abs() < 0.01,
+            "shadows_warmth should be ~0, got {}",
+            result.shadows_warmth
+        );
+        // Highlight zone empty on source → should stay at 0.
+        assert!(
+            result.highlights.abs() < 0.01,
+            "highlights should be ~0, got {}",
+            result.highlights
+        );
     }
 }
