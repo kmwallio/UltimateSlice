@@ -230,6 +230,26 @@ fn inspect_param(
         });
     }
 
+    if let Some(pspec_float) = pspec.downcast_ref::<glib::ParamSpecFloat>() {
+        let default_val = element.property::<f32>(&name) as f64;
+        let safe_default = if default_val.is_finite() {
+            default_val
+        } else {
+            let mid = (pspec_float.minimum() as f64 + pspec_float.maximum() as f64) / 2.0;
+            if mid.is_finite() { mid } else { 0.0 }
+        };
+        return Some(Frei0rParamInfo {
+            display_name,
+            name,
+            param_type: Frei0rParamType::Double,
+            default_value: safe_default,
+            min: pspec_float.minimum() as f64,
+            max: pspec_float.maximum() as f64,
+            enum_values: None,
+            default_string: None,
+        });
+    }
+
     if let Some(_pspec_bool) = pspec.downcast_ref::<glib::ParamSpecBoolean>() {
         let default_val = if element.property::<bool>(&name) {
             1.0
