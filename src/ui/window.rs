@@ -2755,6 +2755,35 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        // on_frei0r_changed: topology change (add/remove/reorder/toggle) → full pipeline rebuild
+        {
+            let on_project_changed = on_project_changed.clone();
+            move || {
+                on_project_changed();
+            }
+        },
+        // on_frei0r_params_changed: slider change → live pipeline update, no rebuild
+        {
+            let prog_player = prog_player.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            move || {
+                let effects = {
+                    let proj = project.borrow();
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    selected.and_then(|cid| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .find(|c| c.id == cid)
+                            .map(|c| c.frei0r_effects.clone())
+                    })
+                };
+                if let Some(effects) = effects {
+                    prog_player.borrow_mut().update_frei0r_effects(&effects);
+                }
+            }
+        },
         // on_speed_keyframe_changed: lightweight update without pipeline rebuild
         {
             let prog_player = prog_player.clone();

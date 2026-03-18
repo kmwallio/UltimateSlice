@@ -134,6 +134,14 @@ pub struct InspectorView {
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
+    /// Project handle for frei0r effect mutations from inspector callbacks.
+    pub project: Rc<RefCell<Project>>,
+    /// Called after frei0r topology changes (add/remove/reorder/toggle) — triggers full pipeline rebuild.
+    pub on_frei0r_changed: Rc<dyn Fn()>,
+    /// Called after frei0r param slider changes — triggers live pipeline update without rebuild.
+    pub on_frei0r_params_changed: Rc<dyn Fn()>,
+    /// Tracks which effect IDs are currently displayed to avoid rebuilding on every update() tick.
+    frei0r_displayed_snapshot: Rc<RefCell<Vec<(String, bool, usize)>>>,
     // Keyframe navigation and animation mode
     pub keyframe_indicator_label: Label,
     pub animation_mode: Rc<Cell<bool>>,
@@ -160,6 +168,17 @@ impl InspectorView {
         &self,
         effects: &[crate::model::clip::Frei0rEffect],
     ) {
+        // Skip rebuild if the displayed effects haven't changed (avoids destroying
+        // slider widgets during playback ticks that call update() repeatedly).
+        let snapshot: Vec<(String, bool, usize)> = effects
+            .iter()
+            .map(|e| (e.id.clone(), e.enabled, e.params.len()))
+            .collect();
+        if *self.frei0r_displayed_snapshot.borrow() == snapshot {
+            return;
+        }
+        *self.frei0r_displayed_snapshot.borrow_mut() = snapshot;
+
         // Remove all children.
         while let Some(child) = self.frei0r_effects_list.first_child() {
             self.frei0r_effects_list.remove(&child);
@@ -176,6 +195,7 @@ impl InspectorView {
             return;
         }
 
+        let effect_count = effects.len();
         for (i, effect) in effects.iter().enumerate() {
             let row = GBox::new(Orientation::Vertical, 2);
             row.set_margin_start(4);
@@ -191,6 +211,42 @@ impl InspectorView {
             enable_check.set_tooltip_text(Some("Enable/disable this effect"));
             header.append(&enable_check);
 
+            // Enable toggle callback
+            {
+                let project = self.project.clone();
+                let selected_clip_id = self.selected_clip_id.clone();
+                let effect_id = effect.id.clone();
+                let on_changed = self.on_frei0r_changed.clone();
+                let updating = self.updating.clone();
+                enable_check.connect_toggled(move |btn| {
+                    if *updating.borrow() {
+                        return;
+                    }
+                    let enabled = btn.is_active();
+                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                {
+                                    if let Some(e) = clip
+                                        .frei0r_effects
+                                        .iter_mut()
+                                        .find(|e| e.id == effect_id)
+                                    {
+                                        e.enabled = enabled;
+                                    }
+                                    break;
+                                }
+                            }
+                            proj.dirty = true;
+                        }
+                        on_changed();
+                    }
+                });
+            }
+
             let display_name = humanize_frei0r_name(&effect.plugin_name);
             let name_label = Label::new(Some(&display_name));
             name_label.add_css_class("applied-effect-name");
@@ -199,23 +255,96 @@ impl InspectorView {
             name_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
             header.append(&name_label);
 
+            // Move up button
             if i > 0 {
                 let up_btn = gtk4::Button::from_icon_name("go-up-symbolic");
                 up_btn.add_css_class("flat");
                 up_btn.set_tooltip_text(Some("Move up"));
                 header.append(&up_btn);
+                let project = self.project.clone();
+                let selected_clip_id = self.selected_clip_id.clone();
+                let on_changed = self.on_frei0r_changed.clone();
+                let idx = i;
+                up_btn.connect_clicked(move |_| {
+                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                {
+                                    if idx > 0 && idx < clip.frei0r_effects.len() {
+                                        clip.frei0r_effects.swap(idx - 1, idx);
+                                    }
+                                    break;
+                                }
+                            }
+                            proj.dirty = true;
+                        }
+                        on_changed();
+                    }
+                });
             }
-            if i + 1 < effects.len() {
+
+            // Move down button
+            if i + 1 < effect_count {
                 let down_btn = gtk4::Button::from_icon_name("go-down-symbolic");
                 down_btn.add_css_class("flat");
                 down_btn.set_tooltip_text(Some("Move down"));
                 header.append(&down_btn);
+                let project = self.project.clone();
+                let selected_clip_id = self.selected_clip_id.clone();
+                let on_changed = self.on_frei0r_changed.clone();
+                let idx = i;
+                down_btn.connect_clicked(move |_| {
+                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                {
+                                    if idx + 1 < clip.frei0r_effects.len() {
+                                        clip.frei0r_effects.swap(idx, idx + 1);
+                                    }
+                                    break;
+                                }
+                            }
+                            proj.dirty = true;
+                        }
+                        on_changed();
+                    }
+                });
             }
 
+            // Remove button
             let remove_btn = gtk4::Button::from_icon_name("edit-delete-symbolic");
             remove_btn.add_css_class("flat");
             remove_btn.set_tooltip_text(Some("Remove effect"));
             header.append(&remove_btn);
+            {
+                let project = self.project.clone();
+                let selected_clip_id = self.selected_clip_id.clone();
+                let effect_id = effect.id.clone();
+                let on_changed = self.on_frei0r_changed.clone();
+                remove_btn.connect_clicked(move |_| {
+                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                {
+                                    clip.frei0r_effects.retain(|e| e.id != effect_id);
+                                    break;
+                                }
+                            }
+                            proj.dirty = true;
+                        }
+                        on_changed();
+                    }
+                });
+            }
 
             row.append(&header);
 
@@ -236,10 +365,47 @@ impl InspectorView {
                 slider.set_hexpand(true);
                 param_row.append(&slider);
 
+                // Param slider callback — live pipeline update without inspector rebuild
+                {
+                    let project = self.project.clone();
+                    let selected_clip_id = self.selected_clip_id.clone();
+                    let effect_id = effect.id.clone();
+                    let pname = param_name.clone();
+                    let on_params_changed = self.on_frei0r_params_changed.clone();
+                    let updating = self.updating.clone();
+                    slider.connect_value_changed(move |s| {
+                        if *updating.borrow() {
+                            return;
+                        }
+                        let val = s.value();
+                        if let Some(ref cid) = *selected_clip_id.borrow() {
+                            {
+                                let mut proj = project.borrow_mut();
+                                for track in &mut proj.tracks {
+                                    if let Some(clip) =
+                                        track.clips.iter_mut().find(|c| c.id == *cid)
+                                    {
+                                        if let Some(e) = clip
+                                            .frei0r_effects
+                                            .iter_mut()
+                                            .find(|e| e.id == effect_id)
+                                        {
+                                            e.params.insert(pname.clone(), val);
+                                        }
+                                        break;
+                                    }
+                                }
+                                proj.dirty = true;
+                            }
+                            on_params_changed();
+                        }
+                    });
+                }
+
                 row.append(&param_row);
             }
 
-            if i + 1 < effects.len() {
+            if i + 1 < effect_count {
                 row.append(&Separator::new(Orientation::Horizontal));
             }
 
@@ -696,6 +862,8 @@ pub fn build_inspector(
     on_chroma_key_changed: impl Fn() + 'static,
     on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
     on_bg_removal_changed: impl Fn() + 'static,
+    on_frei0r_changed: impl Fn() + 'static,
+    on_frei0r_params_changed: impl Fn() + 'static,
     on_speed_keyframe_changed: impl Fn(&str, f64, &[NumericKeyframe]) + 'static,
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
@@ -3903,6 +4071,10 @@ pub fn build_inspector(
         bg_removal_model_available: Cell::new(false),
         frei0r_effects_section,
         frei0r_effects_list,
+        project,
+        on_frei0r_changed: Rc::new(on_frei0r_changed),
+        on_frei0r_params_changed: Rc::new(on_frei0r_params_changed),
+        frei0r_displayed_snapshot: Rc::new(RefCell::new(Vec::new())),
         keyframe_indicator_label,
         animation_mode,
         animation_mode_btn,
