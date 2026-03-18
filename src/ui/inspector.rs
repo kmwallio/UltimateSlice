@@ -366,7 +366,12 @@ impl InspectorView {
             let params_box = GBox::new(Orientation::Vertical, 2);
             let has_params = !effect.params.is_empty() || !effect.string_params.is_empty();
 
-            // Parameter controls — Bool → CheckButton, Double → Scale slider.
+            // ── Special UI: 3-point color balance → color wheels ──
+            let is_3point = effect.plugin_name == "3-point-color-balance";
+
+            if is_3point {
+                self.build_3point_color_wheels(effect, &params_box);
+            } else {
             for (param_name, &param_val) in &effect.params {
                 let param_type = plugin_info
                     .as_ref()
@@ -605,9 +610,12 @@ impl InspectorView {
                 params_box.append(&param_row);
             }
 
-            if has_params {
-                let expander = Expander::new(Some("Parameters"));
-                expander.set_expanded(false);
+            } // end else (non-3-point generic params)
+
+            if has_params || is_3point {
+                let label = if is_3point { "Color Wheels" } else { "Parameters" };
+                let expander = Expander::new(Some(label));
+                expander.set_expanded(is_3point);
                 expander.set_margin_start(4);
                 expander.set_child(Some(&params_box));
                 row.append(&expander);
@@ -619,6 +627,138 @@ impl InspectorView {
 
             self.frei0r_effects_list.append(&row);
         }
+    }
+
+    /// Build three color wheels (Shadows, Midtones, Highlights) for the
+    /// 3-point-color-balance frei0r effect, wired to update the effect's
+    /// RGB params in the project model.
+    fn build_3point_color_wheels(
+        &self,
+        effect: &crate::model::clip::Frei0rEffect,
+        container: &GBox,
+    ) {
+        use crate::ui::color_wheel::build_color_wheel;
+
+        // Zone definitions: (label, r_key, g_key, b_key, default_luminance)
+        let zones: &[(&str, &str, &str, &str, f64)] = &[
+            ("Midtones", "gray-color-r", "gray-color-g", "gray-color-b", 0.5),
+            ("Shadows", "black-color-r", "black-color-g", "black-color-b", 0.0),
+            ("Highlights", "white-color-r", "white-color-g", "white-color-b", 1.0),
+        ];
+
+        // Large midtones wheel on top.
+        let mid_zone = &zones[0];
+        let mid_r = *effect.params.get(mid_zone.1).unwrap_or(&mid_zone.4);
+        let mid_g = *effect.params.get(mid_zone.2).unwrap_or(&mid_zone.4);
+        let mid_b = *effect.params.get(mid_zone.3).unwrap_or(&mid_zone.4);
+
+        let mid_label = Label::new(Some(mid_zone.0));
+        mid_label.add_css_class("dim-label");
+        mid_label.set_halign(gtk4::Align::Center);
+        mid_label.set_margin_top(4);
+        container.append(&mid_label);
+
+        let (mid_widget, _mid_setter) = {
+            let project = self.project.clone();
+            let selected_clip_id = self.selected_clip_id.clone();
+            let effect_id = effect.id.clone();
+            let on_params_changed = self.on_frei0r_params_changed.clone();
+            let updating = self.updating.clone();
+            let rk = mid_zone.1.to_string();
+            let gk = mid_zone.2.to_string();
+            let bk = mid_zone.3.to_string();
+            build_color_wheel(160, (mid_r, mid_g, mid_b), move |r, g, b| {
+                if *updating.borrow() {
+                    return;
+                }
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) =
+                                track.clips.iter_mut().find(|c| c.id == cid)
+                            {
+                                if let Some(e) = clip
+                                    .frei0r_effects
+                                    .iter_mut()
+                                    .find(|e| e.id == effect_id)
+                                {
+                                    e.params.insert(rk.clone(), r);
+                                    e.params.insert(gk.clone(), g);
+                                    e.params.insert(bk.clone(), b);
+                                }
+                                break;
+                            }
+                        }
+                        proj.dirty = true;
+                    }
+                    on_params_changed();
+                }
+            })
+        };
+        container.append(&mid_widget);
+
+        // Shadows and Highlights side-by-side.
+        let bottom_row = GBox::new(Orientation::Horizontal, 8);
+        bottom_row.set_halign(gtk4::Align::Center);
+        bottom_row.set_margin_top(8);
+
+        for zone in &zones[1..] {
+            let zone_r = *effect.params.get(zone.1).unwrap_or(&zone.4);
+            let zone_g = *effect.params.get(zone.2).unwrap_or(&zone.4);
+            let zone_b = *effect.params.get(zone.3).unwrap_or(&zone.4);
+
+            let zone_box = GBox::new(Orientation::Vertical, 2);
+            let zone_label = Label::new(Some(zone.0));
+            zone_label.add_css_class("dim-label");
+            zone_label.set_halign(gtk4::Align::Center);
+            zone_box.append(&zone_label);
+
+            let (wheel_widget, _setter) = {
+                let project = self.project.clone();
+                let selected_clip_id = self.selected_clip_id.clone();
+                let effect_id = effect.id.clone();
+                let on_params_changed = self.on_frei0r_params_changed.clone();
+                let updating = self.updating.clone();
+                let rk = zone.1.to_string();
+                let gk = zone.2.to_string();
+                let bk = zone.3.to_string();
+                build_color_wheel(120, (zone_r, zone_g, zone_b), move |r, g, b| {
+                    if *updating.borrow() {
+                        return;
+                    }
+                    let cid = selected_clip_id.borrow().clone();
+                    if let Some(cid) = cid {
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| c.id == cid)
+                                {
+                                    if let Some(e) = clip
+                                        .frei0r_effects
+                                        .iter_mut()
+                                        .find(|e| e.id == effect_id)
+                                    {
+                                        e.params.insert(rk.clone(), r);
+                                        e.params.insert(gk.clone(), g);
+                                        e.params.insert(bk.clone(), b);
+                                    }
+                                    break;
+                                }
+                            }
+                            proj.dirty = true;
+                        }
+                        on_params_changed();
+                    }
+                })
+            };
+            zone_box.append(&wheel_widget);
+            bottom_row.append(&zone_box);
+        }
+
+        container.append(&bottom_row);
     }
 
     /// Refresh all fields to show the given clip, or clear if None.
