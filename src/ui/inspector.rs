@@ -134,6 +134,10 @@ pub struct InspectorView {
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
+    /// Clipboard for copying/pasting frei0r effects between clips.
+    pub frei0r_effects_clipboard: Rc<RefCell<Option<Vec<crate::model::clip::Frei0rEffect>>>>,
+    /// Paste button — kept so we can update sensitivity when clipboard changes.
+    pub frei0r_paste_btn: Button,
     /// Project handle for frei0r effect mutations from inspector callbacks.
     pub project: Rc<RefCell<Project>>,
     /// Called after frei0r topology changes (add/remove/reorder/toggle) — triggers full pipeline rebuild.
@@ -1216,6 +1220,10 @@ pub fn build_inspector(
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
+    // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
+    let on_frei0r_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_changed);
+    let on_frei0r_params_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_params_changed);
+
     let vbox = GBox::new(Orientation::Vertical, 8);
     vbox.set_width_request(260);
     vbox.set_margin_start(8);
@@ -1545,14 +1553,38 @@ pub fn build_inspector(
     bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
     bg_removal_inner.append(&bg_removal_threshold_slider);
 
+    // Create shared state needed by effects and later sections.
+    let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
     // ── Applied Frei0r Effects section (Video + Image only) ──────────────
     let frei0r_effects_section = GBox::new(Orientation::Vertical, 8);
     content_box.append(&frei0r_effects_section);
 
     frei0r_effects_section.append(&Separator::new(Orientation::Horizontal));
+
+    // Header row: "Applied Effects" expander + Copy/Paste buttons
+    let frei0r_header_row = GBox::new(Orientation::Horizontal, 4);
     let frei0r_effects_expander = Expander::new(Some("Applied Effects"));
     frei0r_effects_expander.set_expanded(true);
-    frei0r_effects_section.append(&frei0r_effects_expander);
+    frei0r_effects_expander.set_hexpand(true);
+    frei0r_header_row.append(&frei0r_effects_expander);
+
+    let frei0r_effects_clipboard: Rc<RefCell<Option<Vec<crate::model::clip::Frei0rEffect>>>> =
+        Rc::new(RefCell::new(None));
+
+    let frei0r_copy_btn = Button::from_icon_name("edit-copy-symbolic");
+    frei0r_copy_btn.set_tooltip_text(Some("Copy effects from this clip"));
+    frei0r_copy_btn.add_css_class("flat");
+    frei0r_header_row.append(&frei0r_copy_btn);
+
+    let frei0r_paste_btn = Button::from_icon_name("edit-paste-symbolic");
+    frei0r_paste_btn.set_tooltip_text(Some("Paste effects to this clip"));
+    frei0r_paste_btn.add_css_class("flat");
+    frei0r_paste_btn.set_sensitive(false);
+    frei0r_header_row.append(&frei0r_paste_btn);
+
+    frei0r_effects_section.append(&frei0r_header_row);
+
     let frei0r_effects_list = GBox::new(Orientation::Vertical, 4);
     frei0r_effects_expander.set_child(Some(&frei0r_effects_list));
 
@@ -1561,6 +1593,70 @@ pub fn build_inspector(
     frei0r_empty_label.add_css_class("panel-empty-state");
     frei0r_empty_label.set_margin_start(4);
     frei0r_effects_list.append(&frei0r_empty_label);
+
+    // Wire copy effects button
+    {
+        let clipboard = frei0r_effects_clipboard.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let project = project.clone();
+        let paste_btn = frei0r_paste_btn.clone();
+        frei0r_copy_btn.connect_clicked(move |_| {
+            let cid = selected_clip_id.borrow().clone();
+            if let Some(cid) = cid {
+                let proj = project.borrow();
+                for track in &proj.tracks {
+                    if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                        let copied: Vec<crate::model::clip::Frei0rEffect> = clip
+                            .frei0r_effects
+                            .iter()
+                            .cloned()
+                            .collect();
+                        let has_effects = !copied.is_empty();
+                        *clipboard.borrow_mut() = Some(copied);
+                        paste_btn.set_sensitive(has_effects);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire paste effects button
+    {
+        let clipboard = frei0r_effects_clipboard.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let project = project.clone();
+        let on_frei0r_changed = on_frei0r_changed.clone();
+        frei0r_paste_btn.connect_clicked(move |_| {
+            let effects_to_paste = {
+                let cb = clipboard.borrow();
+                match cb.as_ref() {
+                    Some(effects) if !effects.is_empty() => effects
+                        .iter()
+                        .map(|e| {
+                            let mut new_effect = e.clone();
+                            new_effect.id = uuid::Uuid::new_v4().to_string();
+                            new_effect
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => return,
+                }
+            };
+            let cid = selected_clip_id.borrow().clone();
+            if let Some(cid) = cid {
+                let mut proj = project.borrow_mut();
+                proj.dirty = true;
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
+                        clip.frei0r_effects.extend(effects_to_paste);
+                        drop(proj);
+                        on_frei0r_changed();
+                        return;
+                    }
+                }
+            }
+        });
+    }
 
     // ── Audio section (Video + Audio only) ───────────────────────────────────
     let audio_section = GBox::new(Orientation::Vertical, 8);
@@ -1982,7 +2078,6 @@ pub fn build_inspector(
     content_box.append(&Separator::new(Orientation::Horizontal));
     let apply_btn = Button::with_label("Apply Name");
     content_box.append(&apply_btn);
-    let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let updating: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let on_clip_changed: Rc<dyn Fn()> = Rc::new(on_clip_changed);
@@ -4419,9 +4514,11 @@ pub fn build_inspector(
         bg_removal_model_available: Cell::new(false),
         frei0r_effects_section,
         frei0r_effects_list,
+        frei0r_effects_clipboard: frei0r_effects_clipboard.clone(),
+        frei0r_paste_btn: frei0r_paste_btn.clone(),
         project,
-        on_frei0r_changed: Rc::new(on_frei0r_changed),
-        on_frei0r_params_changed: Rc::new(on_frei0r_params_changed),
+        on_frei0r_changed,
+        on_frei0r_params_changed,
         frei0r_displayed_snapshot: Rc::new(RefCell::new(Vec::new())),
         frei0r_registry: Rc::new(RefCell::new(None)),
         keyframe_indicator_label,

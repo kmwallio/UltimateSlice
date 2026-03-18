@@ -2549,6 +2549,16 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     target.chroma_key_softness = source.chroma_key_softness;
     target.bg_removal_enabled = source.bg_removal_enabled;
     target.bg_removal_threshold = source.bg_removal_threshold;
+    // Frei0r effects — clone with fresh UUIDs
+    target.frei0r_effects = source
+        .frei0r_effects
+        .iter()
+        .map(|e| {
+            let mut new_effect = e.clone();
+            new_effect.id = uuid::Uuid::new_v4().to_string();
+            new_effect
+        })
+        .collect();
     before != *target
 }
 
