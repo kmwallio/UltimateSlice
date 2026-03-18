@@ -223,12 +223,15 @@ impl InspectorView {
                         return;
                     }
                     let enabled = btn.is_active();
-                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                    // Clone clip_id and drop the borrow BEFORE calling on_changed,
+                    // which triggers inspector.update() → selected_clip_id.borrow_mut().
+                    let cid = selected_clip_id.borrow().clone();
+                    if let Some(cid) = cid {
                         {
                             let mut proj = project.borrow_mut();
                             for track in &mut proj.tracks {
                                 if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                    track.clips.iter_mut().find(|c| c.id == cid)
                                 {
                                     if let Some(e) = clip
                                         .frei0r_effects
@@ -266,12 +269,13 @@ impl InspectorView {
                 let on_changed = self.on_frei0r_changed.clone();
                 let idx = i;
                 up_btn.connect_clicked(move |_| {
-                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                    let cid = selected_clip_id.borrow().clone();
+                    if let Some(cid) = cid {
                         {
                             let mut proj = project.borrow_mut();
                             for track in &mut proj.tracks {
                                 if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                    track.clips.iter_mut().find(|c| c.id == cid)
                                 {
                                     if idx > 0 && idx < clip.frei0r_effects.len() {
                                         clip.frei0r_effects.swap(idx - 1, idx);
@@ -297,12 +301,13 @@ impl InspectorView {
                 let on_changed = self.on_frei0r_changed.clone();
                 let idx = i;
                 down_btn.connect_clicked(move |_| {
-                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                    let cid = selected_clip_id.borrow().clone();
+                    if let Some(cid) = cid {
                         {
                             let mut proj = project.borrow_mut();
                             for track in &mut proj.tracks {
                                 if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                    track.clips.iter_mut().find(|c| c.id == cid)
                                 {
                                     if idx + 1 < clip.frei0r_effects.len() {
                                         clip.frei0r_effects.swap(idx, idx + 1);
@@ -328,12 +333,13 @@ impl InspectorView {
                 let effect_id = effect.id.clone();
                 let on_changed = self.on_frei0r_changed.clone();
                 remove_btn.connect_clicked(move |_| {
-                    if let Some(ref cid) = *selected_clip_id.borrow() {
+                    let cid = selected_clip_id.borrow().clone();
+                    if let Some(cid) = cid {
                         {
                             let mut proj = project.borrow_mut();
                             for track in &mut proj.tracks {
                                 if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == *cid)
+                                    track.clips.iter_mut().find(|c| c.id == cid)
                                 {
                                     clip.frei0r_effects.retain(|e| e.id != effect_id);
                                     break;
@@ -378,12 +384,13 @@ impl InspectorView {
                             return;
                         }
                         let val = s.value();
-                        if let Some(ref cid) = *selected_clip_id.borrow() {
+                        let cid = selected_clip_id.borrow().clone();
+                        if let Some(cid) = cid {
                             {
                                 let mut proj = project.borrow_mut();
                                 for track in &mut proj.tracks {
                                     if let Some(clip) =
-                                        track.clips.iter_mut().find(|c| c.id == *cid)
+                                        track.clips.iter_mut().find(|c| c.id == cid)
                                     {
                                         if let Some(e) = clip
                                             .frei0r_effects
