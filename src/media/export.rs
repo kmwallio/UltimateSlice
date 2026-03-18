@@ -1126,7 +1126,7 @@ fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
 /// Each enabled effect becomes `,frei0r=filter_name={name}:filter_params={p1}|{p2}|...`.
 /// Effects with no FFmpeg frei0r support are silently skipped.
 fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
-    use crate::media::frei0r_registry::Frei0rRegistry;
+    use crate::media::frei0r_registry::{Frei0rRegistry, Frei0rNativeType};
 
     if clip.frei0r_effects.is_empty() {
         return String::new();
@@ -1143,27 +1143,69 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
         // Look up the plugin info to get ordered param names.
         let plugin = registry.find_by_name(&effect.plugin_name);
 
-        // Build filter_params string: values in registry param order, pipe-separated.
+        // Build filter_params string using native frei0r param ordering.
         let params_str = if let Some(info) = plugin {
-            info.params
-                .iter()
-                .map(|p| {
-                    if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
-                        // String params: use string value, or default.
-                        effect
-                            .string_params
-                            .get(&p.name)
-                            .cloned()
-                            .or_else(|| p.default_string.clone())
-                            .unwrap_or_default()
-                    } else {
-                        let val =
-                            effect.params.get(&p.name).copied().unwrap_or(p.default_value);
-                        format!("{val:.6}")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("|")
+            if !info.native_params.is_empty() {
+                // Use native param info for correct compound formatting.
+                info.native_params
+                    .iter()
+                    .map(|np| match np.native_type {
+                        Frei0rNativeType::Color => {
+                            // COLOR: combine 3 GStreamer properties into r/g/b.
+                            let r = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                            let g = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                            let b = np.gst_properties.get(2).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                            format!("{r:.6}/{g:.6}/{b:.6}")
+                        }
+                        Frei0rNativeType::Position => {
+                            // POSITION: combine 2 GStreamer properties into x/y.
+                            let x = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                            let y = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                            format!("{x:.6}/{y:.6}")
+                        }
+                        Frei0rNativeType::NativeString => {
+                            let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
+                            effect
+                                .string_params
+                                .get(prop)
+                                .cloned()
+                                .unwrap_or_default()
+                        }
+                        _ => {
+                            // Bool / Double: single GStreamer property.
+                            let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
+                            if np.native_type == Frei0rNativeType::Bool {
+                                let val = effect.params.get(prop).copied().unwrap_or(0.0);
+                                if val > 0.5 { "1.000000".to_string() } else { "0.000000".to_string() }
+                            } else {
+                                let val = effect.params.get(prop).copied().unwrap_or(0.0);
+                                format!("{val:.6}")
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|")
+            } else {
+                // Fallback: no native info, use GStreamer params in registry order.
+                info.params
+                    .iter()
+                    .map(|p| {
+                        if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
+                            effect
+                                .string_params
+                                .get(&p.name)
+                                .cloned()
+                                .or_else(|| p.default_string.clone())
+                                .unwrap_or_default()
+                        } else {
+                            let val =
+                                effect.params.get(&p.name).copied().unwrap_or(p.default_value);
+                            format!("{val:.6}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|")
+            }
         } else {
             // No registry info — use param values in HashMap iteration order.
             effect

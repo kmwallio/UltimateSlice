@@ -40,6 +40,33 @@ pub enum Frei0rParamType {
     String,
 }
 
+/// Native frei0r parameter type (from f0r_get_param_info).
+/// GStreamer expands COLOR into 3 floats and POSITION into 2 floats,
+/// but FFmpeg expects compound `r/g/b` and `x/y` formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frei0rNativeType {
+    Bool = 0,
+    Double = 1,
+    Color = 2,
+    Position = 3,
+    NativeString = 4,
+}
+
+/// A single parameter as seen by the native frei0r C API (before
+/// GStreamer expands compounds into individual properties).
+#[derive(Debug, Clone)]
+pub struct Frei0rNativeParam {
+    /// Original frei0r param name (e.g. "Black color").
+    pub name: String,
+    /// Native frei0r type.
+    pub native_type: Frei0rNativeType,
+    /// GStreamer property name(s) that map to this native param.
+    /// - Bool/Double/String: 1 entry (e.g. `["split-preview"]`)
+    /// - Color: 3 entries (e.g. `["black-color-r","black-color-g","black-color-b"]`)
+    /// - Position: 2 entries (e.g. `["top-left-x","top-left-y"]`)
+    pub gst_properties: Vec<String>,
+}
+
 /// Metadata for one discovered frei0r filter plugin.
 #[derive(Debug, Clone)]
 pub struct Frei0rPluginInfo {
@@ -57,8 +84,11 @@ pub struct Frei0rPluginInfo {
     pub description: String,
     /// Category (from GStreamer element classification, e.g. `"Filter/Effect"`).
     pub category: String,
-    /// Parameter descriptors.
+    /// Parameter descriptors (GStreamer-level, with compounds expanded).
     pub params: Vec<Frei0rParamInfo>,
+    /// Native frei0r parameter descriptors for FFmpeg export.
+    /// Empty if native info could not be read (falls back to GStreamer params).
+    pub native_params: Vec<Frei0rNativeParam>,
 }
 
 /// Cached registry of all discovered frei0r filter plugins.
@@ -82,9 +112,9 @@ impl Frei0rRegistry {
     pub fn discover() -> Self {
         let mut plugins = Vec::new();
 
-        // Build a map from GStreamer-normalized names to actual .so module names
-        // so FFmpeg export can reference the correct frei0r module.
-        let ffmpeg_name_map = build_ffmpeg_name_map();
+        // Build a map from GStreamer-normalized names to native frei0r info
+        // (FFmpeg .so name + native param types for correct export formatting).
+        let native_info_map = build_native_info_map();
 
         let registry = gstreamer::Registry::get();
         let mut factories: Vec<_> = registry
@@ -100,7 +130,7 @@ impl Frei0rRegistry {
         factories.sort_by(|a, b| a.name().cmp(&b.name()));
 
         for factory in &factories {
-            if let Some(info) = Self::inspect_factory(factory, &ffmpeg_name_map) {
+            if let Some(info) = Self::inspect_factory(factory, &native_info_map) {
                 plugins.push(info);
             }
         }
@@ -160,7 +190,7 @@ impl Frei0rRegistry {
 
     fn inspect_factory(
         factory: &gstreamer::ElementFactory,
-        ffmpeg_name_map: &HashMap<String, String>,
+        native_info_map: &HashMap<String, Frei0rSoInfo>,
     ) -> Option<Frei0rPluginInfo> {
         let gst_element_name = factory.name().to_string();
         let frei0r_name = gst_element_name.strip_prefix(FILTER_PREFIX)?.to_string();
@@ -186,10 +216,13 @@ impl Frei0rRegistry {
             .to_string();
         let category = simplify_category(&klass);
 
-        let ffmpeg_name = ffmpeg_name_map
-            .get(&frei0r_name)
-            .cloned()
+        let so_info = native_info_map.get(&frei0r_name);
+        let ffmpeg_name = so_info
+            .map(|i| i.so_name.clone())
             .unwrap_or_else(|| frei0r_name.clone());
+        let native_params = so_info
+            .map(|i| i.native_params.clone())
+            .unwrap_or_default();
 
         let mut params = Vec::new();
         for pspec in element.list_properties() {
@@ -214,6 +247,7 @@ impl Frei0rRegistry {
             description,
             category,
             params,
+            native_params,
         })
     }
 }
@@ -307,21 +341,31 @@ fn inspect_param(
     None
 }
 
-/// Build a mapping from GStreamer-normalized frei0r names to the actual .so
-/// module names that FFmpeg uses.  Scans standard frei0r-1 directories for
-/// `.so` files, loads each to read the plugin's f0r_get_plugin_info name,
-/// normalizes it the same way GStreamer does, and records the mapping.
-fn build_ffmpeg_name_map() -> HashMap<String, String> {
+/// Information about a frei0r .so module loaded via dlopen.
+#[derive(Debug, Clone)]
+struct Frei0rSoInfo {
+    /// .so filename without extension (FFmpeg module name).
+    so_name: String,
+    /// Native frei0r params with type info and derived GStreamer property names.
+    native_params: Vec<Frei0rNativeParam>,
+}
+
+const FREI0R_DIRS: &[&str] = &[
+    "/usr/lib/frei0r-1",
+    "/usr/local/lib/frei0r-1",
+    "/usr/lib64/frei0r-1",
+    "/usr/lib/x86_64-linux-gnu/frei0r-1",
+];
+
+/// Build a mapping from GStreamer-normalized frei0r names to native .so info
+/// (FFmpeg module name + native param types).  Scans standard frei0r-1
+/// directories, dlopens each .so to read f0r_get_plugin_info and
+/// f0r_get_param_info.
+fn build_native_info_map() -> HashMap<String, Frei0rSoInfo> {
     let mut map = HashMap::new();
-    let frei0r_dirs = [
-        "/usr/lib/frei0r-1",
-        "/usr/local/lib/frei0r-1",
-        "/usr/lib64/frei0r-1",
-        "/usr/lib/x86_64-linux-gnu/frei0r-1",
-    ];
 
     #[repr(C)]
-    struct Frei0rPluginInfo {
+    struct F0rPluginInfo {
         name: *const std::os::raw::c_char,
         author: *const std::os::raw::c_char,
         plugin_type: std::os::raw::c_int,
@@ -329,11 +373,18 @@ fn build_ffmpeg_name_map() -> HashMap<String, String> {
         _frei0r_version: std::os::raw::c_int,
         _major_version: std::os::raw::c_int,
         _minor_version: std::os::raw::c_int,
-        _num_params: std::os::raw::c_int,
+        num_params: std::os::raw::c_int,
         _explanation: *const std::os::raw::c_char,
     }
 
-    for dir in &frei0r_dirs {
+    #[repr(C)]
+    struct F0rParamInfo {
+        name: *const std::os::raw::c_char,
+        param_type: std::os::raw::c_int,
+        _explanation: *const std::os::raw::c_char,
+    }
+
+    for dir in FREI0R_DIRS {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
@@ -347,7 +398,6 @@ fn build_ffmpeg_name_map() -> HashMap<String, String> {
             };
             let so_name = so_name.to_string();
 
-            // dlopen the .so to read f0r_get_plugin_info().name
             let c_path =
                 match std::ffi::CString::new(path.to_string_lossy().as_bytes().to_vec()) {
                     Ok(s) => s,
@@ -358,20 +408,98 @@ fn build_ffmpeg_name_map() -> HashMap<String, String> {
                 if handle.is_null() {
                     continue;
                 }
-                let sym_name = b"f0r_get_plugin_info\0";
-                let sym = libc::dlsym(handle, sym_name.as_ptr() as *const _);
-                if !sym.is_null() {
-                    let get_info: extern "C" fn(*mut Frei0rPluginInfo) =
-                        std::mem::transmute(sym);
-                    let mut info: Frei0rPluginInfo = std::mem::zeroed();
+
+                let info_sym = libc::dlsym(
+                    handle,
+                    b"f0r_get_plugin_info\0".as_ptr() as *const _,
+                );
+                let param_sym = libc::dlsym(
+                    handle,
+                    b"f0r_get_param_info\0".as_ptr() as *const _,
+                );
+                let init_sym = libc::dlsym(
+                    handle,
+                    b"f0r_init\0".as_ptr() as *const _,
+                );
+                let deinit_sym = libc::dlsym(
+                    handle,
+                    b"f0r_deinit\0".as_ptr() as *const _,
+                );
+
+                if !info_sym.is_null() && !param_sym.is_null() {
+                    // Some plugins (e.g. curves) require f0r_init() before
+                    // f0r_get_param_info() to avoid crashes.
+                    if !init_sym.is_null() {
+                        let f0r_init: extern "C" fn() -> std::os::raw::c_int =
+                            std::mem::transmute(init_sym);
+                        f0r_init();
+                    }
+
+                    let get_info: extern "C" fn(*mut F0rPluginInfo) =
+                        std::mem::transmute(info_sym);
+                    let get_param: extern "C" fn(*mut F0rParamInfo, std::os::raw::c_int) =
+                        std::mem::transmute(param_sym);
+
+                    let mut info: F0rPluginInfo = std::mem::zeroed();
                     get_info(&mut info);
+
                     if !info.name.is_null() && info.plugin_type == 0 {
                         let real_name =
                             std::ffi::CStr::from_ptr(info.name).to_string_lossy();
                         let gst_name = normalize_frei0r_name(&real_name);
-                        if gst_name != so_name {
-                            map.insert(gst_name, so_name.clone());
+
+                        let mut native_params = Vec::new();
+                        for i in 0..info.num_params {
+                            let mut pinfo: F0rParamInfo = std::mem::zeroed();
+                            get_param(&mut pinfo, i);
+                            let pname = if !pinfo.name.is_null() {
+                                std::ffi::CStr::from_ptr(pinfo.name)
+                                    .to_string_lossy()
+                                    .to_string()
+                            } else {
+                                format!("param{i}")
+                            };
+                            let native_type = match pinfo.param_type {
+                                0 => Frei0rNativeType::Bool,
+                                1 => Frei0rNativeType::Double,
+                                2 => Frei0rNativeType::Color,
+                                3 => Frei0rNativeType::Position,
+                                4 => Frei0rNativeType::NativeString,
+                                _ => Frei0rNativeType::Double,
+                            };
+                            let base = normalize_frei0r_name(&pname);
+                            let gst_properties = match native_type {
+                                Frei0rNativeType::Color => vec![
+                                    format!("{base}-r"),
+                                    format!("{base}-g"),
+                                    format!("{base}-b"),
+                                ],
+                                Frei0rNativeType::Position => vec![
+                                    format!("{base}-x"),
+                                    format!("{base}-y"),
+                                ],
+                                _ => vec![base],
+                            };
+                            native_params.push(Frei0rNativeParam {
+                                name: pname,
+                                native_type,
+                                gst_properties,
+                            });
                         }
+
+                        map.insert(
+                            gst_name,
+                            Frei0rSoInfo {
+                                so_name: so_name.clone(),
+                                native_params,
+                            },
+                        );
+                    }
+                    // Clean up frei0r state.
+                    if !deinit_sym.is_null() {
+                        let f0r_deinit: extern "C" fn() =
+                            std::mem::transmute(deinit_sym);
+                        f0r_deinit();
                     }
                 }
                 libc::dlclose(handle);
@@ -496,15 +624,21 @@ mod tests {
     }
 
     #[test]
-    fn test_build_ffmpeg_name_map() {
-        let map = build_ffmpeg_name_map();
-        // On a system with frei0r installed, this should find mismatches.
-        // The key test: "3-point-color-balance" maps to "three_point_balance".
-        if let Some(so_name) = map.get("3-point-color-balance") {
-            assert_eq!(so_name, "three_point_balance");
+    fn test_build_native_info_map() {
+        let map = build_native_info_map();
+        // On a system with frei0r installed, verify key plugins.
+        if let Some(info) = map.get("3-point-color-balance") {
+            assert_eq!(info.so_name, "three_point_balance");
+            assert_eq!(info.native_params.len(), 5);
+            assert_eq!(info.native_params[0].native_type, Frei0rNativeType::Color);
+            assert_eq!(
+                info.native_params[0].gst_properties,
+                vec!["black-color-r", "black-color-g", "black-color-b"]
+            );
+            assert_eq!(info.native_params[3].native_type, Frei0rNativeType::Bool);
         }
-        if let Some(so_name) = map.get("coloradj-rgb") {
-            assert_eq!(so_name, "coloradj_RGB");
+        if let Some(info) = map.get("coloradj-rgb") {
+            assert_eq!(info.so_name, "coloradj_RGB");
         }
     }
 }
