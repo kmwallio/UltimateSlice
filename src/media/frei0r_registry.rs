@@ -206,11 +206,18 @@ fn inspect_param(
     if let Some(pspec_double) = pspec.downcast_ref::<glib::ParamSpecDouble>() {
         let default_val = element
             .property::<f64>(&name);
+        // Sanitize NaN/Inf defaults (e.g. defish0r's "non-linear-scale" defaults to NaN).
+        let safe_default = if default_val.is_finite() {
+            default_val
+        } else {
+            let mid = (pspec_double.minimum() + pspec_double.maximum()) / 2.0;
+            if mid.is_finite() { mid } else { 0.0 }
+        };
         return Some(Frei0rParamInfo {
             display_name,
             name,
             param_type: Frei0rParamType::Double,
-            default_value: default_val,
+            default_value: safe_default,
             min: pspec_double.minimum(),
             max: pspec_double.maximum(),
         });

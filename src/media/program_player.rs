@@ -10940,6 +10940,10 @@ impl ProgramPlayer {
 /// property may be `gdouble`, `gboolean`, or `gchararray`. Setting a `gdouble`
 /// on a `gboolean` property panics, so we inspect the property type first.
 fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
+    // Skip NaN/Inf — setting non-finite values panics in GStreamer.
+    if !val.is_finite() {
+        return;
+    }
     let Some(pspec) = elem.find_property(param) else {
         return;
     };
