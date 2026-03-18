@@ -131,6 +131,9 @@ pub struct InspectorView {
     pub bg_removal_threshold_slider: Scale,
     /// Set to `true` when the ONNX model is present; controls section visibility.
     pub bg_removal_model_available: Cell<bool>,
+    // Applied frei0r effects
+    pub frei0r_effects_section: GBox,
+    pub frei0r_effects_list: GBox,
     // Keyframe navigation and animation mode
     pub keyframe_indicator_label: Label,
     pub animation_mode: Rc<Cell<bool>>,
@@ -149,6 +152,98 @@ impl InspectorView {
             2 => KeyframeInterpolation::EaseOut,
             3 => KeyframeInterpolation::EaseInOut,
             _ => KeyframeInterpolation::Linear,
+        }
+    }
+
+    /// Rebuild the applied frei0r effects list in the Inspector.
+    fn rebuild_frei0r_effects_list(
+        &self,
+        effects: &[crate::model::clip::Frei0rEffect],
+    ) {
+        // Remove all children.
+        while let Some(child) = self.frei0r_effects_list.first_child() {
+            self.frei0r_effects_list.remove(&child);
+        }
+
+        if effects.is_empty() {
+            let empty = Label::new(Some(
+                "No effects applied.\nUse the Effects tab to add frei0r filters.",
+            ));
+            empty.set_wrap(true);
+            empty.add_css_class("panel-empty-state");
+            empty.set_margin_start(4);
+            self.frei0r_effects_list.append(&empty);
+            return;
+        }
+
+        for (i, effect) in effects.iter().enumerate() {
+            let row = GBox::new(Orientation::Vertical, 2);
+            row.set_margin_start(4);
+            row.set_margin_end(4);
+            row.set_margin_top(2);
+            row.set_margin_bottom(2);
+
+            // Header: [✓ enabled] Name  [▲] [▼] [×]
+            let header = GBox::new(Orientation::Horizontal, 4);
+
+            let enable_check = CheckButton::new();
+            enable_check.set_active(effect.enabled);
+            enable_check.set_tooltip_text(Some("Enable/disable this effect"));
+            header.append(&enable_check);
+
+            let display_name = humanize_frei0r_name(&effect.plugin_name);
+            let name_label = Label::new(Some(&display_name));
+            name_label.add_css_class("applied-effect-name");
+            name_label.set_halign(gtk4::Align::Start);
+            name_label.set_hexpand(true);
+            name_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            header.append(&name_label);
+
+            if i > 0 {
+                let up_btn = gtk4::Button::from_icon_name("go-up-symbolic");
+                up_btn.add_css_class("flat");
+                up_btn.set_tooltip_text(Some("Move up"));
+                header.append(&up_btn);
+            }
+            if i + 1 < effects.len() {
+                let down_btn = gtk4::Button::from_icon_name("go-down-symbolic");
+                down_btn.add_css_class("flat");
+                down_btn.set_tooltip_text(Some("Move down"));
+                header.append(&down_btn);
+            }
+
+            let remove_btn = gtk4::Button::from_icon_name("edit-delete-symbolic");
+            remove_btn.add_css_class("flat");
+            remove_btn.set_tooltip_text(Some("Remove effect"));
+            header.append(&remove_btn);
+
+            row.append(&header);
+
+            // Parameter sliders.
+            for (param_name, &param_val) in &effect.params {
+                let param_row = GBox::new(Orientation::Horizontal, 4);
+                param_row.set_margin_start(24);
+                let plabel = Label::new(Some(param_name));
+                plabel.add_css_class("dim-label");
+                plabel.set_halign(gtk4::Align::Start);
+                plabel.set_width_chars(12);
+                param_row.append(&plabel);
+
+                let slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+                slider.set_value(param_val);
+                slider.set_draw_value(true);
+                slider.set_digits(2);
+                slider.set_hexpand(true);
+                param_row.append(&slider);
+
+                row.append(&param_row);
+            }
+
+            if i + 1 < effects.len() {
+                row.append(&Separator::new(Orientation::Horizontal));
+            }
+
+            self.frei0r_effects_list.append(&row);
         }
     }
 
@@ -196,6 +291,11 @@ impl InspectorView {
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
+                self.frei0r_effects_section
+                    .set_visible(is_video || is_image);
+
+                // Populate applied frei0r effects list.
+                self.rebuild_frei0r_effects_list(&c.frei0r_effects);
 
                 self.name_entry.set_text(&c.label);
                 self.path_value.set_text(&c.source_path);
@@ -928,6 +1028,23 @@ pub fn build_inspector(
     bg_removal_threshold_slider.set_digits(2);
     bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
     bg_removal_inner.append(&bg_removal_threshold_slider);
+
+    // ── Applied Frei0r Effects section (Video + Image only) ──────────────
+    let frei0r_effects_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&frei0r_effects_section);
+
+    frei0r_effects_section.append(&Separator::new(Orientation::Horizontal));
+    let frei0r_effects_expander = Expander::new(Some("Applied Effects"));
+    frei0r_effects_expander.set_expanded(true);
+    frei0r_effects_section.append(&frei0r_effects_expander);
+    let frei0r_effects_list = GBox::new(Orientation::Vertical, 4);
+    frei0r_effects_expander.set_child(Some(&frei0r_effects_list));
+
+    let frei0r_empty_label = Label::new(Some("No effects applied.\nUse the Effects tab to add frei0r filters."));
+    frei0r_empty_label.set_wrap(true);
+    frei0r_empty_label.add_css_class("panel-empty-state");
+    frei0r_empty_label.set_margin_start(4);
+    frei0r_effects_list.append(&frei0r_empty_label);
 
     // ── Audio section (Video + Audio only) ───────────────────────────────────
     let audio_section = GBox::new(Orientation::Vertical, 8);
@@ -3784,6 +3901,8 @@ pub fn build_inspector(
         bg_removal_enable,
         bg_removal_threshold_slider,
         bg_removal_model_available: Cell::new(false),
+        frei0r_effects_section,
+        frei0r_effects_list,
         keyframe_indicator_label,
         animation_mode,
         animation_mode_btn,
@@ -3857,4 +3976,22 @@ fn ns_to_timecode(ns: u64) -> String {
     } else {
         format!("{m}:{s:02}:{f:02}")
     }
+}
+
+/// Convert a frei0r plugin name like `"cartoon"` or `"color-distance"` to
+/// `"Cartoon"` or `"Color Distance"`.
+fn humanize_frei0r_name(name: &str) -> String {
+    name.split(|c: char| c == '-' || c == '_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let upper: String = first.to_uppercase().collect();
+                    upper + chars.as_str()
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

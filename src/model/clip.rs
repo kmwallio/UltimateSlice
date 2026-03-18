@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Common image file extensions (lowercase).
@@ -353,6 +354,48 @@ fn default_temperature() -> f32 {
     6500.0
 }
 
+/// An instance of a frei0r filter effect applied to a clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Frei0rEffect {
+    /// Unique instance id (UUID v4).
+    pub id: String,
+    /// Short frei0r plugin name (e.g. `"cartoon"`), matching
+    /// [`crate::media::frei0r_registry::Frei0rPluginInfo::frei0r_name`].
+    pub plugin_name: String,
+    /// Whether the effect is currently active in the filter chain.
+    #[serde(default = "default_effect_enabled")]
+    pub enabled: bool,
+    /// Parameter values keyed by GStreamer property name.
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
+}
+
+fn default_effect_enabled() -> bool {
+    true
+}
+
+impl Frei0rEffect {
+    /// Create a new effect instance with default parameters.
+    pub fn new(plugin_name: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            enabled: true,
+            params: HashMap::new(),
+        }
+    }
+
+    /// Create a new effect instance with the given parameters.
+    pub fn with_params(plugin_name: &str, params: HashMap<String, f64>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            enabled: true,
+            params,
+        }
+    }
+}
+
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
@@ -595,6 +638,9 @@ pub struct Clip {
     /// be expanded beyond their actual running time.
     #[serde(default)]
     pub media_duration_ns: Option<u64>,
+    /// Applied frei0r filter effects, ordered from first to last in the chain.
+    #[serde(default)]
+    pub frei0r_effects: Vec<Frei0rEffect>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -809,6 +855,7 @@ impl Clip {
             link_group_id: None,
             source_timecode_base_ns: None,
             media_duration_ns: None,
+            frei0r_effects: Vec::new(),
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
@@ -821,6 +868,11 @@ impl Clip {
     /// Raw source material duration (source_out − source_in), unaffected by speed.
     pub fn source_duration(&self) -> u64 {
         self.source_out.saturating_sub(self.source_in)
+    }
+
+    /// Returns `true` when the clip has one or more frei0r effects applied.
+    pub fn has_frei0r_effects(&self) -> bool {
+        !self.frei0r_effects.is_empty()
     }
 
     /// Maximum allowed `source_out` value, derived from the probed media

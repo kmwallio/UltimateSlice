@@ -3,6 +3,7 @@ pub mod bg_removal_cache;
 pub mod color_match;
 pub mod cube_lut;
 pub mod export;
+pub mod frei0r_registry;
 pub mod player;
 pub mod probe_cache;
 pub mod program_player;

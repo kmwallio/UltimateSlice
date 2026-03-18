@@ -1011,6 +1011,72 @@ fn tools_list() -> Value {
                 },
                 "required": ["source_clip_id", "reference_clip_id"]
             }
+        },
+        {
+            "name": "list_frei0r_plugins",
+            "description": "List all available frei0r filter plugins discovered from the GStreamer registry. Returns plugin names, display names, categories, and parameter info.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "list_clip_frei0r_effects",
+            "description": "List frei0r effects currently applied to a clip, in order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "add_clip_frei0r_effect",
+            "description": "Add a frei0r filter effect to a clip. The effect is appended to the end of the effect chain. Returns the generated effect id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "plugin_name": { "type": "string", "description": "Frei0r plugin name (e.g. 'cartoon', 'glow')" },
+                    "params": { "type": "object", "description": "Optional parameter overrides as {param_name: value} (frei0r doubles 0.0-1.0)" }
+                },
+                "required": ["clip_id", "plugin_name"]
+            }
+        },
+        {
+            "name": "remove_clip_frei0r_effect",
+            "description": "Remove a frei0r effect from a clip by its effect instance id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "effect_id": { "type": "string", "description": "Effect instance id (from list_clip_frei0r_effects)" }
+                },
+                "required": ["clip_id", "effect_id"]
+            }
+        },
+        {
+            "name": "set_clip_frei0r_effect_params",
+            "description": "Update parameters on a frei0r effect applied to a clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "effect_id": { "type": "string", "description": "Effect instance id" },
+                    "params": { "type": "object", "description": "Parameter values as {param_name: value}" }
+                },
+                "required": ["clip_id", "effect_id", "params"]
+            }
+        },
+        {
+            "name": "reorder_clip_frei0r_effects",
+            "description": "Reorder frei0r effects on a clip. Provide the complete list of effect ids in the desired order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "effect_ids": { "type": "array", "items": { "type": "string" }, "description": "All effect ids in desired order" }
+                },
+                "required": ["clip_id", "effect_ids"]
+            }
         }
     ]})
 }
@@ -1033,6 +1099,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "get_preferences"
             | "list_export_presets"
             | "list_library"
+            | "list_frei0r_plugins"
     )
 }
 
@@ -1460,6 +1527,48 @@ fn dispatch_tool_payload(
             source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
             reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
             generate_lut: args.get("generate_lut").and_then(|v| v.as_bool()).unwrap_or(false),
+            reply: tx,
+        },
+        "list_frei0r_plugins" => McpCommand::ListFrei0rPlugins { reply: tx },
+        "list_clip_frei0r_effects" => McpCommand::ListClipFrei0rEffects {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "add_clip_frei0r_effect" => McpCommand::AddClipFrei0rEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            plugin_name: args["plugin_name"].as_str().unwrap_or("").to_string(),
+            params: args.get("params").and_then(|v| v.as_object()).map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+                    .collect()
+            }),
+            reply: tx,
+        },
+        "remove_clip_frei0r_effect" => McpCommand::RemoveClipFrei0rEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_clip_frei0r_effect_params" => McpCommand::SetClipFrei0rEffectParams {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            params: args
+                .get("params")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            reply: tx,
+        },
+        "reorder_clip_frei0r_effects" => McpCommand::ReorderClipFrei0rEffects {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_ids: args["effect_ids"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
             reply: tx,
         },
 

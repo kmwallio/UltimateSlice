@@ -8,7 +8,8 @@ use crate::recent;
 use crate::ui::timecode;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
 use crate::ui::{
-    inspector, keyframe_editor, media_browser, preferences, preview, program_monitor, toolbar,
+    effects_browser, inspector, keyframe_editor, media_browser, preferences, preview,
+    program_monitor, toolbar,
 };
 use crate::undo::TrackClipsChange;
 use glib;
@@ -4698,13 +4699,86 @@ pub fn build_window(
             let _ = player.borrow().stop();
         })
     });
-    // Left panel: vertical Paned — browser (top) + source preview (bottom, hidden until selection)
+    // Left panel: vertical Paned — browser/effects stack (top) + source preview (bottom)
     // The Paned lets the user resize the split after a source is selected.
     preview_widget.set_visible(false);
+
+    // ── Effects Browser ──────────────────────────────────────────────────
+    let on_apply_effect: Rc<dyn Fn(String)> = {
+        let timeline_state = timeline_state.clone();
+        let project = project.clone();
+        Rc::new(move |plugin_name: String| {
+            let (clip_id, track_id) = {
+                let st = timeline_state.borrow();
+                let cid = match st.selected_clip_id.clone() {
+                    Some(id) => id,
+                    None => return,
+                };
+                let tid = match st.selected_track_id.clone() {
+                    Some(id) => id,
+                    None => return,
+                };
+                (cid, tid)
+            };
+            // Check clip is video/image and find its effect count for insert index.
+            let index = {
+                let proj = project.borrow();
+                let clip = proj.tracks.iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == clip_id);
+                match clip {
+                    Some(c) if c.kind != crate::model::clip::ClipKind::Audio => {
+                        c.frei0r_effects.len()
+                    }
+                    _ => return,
+                }
+            };
+            let effect = crate::model::clip::Frei0rEffect::new(&plugin_name);
+            let cmd = crate::undo::AddFrei0rEffectCommand {
+                clip_id,
+                track_id,
+                effect,
+                index,
+            };
+            {
+                let mut st = timeline_state.borrow_mut();
+                let mut proj = project.borrow_mut();
+                st.history.execute(Box::new(cmd), &mut proj);
+            }
+            let cb = {
+                let st = timeline_state.borrow();
+                st.on_project_changed.clone()
+            };
+            if let Some(cb) = cb {
+                cb();
+            }
+        })
+    };
+
+    let (effects_browser_widget, set_effects_registry) =
+        effects_browser::build_effects_browser(on_apply_effect);
+
+    // Stack: Media Browser + Effects Browser as switchable tabs.
+    let left_stack = gtk::Stack::new();
+    left_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    left_stack.set_transition_duration(150);
+    left_stack.add_titled(&browser, Some("media"), "Media");
+    left_stack.add_titled(&effects_browser_widget, Some("effects"), "Effects");
+
+    let left_stack_switcher = gtk::StackSwitcher::new();
+    left_stack_switcher.set_stack(Some(&left_stack));
+    left_stack_switcher.set_halign(gtk::Align::Center);
+    left_stack_switcher.set_margin_top(4);
+    left_stack_switcher.set_margin_bottom(2);
+
+    let left_stack_container = gtk::Box::new(Orientation::Vertical, 0);
+    left_stack_container.append(&left_stack_switcher);
+    left_stack_container.append(&left_stack);
+
     let left_vpaned = Paned::new(Orientation::Vertical);
     left_vpaned.set_vexpand(true);
     left_vpaned.set_position(320); // browser gets ~320 px by default
-    left_vpaned.set_start_child(Some(&browser));
+    left_vpaned.set_start_child(Some(&left_stack_container));
     left_vpaned.set_end_child(Some(&preview_widget));
     top_paned.set_start_child(Some(&left_vpaned));
 
@@ -4930,6 +5004,7 @@ pub fn build_window(
                             chroma_key_softness: c.chroma_key_softness,
                             bg_removal_enabled: c.bg_removal_enabled,
                             bg_removal_threshold: c.bg_removal_threshold,
+                            frei0r_effects: c.frei0r_effects.clone(),
                         })
                     })
                     .collect();
@@ -5460,6 +5535,14 @@ pub fn build_window(
     outer_vbox.append(&root_hpaned);
     outer_vbox.append(&status_bar);
     window.set_child(Some(&outer_vbox));
+
+    // ── Frei0r plugin discovery (deferred to avoid blocking startup) ─────
+    glib::idle_add_local_once(move || {
+        if gstreamer::init().is_ok() {
+            let registry = Rc::new(crate::media::frei0r_registry::Frei0rRegistry::discover());
+            set_effects_registry(registry);
+        }
+    });
 
     // Poll proxy cache every 500ms to drain completed transcodes and update status bar.
     {
@@ -6140,7 +6223,7 @@ fn handle_mcp_command(
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
     use crate::mcp::McpCommand;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     match cmd {
         McpCommand::GetProject { reply } => {
@@ -8862,6 +8945,217 @@ fn handle_mcp_command(
         McpCommand::SourcePause { reply } => {
             let _ = player.borrow().pause();
             reply.send(json!({"ok": true})).ok();
+        }
+
+        McpCommand::ListFrei0rPlugins { reply } => {
+            let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
+            let plugins: Vec<Value> = registry
+                .plugins
+                .iter()
+                .map(|p| {
+                    let params: Vec<Value> = p
+                        .params
+                        .iter()
+                        .map(|pr| {
+                            json!({
+                                "name": pr.name,
+                                "display_name": pr.display_name,
+                                "type": format!("{:?}", pr.param_type),
+                                "default": pr.default_value,
+                                "min": pr.min,
+                                "max": pr.max,
+                            })
+                        })
+                        .collect();
+                    json!({
+                        "name": p.frei0r_name,
+                        "display_name": p.display_name,
+                        "gst_element_name": p.gst_element_name,
+                        "description": p.description,
+                        "category": p.category,
+                        "params": params,
+                    })
+                })
+                .collect();
+            reply.send(json!({"plugins": plugins, "count": plugins.len()})).ok();
+        }
+
+        McpCommand::ListClipFrei0rEffects { clip_id, reply } => {
+            let proj = project.borrow();
+            let mut found = false;
+            let mut effects_json = Vec::new();
+            for track in &proj.tracks {
+                for clip in &track.clips {
+                    if clip.id == clip_id {
+                        found = true;
+                        for e in &clip.frei0r_effects {
+                            effects_json.push(json!({
+                                "id": e.id,
+                                "plugin_name": e.plugin_name,
+                                "enabled": e.enabled,
+                                "params": e.params,
+                            }));
+                        }
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            if found {
+                reply.send(json!({"effects": effects_json})).ok();
+            } else {
+                reply.send(json!({"error": "Clip not found"})).ok();
+            }
+        }
+
+        McpCommand::AddClipFrei0rEffect {
+            clip_id,
+            plugin_name,
+            params,
+            reply,
+        } => {
+            let effect_id = uuid::Uuid::new_v4().to_string();
+            let mut default_params = std::collections::HashMap::new();
+            // Populate defaults from registry.
+            let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
+            if let Some(info) = registry.find_by_name(&plugin_name) {
+                for p in &info.params {
+                    default_params.insert(p.name.clone(), p.default_value);
+                }
+            }
+            // Override with user-supplied params.
+            if let Some(user_params) = params {
+                for (k, v) in user_params {
+                    default_params.insert(k, v);
+                }
+            }
+            let effect = crate::model::clip::Frei0rEffect {
+                id: effect_id.clone(),
+                plugin_name: plugin_name.clone(),
+                enabled: true,
+                params: default_params,
+            };
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer_add: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        clip.frei0r_effects.push(effect);
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer_add;
+                    }
+                }
+            }
+            drop(proj);
+            if found {
+                on_project_changed_full();
+                reply
+                    .send(json!({"success": true, "effect_id": effect_id}))
+                    .ok();
+            } else {
+                reply.send(json!({"error": "Clip not found"})).ok();
+            }
+        }
+
+        McpCommand::RemoveClipFrei0rEffect {
+            clip_id,
+            effect_id,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer_rm: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        if let Some(pos) =
+                            clip.frei0r_effects.iter().position(|e| e.id == effect_id)
+                        {
+                            clip.frei0r_effects.remove(pos);
+                            proj.dirty = true;
+                            found = true;
+                        }
+                        break 'outer_rm;
+                    }
+                }
+            }
+            drop(proj);
+            if found {
+                on_project_changed_full();
+            }
+            reply.send(json!({"success": found})).ok();
+        }
+
+        McpCommand::SetClipFrei0rEffectParams {
+            clip_id,
+            effect_id,
+            params,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer_set: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        if let Some(effect) =
+                            clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                        {
+                            for (k, v) in params {
+                                effect.params.insert(k, v);
+                            }
+                            proj.dirty = true;
+                            found = true;
+                        }
+                        break 'outer_set;
+                    }
+                }
+            }
+            drop(proj);
+            if found {
+                on_project_changed_full();
+            }
+            reply.send(json!({"success": found})).ok();
+        }
+
+        McpCommand::ReorderClipFrei0rEffects {
+            clip_id,
+            effect_ids,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer_reorder: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        // Build new order from effect_ids.
+                        let mut reordered = Vec::with_capacity(effect_ids.len());
+                        for eid in &effect_ids {
+                            if let Some(pos) =
+                                clip.frei0r_effects.iter().position(|e| &e.id == eid)
+                            {
+                                reordered.push(clip.frei0r_effects[pos].clone());
+                            }
+                        }
+                        // Append any effects not mentioned (safety net).
+                        for e in &clip.frei0r_effects {
+                            if !effect_ids.contains(&e.id) {
+                                reordered.push(e.clone());
+                            }
+                        }
+                        clip.frei0r_effects = reordered;
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer_reorder;
+                    }
+                }
+            }
+            drop(proj);
+            if found {
+                on_project_changed_full();
+            }
+            reply.send(json!({"success": found})).ok();
         }
     }
 }

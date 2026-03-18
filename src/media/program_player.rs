@@ -377,6 +377,8 @@ pub struct ProgramClip {
     pub bg_removal_enabled: bool,
     /// AI background removal threshold: 0.0 (aggressive) to 1.0 (conservative).
     pub bg_removal_threshold: f64,
+    /// User-applied frei0r filter effects, ordered first-to-last.
+    pub frei0r_effects: Vec<crate::model::clip::Frei0rEffect>,
 }
 
 impl ProgramClip {
@@ -775,6 +777,8 @@ struct VideoSlot {
     alpha_chroma_key: Option<gst::Element>,
     capsfilter_zoom: Option<gst::Element>,
     videobox_zoom: Option<gst::Element>,
+    /// User-applied frei0r filter effect elements (from `clip.frei0r_effects`).
+    frei0r_user_effects: Vec<gst::Element>,
     /// Queue between effects_bin and compositor to decouple caps negotiation.
     slot_queue: Option<gst::Element>,
     /// Monotonic counter incremented when a buffer passes through queue→compositor.
@@ -1975,6 +1979,14 @@ impl ProgramPlayer {
                 c.title_y.to_bits().hash(&mut hasher);
                 c.bg_removal_enabled.hash(&mut hasher);
                 c.bg_removal_threshold.to_bits().hash(&mut hasher);
+                for fe in &c.frei0r_effects {
+                    fe.plugin_name.hash(&mut hasher);
+                    fe.enabled.hash(&mut hasher);
+                    for (k, v) in &fe.params {
+                        k.hash(&mut hasher);
+                        v.to_bits().hash(&mut hasher);
+                    }
+                }
             }
         }
         hasher.finish()
@@ -3383,6 +3395,70 @@ impl ProgramPlayer {
                 let _ = enabled; // rebuild handles toggle; see on_project_changed
             }
         }
+        // Force frame redraw when paused.
+        if self.current_idx.is_some() && self.state != PlayerState::Playing {
+            self.reseek_slot_for_current();
+        }
+    }
+
+    /// Live-update frei0r effect parameters on the current slot.
+    ///
+    /// If the effect topology changed (add/remove/reorder/toggle), syncs the
+    /// clip model and triggers a full pipeline rebuild. Otherwise updates
+    /// GStreamer element properties in-place for zero-latency slider feedback.
+    pub fn update_frei0r_effects(&mut self, effects: &[crate::model::clip::Frei0rEffect]) {
+        let clip_idx = match self.current_idx {
+            Some(i) => i,
+            None => return,
+        };
+
+        // Check topology: does the slot already have matching elements?
+        let topology_matches = if let Some(slot) = self.slot_for_clip(clip_idx) {
+            let enabled: Vec<&str> = effects
+                .iter()
+                .filter(|e| e.enabled)
+                .map(|e| e.plugin_name.as_str())
+                .collect();
+            slot.frei0r_user_effects.len() == enabled.len()
+                && slot
+                    .frei0r_user_effects
+                    .iter()
+                    .zip(enabled.iter())
+                    .all(|(elem, &name)| {
+                        let factory_name = elem
+                            .factory()
+                            .map(|f| f.name().to_string())
+                            .unwrap_or_default();
+                        factory_name == format!("frei0r-filter-{}", name)
+                    })
+        } else {
+            false
+        };
+
+        // Always sync the clip model.
+        if let Some(clip) = self.clips.get_mut(clip_idx) {
+            clip.frei0r_effects = effects.to_vec();
+        }
+
+        if !topology_matches {
+            let pos = self.timeline_pos_ns;
+            self.rebuild_pipeline_at(pos);
+            return;
+        }
+
+        // Live param update — set properties on existing GStreamer elements.
+        if let Some(slot) = self.slot_for_clip(clip_idx) {
+            let enabled: Vec<&crate::model::clip::Frei0rEffect> =
+                effects.iter().filter(|e| e.enabled).collect();
+            for (elem, effect) in slot.frei0r_user_effects.iter().zip(enabled.iter()) {
+                for (param, &val) in &effect.params {
+                    if elem.has_property(param) {
+                        elem.set_property(param, val);
+                    }
+                }
+            }
+        }
+
         // Force frame redraw when paused.
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
             self.reseek_slot_for_current();
@@ -6848,8 +6924,9 @@ impl ProgramPlayer {
         Option<gst::Element>, // alpha_filter
         Option<gst::Element>, // alpha_chroma_key
         Option<gst::Element>, // capsfilter_zoom
-        Option<gst::Element>,
-    ) // videobox_zoom
+        Option<gst::Element>, // videobox_zoom
+        Vec<gst::Element>,    // frei0r_user_effects
+    )
     {
         let bin = gst::Bin::new();
 
@@ -6956,6 +7033,23 @@ impl ProgramPlayer {
         } else {
             (None, None)
         };
+
+        // User-applied frei0r filter effects (from clip.frei0r_effects).
+        let frei0r_user_effects: Vec<gst::Element> = clip
+            .frei0r_effects
+            .iter()
+            .filter(|e| e.enabled)
+            .filter_map(|effect| {
+                let gst_name = format!("frei0r-filter-{}", effect.plugin_name);
+                let elem = gst::ElementFactory::make(&gst_name).build().ok()?;
+                for (param, &val) in &effect.params {
+                    if elem.has_property(param) {
+                        elem.set_property(param, val);
+                    }
+                }
+                Some(elem)
+            })
+            .collect();
 
         // Always build rotation/flip path so live inspector edits work even
         // when clips start at identity transform (no full pipeline rebuild).
@@ -7240,6 +7334,10 @@ impl ProgramPlayer {
         if let Some(ref e) = gaussianblur {
             chain.push(e.clone());
         }
+        // 3a. User-applied frei0r filter effects (after built-in color/blur).
+        for e in &frei0r_user_effects {
+            chain.push(e.clone());
+        }
         // 3b. Chroma key (after color/blur, before zoom).
         if let Some(ref e) = conv_ck {
             chain.push(e.clone());
@@ -7336,6 +7434,7 @@ impl ProgramPlayer {
             alpha_chroma_key,
             capsfilter_zoom,
             videobox_zoom,
+            frei0r_user_effects,
         )
     }
 
@@ -7607,6 +7706,7 @@ impl ProgramPlayer {
             alpha_chroma_key: None,
             capsfilter_zoom: None,
             videobox_zoom: None,
+            frei0r_user_effects: Vec::new(),
             slot_queue: None,
             comp_arrival_seq: Arc::new(AtomicU64::new(0)),
             hidden: false,
@@ -7874,6 +7974,7 @@ impl ProgramPlayer {
             alpha_chroma_key: None,
             capsfilter_zoom: None,
             videobox_zoom: None,
+            frei0r_user_effects: Vec::new(),
             slot_queue: Some(slot_queue),
             comp_arrival_seq,
             hidden: false,
@@ -8482,6 +8583,7 @@ impl ProgramPlayer {
             alpha_chroma_key,
             capsfilter_zoom,
             videobox_zoom,
+            frei0r_user_effects,
         ) = Self::build_effects_bin(&clip, proc_w, proc_h, realtime_lut);
 
         // Create uridecodebin for this clip.
@@ -8799,6 +8901,7 @@ impl ProgramPlayer {
             alpha_chroma_key: alpha_chroma_key.clone(),
             capsfilter_zoom: capsfilter_zoom.clone(),
             videobox_zoom: videobox_zoom.clone(),
+            frei0r_user_effects: frei0r_user_effects.clone(),
             slot_queue: Some(slot_queue.clone()),
             comp_arrival_seq: comp_arrival_seq.clone(),
             hidden: false,
@@ -8861,6 +8964,7 @@ impl ProgramPlayer {
             alpha_chroma_key,
             capsfilter_zoom,
             videobox_zoom,
+            frei0r_user_effects,
             slot_queue: Some(slot_queue),
             comp_arrival_seq,
             hidden: false,
@@ -9476,6 +9580,27 @@ impl ProgramPlayer {
         let need_chroma_key = clip.chroma_key_enabled;
         let need_freeze_hold = clip.is_freeze_frame() || clip.is_image;
 
+        // User-applied frei0r effects: topology must match (same count + same
+        // plugin names in the same order).
+        let enabled_effects: Vec<&str> = clip
+            .frei0r_effects
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.plugin_name.as_str())
+            .collect();
+        let frei0r_ok = slot.frei0r_user_effects.len() == enabled_effects.len()
+            && slot
+                .frei0r_user_effects
+                .iter()
+                .zip(enabled_effects.iter())
+                .all(|(elem, &name)| {
+                    let factory_name = elem
+                        .factory()
+                        .map(|f| f.name().to_string())
+                        .unwrap_or_default();
+                    factory_name == format!("frei0r-filter-{}", name)
+                });
+
         // Temperature/tint needs either coloradj_rgb (preferred) or
         // videobalance (hue-rotation fallback).
         let coloradj_ok =
@@ -9495,6 +9620,7 @@ impl ProgramPlayer {
             && (!need_title || slot.textoverlay.is_some())
             && (!need_chroma_key || slot.alpha_chroma_key.is_some())
             && (!need_freeze_hold || slot.imagefreeze.is_some())
+            && frei0r_ok
     }
 
     /// Determine whether all current slots can be reused for the desired
@@ -10922,6 +11048,7 @@ mod tests {
             chroma_key_softness: 0.1,
             bg_removal_enabled: false,
             bg_removal_threshold: 0.5,
+            frei0r_effects: Vec::new(),
         }
     }
 
@@ -11577,6 +11704,7 @@ mod tests {
             alpha_chroma_key: if has_chroma_key { identity() } else { None },
             capsfilter_zoom: None,
             videobox_zoom: None,
+            frei0r_user_effects: Vec::new(),
             slot_queue: None,
             comp_arrival_seq: Arc::new(AtomicU64::new(0)),
             hidden: false,

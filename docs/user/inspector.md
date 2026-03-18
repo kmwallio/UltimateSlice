@@ -281,6 +281,44 @@ Place the chroma-keyed clip on an upper video track with the background on a low
 
 ---
 
+## Applied Effects (Frei0r Plugins)
+
+The **Applied Effects** section appears below Color Correction when a clip has frei0r effects applied. Effects are discovered from the system's GStreamer frei0r plugin registry (~130+ filters on a typical Linux system).
+
+### Adding effects
+
+Open the **Effects Browser** tab in the left panel (tab peer of Media Browser). Effects are organized by category with a search filter. Double-click a plugin or click **Apply** to add it to the selected clip. Effects stack in order — first applied is processed first.
+
+### Per-effect controls
+
+Each applied effect row shows:
+
+| Control | Description |
+|---------|-------------|
+| **Enable toggle** | Bypass the effect without removing it |
+| **Effect name** | Human-friendly plugin name |
+| **↑ / ↓** buttons | Reorder within the effect chain |
+| **×** button | Remove the effect |
+| **Parameter sliders** | Frei0r double parameters (0.0–1.0 normalized range) |
+
+### Preview & Export
+
+- **Preview**: GStreamer `frei0r-filter-*` elements inserted after the built-in color pipeline (brightness/contrast/saturation/LUT/temperature/tint/grading/denoise/sharpness) and before chroma key. Parameter changes update live without pipeline rebuild.
+- **Export**: FFmpeg `frei0r=filter_name={name}:filter_params={p1}|{p2}|...` filter chain. Parameters are passed in registry-defined order.
+
+### MCP tools
+
+- `list_frei0r_plugins` — enumerate available plugins with parameter metadata
+- `add_clip_frei0r_effect` — apply a plugin to a clip
+- `remove_clip_frei0r_effect` — remove an effect instance
+- `set_clip_frei0r_effect_params` — update effect parameters
+- `reorder_clip_frei0r_effects` — reorder the effect chain
+- `list_clip_frei0r_effects` — list effects applied to a clip
+
+All effect operations are **undoable** (add, remove, reorder, set params, toggle).
+
+---
+
 ## Notes
 
 - All Inspector values are **persisted in the FCPXML** project file.

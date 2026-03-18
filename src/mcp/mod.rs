@@ -358,6 +358,35 @@ pub enum McpCommand {
         generate_lut: bool,
         reply: SyncSender<Value>,
     },
+    ListFrei0rPlugins {
+        reply: SyncSender<Value>,
+    },
+    ListClipFrei0rEffects {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    AddClipFrei0rEffect {
+        clip_id: String,
+        plugin_name: String,
+        params: Option<std::collections::HashMap<String, f64>>,
+        reply: SyncSender<Value>,
+    },
+    RemoveClipFrei0rEffect {
+        clip_id: String,
+        effect_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetClipFrei0rEffectParams {
+        clip_id: String,
+        effect_id: String,
+        params: std::collections::HashMap<String, f64>,
+        reply: SyncSender<Value>,
+    },
+    ReorderClipFrei0rEffects {
+        clip_id: String,
+        effect_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

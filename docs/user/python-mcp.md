@@ -131,6 +131,44 @@ python3 tools/mcp_call.py remove_clip_keyframe '{"clip_id":"<clip-id>","property
 
 Use `list_clips` to discover `clip_id` values and inspect phase-1 keyframe arrays (`scale_keyframes`, `opacity_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `volume_keyframes`). Keyframes may include optional `bezier_controls` for custom tangent-authored segments.
 
+## Frei0r effects MCP examples
+
+List all available frei0r filter plugins:
+
+```bash
+python3 tools/mcp_call.py list_frei0r_plugins '{}'
+```
+
+Add a "cartoon" effect to a clip:
+
+```bash
+python3 tools/mcp_call.py add_clip_frei0r_effect '{"clip_id":"<clip-id>","plugin_name":"cartoon"}'
+```
+
+List effects applied to a clip:
+
+```bash
+python3 tools/mcp_call.py list_clip_frei0r_effects '{"clip_id":"<clip-id>"}'
+```
+
+Update effect parameters:
+
+```bash
+python3 tools/mcp_call.py set_clip_frei0r_effect_params '{"clip_id":"<clip-id>","effect_id":"<effect-id>","params":{"Triplevel":0.7}}'
+```
+
+Reorder effects on a clip:
+
+```bash
+python3 tools/mcp_call.py reorder_clip_frei0r_effects '{"clip_id":"<clip-id>","effect_ids":["<eid2>","<eid1>"]}'
+```
+
+Remove an effect:
+
+```bash
+python3 tools/mcp_call.py remove_clip_frei0r_effect '{"clip_id":"<clip-id>","effect_id":"<effect-id>"}'
+```
+
 ## `.mcp.json` server entry
 
 This repository includes a Python socket entry:

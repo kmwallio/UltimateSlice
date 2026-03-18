@@ -881,6 +881,161 @@ fn move_clip(
     }
 }
 
+// ── Frei0r Effect Commands ──────────────────────────────────────────────────
+
+/// Add a frei0r effect to a clip.
+pub struct AddFrei0rEffectCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect: crate::model::clip::Frei0rEffect,
+    pub index: usize,
+}
+
+impl EditCommand for AddFrei0rEffectCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                let idx = self.index.min(clip.frei0r_effects.len());
+                clip.frei0r_effects.insert(idx, self.effect.clone());
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.frei0r_effects.retain(|e| e.id != self.effect.id);
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add frei0r effect"
+    }
+}
+
+/// Remove a frei0r effect from a clip.
+pub struct RemoveFrei0rEffectCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect: crate::model::clip::Frei0rEffect,
+    pub index: usize,
+}
+
+impl EditCommand for RemoveFrei0rEffectCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.frei0r_effects.retain(|e| e.id != self.effect.id);
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                let idx = self.index.min(clip.frei0r_effects.len());
+                clip.frei0r_effects.insert(idx, self.effect.clone());
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Remove frei0r effect"
+    }
+}
+
+/// Reorder frei0r effects on a clip (swap two adjacent entries).
+pub struct ReorderFrei0rEffectsCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub index_a: usize,
+    pub index_b: usize,
+}
+
+impl EditCommand for ReorderFrei0rEffectsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                let len = clip.frei0r_effects.len();
+                if self.index_a < len && self.index_b < len {
+                    clip.frei0r_effects.swap(self.index_a, self.index_b);
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        // Swapping the same pair reverses the operation.
+        self.execute(project);
+    }
+    fn description(&self) -> &str {
+        "Reorder frei0r effects"
+    }
+}
+
+/// Change parameters of a frei0r effect on a clip.
+pub struct SetFrei0rEffectParamsCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect_id: String,
+    pub old_params: std::collections::HashMap<String, f64>,
+    pub new_params: std::collections::HashMap<String, f64>,
+}
+
+impl EditCommand for SetFrei0rEffectParamsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                    effect.params = self.new_params.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                    effect.params = self.old_params.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set frei0r effect parameters"
+    }
+}
+
+/// Toggle the enabled state of a frei0r effect on a clip.
+pub struct ToggleFrei0rEffectCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect_id: String,
+}
+
+impl EditCommand for ToggleFrei0rEffectCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                    effect.enabled = !effect.enabled;
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        // Toggling again reverses the operation.
+        self.execute(project);
+    }
+    fn description(&self) -> &str {
+        "Toggle frei0r effect"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

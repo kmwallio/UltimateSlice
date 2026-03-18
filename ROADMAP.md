@@ -428,11 +428,16 @@ Tracking docs:
   - [ ] High-quality upscaling/downscaling (libplacebo polar/orthogonal scalers as alternative to GStreamer `videoscale`)
   - [ ] HDR export metadata (PQ/HLG transfer characteristics, mastering display color volume, MaxCLL/MaxFALL)
   - [ ] HDR passthrough mode for native HDR display output
-- [ ] Frei0r video effects plugin support
-  - [ ] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
-  - [ ] Effects browser UI listing available Frei0r filters/generators/mixers with categories
-  - [ ] Per-clip Frei0r effect application with parameter controls in Inspector
-  - [ ] Effect stacking (multiple Frei0r filters per clip, reorderable)
+- [x] Frei0r video effects plugin support
+  - [x] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
+  - [x] Effects browser UI listing available Frei0r filters with categories and search
+  - [x] Per-clip Frei0r effect application with parameter controls in Inspector
+  - [x] Effect stacking (multiple Frei0r filters per clip, reorderable)
+  - [x] GStreamer preview pipeline integration with live parameter updates
+  - [x] FFmpeg export pipeline integration (frei0r filter_complex chain)
+  - [x] FCPXML round-trip via `us:frei0r-effects` vendor attribute
+  - [x] MCP tools: `list_frei0r_plugins`, `add_clip_frei0r_effect`, `remove_clip_frei0r_effect`, `set_clip_frei0r_effect_params`, `reorder_clip_frei0r_effects`, `list_clip_frei0r_effects`
+  - [x] Five undo commands (add, remove, reorder, set params, toggle)
 - [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Transition effects (fade to black, wipe right, wipe left)

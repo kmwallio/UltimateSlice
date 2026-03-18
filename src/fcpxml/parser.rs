@@ -956,6 +956,9 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:sharpness") {
                 clip.sharpness = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:frei0r-effects") {
+                clip.frei0r_effects = serde_json::from_str(v).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:volume") {
                 clip.volume = v.parse().unwrap_or(1.0);
             }
@@ -2321,6 +2324,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
+            | "us:frei0r-effects"
             | "us:volume"
             | "us:volume-keyframes"
             | "us:pan"

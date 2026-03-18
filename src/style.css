@@ -621,3 +621,60 @@ expander > title {
     border: 1px solid #333338;
     border-radius: 6px;
 }
+
+/* ── Effects Browser ──────────────────────────────────────────────── */
+
+.effects-list {
+    background-color: #131315;
+    color: #e0e0e0;
+}
+
+.effects-list row {
+    border-bottom: 1px solid #2a2a2e;
+    padding: 2px 0;
+}
+
+.effects-list row:hover {
+    background-color: #2a2a2e;
+}
+
+.effects-list row:selected {
+    background-color: #1565c0;
+    color: white;
+}
+
+.effects-category-header {
+    font-size: 11px;
+    font-weight: 700;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.effect-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #e0e0e0;
+}
+
+.effect-hint {
+    font-size: 10px;
+    color: #888;
+}
+
+/* ── Applied Effects in Inspector ─────────────────────────────────── */
+
+.applied-effects-list {
+    background-color: #1a1a1c;
+}
+
+.applied-effects-list row {
+    border-bottom: 1px solid #2a2a2e;
+    padding: 4px 0;
+}
+
+.applied-effect-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #e0e0e0;
+}
