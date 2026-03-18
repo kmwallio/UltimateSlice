@@ -1133,7 +1133,7 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
     }
 
     let mut result = String::new();
-    let registry = Frei0rRegistry::discover();
+    let registry = Frei0rRegistry::get_or_discover();
 
     for effect in &clip.frei0r_effects {
         if !effect.enabled {
@@ -1176,7 +1176,7 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
                             let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
                             if np.native_type == Frei0rNativeType::Bool {
                                 let val = effect.params.get(prop).copied().unwrap_or(0.0);
-                                if val > 0.5 { "1.000000".to_string() } else { "0.000000".to_string() }
+                                if val > 0.5 { "y".to_string() } else { "n".to_string() }
                             } else {
                                 let val = effect.params.get(prop).copied().unwrap_or(0.0);
                                 format!("{val:.6}")
@@ -2114,6 +2114,7 @@ mod tests {
         parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
         ExportOptions, VideoCodec,
     };
+    use gstreamer as gst;
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
@@ -2826,5 +2827,39 @@ mod tests {
         assert!(f.contains("fontcolor=ff3366@0.8000"));
         assert!(f.contains("x='(0.250000)*(w-text_w)'"));
         assert!(f.contains("y='(0.750000)*(h-text_h)'"));
+    }
+
+    #[test]
+    fn frei0r_export_bool_params_use_y_n() {
+        let _ = gst::init();
+        // 3-point-color-balance has Bool params (split-preview, source-image-on-left-side).
+        // FFmpeg requires 'y'/'n' for Bool, not '1.000000'/'0.000000'.
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        let mut params = std::collections::HashMap::new();
+        params.insert("black-color-r".to_string(), 0.0);
+        params.insert("black-color-g".to_string(), 0.0);
+        params.insert("black-color-b".to_string(), 0.0);
+        params.insert("gray-color-r".to_string(), 0.5);
+        params.insert("gray-color-g".to_string(), 0.5);
+        params.insert("gray-color-b".to_string(), 0.5);
+        params.insert("white-color-r".to_string(), 1.0);
+        params.insert("white-color-g".to_string(), 1.0);
+        params.insert("white-color-b".to_string(), 1.0);
+        params.insert("split-preview".to_string(), 1.0);
+        params.insert("source-image-on-left-side".to_string(), 0.0);
+
+        clip.frei0r_effects.push(crate::model::clip::Frei0rEffect {
+            id: "test-id".to_string(),
+            plugin_name: "3-point-color-balance".to_string(),
+            enabled: true,
+            params,
+            string_params: std::collections::HashMap::new(),
+        });
+
+        let filter = super::build_frei0r_effects_filter(&clip);
+        // Must contain y/n for bools, not 1.000000/0.000000.
+        assert!(filter.contains("|y|n"), "Expected y/n for bools, got: {}", filter);
+        // Must contain r/g/b compound format for COLORs.
+        assert!(filter.contains("0.000000/0.000000/0.000000"), "Missing compound COLOR format in: {}", filter);
     }
 }

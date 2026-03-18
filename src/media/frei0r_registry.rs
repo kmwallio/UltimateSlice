@@ -6,6 +6,10 @@
 
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// Cached singleton registry. Built on first access, reused thereafter.
+static FREI0R_REGISTRY: OnceLock<Frei0rRegistry> = OnceLock::new();
 
 /// Describes a single parameter exposed by a frei0r filter plugin.
 #[derive(Debug, Clone)]
@@ -106,9 +110,18 @@ const FILTER_PREFIX: &str = "frei0r-filter-";
 const SKIP_PROPERTIES: &[&str] = &["name", "parent", "qos"];
 
 impl Frei0rRegistry {
+    /// Get the cached frei0r registry, building it on first access.
+    ///
+    /// This avoids repeatedly dlopening all frei0r .so files (which can
+    /// conflict with running GStreamer pipelines when called more than once).
+    pub fn get_or_discover() -> &'static Self {
+        FREI0R_REGISTRY.get_or_init(Self::discover)
+    }
+
     /// Discover all available frei0r filter plugins via GStreamer.
     ///
-    /// Should be called once at startup after `gstreamer::init()`.
+    /// Prefer `get_or_discover()` for cached access. This performs a fresh
+    /// scan including dlopen of every frei0r .so file.
     pub fn discover() -> Self {
         let mut plugins = Vec::new();
 

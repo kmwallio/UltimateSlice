@@ -358,17 +358,8 @@ impl InspectorView {
 
             // Look up plugin info for param type detection (Bool vs Double).
             let plugin_info = {
-                let reg_opt = self.frei0r_registry.borrow();
-                if reg_opt.is_none() {
-                    drop(reg_opt);
-                    let reg = crate::media::frei0r_registry::Frei0rRegistry::discover();
-                    *self.frei0r_registry.borrow_mut() = Some(reg);
-                }
-                let reg_ref = self.frei0r_registry.borrow();
-                reg_ref
-                    .as_ref()
-                    .and_then(|r| r.find_by_name(&effect.plugin_name))
-                    .cloned()
+                let reg = crate::media::frei0r_registry::Frei0rRegistry::get_or_discover();
+                reg.find_by_name(&effect.plugin_name).cloned()
             };
 
             // Collapsible container for parameter controls.

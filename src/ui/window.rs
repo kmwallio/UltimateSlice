@@ -4764,7 +4764,7 @@ pub fn build_window(
             };
             // Populate default parameter values from the registry so that
             // parameter sliders appear in the inspector immediately.
-            let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
+            let registry = crate::media::frei0r_registry::Frei0rRegistry::get_or_discover();
             let mut default_params = std::collections::HashMap::new();
             let mut default_string_params = std::collections::HashMap::new();
             if let Some(info) = registry.find_by_name(&plugin_name) {
@@ -5588,7 +5588,7 @@ pub fn build_window(
     // ── Frei0r plugin discovery (deferred to avoid blocking startup) ─────
     glib::idle_add_local_once(move || {
         if gstreamer::init().is_ok() {
-            let registry = Rc::new(crate::media::frei0r_registry::Frei0rRegistry::discover());
+            let registry = Rc::new(crate::media::frei0r_registry::Frei0rRegistry::get_or_discover().clone());
             set_effects_registry(registry);
         }
     });
@@ -8997,7 +8997,7 @@ fn handle_mcp_command(
         }
 
         McpCommand::ListFrei0rPlugins { reply } => {
-            let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
+            let registry = crate::media::frei0r_registry::Frei0rRegistry::get_or_discover();
             let plugins: Vec<Value> = registry
                 .plugins
                 .iter()
@@ -9078,7 +9078,7 @@ fn handle_mcp_command(
             let mut default_params = std::collections::HashMap::new();
             let mut default_string_params = std::collections::HashMap::new();
             // Populate defaults from registry.
-            let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
+            let registry = crate::media::frei0r_registry::Frei0rRegistry::get_or_discover();
             if let Some(info) = registry.find_by_name(&plugin_name) {
                 for p in &info.params {
                     if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
