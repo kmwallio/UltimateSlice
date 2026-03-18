@@ -435,7 +435,7 @@ Tracking docs:
   - [x] Effect stacking (multiple Frei0r filters per clip, reorderable)
   - [x] GStreamer preview pipeline integration with live parameter updates
   - [x] FFmpeg export pipeline integration (frei0r filter_complex chain)
-  - [x] FCPXML round-trip via `us:frei0r-effects` vendor attribute
+  - [x] FCPXML round-trip via `us:frei0r-effects` vendor attribute (JSON quotes escaped to `&quot;` on write; backward-compatible sanitizer for older files)
   - [x] MCP tools: `list_frei0r_plugins`, `add_clip_frei0r_effect`, `remove_clip_frei0r_effect`, `set_clip_frei0r_effect_params`, `reorder_clip_frei0r_effects`, `list_clip_frei0r_effects`
   - [x] Five undo commands (add, remove, reorder, set params, toggle)
 - [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)

@@ -2785,7 +2785,7 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
 }
 
 fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
-    const KEYFRAME_ATTR_PREFIXES: [&str; 16] = [
+    const KEYFRAME_ATTR_PREFIXES: [&str; 17] = [
         "us:brightness-keyframes=\"",
         "us:contrast-keyframes=\"",
         "us:saturation-keyframes=\"",
@@ -2802,6 +2802,7 @@ fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
         "us:crop-right-keyframes=\"",
         "us:crop-top-keyframes=\"",
         "us:crop-bottom-keyframes=\"",
+        "us:frei0r-effects=\"",
     ];
 
     let mut cursor = 0usize;
