@@ -1843,6 +1843,10 @@ fn patch_asset_clip_block_transform(
                 &project.frame_rate,
             ),
         ),
+        (
+            "duration",
+            ns_to_fcpxml_time(clip.duration(), &project.frame_rate),
+        ),
     ] {
         let next = replace_or_insert_attr(&updated_start, attr, &value)?;
         if next != updated_start {
