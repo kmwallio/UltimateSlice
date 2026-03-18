@@ -371,6 +371,10 @@ impl InspectorView {
                     .cloned()
             };
 
+            // Collapsible container for parameter controls.
+            let params_box = GBox::new(Orientation::Vertical, 2);
+            let has_params = !effect.params.is_empty();
+
             // Parameter controls — Bool → CheckButton, Double → Scale slider.
             for (param_name, &param_val) in &effect.params {
                 let param_type = plugin_info
@@ -496,7 +500,15 @@ impl InspectorView {
                     }
                 }
 
-                row.append(&param_row);
+                params_box.append(&param_row);
+            }
+
+            if has_params {
+                let expander = Expander::new(Some("Parameters"));
+                expander.set_expanded(false);
+                expander.set_margin_start(4);
+                expander.set_child(Some(&params_box));
+                row.append(&expander);
             }
 
             if i + 1 < effect_count {
