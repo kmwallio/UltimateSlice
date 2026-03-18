@@ -3544,7 +3544,8 @@ impl ProgramPlayer {
 
     pub fn set_title(&self, text: &str, font: &str, color_rgba: u32, rel_x: f64, rel_y: f64) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
-            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y);
+            let (_, proc_h) = self.preview_processing_dimensions();
+            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, proc_h);
         }
     }
 
@@ -6168,6 +6169,26 @@ impl ProgramPlayer {
         }
     }
 
+    /// Parse a Pango font description ("Sans Bold 36") into (family, size).
+    fn parse_pango_font_desc(font_desc: &str) -> (String, f64) {
+        let trimmed = font_desc.trim();
+        if trimmed.is_empty() {
+            return ("Sans".to_string(), 36.0);
+        }
+        let mut parts = trimmed.rsplitn(2, ' ');
+        let last = parts.next().unwrap_or_default();
+        if let Ok(size) = last.parse::<f64>() {
+            let family = parts.next().unwrap_or("Sans").trim();
+            if family.is_empty() {
+                ("Sans".to_string(), size.max(1.0))
+            } else {
+                (family.to_string(), size.max(1.0))
+            }
+        } else {
+            (trimmed.to_string(), 36.0)
+        }
+    }
+
     fn apply_title_to_slot(
         slot: &VideoSlot,
         text: &str,
@@ -6175,13 +6196,18 @@ impl ProgramPlayer {
         color_rgba: u32,
         rel_x: f64,
         rel_y: f64,
+        proc_h: u32,
     ) {
+        const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
         if let Some(ref to) = slot.textoverlay {
             let silent = text.is_empty();
             to.set_property("silent", silent);
             if !silent {
                 to.set_property("text", text);
-                to.set_property("font-desc", font);
+                let (family, base_size) = Self::parse_pango_font_desc(font);
+                let scaled_size = (base_size * (proc_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let adjusted_font = format!("{} {:.0}", family, scaled_size);
+                to.set_property("font-desc", &adjusted_font);
                 to.set_property_from_str("halignment", "position");
                 to.set_property_from_str("valignment", "position");
                 to.set_property("xpos", rel_x);
@@ -7215,13 +7241,17 @@ impl ProgramPlayer {
             );
         }
         if let Some(ref to) = textoverlay {
+            const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
             if clip.title_text.is_empty() {
                 to.set_property("silent", true);
                 to.set_property("text", "");
             } else {
                 to.set_property("silent", false);
                 to.set_property("text", &clip.title_text);
-                to.set_property("font-desc", &clip.title_font);
+                let (family, base_size) = Self::parse_pango_font_desc(&clip.title_font);
+                let scaled_size = (base_size * (target_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let adjusted_font = format!("{} {:.0}", family, scaled_size);
+                to.set_property("font-desc", &adjusted_font);
                 to.set_property_from_str("halignment", "position");
                 to.set_property_from_str("valignment", "position");
                 to.set_property("xpos", clip.title_x);
@@ -8938,6 +8968,7 @@ impl ProgramPlayer {
             clip.title_color,
             clip.title_x,
             clip.title_y,
+            proc_h,
         );
         Self::apply_zoom_to_slot(
             &slot_ref_for_transform,
@@ -9820,14 +9851,18 @@ impl ProgramPlayer {
         );
 
         // Title overlay
-        Self::apply_title_to_slot(
-            slot,
-            &clip.title_text,
-            &clip.title_font,
-            clip.title_color,
-            clip.title_x,
-            clip.title_y,
-        );
+        {
+            let (_, proc_h) = self.preview_processing_dimensions();
+            Self::apply_title_to_slot(
+                slot,
+                &clip.title_text,
+                &clip.title_font,
+                clip.title_color,
+                clip.title_x,
+                clip.title_y,
+                proc_h,
+            );
+        }
 
         // Compositor pad: opacity + zoom/position
         if let Some(ref pad) = slot.compositor_pad {

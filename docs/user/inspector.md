@@ -168,6 +168,8 @@ Rendered via GStreamer `textoverlay` (preview) and composited on export.
 
 Default: white `Sans Bold 36`, bottom-centre (`x=0.5, y=0.9`).
 
+> **Resolution-independent sizing** — Font size is specified in Pango points at a 1080p reference height. Both GStreamer preview and FFmpeg export scale the effective font size proportionally to the actual rendering height, so title text appears at the same relative size regardless of output resolution (720p, 1080p, 4K, etc.).
+
 ---
 
 ## Speed

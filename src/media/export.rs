@@ -249,7 +249,7 @@ pub fn export_project(
         let sharpen_filter = build_sharpen_filter(clip);
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
-        let title_filter = build_title_filter(clip);
+        let title_filter = build_title_filter(clip, out_h);
         let speed_filter = build_timing_filter(clip, frame_duration_s);
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
@@ -386,7 +386,7 @@ pub fn export_project(
         let sharpen_filter = build_sharpen_filter(clip);
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
-        let title_filter = build_title_filter(clip);
+        let title_filter = build_title_filter(clip, out_h);
         let speed_filter = build_timing_filter(clip, frame_duration_s);
         let lut_prefix = build_lut_filter_prefix(clip);        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let rotate_filter = build_rotation_filter(clip, true);
@@ -425,24 +425,27 @@ pub fn export_project(
             );
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
                  ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[{ov_label}raw]"
+                , project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
             let opacity = clip.opacity.clamp(0.0, 1.0);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
-        // Delay PTS to timeline position so the overlay lands at the right time
+        // Normalize PTS to zero (removes any residual offset from keyframe
+        // seeking), then delay to the correct timeline position.
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
         filter.push_str(&format!(
-            ";[{ov_label}raw]setpts=PTS+{start_s:.6}/TB[{ov_label}]"
+            ";[{ov_label}raw]setpts=PTS-STARTPTS+{start_s:.6}/TB[{ov_label}]"
         ));
         let next_label = format!("vcomp{k}");
         let end_s = (clip.timeline_start + clip.duration()) as f64 / 1_000_000_000.0;
@@ -1273,7 +1276,9 @@ fn escape_drawtext_value(value: &str) -> String {
         .replace('%', "\\%")
 }
 
-fn build_title_filter(clip: &crate::model::clip::Clip) -> String {
+const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
+
+fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     if clip.title_text.trim().is_empty() {
         return String::new();
     }
@@ -1284,6 +1289,9 @@ fn build_title_filter(clip: &crate::model::clip::Clip) -> String {
     let rel_x = clip.title_x.clamp(0.0, 1.0);
     let rel_y = clip.title_y.clamp(0.0, 1.0);
 
+    // Scale Pango points → pixels (×4/3) then proportionally to output height
+    let scaled_size = font_size * (4.0 / 3.0) * (out_h as f64 / TITLE_REFERENCE_HEIGHT);
+
     let rgba = clip.title_color;
     let r = ((rgba >> 24) & 0xFF) as u8;
     let g = ((rgba >> 16) & 0xFF) as u8;
@@ -1291,8 +1299,9 @@ fn build_title_filter(clip: &crate::model::clip::Clip) -> String {
     let a = (rgba & 0xFF) as u8;
     let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
 
+    // Position: center text at (rel_x*w, rel_y*h) to match GStreamer textoverlay semantics
     format!(
-        ",drawtext=font='{font_name}':text='{text}':fontsize={font_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*(w-text_w)':y='({rel_y:.6})*(h-text_h)'"
+        ",drawtext=font='{font_name}':text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
     )
 }
 
@@ -2807,7 +2816,7 @@ mod tests {
     #[test]
     fn build_title_filter_empty_when_no_title_text() {
         let clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
-        assert!(build_title_filter(&clip).is_empty());
+        assert!(build_title_filter(&clip, 1080).is_empty());
     }
 
     #[test]
@@ -2819,14 +2828,41 @@ mod tests {
         clip.title_y = 0.75;
         clip.title_color = 0xFF3366CC;
 
-        let f = build_title_filter(&clip);
+        // At 1080p: 48pt × 4/3 × (1080/1080) = 64px
+        let f = build_title_filter(&clip, 1080);
         assert!(f.contains(",drawtext="));
         assert!(f.contains("text='Hello\\: world'"));
         assert!(f.contains("font='Sans Bold'"));
-        assert!(f.contains("fontsize=48.00"));
+        assert!(f.contains("fontsize=64.00"));
         assert!(f.contains("fontcolor=ff3366@0.8000"));
-        assert!(f.contains("x='(0.250000)*(w-text_w)'"));
-        assert!(f.contains("y='(0.750000)*(h-text_h)'"));
+        assert!(f.contains("x='(0.250000)*w-text_w/2'"));
+        assert!(f.contains("y='(0.750000)*h-text_h/2'"));
+    }
+
+    #[test]
+    fn build_title_filter_scales_with_resolution() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "Test".to_string();
+        clip.title_font = "Sans Bold 36".to_string();
+
+        // At 2160p: 36pt × 4/3 × (2160/1080) = 96px
+        let f = build_title_filter(&clip, 2160);
+        assert!(f.contains("fontsize=96.00"));
+
+        // At 1080p: 36pt × 4/3 × (1080/1080) = 48px
+        let f = build_title_filter(&clip, 1080);
+        assert!(f.contains("fontsize=48.00"));
+    }
+
+    #[test]
+    fn build_title_filter_default_font_at_1080p() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "Default".to_string();
+        // default font is "Sans Bold 36"
+
+        let f = build_title_filter(&clip, 1080);
+        // 36pt × 4/3 × 1 = 48px
+        assert!(f.contains("fontsize=48.00"));
     }
 
     #[test]
