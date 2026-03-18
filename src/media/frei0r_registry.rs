@@ -22,6 +22,11 @@ pub struct Frei0rParamInfo {
     pub min: f64,
     /// Maximum value.
     pub max: f64,
+    /// For String params: accepted enum values parsed from GStreamer blurb,
+    /// e.g. `["normal", "add", "multiply"]`.  `None` for non-enum strings.
+    pub enum_values: Option<Vec<String>>,
+    /// For String params: the default string value (e.g. `"normal"`).
+    pub default_string: Option<String>,
 }
 
 /// Frei0r parameter types supported in the UI.
@@ -220,6 +225,8 @@ fn inspect_param(
             default_value: safe_default,
             min: pspec_double.minimum(),
             max: pspec_double.maximum(),
+            enum_values: None,
+            default_string: None,
         });
     }
 
@@ -236,10 +243,17 @@ fn inspect_param(
             default_value: default_val,
             min: 0.0,
             max: 1.0,
+            enum_values: None,
+            default_string: None,
         });
     }
 
     if let Some(_pspec_str) = pspec.downcast_ref::<glib::ParamSpecString>() {
+        let default_str = element
+            .property::<Option<String>>(&name)
+            .unwrap_or_default();
+        let blurb = pspec.blurb().map(|s| s.to_string()).unwrap_or_default();
+        let enum_values = parse_accepted_values(&blurb);
         return Some(Frei0rParamInfo {
             display_name,
             name,
@@ -247,11 +261,38 @@ fn inspect_param(
             default_value: 0.0,
             min: 0.0,
             max: 0.0,
+            enum_values,
+            default_string: Some(default_str),
         });
     }
 
     // Skip unsupported types (Color, Position, etc.) for now.
     None
+}
+
+/// Parse "Accepted values: 'val1', 'val2', ..." from a GStreamer property blurb.
+/// Returns `None` if the pattern is not found.
+fn parse_accepted_values(blurb: &str) -> Option<Vec<String>> {
+    let marker = "Accepted values:";
+    let idx = blurb.find(marker)?;
+    let tail = &blurb[idx + marker.len()..];
+    let values: Vec<String> = tail
+        .split('\'')
+        .enumerate()
+        .filter_map(|(i, s)| {
+            // Odd indices are inside single-quoted strings.
+            if i % 2 == 1 && !s.trim().is_empty() {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
 }
 
 /// Convert a frei0r name like `"3-point-color-balance"` to `"3 Point Color Balance"`.
@@ -302,5 +343,15 @@ mod tests {
         assert_eq!(simplify_category("Filter/Effect/Video"), "Effect");
         assert_eq!(simplify_category("Filter/Converter/Video"), "Converter");
         assert_eq!(simplify_category("Filter"), "Uncategorized");
+    }
+
+    #[test]
+    fn test_parse_accepted_values() {
+        let blurb = "Blend mode used to compose gradient on image. Accepted values: 'normal', 'add', 'saturate', 'multiply'";
+        let vals = parse_accepted_values(blurb).unwrap();
+        assert_eq!(vals, vec!["normal", "add", "saturate", "multiply"]);
+
+        assert!(parse_accepted_values("Just a description").is_none());
+        assert!(parse_accepted_values("Accepted values:").is_none());
     }
 }

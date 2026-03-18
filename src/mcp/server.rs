@@ -1036,7 +1036,8 @@ fn tools_list() -> Value {
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id" },
                     "plugin_name": { "type": "string", "description": "Frei0r plugin name (e.g. 'cartoon', 'glow')" },
-                    "params": { "type": "object", "description": "Optional parameter overrides as {param_name: value} (frei0r doubles 0.0-1.0)" }
+                    "params": { "type": "object", "description": "Optional numeric parameter overrides as {param_name: value} (frei0r doubles 0.0-1.0)" },
+                    "string_params": { "type": "object", "description": "Optional string parameter overrides as {param_name: value} (e.g. blend-mode, pattern)" }
                 },
                 "required": ["clip_id", "plugin_name"]
             }
@@ -1061,7 +1062,8 @@ fn tools_list() -> Value {
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id" },
                     "effect_id": { "type": "string", "description": "Effect instance id" },
-                    "params": { "type": "object", "description": "Parameter values as {param_name: value}" }
+                    "params": { "type": "object", "description": "Numeric parameter values as {param_name: value}" },
+                    "string_params": { "type": "object", "description": "Optional string parameter values as {param_name: value}" }
                 },
                 "required": ["clip_id", "effect_id", "params"]
             }
@@ -1542,6 +1544,14 @@ fn dispatch_tool_payload(
                     .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
                     .collect()
             }),
+            string_params: args
+                .get("string_params")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
             reply: tx,
         },
         "remove_clip_frei0r_effect" => McpCommand::RemoveClipFrei0rEffect {
@@ -1561,6 +1571,14 @@ fn dispatch_tool_payload(
                         .collect()
                 })
                 .unwrap_or_default(),
+            string_params: args
+                .get("string_params")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
             reply: tx,
         },
         "reorder_clip_frei0r_effects" => McpCommand::ReorderClipFrei0rEffects {

@@ -6,8 +6,8 @@ use gdk4;
 use gio;
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, Button, CheckButton, Entry, Expander, Label, Orientation, Scale,
-    Separator,
+    self as gtk, Box as GBox, Button, CheckButton, DropDown, Entry, Expander, Label, Orientation,
+    Scale, Separator, StringList,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -373,7 +373,7 @@ impl InspectorView {
 
             // Collapsible container for parameter controls.
             let params_box = GBox::new(Orientation::Vertical, 2);
-            let has_params = !effect.params.is_empty();
+            let has_params = !effect.params.is_empty() || !effect.string_params.is_empty();
 
             // Parameter controls — Bool → CheckButton, Double → Scale slider.
             for (param_name, &param_val) in &effect.params {
@@ -434,8 +434,9 @@ impl InspectorView {
                         });
                     }
                     crate::media::frei0r_registry::Frei0rParamType::String => {
-                        // String params not editable via numeric model; show read-only hint.
-                        let hint = Label::new(Some("(string — not editable)"));
+                        // String params are now handled in the string_params loop below.
+                        // If somehow a string param is in the f64 map, show value.
+                        let hint = Label::new(Some(&format!("{param_val}")));
                         hint.add_css_class("dim-label");
                         hint.set_hexpand(true);
                         param_row.append(&hint);
@@ -498,6 +499,116 @@ impl InspectorView {
                             }
                         });
                     }
+                }
+
+                params_box.append(&param_row);
+            }
+
+            // String parameter controls — DropDown for enums, Entry for free-form.
+            for (param_name, param_val) in &effect.string_params {
+                let enum_values = plugin_info
+                    .as_ref()
+                    .and_then(|info| info.params.iter().find(|p| p.name == *param_name))
+                    .and_then(|p| p.enum_values.clone());
+
+                let param_row = GBox::new(Orientation::Horizontal, 4);
+                param_row.set_margin_start(24);
+                let plabel = Label::new(Some(param_name));
+                plabel.add_css_class("dim-label");
+                plabel.set_halign(gtk4::Align::Start);
+                plabel.set_width_chars(12);
+                param_row.append(&plabel);
+
+                if let Some(values) = enum_values {
+                    let str_list = StringList::new(&values.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                    let dropdown = DropDown::new(Some(str_list), gtk4::Expression::NONE);
+                    dropdown.set_hexpand(true);
+                    // Select the current value.
+                    if let Some(pos) = values.iter().position(|v| v == param_val) {
+                        dropdown.set_selected(pos as u32);
+                    }
+                    param_row.append(&dropdown);
+
+                    let project = self.project.clone();
+                    let selected_clip_id = self.selected_clip_id.clone();
+                    let effect_id = effect.id.clone();
+                    let pname = param_name.clone();
+                    let vals = values.clone();
+                    let on_params_changed = self.on_frei0r_params_changed.clone();
+                    let updating = self.updating.clone();
+                    dropdown.connect_selected_notify(move |dd| {
+                        if *updating.borrow() {
+                            return;
+                        }
+                        let idx = dd.selected() as usize;
+                        if let Some(new_val) = vals.get(idx) {
+                            let cid = selected_clip_id.borrow().clone();
+                            if let Some(cid) = cid {
+                                {
+                                    let mut proj = project.borrow_mut();
+                                    for track in &mut proj.tracks {
+                                        if let Some(clip) =
+                                            track.clips.iter_mut().find(|c| c.id == cid)
+                                        {
+                                            if let Some(e) = clip
+                                                .frei0r_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
+                                            {
+                                                e.string_params
+                                                    .insert(pname.clone(), new_val.clone());
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    proj.dirty = true;
+                                }
+                                on_params_changed();
+                            }
+                        }
+                    });
+                } else {
+                    // Free-form string parameter — use an Entry.
+                    let entry = Entry::new();
+                    entry.set_text(param_val);
+                    entry.set_hexpand(true);
+                    param_row.append(&entry);
+
+                    let project = self.project.clone();
+                    let selected_clip_id = self.selected_clip_id.clone();
+                    let effect_id = effect.id.clone();
+                    let pname = param_name.clone();
+                    let on_params_changed = self.on_frei0r_params_changed.clone();
+                    let updating = self.updating.clone();
+                    entry.connect_changed(move |e| {
+                        if *updating.borrow() {
+                            return;
+                        }
+                        let new_val = e.text().to_string();
+                        let cid = selected_clip_id.borrow().clone();
+                        if let Some(cid) = cid {
+                            {
+                                let mut proj = project.borrow_mut();
+                                for track in &mut proj.tracks {
+                                    if let Some(clip) =
+                                        track.clips.iter_mut().find(|c| c.id == cid)
+                                    {
+                                        if let Some(eff) = clip
+                                            .frei0r_effects
+                                            .iter_mut()
+                                            .find(|eff| eff.id == effect_id)
+                                        {
+                                            eff.string_params
+                                                .insert(pname.clone(), new_val.clone());
+                                        }
+                                        break;
+                                    }
+                                }
+                                proj.dirty = true;
+                            }
+                            on_params_changed();
+                        }
+                    });
                 }
 
                 params_box.append(&param_row);

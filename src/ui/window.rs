@@ -4764,17 +4764,25 @@ pub fn build_window(
             };
             // Populate default parameter values from the registry so that
             // parameter sliders appear in the inspector immediately.
-            let default_params = {
-                let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
-                let mut params = std::collections::HashMap::new();
-                if let Some(info) = registry.find_by_name(&plugin_name) {
-                    for p in &info.params {
-                        params.insert(p.name.clone(), p.default_value);
+            let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
+            let mut default_params = std::collections::HashMap::new();
+            let mut default_string_params = std::collections::HashMap::new();
+            if let Some(info) = registry.find_by_name(&plugin_name) {
+                for p in &info.params {
+                    if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
+                        if let Some(ref s) = p.default_string {
+                            default_string_params.insert(p.name.clone(), s.clone());
+                        }
+                    } else {
+                        default_params.insert(p.name.clone(), p.default_value);
                     }
                 }
-                params
-            };
-            let effect = crate::model::clip::Frei0rEffect::with_params(&plugin_name, default_params);
+            }
+            let effect = crate::model::clip::Frei0rEffect::with_all_params(
+                &plugin_name,
+                default_params,
+                default_string_params,
+            );
             let cmd = crate::undo::AddFrei0rEffectCommand {
                 clip_id,
                 track_id,
@@ -8998,14 +9006,21 @@ fn handle_mcp_command(
                         .params
                         .iter()
                         .map(|pr| {
-                            json!({
+                            let mut obj = json!({
                                 "name": pr.name,
                                 "display_name": pr.display_name,
                                 "type": format!("{:?}", pr.param_type),
                                 "default": pr.default_value,
                                 "min": pr.min,
                                 "max": pr.max,
-                            })
+                            });
+                            if let Some(ref ev) = pr.enum_values {
+                                obj["enum_values"] = json!(ev);
+                            }
+                            if let Some(ref ds) = pr.default_string {
+                                obj["default_string"] = json!(ds);
+                            }
+                            obj
                         })
                         .collect();
                     json!({
@@ -9035,6 +9050,7 @@ fn handle_mcp_command(
                                 "plugin_name": e.plugin_name,
                                 "enabled": e.enabled,
                                 "params": e.params,
+                                "string_params": e.string_params,
                             }));
                         }
                         break;
@@ -9055,15 +9071,23 @@ fn handle_mcp_command(
             clip_id,
             plugin_name,
             params,
+            string_params,
             reply,
         } => {
             let effect_id = uuid::Uuid::new_v4().to_string();
             let mut default_params = std::collections::HashMap::new();
+            let mut default_string_params = std::collections::HashMap::new();
             // Populate defaults from registry.
             let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
             if let Some(info) = registry.find_by_name(&plugin_name) {
                 for p in &info.params {
-                    default_params.insert(p.name.clone(), p.default_value);
+                    if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
+                        if let Some(ref s) = p.default_string {
+                            default_string_params.insert(p.name.clone(), s.clone());
+                        }
+                    } else {
+                        default_params.insert(p.name.clone(), p.default_value);
+                    }
                 }
             }
             // Override with user-supplied params.
@@ -9072,11 +9096,17 @@ fn handle_mcp_command(
                     default_params.insert(k, v);
                 }
             }
+            if let Some(user_string_params) = string_params {
+                for (k, v) in user_string_params {
+                    default_string_params.insert(k, v);
+                }
+            }
             let effect = crate::model::clip::Frei0rEffect {
                 id: effect_id.clone(),
                 plugin_name: plugin_name.clone(),
                 enabled: true,
                 params: default_params,
+                string_params: default_string_params,
             };
             let mut proj = project.borrow_mut();
             let mut found = false;
@@ -9133,6 +9163,7 @@ fn handle_mcp_command(
             clip_id,
             effect_id,
             params,
+            string_params,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -9145,6 +9176,11 @@ fn handle_mcp_command(
                         {
                             for (k, v) in params {
                                 effect.params.insert(k, v);
+                            }
+                            if let Some(sp) = string_params {
+                                for (k, v) in sp {
+                                    effect.string_params.insert(k, v);
+                                }
                             }
                             proj.dirty = true;
                             found = true;

@@ -145,16 +145,23 @@ Add a "cartoon" effect to a clip:
 python3 tools/mcp_call.py add_clip_frei0r_effect '{"clip_id":"<clip-id>","plugin_name":"cartoon"}'
 ```
 
+Add a "cairogradient" effect with a string parameter override:
+
+```bash
+python3 tools/mcp_call.py add_clip_frei0r_effect '{"clip_id":"<clip-id>","plugin_name":"cairogradient","string_params":{"blend-mode":"multiply"}}'
+```
+
 List effects applied to a clip:
 
 ```bash
 python3 tools/mcp_call.py list_clip_frei0r_effects '{"clip_id":"<clip-id>"}'
 ```
 
-Update effect parameters:
+Update effect parameters (numeric and string):
 
 ```bash
 python3 tools/mcp_call.py set_clip_frei0r_effect_params '{"clip_id":"<clip-id>","effect_id":"<effect-id>","params":{"Triplevel":0.7}}'
+python3 tools/mcp_call.py set_clip_frei0r_effect_params '{"clip_id":"<clip-id>","effect_id":"<effect-id>","params":{},"string_params":{"blend-mode":"screen"}}'
 ```
 
 Reorder effects on a clip:

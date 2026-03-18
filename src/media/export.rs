@@ -1148,8 +1148,19 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
             info.params
                 .iter()
                 .map(|p| {
-                    let val = effect.params.get(&p.name).copied().unwrap_or(p.default_value);
-                    format!("{val:.6}")
+                    if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
+                        // String params: use string value, or default.
+                        effect
+                            .string_params
+                            .get(&p.name)
+                            .cloned()
+                            .or_else(|| p.default_string.clone())
+                            .unwrap_or_default()
+                    } else {
+                        let val =
+                            effect.params.get(&p.name).copied().unwrap_or(p.default_value);
+                        format!("{val:.6}")
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join("|")

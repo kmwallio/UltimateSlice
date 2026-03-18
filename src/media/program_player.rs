@@ -3456,6 +3456,11 @@ impl ProgramPlayer {
                         set_frei0r_property(elem, param, val);
                     }
                 }
+                for (param, val) in &effect.string_params {
+                    if elem.has_property(param) {
+                        set_frei0r_string_property(elem, param, val);
+                    }
+                }
             }
         }
 
@@ -7045,6 +7050,11 @@ impl ProgramPlayer {
                 for (param, &val) in &effect.params {
                     if elem.has_property(param) {
                         set_frei0r_property(&elem, param, val);
+                    }
+                }
+                for (param, val) in &effect.string_params {
+                    if elem.has_property(param) {
+                        set_frei0r_string_property(&elem, param, val);
                     }
                 }
                 Some(elem)
@@ -10955,9 +10965,18 @@ fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
     } else if vtype == glib::Type::F32 {
         elem.set_property(param, val as f32);
     } else if vtype == glib::Type::STRING {
-        // String params aren't editable via our f64 model; skip silently.
+        // String params are handled by set_frei0r_string_property.
     } else {
         // Unknown type (Object, etc.) — skip silently.
+    }
+}
+
+fn set_frei0r_string_property(elem: &gst::Element, param: &str, val: &str) {
+    let Some(pspec) = elem.find_property(param) else {
+        return;
+    };
+    if pspec.value_type() == glib::Type::STRING {
+        elem.set_property(param, val);
     }
 }
 

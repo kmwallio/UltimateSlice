@@ -369,6 +369,7 @@ pub enum McpCommand {
         clip_id: String,
         plugin_name: String,
         params: Option<std::collections::HashMap<String, f64>>,
+        string_params: Option<std::collections::HashMap<String, String>>,
         reply: SyncSender<Value>,
     },
     RemoveClipFrei0rEffect {
@@ -380,6 +381,7 @@ pub enum McpCommand {
         clip_id: String,
         effect_id: String,
         params: std::collections::HashMap<String, f64>,
+        string_params: Option<std::collections::HashMap<String, String>>,
         reply: SyncSender<Value>,
     },
     ReorderClipFrei0rEffects {

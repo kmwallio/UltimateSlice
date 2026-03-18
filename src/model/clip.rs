@@ -365,9 +365,13 @@ pub struct Frei0rEffect {
     /// Whether the effect is currently active in the filter chain.
     #[serde(default = "default_effect_enabled")]
     pub enabled: bool,
-    /// Parameter values keyed by GStreamer property name.
+    /// Numeric parameter values keyed by GStreamer property name.
     #[serde(default)]
     pub params: HashMap<String, f64>,
+    /// String parameter values keyed by GStreamer property name
+    /// (e.g. blend-mode → "normal").
+    #[serde(default)]
+    pub string_params: HashMap<String, String>,
 }
 
 fn default_effect_enabled() -> bool {
@@ -382,6 +386,7 @@ impl Frei0rEffect {
             plugin_name: plugin_name.to_string(),
             enabled: true,
             params: HashMap::new(),
+            string_params: HashMap::new(),
         }
     }
 
@@ -392,6 +397,22 @@ impl Frei0rEffect {
             plugin_name: plugin_name.to_string(),
             enabled: true,
             params,
+            string_params: HashMap::new(),
+        }
+    }
+
+    /// Create a new effect instance with both numeric and string parameters.
+    pub fn with_all_params(
+        plugin_name: &str,
+        params: HashMap<String, f64>,
+        string_params: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            enabled: true,
+            params,
+            string_params,
         }
     }
 }

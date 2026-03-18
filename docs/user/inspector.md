@@ -299,7 +299,11 @@ Each applied effect row shows:
 | **Effect name** | Human-friendly plugin name |
 | **↑ / ↓** buttons | Reorder within the effect chain |
 | **×** button | Remove the effect |
-| **Parameter sliders** | Frei0r double parameters (0.0–1.0 normalized range) |
+| **Parameters** (collapsible) | Click "Parameters" expander to reveal controls |
+| **Numeric sliders** | Frei0r double parameters (0.0–1.0 normalized range) |
+| **Boolean toggles** | CheckButton for on/off parameters |
+| **String dropdowns** | DropDown for enum string parameters (e.g. blend-mode with values like "normal", "multiply", "screen") |
+| **String entries** | Text entry for free-form string parameters |
 
 ### Preview & Export
 
