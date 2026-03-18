@@ -1174,12 +1174,17 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
                 .join("|")
         };
 
+        // Use FFmpeg module name (may differ from GStreamer name).
+        let ffmpeg_name = plugin
+            .map(|p| p.ffmpeg_name.as_str())
+            .unwrap_or(&effect.plugin_name);
+
         if params_str.is_empty() {
-            result.push_str(&format!(",frei0r=filter_name={}", effect.plugin_name));
+            result.push_str(&format!(",frei0r=filter_name={}", ffmpeg_name));
         } else {
             result.push_str(&format!(
                 ",frei0r=filter_name={}:filter_params={}",
-                effect.plugin_name, params_str
+                ffmpeg_name, params_str
             ));
         }
     }

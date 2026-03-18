@@ -47,6 +47,10 @@ pub struct Frei0rPluginInfo {
     pub gst_element_name: String,
     /// Short frei0r name (prefix stripped, e.g. `"cartoon"`).
     pub frei0r_name: String,
+    /// FFmpeg frei0r module name (the .so filename without extension,
+    /// e.g. `"three_point_balance"`).  Falls back to `frei0r_name` when
+    /// the .so cannot be found on disk.
+    pub ffmpeg_name: String,
     /// Human-friendly display name (title-cased, hyphens → spaces).
     pub display_name: String,
     /// Description from GStreamer element metadata.
@@ -78,6 +82,10 @@ impl Frei0rRegistry {
     pub fn discover() -> Self {
         let mut plugins = Vec::new();
 
+        // Build a map from GStreamer-normalized names to actual .so module names
+        // so FFmpeg export can reference the correct frei0r module.
+        let ffmpeg_name_map = build_ffmpeg_name_map();
+
         let registry = gstreamer::Registry::get();
         let mut factories: Vec<_> = registry
             .features(gstreamer::ElementFactory::static_type())
@@ -92,7 +100,7 @@ impl Frei0rRegistry {
         factories.sort_by(|a, b| a.name().cmp(&b.name()));
 
         for factory in &factories {
-            if let Some(info) = Self::inspect_factory(factory) {
+            if let Some(info) = Self::inspect_factory(factory, &ffmpeg_name_map) {
                 plugins.push(info);
             }
         }
@@ -150,7 +158,10 @@ impl Frei0rRegistry {
             .collect()
     }
 
-    fn inspect_factory(factory: &gstreamer::ElementFactory) -> Option<Frei0rPluginInfo> {
+    fn inspect_factory(
+        factory: &gstreamer::ElementFactory,
+        ffmpeg_name_map: &HashMap<String, String>,
+    ) -> Option<Frei0rPluginInfo> {
         let gst_element_name = factory.name().to_string();
         let frei0r_name = gst_element_name.strip_prefix(FILTER_PREFIX)?.to_string();
 
@@ -175,6 +186,11 @@ impl Frei0rRegistry {
             .to_string();
         let category = simplify_category(&klass);
 
+        let ffmpeg_name = ffmpeg_name_map
+            .get(&frei0r_name)
+            .cloned()
+            .unwrap_or_else(|| frei0r_name.clone());
+
         let mut params = Vec::new();
         for pspec in element.list_properties() {
             let prop_name = pspec.name().to_string();
@@ -193,6 +209,7 @@ impl Frei0rRegistry {
         Some(Frei0rPluginInfo {
             gst_element_name,
             frei0r_name,
+            ffmpeg_name,
             display_name,
             description,
             category,
@@ -290,6 +307,100 @@ fn inspect_param(
     None
 }
 
+/// Build a mapping from GStreamer-normalized frei0r names to the actual .so
+/// module names that FFmpeg uses.  Scans standard frei0r-1 directories for
+/// `.so` files, loads each to read the plugin's f0r_get_plugin_info name,
+/// normalizes it the same way GStreamer does, and records the mapping.
+fn build_ffmpeg_name_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let frei0r_dirs = [
+        "/usr/lib/frei0r-1",
+        "/usr/local/lib/frei0r-1",
+        "/usr/lib64/frei0r-1",
+        "/usr/lib/x86_64-linux-gnu/frei0r-1",
+    ];
+
+    #[repr(C)]
+    struct Frei0rPluginInfo {
+        name: *const std::os::raw::c_char,
+        author: *const std::os::raw::c_char,
+        plugin_type: std::os::raw::c_int,
+        _color_model: std::os::raw::c_int,
+        _frei0r_version: std::os::raw::c_int,
+        _major_version: std::os::raw::c_int,
+        _minor_version: std::os::raw::c_int,
+        _num_params: std::os::raw::c_int,
+        _explanation: *const std::os::raw::c_char,
+    }
+
+    for dir in &frei0r_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("so") {
+                continue;
+            }
+            let Some(so_name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let so_name = so_name.to_string();
+
+            // dlopen the .so to read f0r_get_plugin_info().name
+            let c_path =
+                match std::ffi::CString::new(path.to_string_lossy().as_bytes().to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+            unsafe {
+                let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY);
+                if handle.is_null() {
+                    continue;
+                }
+                let sym_name = b"f0r_get_plugin_info\0";
+                let sym = libc::dlsym(handle, sym_name.as_ptr() as *const _);
+                if !sym.is_null() {
+                    let get_info: extern "C" fn(*mut Frei0rPluginInfo) =
+                        std::mem::transmute(sym);
+                    let mut info: Frei0rPluginInfo = std::mem::zeroed();
+                    get_info(&mut info);
+                    if !info.name.is_null() && info.plugin_type == 0 {
+                        let real_name =
+                            std::ffi::CStr::from_ptr(info.name).to_string_lossy();
+                        let gst_name = normalize_frei0r_name(&real_name);
+                        if gst_name != so_name {
+                            map.insert(gst_name, so_name.clone());
+                        }
+                    }
+                }
+                libc::dlclose(handle);
+            }
+        }
+    }
+    map
+}
+
+/// Normalize a frei0r plugin name the same way GStreamer does:
+/// lowercase, non-alphanumeric → hyphens, collapse consecutive hyphens.
+fn normalize_frei0r_name(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut prev_hyphen = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            result.push(c.to_ascii_lowercase());
+            prev_hyphen = false;
+        } else if !prev_hyphen && !result.is_empty() {
+            result.push('-');
+            prev_hyphen = true;
+        }
+    }
+    if result.ends_with('-') {
+        result.pop();
+    }
+    result
+}
+
 /// Parse "Accepted values: 'val1', 'val2', ..." from a GStreamer property blurb.
 /// Returns `None` if the pattern is not found.
 fn parse_accepted_values(blurb: &str) -> Option<Vec<String>> {
@@ -373,5 +484,27 @@ mod tests {
 
         assert!(parse_accepted_values("Just a description").is_none());
         assert!(parse_accepted_values("Accepted values:").is_none());
+    }
+
+    #[test]
+    fn test_normalize_frei0r_name() {
+        assert_eq!(normalize_frei0r_name("3 point color balance"), "3-point-color-balance");
+        assert_eq!(normalize_frei0r_name("coloradj_RGB"), "coloradj-rgb");
+        assert_eq!(normalize_frei0r_name("B"), "b");
+        assert_eq!(normalize_frei0r_name("Cartoon"), "cartoon");
+        assert_eq!(normalize_frei0r_name("Color Distance"), "color-distance");
+    }
+
+    #[test]
+    fn test_build_ffmpeg_name_map() {
+        let map = build_ffmpeg_name_map();
+        // On a system with frei0r installed, this should find mismatches.
+        // The key test: "3-point-color-balance" maps to "three_point_balance".
+        if let Some(so_name) = map.get("3-point-color-balance") {
+            assert_eq!(so_name, "three_point_balance");
+        }
+        if let Some(so_name) = map.get("coloradj-rgb") {
+            assert_eq!(so_name, "coloradj_RGB");
+        }
     }
 }
