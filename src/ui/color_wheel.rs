@@ -66,13 +66,14 @@ fn rgb_to_hsv(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 /// - luminance slider → scales the neutral brightness
 
 /// Convert a wheel (angle, radius_fraction) + luminance to an RGB triplet.
-/// `angle` is in radians (0 = right, counter-clockwise), `radius_frac` in 0..1.
-/// `luminance` is 0..1 controlling overall brightness.
+/// `angle` is in radians (math convention: 0 = right, counter-clockwise).
+/// `radius_frac` in 0..1, `luminance` is 0..1.
 pub fn wheel_pos_to_rgb(angle: f64, radius_frac: f64, luminance: f64) -> (f64, f64, f64) {
     let sat = radius_frac.clamp(0.0, 1.0);
-    // Map angle to hue (0..360). Top = red (0°), clockwise.
-    // Standard HSV: 0° = right. We rotate so top of wheel = 0° hue (red).
-    let hue_deg = (90.0 - angle.to_degrees()).rem_euclid(360.0);
+    // The wheel background draws hue=90° at the top (a0=0 → screen top via
+    // -PI/2 offset). The math angle for "top" is PI/2 (90°). So hue simply
+    // equals the math angle in degrees.
+    let hue_deg = angle.to_degrees().rem_euclid(360.0);
     let v = luminance.clamp(0.0, 1.0);
     hsv_to_rgb(hue_deg, sat, v)
 }
@@ -80,8 +81,7 @@ pub fn wheel_pos_to_rgb(angle: f64, radius_frac: f64, luminance: f64) -> (f64, f
 /// Convert an RGB triplet to wheel position (angle_rad, radius_frac, luminance).
 pub fn rgb_to_wheel_pos(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
     let (h, s, v) = rgb_to_hsv(r, g, b);
-    // Reverse the hue→angle mapping: angle = (90 - hue)° in radians.
-    let angle = (90.0 - h).to_radians();
+    let angle = h.to_radians();
     (angle, s, v)
 }
 
