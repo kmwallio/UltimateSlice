@@ -4762,7 +4762,19 @@ pub fn build_window(
                     _ => return,
                 }
             };
-            let effect = crate::model::clip::Frei0rEffect::new(&plugin_name);
+            // Populate default parameter values from the registry so that
+            // parameter sliders appear in the inspector immediately.
+            let default_params = {
+                let registry = crate::media::frei0r_registry::Frei0rRegistry::discover();
+                let mut params = std::collections::HashMap::new();
+                if let Some(info) = registry.find_by_name(&plugin_name) {
+                    for p in &info.params {
+                        params.insert(p.name.clone(), p.default_value);
+                    }
+                }
+                params
+            };
+            let effect = crate::model::clip::Frei0rEffect::with_params(&plugin_name, default_params);
             let cmd = crate::undo::AddFrei0rEffectCommand {
                 clip_id,
                 track_id,
