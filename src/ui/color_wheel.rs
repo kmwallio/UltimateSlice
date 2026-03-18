@@ -89,6 +89,9 @@ pub fn rgb_to_wheel_pos(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 
 /// Render the HSV color wheel background into the given Cairo context.
 /// Draws concentric rings of hue/saturation at the given brightness `value`.
+///
+/// Convention: hue 0° (red) at 3-o'clock, increasing CCW on screen.
+/// This matches `wheel_pos_to_rgb` where hue = degrees(math_angle).
 fn draw_wheel_background(
     cr: &gtk::cairo::Context,
     cx: f64,
@@ -96,10 +99,10 @@ fn draw_wheel_background(
     radius: f64,
     value: f64,
 ) {
-    // Draw from outside in so inner pixels overwrite outer.
     let steps = (radius * 1.5).max(60.0) as i32;
     let angle_steps = 256;
     let v = value.clamp(0.05, 1.0);
+    let wedge = TAU / angle_steps as f64;
 
     for ri in 0..steps {
         let frac = ri as f64 / steps as f64;
@@ -108,14 +111,18 @@ fn draw_wheel_background(
         let sat = frac;
 
         for ai in 0..angle_steps {
-            let a0 = TAU * ai as f64 / angle_steps as f64;
-            let a1 = TAU * (ai as f64 + 1.2) / angle_steps as f64;
-            // Hue: top = red (0°). Standard HSV 0° is right, so offset by 90°.
-            let hue_deg = (90.0 - a0.to_degrees()).rem_euclid(360.0);
+            // Iterate in Cairo angle space (0 = right, increasing = CW on screen).
+            let ca = wedge * ai as f64;
+            let ca_next = wedge * (ai as f64 + 1.2); // slightly wide to avoid gaps
+
+            // Cairo Y-down means CW on screen = CCW in math.
+            // Math angle = -cairo_angle, hue = degrees(math_angle) = -degrees(cairo_angle).
+            let hue_deg = (-ca.to_degrees()).rem_euclid(360.0);
             let (red, grn, blu) = hsv_to_rgb(hue_deg, sat, v);
+
             cr.set_source_rgb(red, grn, blu);
-            cr.arc(cx, cy, r_outer, a0 - PI / 2.0, a1 - PI / 2.0);
-            cr.arc_negative(cx, cy, r_inner, a1 - PI / 2.0, a0 - PI / 2.0);
+            cr.arc(cx, cy, r_outer, ca, ca_next);
+            cr.arc_negative(cx, cy, r_inner, ca_next, ca);
             cr.close_path();
             let _ = cr.fill();
         }
@@ -432,5 +439,41 @@ mod tests {
         assert!((r - 0.5).abs() < 0.001);
         assert!((g - 0.5).abs() < 0.001);
         assert!((b - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn drawing_and_interaction_hues_match() {
+        // Verify that the drawing formula (hue = -degrees(cairo_angle))
+        // and the interaction formula (hue = degrees(math_angle)) agree
+        // at the same screen position.
+        //
+        // At screen RIGHT (3 o'clock): cairo=0, math=0 → both hue 0° (red)
+        // At screen UP (12 o'clock): cairo=3PI/2, math=PI/2 → both hue 90°
+        // At screen LEFT (9 o'clock): cairo=PI, math=PI → both hue 180° (cyan)
+        // At screen DOWN (6 o'clock): cairo=PI/2, math=-PI/2 → both hue 270°
+
+        let positions: &[(&str, f64, f64, f64)] = &[
+            // (label, cairo_angle, math_angle, expected_hue)
+            ("right",  0.0,        0.0,          0.0),
+            ("up",     3.0*PI/2.0, PI/2.0,       90.0),
+            ("left",   PI,         PI,            180.0),
+            ("down",   PI/2.0,     -PI/2.0,      270.0),
+            ("1 o'clock", 5.0*PI/3.0, PI/3.0,   60.0),  // yellow
+        ];
+
+        for &(label, cairo_a, math_a, expected_hue) in positions {
+            // Drawing formula:
+            let draw_hue = (-cairo_a.to_degrees()).rem_euclid(360.0);
+            // Interaction formula:
+            let interact_hue = math_a.to_degrees().rem_euclid(360.0);
+
+            let dh1 = (draw_hue - expected_hue).abs();
+            let dh1 = dh1.min(360.0 - dh1);
+            assert!(dh1 < 0.1, "{label}: draw_hue={draw_hue:.1}° expected {expected_hue:.1}°");
+
+            let dh2 = (interact_hue - expected_hue).abs();
+            let dh2 = dh2.min(360.0 - dh2);
+            assert!(dh2 < 0.1, "{label}: interact_hue={interact_hue:.1}° expected {expected_hue:.1}°");
+        }
     }
 }
