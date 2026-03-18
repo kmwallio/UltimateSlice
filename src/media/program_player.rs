@@ -3453,7 +3453,7 @@ impl ProgramPlayer {
             for (elem, effect) in slot.frei0r_user_effects.iter().zip(enabled.iter()) {
                 for (param, &val) in &effect.params {
                     if elem.has_property(param) {
-                        elem.set_property(param, val);
+                        set_frei0r_property(elem, param, val);
                     }
                 }
             }
@@ -7044,7 +7044,7 @@ impl ProgramPlayer {
                 let elem = gst::ElementFactory::make(&gst_name).build().ok()?;
                 for (param, &val) in &effect.params {
                     if elem.has_property(param) {
-                        elem.set_property(param, val);
+                        set_frei0r_property(&elem, param, val);
                     }
                 }
                 Some(elem)
@@ -10931,6 +10931,29 @@ impl ProgramPlayer {
             self.set_audio_pipeline_volume(volume);
         }
         self.sync_preview_audio_levels(timeline_pos_ns);
+    }
+}
+
+/// Set a frei0r element property with correct GLib type conversion.
+///
+/// Frei0r parameters are stored as f64 in our model, but the actual GStreamer
+/// property may be `gdouble`, `gboolean`, or `gchararray`. Setting a `gdouble`
+/// on a `gboolean` property panics, so we inspect the property type first.
+fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
+    let Some(pspec) = elem.find_property(param) else {
+        return;
+    };
+    let vtype = pspec.value_type();
+    if vtype == glib::Type::BOOL {
+        elem.set_property(param, val > 0.5);
+    } else if vtype == glib::Type::F64 {
+        elem.set_property(param, val);
+    } else if vtype == glib::Type::F32 {
+        elem.set_property(param, val as f32);
+    } else if vtype == glib::Type::STRING {
+        // String params aren't editable via our f64 model; skip silently.
+    } else {
+        // Unknown type (Object, etc.) — skip silently.
     }
 }
 

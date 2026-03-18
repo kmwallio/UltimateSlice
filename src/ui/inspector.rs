@@ -142,6 +142,8 @@ pub struct InspectorView {
     pub on_frei0r_params_changed: Rc<dyn Fn()>,
     /// Tracks which effect IDs are currently displayed to avoid rebuilding on every update() tick.
     frei0r_displayed_snapshot: Rc<RefCell<Vec<(String, bool, usize)>>>,
+    /// Cached frei0r registry for param type lookup in the inspector.
+    frei0r_registry: Rc<RefCell<Option<crate::media::frei0r_registry::Frei0rRegistry>>>,
     // Keyframe navigation and animation mode
     pub keyframe_indicator_label: Label,
     pub animation_mode: Rc<Cell<bool>>,
@@ -354,8 +356,29 @@ impl InspectorView {
 
             row.append(&header);
 
-            // Parameter sliders.
+            // Look up plugin info for param type detection (Bool vs Double).
+            let plugin_info = {
+                let reg_opt = self.frei0r_registry.borrow();
+                if reg_opt.is_none() {
+                    drop(reg_opt);
+                    let reg = crate::media::frei0r_registry::Frei0rRegistry::discover();
+                    *self.frei0r_registry.borrow_mut() = Some(reg);
+                }
+                let reg_ref = self.frei0r_registry.borrow();
+                reg_ref
+                    .as_ref()
+                    .and_then(|r| r.find_by_name(&effect.plugin_name))
+                    .cloned()
+            };
+
+            // Parameter controls — Bool → CheckButton, Double → Scale slider.
             for (param_name, &param_val) in &effect.params {
+                let param_type = plugin_info
+                    .as_ref()
+                    .and_then(|info| info.params.iter().find(|p| p.name == *param_name))
+                    .map(|p| p.param_type)
+                    .unwrap_or(crate::media::frei0r_registry::Frei0rParamType::Double);
+
                 let param_row = GBox::new(Orientation::Horizontal, 4);
                 param_row.set_margin_start(24);
                 let plabel = Label::new(Some(param_name));
@@ -364,49 +387,113 @@ impl InspectorView {
                 plabel.set_width_chars(12);
                 param_row.append(&plabel);
 
-                let slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
-                slider.set_value(param_val);
-                slider.set_draw_value(true);
-                slider.set_digits(2);
-                slider.set_hexpand(true);
-                param_row.append(&slider);
+                match param_type {
+                    crate::media::frei0r_registry::Frei0rParamType::Bool => {
+                        let toggle = CheckButton::new();
+                        toggle.set_active(param_val > 0.5);
+                        toggle.set_hexpand(true);
+                        param_row.append(&toggle);
 
-                // Param slider callback — live pipeline update without inspector rebuild
-                {
-                    let project = self.project.clone();
-                    let selected_clip_id = self.selected_clip_id.clone();
-                    let effect_id = effect.id.clone();
-                    let pname = param_name.clone();
-                    let on_params_changed = self.on_frei0r_params_changed.clone();
-                    let updating = self.updating.clone();
-                    slider.connect_value_changed(move |s| {
-                        if *updating.borrow() {
-                            return;
-                        }
-                        let val = s.value();
-                        let cid = selected_clip_id.borrow().clone();
-                        if let Some(cid) = cid {
-                            {
-                                let mut proj = project.borrow_mut();
-                                for track in &mut proj.tracks {
-                                    if let Some(clip) =
-                                        track.clips.iter_mut().find(|c| c.id == cid)
-                                    {
-                                        if let Some(e) = clip
-                                            .frei0r_effects
-                                            .iter_mut()
-                                            .find(|e| e.id == effect_id)
-                                        {
-                                            e.params.insert(pname.clone(), val);
-                                        }
-                                        break;
-                                    }
-                                }
-                                proj.dirty = true;
+                        let project = self.project.clone();
+                        let selected_clip_id = self.selected_clip_id.clone();
+                        let effect_id = effect.id.clone();
+                        let pname = param_name.clone();
+                        let on_params_changed = self.on_frei0r_params_changed.clone();
+                        let updating = self.updating.clone();
+                        toggle.connect_toggled(move |btn| {
+                            if *updating.borrow() {
+                                return;
                             }
-                            on_params_changed();
-                        }
-                    });
+                            let val = if btn.is_active() { 1.0 } else { 0.0 };
+                            let cid = selected_clip_id.borrow().clone();
+                            if let Some(cid) = cid {
+                                {
+                                    let mut proj = project.borrow_mut();
+                                    for track in &mut proj.tracks {
+                                        if let Some(clip) =
+                                            track.clips.iter_mut().find(|c| c.id == cid)
+                                        {
+                                            if let Some(e) = clip
+                                                .frei0r_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
+                                            {
+                                                e.params.insert(pname.clone(), val);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    proj.dirty = true;
+                                }
+                                on_params_changed();
+                            }
+                        });
+                    }
+                    crate::media::frei0r_registry::Frei0rParamType::String => {
+                        // String params not editable via numeric model; show read-only hint.
+                        let hint = Label::new(Some("(string — not editable)"));
+                        hint.add_css_class("dim-label");
+                        hint.set_hexpand(true);
+                        param_row.append(&hint);
+                    }
+                    _ => {
+                        // Double — use a slider.
+                        let (min, max) = plugin_info
+                            .as_ref()
+                            .and_then(|info| {
+                                info.params
+                                    .iter()
+                                    .find(|p| p.name == *param_name)
+                                    .map(|p| (p.min, p.max))
+                            })
+                            .unwrap_or((0.0, 1.0));
+                        let slider = Scale::with_range(
+                            Orientation::Horizontal,
+                            min,
+                            max,
+                            (max - min) / 100.0,
+                        );
+                        slider.set_value(param_val);
+                        slider.set_draw_value(true);
+                        slider.set_digits(2);
+                        slider.set_hexpand(true);
+                        param_row.append(&slider);
+
+                        let project = self.project.clone();
+                        let selected_clip_id = self.selected_clip_id.clone();
+                        let effect_id = effect.id.clone();
+                        let pname = param_name.clone();
+                        let on_params_changed = self.on_frei0r_params_changed.clone();
+                        let updating = self.updating.clone();
+                        slider.connect_value_changed(move |s| {
+                            if *updating.borrow() {
+                                return;
+                            }
+                            let val = s.value();
+                            let cid = selected_clip_id.borrow().clone();
+                            if let Some(cid) = cid {
+                                {
+                                    let mut proj = project.borrow_mut();
+                                    for track in &mut proj.tracks {
+                                        if let Some(clip) =
+                                            track.clips.iter_mut().find(|c| c.id == cid)
+                                        {
+                                            if let Some(e) = clip
+                                                .frei0r_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
+                                            {
+                                                e.params.insert(pname.clone(), val);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    proj.dirty = true;
+                                }
+                                on_params_changed();
+                            }
+                        });
+                    }
                 }
 
                 row.append(&param_row);
@@ -4082,6 +4169,7 @@ pub fn build_inspector(
         on_frei0r_changed: Rc::new(on_frei0r_changed),
         on_frei0r_params_changed: Rc::new(on_frei0r_params_changed),
         frei0r_displayed_snapshot: Rc::new(RefCell::new(Vec::new())),
+        frei0r_registry: Rc::new(RefCell::new(None)),
         keyframe_indicator_label,
         animation_mode,
         animation_mode_btn,
