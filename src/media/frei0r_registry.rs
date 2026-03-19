@@ -265,6 +265,19 @@ impl Frei0rRegistry {
     }
 }
 
+/// Clamp frei0r parameter min/max to sane finite values.
+/// Some plugins report NaN, Inf, or extreme bounds (f64::MIN/MAX, ±1e308)
+/// which crash GTK `Scale::with_range()` or produce unusable sliders.
+fn sanitize_param_bounds(raw_min: f64, raw_max: f64) -> (f64, f64) {
+    let min = if raw_min.is_finite() && raw_min > -1e6 { raw_min } else { 0.0 };
+    let max = if raw_max.is_finite() && raw_max < 1e6 { raw_max } else { 1.0 };
+    if min >= max {
+        (0.0, 1.0)
+    } else {
+        (min, max)
+    }
+}
+
 fn inspect_param(
     element: &gstreamer::Element,
     pspec: &glib::ParamSpec,
@@ -282,13 +295,18 @@ fn inspect_param(
             let mid = (pspec_double.minimum() + pspec_double.maximum()) / 2.0;
             if mid.is_finite() { mid } else { 0.0 }
         };
+        // Sanitize min/max: some frei0r plugins report NaN, Inf, or
+        // extreme bounds (e.g. f64::MIN/MAX) which crash GTK sliders.
+        let raw_min = pspec_double.minimum();
+        let raw_max = pspec_double.maximum();
+        let (min, max) = sanitize_param_bounds(raw_min, raw_max);
         return Some(Frei0rParamInfo {
             display_name,
             name,
             param_type: Frei0rParamType::Double,
-            default_value: safe_default,
-            min: pspec_double.minimum(),
-            max: pspec_double.maximum(),
+            default_value: safe_default.clamp(min, max),
+            min,
+            max,
             enum_values: None,
             default_string: None,
         });
@@ -302,13 +320,16 @@ fn inspect_param(
             let mid = (pspec_float.minimum() as f64 + pspec_float.maximum() as f64) / 2.0;
             if mid.is_finite() { mid } else { 0.0 }
         };
+        let raw_min = pspec_float.minimum() as f64;
+        let raw_max = pspec_float.maximum() as f64;
+        let (min, max) = sanitize_param_bounds(raw_min, raw_max);
         return Some(Frei0rParamInfo {
             display_name,
             name,
             param_type: Frei0rParamType::Double,
-            default_value: safe_default,
-            min: pspec_float.minimum() as f64,
-            max: pspec_float.maximum() as f64,
+            default_value: safe_default.clamp(min, max),
+            min,
+            max,
             enum_values: None,
             default_string: None,
         });
@@ -655,3 +676,4 @@ mod tests {
         }
     }
 }
+// end of file

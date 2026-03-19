@@ -454,7 +454,7 @@ impl InspectorView {
                     }
                     _ => {
                         // Double — use a slider.
-                        let (min, max) = plugin_info
+                        let (mut min, mut max) = plugin_info
                             .as_ref()
                             .and_then(|info| {
                                 info.params
@@ -463,11 +463,16 @@ impl InspectorView {
                                     .map(|p| (p.min, p.max))
                             })
                             .unwrap_or((0.0, 1.0));
+                        // Safety: ensure finite, sane bounds for GTK Scale.
+                        if !min.is_finite() || min < -1e6 { min = 0.0; }
+                        if !max.is_finite() || max > 1e6 { max = 1.0; }
+                        if min >= max { min = 0.0; max = 1.0; }
+                        let step = ((max - min) / 100.0).max(f64::MIN_POSITIVE);
                         let slider = Scale::with_range(
                             Orientation::Horizontal,
                             min,
                             max,
-                            (max - min) / 100.0,
+                            step,
                         );
                         slider.set_value(param_val);
                         slider.set_draw_value(true);
