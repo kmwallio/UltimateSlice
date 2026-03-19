@@ -14,6 +14,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [timeline.md](timeline.md) | Arranging clips, trimming, splitting, markers, zoom/pan |
 | [VIDEOAUDIOALIGNMENT.md](VIDEOAUDIOALIGNMENT.md) | Multi-cam sync: timecode alignment and audio cross-correlation |
 | [inspector.md](inspector.md) | Color correction, effects, audio, transform, titles, speed |
+| [effects.md](effects.md) | Complete effects reference: color grading, frei0r plugins, blend modes, chroma key, LUTs |
 | [color-scopes.md](color-scopes.md) | Waveform, histogram, RGB parade, vectorscope |
 | [preferences.md](preferences.md) | Application-level settings and performance preferences |
 | [python-mcp.md](python-mcp.md) | Python socket client commands for MCP |

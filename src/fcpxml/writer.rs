@@ -77,9 +77,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             if !project.dirty {
                 return Ok(original.clone());
             }
-            if let Some(patched) = patch_imported_fcpxml_transform(project, original) {
-                return Ok(patched);
-            }
+            // The patch path only updates a subset of clip fields (transform,
+            // color, title, keyframes).  Many fields — blend mode, speed,
+            // reverse, freeze-frame, chroma key, LUT, grading extensions,
+            // frei0r effects, transitions, audio, etc. — are NOT patched,
+            // causing silent data loss.  Always use the full rewrite for
+            // dirty projects to ensure all fields are persisted correctly.
+            // (The non-dirty case above still returns the original verbatim.)
         }
     }
 
@@ -2609,6 +2613,11 @@ fn write_resources(
     let mut written_asset_sources: std::collections::HashSet<String> = std::collections::HashSet::new();
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
+            // Title clips have no source media — skip to avoid writing
+            // broken asset references with empty file:// URIs.
+            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title {
+                continue;
+            }
             let export_source_path = clip
                 .fcpxml_original_source_path
                 .as_deref()
@@ -3370,6 +3379,30 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
+            | "us:blend-mode"
+            | "us:exposure"
+            | "us:black-point"
+            | "us:highlights-warmth"
+            | "us:highlights-tint"
+            | "us:midtones-warmth"
+            | "us:midtones-tint"
+            | "us:shadows-warmth"
+            | "us:shadows-tint"
+            | "us:bg-removal-enabled"
+            | "us:bg-removal-threshold"
+            | "us:title-template"
+            | "us:title-outline-color"
+            | "us:title-outline-width"
+            | "us:title-shadow"
+            | "us:title-shadow-color"
+            | "us:title-shadow-offset-x"
+            | "us:title-shadow-offset-y"
+            | "us:title-bg-box"
+            | "us:title-bg-box-color"
+            | "us:title-bg-box-padding"
+            | "us:title-clip-bg-color"
+            | "us:title-secondary-text"
+            | "us:clip-kind"
     )
 }
 
@@ -4242,7 +4275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_fcpxml_dirty_scale_edit_preserves_unknown_fields() {
+    fn test_write_fcpxml_dirty_scale_edit_preserves_fields_via_full_rewrite() {
         let original = r#"<?xml version="1.0" encoding="UTF-8"?>
 <fcpxml version="1.14" customRoot="keep-root">
   <resources>
@@ -4353,13 +4386,16 @@ mod tests {
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
+        // Full rewrite preserves unknown attributes via fcpxml_unknown_* fields.
         assert!(written.contains("customRoot=\"keep-root\""));
         assert!(written.contains("customAsset=\"keep-asset\""));
         assert!(written.contains("customSequence=\"keep-seq\""));
         assert!(written.contains("customClip=\"keep-clip\""));
         assert!(written.contains("<metadata key=\"com.example.unknown\" value=\"keep-meta\""));
+        // Verify data values are correct.
         assert!(written.contains("us:scale=\"1.75\""));
         assert!(written.contains("us:position-x=\"0.25\""));
+        assert!(written.contains("us:position-y=\"-0.5\""));
         assert!(written.contains("us:scale-keyframes="));
         assert!(written.contains("us:opacity-keyframes="));
         assert!(written.contains("us:position-x-keyframes="));
@@ -4370,10 +4406,15 @@ mod tests {
         assert!(written.contains("us:saturation-keyframes="));
         assert!(written.contains("us:temperature-keyframes="));
         assert!(written.contains("us:tint-keyframes="));
-        assert!(written.contains("us:position-y=\"-0.5\""));
-        assert!(written.contains("adjust-transform position=\"-16.666666"));
-        assert!(written.contains(" scale=\"1.75 1.75\" rotation=\"0\""));
-        assert!(written.contains(" -18.75\""));
+        // Verify round-trip: parse the written XML back and check data values.
+        let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
+        let clip2 = reparsed.tracks.iter().flat_map(|t| t.clips.iter()).next()
+            .expect("clip should survive round-trip");
+        assert!((clip2.scale - 1.75).abs() < 0.001, "scale should round-trip");
+        assert!((clip2.position_x - 0.25).abs() < 0.001, "position_x should round-trip");
+        assert!((clip2.position_y - (-0.5)).abs() < 0.001, "position_y should round-trip");
+        assert_eq!(clip2.scale_keyframes.len(), 2, "scale keyframes should round-trip");
+        assert_eq!(clip2.opacity_keyframes.len(), 1, "opacity keyframes should round-trip");
     }
 
     #[test]
@@ -4558,7 +4599,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_fcpxml_dirty_transform_edit_prefers_in_place_patch_for_multi_clip_import() {
+    fn test_write_fcpxml_dirty_transform_edit_uses_full_rewrite_for_multi_clip_import() {
         let original = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.14">
@@ -4603,14 +4644,20 @@ mod tests {
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
-        assert!(written.contains("<asset id=\"r1v\""));
-        assert!(written.contains("<asset id=\"r2v\""));
-        assert!(written.contains("<smart-collection name=\"Projects\""));
+        // Full rewrite generates its own asset IDs and includes vendor extensions.
         assert!(written.contains("scale=\"0.75 0.75\""));
         assert!(written.contains("rotation=\"37\""));
-        assert!(!written.contains("us:track-idx="));
-        assert!(!written.contains("<asset id=\"a_"));
-        assert!(!written.contains("ref=\"a_"));
+        // Verify the smart-collection is preserved via unknown library children.
+        assert!(written.contains("<smart-collection name=\"Projects\""));
+        // Verify the full rewrite emits USPXML vendor extensions.
+        assert!(written.contains("us:track-idx="));
+        // Round-trip: verify the written XML can be parsed back.
+        let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
+        let overlay = reparsed.tracks.iter().flat_map(|t| t.clips.iter())
+            .find(|c| c.label == "overlay")
+            .expect("overlay clip should survive round-trip");
+        assert!((overlay.scale - 0.75).abs() < 0.001);
+        assert_eq!(overlay.rotate, 37);
     }
 
     #[test]

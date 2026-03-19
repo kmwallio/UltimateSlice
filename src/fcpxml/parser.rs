@@ -2429,6 +2429,20 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
+            | "us:blend-mode"
+            | "us:title-template"
+            | "us:title-outline-color"
+            | "us:title-outline-width"
+            | "us:title-shadow"
+            | "us:title-shadow-color"
+            | "us:title-shadow-offset-x"
+            | "us:title-shadow-offset-y"
+            | "us:title-bg-box"
+            | "us:title-bg-box-color"
+            | "us:title-bg-box-padding"
+            | "us:title-clip-bg-color"
+            | "us:title-secondary-text"
+            | "us:clip-kind"
     )
 }
 
