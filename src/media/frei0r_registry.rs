@@ -358,7 +358,12 @@ fn inspect_param(
             .property::<Option<String>>(&name)
             .unwrap_or_default();
         let blurb = pspec.blurb().map(|s| s.to_string()).unwrap_or_default();
-        let enum_values = parse_accepted_values(&blurb);
+        let factory_hint = element
+            .factory()
+            .map(|f| f.name().to_string())
+            .unwrap_or_default();
+        let enum_values = parse_accepted_values(&blurb)
+            .or_else(|| known_string_param_values(&factory_hint, &name));
         return Some(Frei0rParamInfo {
             display_name,
             name,
@@ -585,6 +590,59 @@ fn parse_accepted_values(blurb: &str) -> Option<Vec<String>> {
         None
     } else {
         Some(values)
+    }
+}
+
+/// Fallback accepted-value lists for frei0r string parameters whose GStreamer
+/// blurbs omit the `Accepted values:` annotation.  Keyed by (GStreamer element
+/// factory name, property name) to avoid false positives on generic names like
+/// "type" or "pattern".
+fn known_string_param_values(factory_name: &str, property_name: &str) -> Option<Vec<String>> {
+    let v = |vals: &[&str]| Some(vals.iter().map(|s| (*s).into()).collect());
+    match (factory_name, property_name) {
+        // cairogradient: "Linear or radial gradient"
+        ("frei0r-filter-cairogradient", "pattern") => {
+            v(&["gradient_linear", "gradient_radial"])
+        }
+        // colortap: "One of: xpro, sepia, heat, red_green, old_photo, xray, esses, yellow_blue"
+        ("frei0r-filter-colortap", "table") => v(&[
+            "xpro",
+            "sepia",
+            "heat",
+            "red_green",
+            "old_photo",
+            "xray",
+            "esses",
+            "yellow_blue",
+        ]),
+        // keyspillm0pup: mask-type "[0,1,2,3]", operation-1/2 "[0,1,2]"
+        ("frei0r-filter-keyspillm0pup", "mask-type") => v(&["0", "1", "2", "3"]),
+        ("frei0r-filter-keyspillm0pup", "operation-1") => v(&["0", "1", "2"]),
+        ("frei0r-filter-keyspillm0pup", "operation-2") => v(&["0", "1", "2"]),
+        // medians: "Cross5, Square3x3, Bilevel, Diamond3x3, Square5x5, Temp3,
+        //           Temp5, ArceBI, ML3D, ML3dEX, VarSize"
+        ("frei0r-filter-medians", "type") => v(&[
+            "Cross5",
+            "Square3x3",
+            "Bilevel",
+            "Diamond3x3",
+            "Square5x5",
+            "Temp3",
+            "Temp5",
+            "ArceBI",
+            "ML3D",
+            "ML3dEX",
+            "VarSize",
+        ]),
+        // ndvi-filter: five string params with "One of ..." blurbs
+        ("frei0r-filter-ndvi-filter", "color-map") => {
+            v(&["earth", "grayscale", "heat", "rainbow"])
+        }
+        ("frei0r-filter-ndvi-filter", "index-calculation") => v(&["ndvi", "vi"]),
+        ("frei0r-filter-ndvi-filter", "legend") => v(&["off", "bottom"]),
+        ("frei0r-filter-ndvi-filter", "nir-channel") => v(&["r", "g", "b"]),
+        ("frei0r-filter-ndvi-filter", "visible-channel") => v(&["r", "g", "b"]),
+        _ => None,
     }
 }
 
