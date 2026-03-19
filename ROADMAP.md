@@ -440,6 +440,15 @@ Tracking docs:
   - [x] Five undo commands (add, remove, reorder, set params, toggle)
 - [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
+- [x] Titles Browser with 9 built-in templates (Standard, Cinematic, Informational categories)
+- [x] Standalone `ClipKind::Title` clips — transparent/solid-color background, no source media required
+- [x] Extended title styling — font picker, color picker, outline stroke, drop shadow, background box, secondary text
+- [x] Live title style editing — all 11 styling controls (font, color, outline, shadow, bg box) update preview in real-time
+- [x] Debounced title reseek — compositor-only flush during title edits (avoids expensive all-slot decoder re-seek)
+- [x] Velocity-adaptive scrub waits — 30ms arrival/pulse budgets during rapid scrubbing (2.6× faster)
+- [x] Title clips in background prerender — lavfi color + drawtext source for title overlay clips
+- [x] Frei0r effects in background prerender — applied in ffmpeg filter chain, hashed in signature
+- [x] MCP tools: `add_title_clip`, `set_clip_title_style`
 - [x] Transition effects (fade to black, wipe right, wipe left)
 - [x] Transition preview matching — program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions using compositor alpha animation and videocrop, matching FFmpeg `xfade` export output
 

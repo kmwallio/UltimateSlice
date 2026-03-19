@@ -184,6 +184,9 @@ pub fn export_project(
     };
 
     let resolve_export_path = |clip: &Clip| -> String {
+        if clip.kind == ClipKind::Title {
+            return String::new(); // Title clips use lavfi, not file input
+        }
         if clip.bg_removal_enabled {
             if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
                 if std::path::Path::new(bg_path).exists() {
@@ -196,30 +199,44 @@ pub fn export_project(
 
     // Inputs: primary video clips (0..primary_clips.len())
     for clip in &primary_clips {
-        let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
-        if clip.kind == ClipKind::Image {
-            cmd.arg("-loop").arg("1");
+        if clip.kind == ClipKind::Title {
+            let dur_s = clip.duration() as f64 / 1_000_000_000.0;
+            let bg = title_clip_lavfi_color(clip, out_w, out_h,
+                project.frame_rate.numerator, project.frame_rate.denominator, dur_s);
+            cmd.arg("-f").arg("lavfi").arg("-i").arg(bg);
+        } else {
+            let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
+            if clip.kind == ClipKind::Image {
+                cmd.arg("-loop").arg("1");
+            }
+            cmd.arg("-ss")
+                .arg(format!("{in_s:.6}"))
+                .arg("-t")
+                .arg(format!("{src_dur_s:.6}"))
+                .arg("-i")
+                .arg(resolve_export_path(clip));
         }
-        cmd.arg("-ss")
-            .arg(format!("{in_s:.6}"))
-            .arg("-t")
-            .arg(format!("{src_dur_s:.6}"))
-            .arg("-i")
-            .arg(resolve_export_path(clip));
     }
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
     for clip in &secondary_clips_flat {
-        let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
-        if clip.kind == ClipKind::Image {
-            cmd.arg("-loop").arg("1");
+        if clip.kind == ClipKind::Title {
+            let dur_s = clip.duration() as f64 / 1_000_000_000.0;
+            let bg = title_clip_lavfi_color(clip, out_w, out_h,
+                project.frame_rate.numerator, project.frame_rate.denominator, dur_s);
+            cmd.arg("-f").arg("lavfi").arg("-i").arg(bg);
+        } else {
+            let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
+            if clip.kind == ClipKind::Image {
+                cmd.arg("-loop").arg("1");
+            }
+            cmd.arg("-ss")
+                .arg(format!("{in_s:.6}"))
+                .arg("-t")
+                .arg(format!("{src_dur_s:.6}"))
+                .arg("-i")
+                .arg(resolve_export_path(clip));
         }
-        cmd.arg("-ss")
-            .arg(format!("{in_s:.6}"))
-            .arg("-t")
-            .arg(format!("{src_dur_s:.6}"))
-            .arg("-i")
-            .arg(resolve_export_path(clip));
     }
 
     let sec_base = primary_clips.len();
@@ -586,15 +603,24 @@ pub fn export_project(
         audio_labels.push(label);
     }
 
-    // Mix all audio streams
+    // Mix all audio streams.
+    // Use `duration=longest` (default) but trim the amix output to the
+    // project duration.  Without the trim, `amix` + `adelay` can produce
+    // trailing packets with PTS=NOPTS_VALUE (INT64_MAX) that cause
+    // "non monotonically increasing dts" muxer errors, especially when
+    // the timeline contains title clips or other video-only sources that
+    // don't contribute audio.
     let has_audio = !audio_labels.is_empty();
     if has_audio {
         let n = audio_labels.len();
+        let project_dur_s = project.duration() as f64 / 1_000_000_000.0;
         filter.push(';');
         for label in &audio_labels {
             filter.push_str(&format!("[{label}]"));
         }
-        filter.push_str(&format!("amix=inputs={n}:normalize=0[aout]"));
+        filter.push_str(&format!(
+            "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+        ));
     }
 
     cmd.arg("-filter_complex")
@@ -1289,8 +1315,9 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     let rel_x = clip.title_x.clamp(0.0, 1.0);
     let rel_y = clip.title_y.clamp(0.0, 1.0);
 
+    let scale_factor = out_h as f64 / TITLE_REFERENCE_HEIGHT;
     // Scale Pango points → pixels (×4/3) then proportionally to output height
-    let scaled_size = font_size * (4.0 / 3.0) * (out_h as f64 / TITLE_REFERENCE_HEIGHT);
+    let scaled_size = font_size * (4.0 / 3.0) * scale_factor;
 
     let rgba = clip.title_color;
     let r = ((rgba >> 24) & 0xFF) as u8;
@@ -1299,10 +1326,59 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     let a = (rgba & 0xFF) as u8;
     let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
 
-    // Position: center text at (rel_x*w, rel_y*h) to match GStreamer textoverlay semantics
-    format!(
+    // Base drawtext filter
+    let mut filter = format!(
         ",drawtext=font='{font_name}':text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
-    )
+    );
+
+    // Outline (border)
+    if clip.title_outline_width > 0.0 {
+        let bw = (clip.title_outline_width * scale_factor).max(0.5);
+        let oc = clip.title_outline_color;
+        let or = ((oc >> 24) & 0xFF) as u8;
+        let og = ((oc >> 16) & 0xFF) as u8;
+        let ob = ((oc >> 8) & 0xFF) as u8;
+        let oa = (oc & 0xFF) as u8;
+        let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
+        filter.push_str(&format!(":borderw={bw:.1}:bordercolor={or:02x}{og:02x}{ob:02x}@{o_alpha:.4}"));
+    }
+
+    // Shadow
+    if clip.title_shadow {
+        let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
+        let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
+        let sc = clip.title_shadow_color;
+        let sr = ((sc >> 24) & 0xFF) as u8;
+        let sg = ((sc >> 16) & 0xFF) as u8;
+        let sb = ((sc >> 8) & 0xFF) as u8;
+        let sa = (sc & 0xFF) as u8;
+        let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
+        filter.push_str(&format!(":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"));
+    }
+
+    // Background box
+    if clip.title_bg_box {
+        let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
+        let bc = clip.title_bg_box_color;
+        let br = ((bc >> 24) & 0xFF) as u8;
+        let bg = ((bc >> 16) & 0xFF) as u8;
+        let bb = ((bc >> 8) & 0xFF) as u8;
+        let ba = (bc & 0xFF) as u8;
+        let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
+        filter.push_str(&format!(":box=1:boxcolor={br:02x}{bg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"));
+    }
+
+    // Secondary text (second drawtext filter below primary)
+    if !clip.title_secondary_text.trim().is_empty() {
+        let sec_text = escape_drawtext_value(&clip.title_secondary_text).replace('\n', "\\n");
+        let sec_size = scaled_size * 0.7; // secondary text is 70% of primary
+        let sec_y_offset = scaled_size * 1.5; // offset below primary
+        filter.push_str(&format!(
+            ",drawtext=font='{font_name}':text='{sec_text}':fontsize={sec_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2+{sec_y_offset:.0}'"
+        ));
+    }
+
+    filter
 }
 
 fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
@@ -1400,6 +1476,10 @@ fn video_input_seek_and_duration(
     clip: &crate::model::clip::Clip,
     frame_duration_s: f64,
 ) -> (f64, f64) {
+    if clip.kind == ClipKind::Title {
+        // Title clips use lavfi input; return zero seek, full duration.
+        return (0.0, clip.duration() as f64 / 1_000_000_000.0);
+    }
     if clip.is_freeze_frame() {
         let source_ns = clip.freeze_frame_source_time_ns().unwrap_or(clip.source_in);
         return (
@@ -1417,7 +1497,39 @@ fn video_input_seek_and_duration(
     )
 }
 
+/// Generate lavfi color source string for a title clip.
+///
+/// Always outputs opaque yuv420p — transparency is not supported in the
+/// primary/secondary concat export path (the filter chain converts to
+/// yuv420p anyway).  Using a finite `d=` duration plus `trim` and
+/// `setpts=PTS-STARTPTS` ensures the lavfi source produces clean
+/// monotonic timestamps compatible with concat.
+fn title_clip_lavfi_color(
+    clip: &crate::model::clip::Clip,
+    out_w: u32, out_h: u32,
+    fr_n: u32, fr_d: u32,
+    dur_s: f64,
+) -> String {
+    let bg = clip.title_clip_bg_color;
+    let a = bg & 0xFF;
+    let color_str = if a > 0 {
+        let r = (bg >> 24) & 0xFF;
+        let g = (bg >> 16) & 0xFF;
+        let b = (bg >> 8) & 0xFF;
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        "black".to_string()
+    };
+    format!(
+        "color=c={color_str}:size={out_w}x{out_h}:r={fr_n}/{fr_d}:d={dur_s:.6},format=yuv420p,trim=duration={dur_s:.6},setpts=PTS-STARTPTS"
+    )
+}
+
 fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -> String {
+    if clip.kind == ClipKind::Title {
+        // Title clips are generated at exact duration by lavfi, no timing filter needed.
+        return String::new();
+    }
     if clip.is_freeze_frame() || clip.kind == ClipKind::Image {
         let hold_s = clip.duration() as f64 / 1_000_000_000.0;
         let frame_s = frame_duration_s.max(0.001);
@@ -1990,6 +2102,10 @@ fn has_linked_audio_peer(clip: &Clip, audio_clips: &[&Clip]) -> bool {
 }
 
 fn clip_has_audio(ffmpeg: &str, clip: &Clip, cache: &mut HashMap<String, bool>) -> bool {
+    // Title clips have no source media and thus no audio.
+    if clip.kind == ClipKind::Title || clip.source_path.is_empty() {
+        return false;
+    }
     if let Some(has_audio) = cache.get(&clip.source_path) {
         return *has_audio;
     }

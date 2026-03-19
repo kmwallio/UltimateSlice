@@ -224,6 +224,7 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 |---|---|---|
 | `gtk4` | `0.11` | glib 0.22 |
 | `gdk4` | `0.11` | glib 0.22 |
+| `pango` | `0.22` | Font description for title font chooser |
 | `glib` | `0.22` | shared base |
 | `gio` | `0.22` | GIO |
 | `gstreamer` | `0.25` | glib 0.22 |

@@ -97,6 +97,17 @@ pub struct InspectorView {
     pub title_entry: Entry,
     pub title_x_slider: Scale,
     pub title_y_slider: Scale,
+    pub title_font_btn: gtk4::Button,
+    pub title_color_btn: gtk4::ColorDialogButton,
+    pub title_outline_width_slider: Scale,
+    pub title_outline_color_btn: gtk4::ColorDialogButton,
+    pub title_shadow_check: CheckButton,
+    pub title_shadow_color_btn: gtk4::ColorDialogButton,
+    pub title_shadow_x_slider: Scale,
+    pub title_shadow_y_slider: Scale,
+    pub title_bg_box_check: CheckButton,
+    pub title_bg_box_color_btn: gtk4::ColorDialogButton,
+    pub title_bg_box_padding_slider: Scale,
     // Speed
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
@@ -800,27 +811,36 @@ impl InspectorView {
                 let is_video = c.kind == ClipKind::Video;
                 let is_audio = c.kind == ClipKind::Audio;
                 let is_image = c.kind == ClipKind::Image;
+                let is_title_clip = c.kind == ClipKind::Title;
+                let is_visual = is_video || is_image || is_title_clip;
                 self.color_section.set_visible(is_video || is_image);
                 self.audio_section.set_visible(is_video || is_audio);
-                self.transform_section.set_visible(is_video || is_image);
-                self.title_section_box.set_visible(is_video || is_image);
-                self.speed_section_box.set_visible(true);
+                self.transform_section.set_visible(is_visual);
+                self.title_section_box.set_visible(is_visual);
+                self.speed_section_box.set_visible(!is_title_clip);
                 self.lut_section_box.set_visible(is_video || is_image);
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
                 self.frei0r_effects_section
-                    .set_visible(is_video || is_image);
+                    .set_visible(is_visual);
 
                 // Populate applied frei0r effects list.
                 self.rebuild_frei0r_effects_list(&c.frei0r_effects);
 
                 self.name_entry.set_text(&c.label);
-                self.path_value.set_text(&c.source_path);
-                self.path_value.set_tooltip_text(Some(&c.source_path));
-                let is_missing = missing_media_paths
-                    .map(|paths| paths.contains(&c.source_path))
-                    .unwrap_or_else(|| !crate::model::media_library::source_path_exists(&c.source_path));
+                let is_title = c.kind == ClipKind::Title;
+                if is_title {
+                    self.path_value.set_text("(title clip — no source file)");
+                    self.path_value.set_tooltip_text(None);
+                } else {
+                    self.path_value.set_text(&c.source_path);
+                    self.path_value.set_tooltip_text(Some(&c.source_path));
+                }
+                let is_missing = !is_title
+                    && missing_media_paths
+                        .map(|paths| paths.contains(&c.source_path))
+                        .unwrap_or_else(|| !crate::model::media_library::source_path_exists(&c.source_path));
                 if is_missing {
                     self.path_status_value
                         .set_text("Offline — source file is missing");
@@ -926,8 +946,47 @@ impl InspectorView {
                         playhead_ns,
                     ));
                 self.title_entry.set_text(&c.title_text);
+                self.title_font_btn.set_label(&c.title_font);
+                {
+                    let rgba = c.title_color;
+                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
+                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
+                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
+                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    self.title_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                }
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
+                self.title_outline_width_slider.set_value(c.title_outline_width);
+                {
+                    let rgba = c.title_outline_color;
+                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
+                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
+                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
+                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    self.title_outline_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                }
+                self.title_shadow_check.set_active(c.title_shadow);
+                {
+                    let rgba = c.title_shadow_color;
+                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
+                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
+                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
+                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    self.title_shadow_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                }
+                self.title_shadow_x_slider.set_value(c.title_shadow_offset_x);
+                self.title_shadow_y_slider.set_value(c.title_shadow_offset_y);
+                self.title_bg_box_check.set_active(c.title_bg_box);
+                {
+                    let rgba = c.title_bg_box_color;
+                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
+                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
+                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
+                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    self.title_bg_box_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                }
+                self.title_bg_box_padding_slider.set_value(c.title_bg_box_padding);
                 // When speed keyframes are present, don't auto-update the slider —
                 // the user sets it to the desired value before clicking
                 // "Set Speed Keyframe". Auto-resetting would clobber their input.
@@ -1025,8 +1084,19 @@ impl InspectorView {
                 self.position_x_slider.set_value(0.0);
                 self.position_y_slider.set_value(0.0);
                 self.title_entry.set_text("");
+                self.title_font_btn.set_label("Sans Bold 36");
+                self.title_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
                 self.title_x_slider.set_value(0.5);
                 self.title_y_slider.set_value(0.9);
+                self.title_outline_width_slider.set_value(0.0);
+                self.title_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+                self.title_shadow_check.set_active(false);
+                self.title_shadow_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.67));
+                self.title_shadow_x_slider.set_value(2.0);
+                self.title_shadow_y_slider.set_value(2.0);
+                self.title_bg_box_check.set_active(false);
+                self.title_bg_box_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
+                self.title_bg_box_padding_slider.set_value(8.0);
                 self.speed_slider.set_value(1.0);
                 self.reverse_check.set_active(false);
                 self.lut_path_label.set_text("None");
@@ -1207,6 +1277,7 @@ pub fn build_inspector(
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
+    on_title_style_changed: impl Fn() + 'static,
     on_speed_changed: impl Fn(f64) + 'static,
     on_lut_changed: impl Fn(Option<String>) + 'static,
     on_opacity_changed: impl Fn(f64) + 'static,
@@ -1770,6 +1841,16 @@ pub fn build_inspector(
 
     transform_inner.append(&Separator::new(Orientation::Horizontal));
 
+    row_label(&transform_inner, "Blend Mode");
+    let blend_mode_dropdown = gtk4::DropDown::from_strings(&[
+        "Normal", "Multiply", "Screen", "Overlay", "Add", "Difference", "Soft Light",
+    ]);
+    blend_mode_dropdown.set_selected(0);
+    blend_mode_dropdown.set_halign(gtk4::Align::Start);
+    blend_mode_dropdown.set_hexpand(true);
+    blend_mode_dropdown.set_tooltip_text(Some("Compositing blend mode"));
+    transform_inner.append(&blend_mode_dropdown);
+
     row_label(&transform_inner, "Scale");
     let scale_slider = Scale::with_range(Orientation::Horizontal, 0.1, 4.0, 0.05);
     scale_slider.set_value(1.0);
@@ -1804,16 +1885,6 @@ pub fn build_inspector(
     opacity_keyframe_row.append(&opacity_set_keyframe_btn);
     opacity_keyframe_row.append(&opacity_remove_keyframe_btn);
     transform_inner.append(&opacity_keyframe_row);
-
-    row_label(&transform_inner, "Blend Mode");
-    let blend_mode_dropdown = gtk4::DropDown::from_strings(&[
-        "Normal", "Multiply", "Screen", "Overlay", "Add", "Difference", "Soft Light",
-    ]);
-    blend_mode_dropdown.set_selected(0);
-    blend_mode_dropdown.set_halign(gtk4::Align::Start);
-    blend_mode_dropdown.set_hexpand(true);
-    blend_mode_dropdown.set_tooltip_text(Some("Compositing blend mode"));
-    transform_inner.append(&blend_mode_dropdown);
 
     row_label(&transform_inner, "Position X");
     let position_x_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
@@ -1986,6 +2057,18 @@ pub fn build_inspector(
     title_entry.set_placeholder_text(Some("Overlay text…"));
     title_inner.append(&title_entry);
 
+    row_label(&title_inner, "Font");
+    let title_font_btn = gtk4::Button::with_label("Sans Bold 36");
+    title_font_btn.set_tooltip_text(Some("Click to choose a font"));
+    title_inner.append(&title_font_btn);
+
+    row_label(&title_inner, "Text Color");
+    let title_color_dialog = gtk4::ColorDialog::new();
+    title_color_dialog.set_with_alpha(true);
+    let title_color_btn = gtk4::ColorDialogButton::new(Some(title_color_dialog));
+    title_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+    title_inner.append(&title_color_btn);
+
     row_label(&title_inner, "Position X");
     let title_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     title_x_slider.set_value(0.5);
@@ -1997,6 +2080,65 @@ pub fn build_inspector(
     title_y_slider.set_value(0.9);
     title_y_slider.set_hexpand(true);
     title_inner.append(&title_y_slider);
+
+    row_label(&title_inner, "Outline Width");
+    let title_outline_width_slider = Scale::with_range(Orientation::Horizontal, 0.0, 10.0, 0.5);
+    title_outline_width_slider.set_value(0.0);
+    title_outline_width_slider.set_draw_value(true);
+    title_outline_width_slider.set_digits(1);
+    title_outline_width_slider.set_hexpand(true);
+    title_inner.append(&title_outline_width_slider);
+
+    row_label(&title_inner, "Outline Color");
+    let title_outline_color_dialog = gtk4::ColorDialog::new();
+    title_outline_color_dialog.set_with_alpha(true);
+    let title_outline_color_btn = gtk4::ColorDialogButton::new(Some(title_outline_color_dialog));
+    title_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    title_inner.append(&title_outline_color_btn);
+
+    let title_shadow_check = CheckButton::with_label("Drop Shadow");
+    title_inner.append(&title_shadow_check);
+
+    row_label(&title_inner, "Shadow Color");
+    let title_shadow_color_dialog = gtk4::ColorDialog::new();
+    title_shadow_color_dialog.set_with_alpha(true);
+    let title_shadow_color_btn = gtk4::ColorDialogButton::new(Some(title_shadow_color_dialog));
+    title_shadow_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.67));
+    title_inner.append(&title_shadow_color_btn);
+
+    row_label(&title_inner, "Shadow Offset X");
+    let title_shadow_x_slider = Scale::with_range(Orientation::Horizontal, -10.0, 10.0, 0.5);
+    title_shadow_x_slider.set_value(2.0);
+    title_shadow_x_slider.set_draw_value(true);
+    title_shadow_x_slider.set_digits(1);
+    title_shadow_x_slider.set_hexpand(true);
+    title_inner.append(&title_shadow_x_slider);
+
+    row_label(&title_inner, "Shadow Offset Y");
+    let title_shadow_y_slider = Scale::with_range(Orientation::Horizontal, -10.0, 10.0, 0.5);
+    title_shadow_y_slider.set_value(2.0);
+    title_shadow_y_slider.set_draw_value(true);
+    title_shadow_y_slider.set_digits(1);
+    title_shadow_y_slider.set_hexpand(true);
+    title_inner.append(&title_shadow_y_slider);
+
+    let title_bg_box_check = CheckButton::with_label("Background Box");
+    title_inner.append(&title_bg_box_check);
+
+    row_label(&title_inner, "Box Color");
+    let title_bg_box_color_dialog = gtk4::ColorDialog::new();
+    title_bg_box_color_dialog.set_with_alpha(true);
+    let title_bg_box_color_btn = gtk4::ColorDialogButton::new(Some(title_bg_box_color_dialog));
+    title_bg_box_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
+    title_inner.append(&title_bg_box_color_btn);
+
+    row_label(&title_inner, "Box Padding");
+    let title_bg_box_padding_slider = Scale::with_range(Orientation::Horizontal, 0.0, 30.0, 1.0);
+    title_bg_box_padding_slider.set_value(8.0);
+    title_bg_box_padding_slider.set_draw_value(true);
+    title_bg_box_padding_slider.set_digits(0);
+    title_bg_box_padding_slider.set_hexpand(true);
+    title_inner.append(&title_bg_box_padding_slider);
 
     // ── Speed section (all clip types) ───────────────────────────────────────
     let speed_section_box = GBox::new(Orientation::Vertical, 8);
@@ -2107,6 +2249,7 @@ pub fn build_inspector(
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
+    let on_title_style_changed: Rc<dyn Fn()> = Rc::new(on_title_style_changed);
     let on_speed_changed: Rc<dyn Fn(f64)> = Rc::new(on_speed_changed);
     let on_lut_changed: Rc<dyn Fn(Option<String>)> = Rc::new(on_lut_changed);
     let on_opacity_changed: Rc<dyn Fn(f64)> = Rc::new(on_opacity_changed);
@@ -3736,6 +3879,364 @@ pub fn build_inspector(
         });
     }
 
+    // Title font button — opens a FontDialog, updates clip model + live preview
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        let on_title_changed = on_title_changed.clone();
+        let title_x = title_x_slider.clone();
+        let title_y = title_y_slider.clone();
+        let title_entry_font = title_entry.clone();
+        let font_btn = title_font_btn.clone();
+        title_font_btn.connect_clicked(move |_btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let dialog = gtk4::FontDialog::new();
+            let current_label = font_btn.label().map(|l| l.to_string()).unwrap_or_default();
+            let initial = if current_label.is_empty() {
+                None
+            } else {
+                pango::FontDescription::from_string(&current_label).into()
+            };
+            let project_c = project.clone();
+            let id_c = selected_clip_id.clone();
+            let on_style = on_title_style_changed.clone();
+            let on_title = on_title_changed.clone();
+            let tx = title_x.clone();
+            let ty = title_y.clone();
+            let te = title_entry_font.clone();
+            let fb = font_btn.clone();
+            let parent: Option<&gtk4::Window> = None;
+            dialog.choose_font(parent, initial.as_ref(), None::<&gio::Cancellable>, move |result| {
+                if let Ok(desc) = result {
+                    let font_str = desc.to_string();
+                    fb.set_label(&font_str);
+                    let id = id_c.borrow().clone();
+                    if let Some(ref clip_id) = id {
+                        {
+                            let mut proj = project_c.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                    clip.title_font = font_str.clone();
+                                    proj.dirty = true;
+                                    break;
+                                }
+                            }
+                        }
+                        on_title(te.text().to_string(), tx.value(), ty.value());
+                        on_style();
+                    }
+                }
+            });
+        });
+    }
+
+    // Title text color button
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_changed = on_title_changed.clone();
+        let title_x = title_x_slider.clone();
+        let title_y = title_y_slider.clone();
+        let title_entry_c = title_entry.clone();
+        title_color_btn.connect_rgba_notify(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0).round() as u32;
+            let g = (rgba.green() * 255.0).round() as u32;
+            let b = (rgba.blue() * 255.0).round() as u32;
+            let a = (rgba.alpha() * 255.0).round() as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_changed(title_entry_c.text().to_string(), title_x.value(), title_y.value());
+            }
+        });
+    }
+
+    // Title outline width slider
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_outline_width_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_outline_width = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title outline color button
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_outline_color_btn.connect_rgba_notify(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0).round() as u32;
+            let g = (rgba.green() * 255.0).round() as u32;
+            let b = (rgba.blue() * 255.0).round() as u32;
+            let a = (rgba.alpha() * 255.0).round() as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_outline_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title shadow toggle
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_shadow_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_shadow = active;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title shadow color button
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_shadow_color_btn.connect_rgba_notify(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0).round() as u32;
+            let g = (rgba.green() * 255.0).round() as u32;
+            let b = (rgba.blue() * 255.0).round() as u32;
+            let a = (rgba.alpha() * 255.0).round() as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_shadow_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title shadow offset X slider
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_shadow_x_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_shadow_offset_x = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title shadow offset Y slider
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_shadow_y_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_shadow_offset_y = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title background box toggle
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_bg_box_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_bg_box = active;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title background box color button
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_bg_box_color_btn.connect_rgba_notify(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0).round() as u32;
+            let g = (rgba.green() * 255.0).round() as u32;
+            let b = (rgba.blue() * 255.0).round() as u32;
+            let a = (rgba.alpha() * 255.0).round() as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_bg_box_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title background box padding slider
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_bg_box_padding_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = sl.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.title_bg_box_padding = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
     // Speed slider — when speed keyframes are present, live-update the
     // nearest keyframe at the playhead. Without keyframes, update clip.speed.
     // Uses a pending-update pattern to avoid re-entrancy panics: the model
@@ -4485,6 +4986,17 @@ pub fn build_inspector(
         title_entry,
         title_x_slider,
         title_y_slider,
+        title_font_btn,
+        title_color_btn,
+        title_outline_width_slider,
+        title_outline_color_btn,
+        title_shadow_check,
+        title_shadow_color_btn,
+        title_shadow_x_slider,
+        title_shadow_y_slider,
+        title_bg_box_check,
+        title_bg_box_color_btn,
+        title_bg_box_padding_slider,
         speed_slider,
         reverse_check,
         lut_path_label,

@@ -83,9 +83,9 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 
 | Control | Options | Description |
 |---|---|---|
+| **Blend Mode** | Dropdown | Compositing blend mode: Normal (default), Multiply, Screen, Overlay, Add, Difference, Soft Light. Preview blends against real lower layers via compositor probe; export uses ffmpeg `blend` filter |
 | **Scale** | 0.1 → 4.0 | Zoom factor. 1.0 = normal, 2.0 = 2× zoom in (crops), 0.5 = half size (letterbox/pillarbox) |
 | **Opacity** | 0.0 → 1.0 | Layer blend amount. 1.0 = fully opaque, 0.0 = fully transparent |
-| **Blend Mode** | Dropdown | Compositing blend mode: Normal (default), Multiply, Screen, Overlay, Add, Difference, Soft Light. Preview blends against real lower layers via compositor probe; export uses ffmpeg `blend` filter |
 | **Position X** | −1.0 → 1.0 | Horizontal offset within the frame. 0.0 = center, −1.0 = full left, 1.0 = full right |
 | **Position Y** | −1.0 → 1.0 | Vertical offset within the frame. 0.0 = center, −1.0 = full top, 1.0 = full bottom |
 | **Crop Left/Right/Top/Bottom** | 0 → 500 px | Crop pixels from each edge |
@@ -158,17 +158,33 @@ Program Monitor overlay integration:
 
 ## Title / Text Overlay
 
-Rendered via GStreamer `textoverlay` (preview) and composited on export.
+Rendered via GStreamer `textoverlay` (preview) and FFmpeg `drawtext` (export).
 
 | Field | Description |
 |---|---|
 | **Text** | The overlay text (leave empty to hide) |
+| **Font** | Click to choose a font (Pango font description) |
+| **Text Color** | Color picker with alpha support |
 | **Position X** | 0.0 (left) → 1.0 (right) |
 | **Position Y** | 0.0 (top) → 1.0 (bottom) |
+| **Outline Width** | Stroke width in pts (0 = none) |
+| **Outline Color** | Stroke color with alpha |
+| **Drop Shadow** | Enable/disable drop shadow |
+| **Shadow Color** | Shadow color with alpha |
+| **Shadow Offset X/Y** | Shadow offset in pts |
+| **Background Box** | Enable/disable background box behind text |
+| **Box Color** | Background box color with alpha |
+| **Box Padding** | Padding around text in pts |
 
 Default: white `Sans Bold 36`, bottom-centre (`x=0.5, y=0.9`).
 
 > **Resolution-independent sizing** — Font size is specified in Pango points at a 1080p reference height. Both GStreamer preview and FFmpeg export scale the effective font size proportionally to the actual rendering height, so title text appears at the same relative size regardless of output resolution (720p, 1080p, 4K, etc.).
+
+> **Live preview** — All title styling controls update the GStreamer preview immediately. Property changes are non-blocking; the compositor flush is fire-and-forget with 32ms debouncing, so rapid typing and slider drags feel smooth even on multi-clip timelines.
+
+> **Resolution-independent sizing** — Title font size is calculated to match the export output regardless of preview quality or window size. The font size specified in the inspector (e.g. "Sans Bold 36") defines the visual size at 1080p; the preview and export both scale proportionally to the actual rendering height.
+
+> **Preview limitations** — GStreamer `textoverlay` has fixed outline width (~1px), fixed shadow offset, and a single dark shaded-background style. The FFmpeg export renders all styling options at full fidelity.
 
 ---
 

@@ -817,7 +817,7 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image => {
+                ClipKind::Video | ClipKind::Image | ClipKind::Title => {
                     lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
                 }
             };
@@ -957,7 +957,12 @@ fn parse_asset_clip(
                 clip.sharpness = v.parse().unwrap_or(0.0);
             }
             if let Some(v) = attrs.get("us:frei0r-effects") {
-                clip.frei0r_effects = serde_json::from_str(v).unwrap_or_default();
+                // The writer escapes " → &quot; then XML serialization escapes
+                // & → &amp;, producing &amp;quot; in the file.  quick_xml's
+                // unescape decodes &amp;quot; → &quot; but not the second level.
+                // Decode any remaining &quot; so JSON parsing succeeds.
+                let json_str = v.replace("&quot;", "\"");
+                clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:volume") {
                 clip.volume = v.parse().unwrap_or(1.0);
@@ -1056,6 +1061,47 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:title-y") {
                 clip.title_y = v.parse().unwrap_or(0.9);
+            }
+            if let Some(v) = attrs.get("us:title-template") {
+                clip.title_template = v.clone();
+            }
+            if let Some(v) = attrs.get("us:title-outline-color") {
+                clip.title_outline_color = u32::from_str_radix(v, 16).unwrap_or(0x000000FF);
+            }
+            if let Some(v) = attrs.get("us:title-outline-width") {
+                clip.title_outline_width = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:title-shadow") {
+                clip.title_shadow = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:title-shadow-color") {
+                clip.title_shadow_color = u32::from_str_radix(v, 16).unwrap_or(0x000000AA);
+            }
+            if let Some(v) = attrs.get("us:title-shadow-offset-x") {
+                clip.title_shadow_offset_x = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:title-shadow-offset-y") {
+                clip.title_shadow_offset_y = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:title-bg-box") {
+                clip.title_bg_box = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:title-bg-box-color") {
+                clip.title_bg_box_color = u32::from_str_radix(v, 16).unwrap_or(0x00000088);
+            }
+            if let Some(v) = attrs.get("us:title-bg-box-padding") {
+                clip.title_bg_box_padding = v.parse().unwrap_or(8.0);
+            }
+            if let Some(v) = attrs.get("us:title-clip-bg-color") {
+                clip.title_clip_bg_color = u32::from_str_radix(v, 16).unwrap_or(0);
+            }
+            if let Some(v) = attrs.get("us:title-secondary-text") {
+                clip.title_secondary_text = v.clone();
+            }
+            if let Some(v) = attrs.get("us:clip-kind") {
+                if v == "title" {
+                    clip.kind = ClipKind::Title;
+                }
             }
             if let Some(v) = attrs.get("us:speed") {
                 clip.speed = v.parse().unwrap_or(1.0);

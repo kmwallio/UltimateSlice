@@ -1080,6 +1080,48 @@ fn tools_list() -> Value {
                 "required": ["clip_id", "effect_ids"]
             }
         }
+        ,{
+            "name": "add_title_clip",
+            "description": "Add a standalone title clip to the timeline from a built-in template. Templates: lower_third_banner, lower_third_clean, centered_title, subtitle, full_screen, chapter_heading, cinematic, end_credits, callout.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "template_id": { "type": "string", "description": "Template id (e.g. 'centered_title')" },
+                    "track_index": { "type": "integer", "description": "Video track index (default: first video track)" },
+                    "timeline_start_ns": { "type": "integer", "description": "Timeline start position in nanoseconds (default: playhead)" },
+                    "duration_ns": { "type": "integer", "description": "Clip duration in nanoseconds (default: 5 seconds)" },
+                    "title_text": { "type": "string", "description": "Override title text (default: template name)" }
+                },
+                "required": ["template_id"]
+            }
+        },
+        {
+            "name": "set_clip_title_style",
+            "description": "Set title/text overlay styling properties on a clip. Includes font, color, position, outline, shadow, background box.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "title_text": { "type": "string" },
+                    "title_font": { "type": "string", "description": "Pango font description (e.g. 'Sans Bold 36')" },
+                    "title_color": { "type": "integer", "description": "Text color as 0xRRGGBBAA" },
+                    "title_x": { "type": "number", "description": "Horizontal position 0.0-1.0" },
+                    "title_y": { "type": "number", "description": "Vertical position 0.0-1.0" },
+                    "title_outline_width": { "type": "number", "description": "Outline width in pts (0=none)" },
+                    "title_outline_color": { "type": "integer", "description": "Outline color as 0xRRGGBBAA" },
+                    "title_shadow": { "type": "boolean", "description": "Enable drop shadow" },
+                    "title_shadow_color": { "type": "integer" },
+                    "title_shadow_offset_x": { "type": "number" },
+                    "title_shadow_offset_y": { "type": "number" },
+                    "title_bg_box": { "type": "boolean", "description": "Enable background box" },
+                    "title_bg_box_color": { "type": "integer" },
+                    "title_bg_box_padding": { "type": "number" },
+                    "title_clip_bg_color": { "type": "integer", "description": "Title clip background color (0=transparent)" },
+                    "title_secondary_text": { "type": "string" }
+                },
+                "required": ["clip_id"]
+            }
+        }
     ]})
 }
 
@@ -1587,6 +1629,34 @@ fn dispatch_tool_payload(
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
+            reply: tx,
+        },
+        "add_title_clip" => McpCommand::AddTitleClip {
+            template_id: args["template_id"].as_str().unwrap_or("").to_string(),
+            track_index: args["track_index"].as_u64().map(|v| v as usize),
+            timeline_start_ns: args["timeline_start_ns"].as_u64(),
+            duration_ns: args["duration_ns"].as_u64(),
+            title_text: args["title_text"].as_str().map(String::from),
+            reply: tx,
+        },
+        "set_clip_title_style" => McpCommand::SetClipTitleStyle {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            title_text: args["title_text"].as_str().map(String::from),
+            title_font: args["title_font"].as_str().map(String::from),
+            title_color: args["title_color"].as_u64().map(|v| v as u32),
+            title_x: args["title_x"].as_f64(),
+            title_y: args["title_y"].as_f64(),
+            title_outline_width: args["title_outline_width"].as_f64(),
+            title_outline_color: args["title_outline_color"].as_u64().map(|v| v as u32),
+            title_shadow: args["title_shadow"].as_bool(),
+            title_shadow_color: args["title_shadow_color"].as_u64().map(|v| v as u32),
+            title_shadow_offset_x: args["title_shadow_offset_x"].as_f64(),
+            title_shadow_offset_y: args["title_shadow_offset_y"].as_f64(),
+            title_bg_box: args["title_bg_box"].as_bool(),
+            title_bg_box_color: args["title_bg_box_color"].as_u64().map(|v| v as u32),
+            title_bg_box_padding: args["title_bg_box_padding"].as_f64(),
+            title_clip_bg_color: args["title_clip_bg_color"].as_u64().map(|v| v as u32),
+            title_secondary_text: args["title_secondary_text"].as_str().map(String::from),
             reply: tx,
         },
 

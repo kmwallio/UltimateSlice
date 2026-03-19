@@ -1036,6 +1036,102 @@ impl EditCommand for ToggleFrei0rEffectCommand {
     }
 }
 
+/// Snapshot of all title-related properties for undo/redo.
+#[derive(Clone, Debug)]
+pub struct TitlePropertySnapshot {
+    pub title_text: String,
+    pub title_font: String,
+    pub title_color: u32,
+    pub title_x: f64,
+    pub title_y: f64,
+    pub title_template: String,
+    pub title_outline_color: u32,
+    pub title_outline_width: f64,
+    pub title_shadow: bool,
+    pub title_shadow_color: u32,
+    pub title_shadow_offset_x: f64,
+    pub title_shadow_offset_y: f64,
+    pub title_bg_box: bool,
+    pub title_bg_box_color: u32,
+    pub title_bg_box_padding: f64,
+    pub title_clip_bg_color: u32,
+    pub title_secondary_text: String,
+}
+
+impl TitlePropertySnapshot {
+    pub fn from_clip(clip: &Clip) -> Self {
+        Self {
+            title_text: clip.title_text.clone(),
+            title_font: clip.title_font.clone(),
+            title_color: clip.title_color,
+            title_x: clip.title_x,
+            title_y: clip.title_y,
+            title_template: clip.title_template.clone(),
+            title_outline_color: clip.title_outline_color,
+            title_outline_width: clip.title_outline_width,
+            title_shadow: clip.title_shadow,
+            title_shadow_color: clip.title_shadow_color,
+            title_shadow_offset_x: clip.title_shadow_offset_x,
+            title_shadow_offset_y: clip.title_shadow_offset_y,
+            title_bg_box: clip.title_bg_box,
+            title_bg_box_color: clip.title_bg_box_color,
+            title_bg_box_padding: clip.title_bg_box_padding,
+            title_clip_bg_color: clip.title_clip_bg_color,
+            title_secondary_text: clip.title_secondary_text.clone(),
+        }
+    }
+
+    fn apply_to_clip(&self, clip: &mut Clip) {
+        clip.title_text = self.title_text.clone();
+        clip.title_font = self.title_font.clone();
+        clip.title_color = self.title_color;
+        clip.title_x = self.title_x;
+        clip.title_y = self.title_y;
+        clip.title_template = self.title_template.clone();
+        clip.title_outline_color = self.title_outline_color;
+        clip.title_outline_width = self.title_outline_width;
+        clip.title_shadow = self.title_shadow;
+        clip.title_shadow_color = self.title_shadow_color;
+        clip.title_shadow_offset_x = self.title_shadow_offset_x;
+        clip.title_shadow_offset_y = self.title_shadow_offset_y;
+        clip.title_bg_box = self.title_bg_box;
+        clip.title_bg_box_color = self.title_bg_box_color;
+        clip.title_bg_box_padding = self.title_bg_box_padding;
+        clip.title_clip_bg_color = self.title_clip_bg_color;
+        clip.title_secondary_text = self.title_secondary_text.clone();
+    }
+}
+
+pub struct SetTitlePropertiesCommand {
+    pub clip_id: String,
+    pub before: TitlePropertySnapshot,
+    pub after: TitlePropertySnapshot,
+}
+
+impl EditCommand for SetTitlePropertiesCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.tracks.iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .find(|c| c.id == self.clip_id)
+        {
+            self.after.apply_to_clip(clip);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.tracks.iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .find(|c| c.id == self.clip_id)
+        {
+            self.before.apply_to_clip(clip);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set title properties"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

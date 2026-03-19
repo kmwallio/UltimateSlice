@@ -1650,6 +1650,7 @@ dependencies = [
  "log",
  "ndarray",
  "ort",
+ "pango",
  "quick-xml",
  "rustfft",
  "serde",

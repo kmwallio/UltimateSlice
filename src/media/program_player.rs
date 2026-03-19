@@ -302,6 +302,20 @@ pub struct ProgramClip {
     pub title_color: u32,
     pub title_x: f64,
     pub title_y: f64,
+    /// Extended title styling fields.
+    pub title_outline_color: u32,
+    pub title_outline_width: f64,
+    pub title_shadow: bool,
+    pub title_shadow_color: u32,
+    pub title_shadow_offset_x: f64,
+    pub title_shadow_offset_y: f64,
+    pub title_bg_box: bool,
+    pub title_bg_box_color: u32,
+    pub title_bg_box_padding: f64,
+    pub title_clip_bg_color: u32,
+    pub title_secondary_text: String,
+    /// True when this clip is a standalone title clip (ClipKind::Title).
+    pub is_title: bool,
     /// Playback speed multiplier (default 1.0). >1 = fast, <1 = slow.
     pub speed: f64,
     /// Optional variable speed keyframes over clip-local timeline.
@@ -1129,6 +1143,9 @@ pub struct ProgramPlayer {
     /// Last frame-quantized seek position (nanoseconds). When a new seek
     /// lands on the same frame, the pipeline work is skipped entirely.
     last_seeked_frame_pos: Option<u64>,
+    /// Instant of the last completed seek — used to detect rapid interactive
+    /// scrubbing (seeks arriving <300ms apart) and reduce wait budgets.
+    last_seek_instant: Option<Instant>,
     /// Small previous/current/next frame cache around the paused playhead.
     short_frame_cache: ShortFrameCache,
     /// Deferred cache capture ticket for non-blocking 3+ track playing pulses.
@@ -1707,6 +1724,7 @@ impl ProgramPlayer {
                 // Default 24 fps ≈ 41_666_666 ns per frame
                 frame_duration_ns: 1_000_000_000 / 24,
                 last_seeked_frame_pos: None,
+                last_seek_instant: None,
                 short_frame_cache: ShortFrameCache::default(),
                 pending_short_frame_capture: None,
                 last_boundary_rebuild_clips: Vec::new(),
@@ -2411,7 +2429,10 @@ impl ProgramPlayer {
         }
         let mut short_frame_signature = None;
         let mut short_frame_cache_hit = false;
-        let mut arrival_wait_budget_ms = 3000;
+        // Default budget for non-cached seeks. The effective_wait_timeout_ms()
+        // function further caps this based on player state and slot count, so
+        // during interactive scrubbing the actual wait is much shorter (~150ms).
+        let mut arrival_wait_budget_ms: u64 = if resume_playback { 3000 } else { 500 };
         let scope_seq_before_seek = self.scope_frame_seq.load(Ordering::Relaxed);
         if !resume_playback {
             let signature = self.short_frame_cache_signature_for_frame(frame_pos);
@@ -2464,6 +2485,7 @@ impl ProgramPlayer {
                 seek_started.elapsed().as_millis()
             );
             self.last_seeked_frame_pos = Some(frame_pos);
+            self.last_seek_instant = Some(Instant::now());
             return needs_async;
         }
         // Full rebuild: needed when the set of active clips has changed (e.g.
@@ -2487,8 +2509,7 @@ impl ProgramPlayer {
             false
         } else if self.current_idx.is_some() {
             if self.slots.len() >= 3 {
-                // For 3+ tracks, start a non-blocking Playing pulse: lock the
-                // audio sink, set Playing, and return immediately so the GTK
+                // For 3+ tracks, start a non-blocking Playing pulse so the GTK
                 // main loop can service gtk4paintablesink's preroll.  The caller
                 // must schedule complete_playing_pulse() via idle/timeout.
                 self.start_playing_pulse();
@@ -2522,6 +2543,7 @@ impl ProgramPlayer {
             seek_started.elapsed().as_millis()
         );
         self.last_seeked_frame_pos = Some(frame_pos);
+        self.last_seek_instant = Some(Instant::now());
         needs_async
     }
 
@@ -3550,7 +3572,7 @@ impl ProgramPlayer {
     }
 
     pub fn update_current_title(
-        &mut self,
+        &self,
         text: &str,
         font: &str,
         color_rgba: u32,
@@ -3558,9 +3580,101 @@ impl ProgramPlayer {
         rel_y: f64,
     ) {
         self.set_title(text, font, color_rgba, rel_x, rel_y);
-        if self.current_idx.is_some() && self.state != PlayerState::Playing {
-            self.reseek_slot_for_current();
+        // Don't flush here — caller schedules a debounced compositor flush
+        // so rapid keystrokes / slider drags don't block the GTK main thread.
+    }
+
+    /// Update title on the slot matching `clip_id` (not just current_idx).
+    /// This is needed when the selected clip differs from the highest-priority
+    /// clip at the playhead (e.g. editing a lower-track clip's title overlay
+    /// while a higher-track clip is the "current" composited clip).
+    pub fn update_title_for_clip(
+        &self,
+        clip_id: &str,
+        text: &str,
+        font: &str,
+        color_rgba: u32,
+        rel_x: f64,
+        rel_y: f64,
+    ) {
+        let idx = self.clips.iter().position(|c| c.id == clip_id);
+        if let Some(slot) = idx.and_then(|i| self.slot_for_clip(i)) {
+            let (_, proc_h) = self.preview_processing_dimensions();
+            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, proc_h);
         }
+    }
+
+    /// Update title style on the slot matching `clip_id`.
+    pub fn update_title_style_for_clip(
+        &self,
+        clip_id: &str,
+        outline_width: f64,
+        outline_color: u32,
+        shadow: bool,
+        bg_box: bool,
+    ) {
+        let idx = self.clips.iter().position(|c| c.id == clip_id);
+        if let Some(slot) = idx.and_then(|i| self.slot_for_clip(i)) {
+            if let Some(ref to) = slot.textoverlay {
+                to.set_property("draw-outline", outline_width > 0.0);
+                if outline_width > 0.0 {
+                    let r = (outline_color >> 24) & 0xFF;
+                    let g = (outline_color >> 16) & 0xFF;
+                    let b = (outline_color >> 8) & 0xFF;
+                    let a = outline_color & 0xFF;
+                    let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                    to.set_property("outline-color", argb);
+                }
+                to.set_property("draw-shadow", shadow);
+                to.set_property("shaded-background", bg_box);
+            }
+        }
+    }
+
+    /// Apply extended title styling (outline, shadow, bg box) from individual
+    /// fields to the current slot's textoverlay element.  No flush here —
+    /// caller schedules a debounced compositor flush.
+    pub fn update_current_title_style(
+        &self,
+        outline_width: f64,
+        outline_color: u32,
+        shadow: bool,
+        bg_box: bool,
+    ) {
+        if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
+            if let Some(ref to) = slot.textoverlay {
+                to.set_property("draw-outline", outline_width > 0.0);
+                if outline_width > 0.0 {
+                    let r = (outline_color >> 24) & 0xFF;
+                    let g = (outline_color >> 16) & 0xFF;
+                    let b = (outline_color >> 8) & 0xFF;
+                    let a = outline_color & 0xFF;
+                    let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                    to.set_property("outline-color", argb);
+                }
+                to.set_property("draw-shadow", shadow);
+                to.set_property("shaded-background", bg_box);
+            }
+        }
+        // Don't flush here — caller schedules a debounced compositor flush.
+    }
+
+    /// Fire-and-forget compositor flush.  Sends a FLUSH seek so the
+    /// compositor re-aggregates a frame with updated textoverlay properties.
+    /// Does NOT block — the new frame arrives asynchronously via the
+    /// gtk4paintablesink.  Much cheaper than `reseek_slot_for_current()`
+    /// because the decoders are already at the correct position.
+    pub fn flush_compositor_for_title_update(&self) {
+        if self.slots.is_empty() {
+            return;
+        }
+        if self.state == PlayerState::Playing {
+            // During playback, new frames flow continuously — no flush needed.
+            return;
+        }
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
     }
 
     pub fn update_current_transform(
@@ -4980,6 +5094,41 @@ impl ProgramPlayer {
                 c.chroma_key_color.hash(&mut hasher);
                 c.chroma_key_tolerance.to_bits().hash(&mut hasher);
                 c.chroma_key_softness.to_bits().hash(&mut hasher);
+                // Title overlay properties
+                c.is_title.hash(&mut hasher);
+                c.title_text.hash(&mut hasher);
+                c.title_font.hash(&mut hasher);
+                c.title_color.hash(&mut hasher);
+                c.title_x.to_bits().hash(&mut hasher);
+                c.title_y.to_bits().hash(&mut hasher);
+                c.title_outline_width.to_bits().hash(&mut hasher);
+                c.title_outline_color.hash(&mut hasher);
+                c.title_shadow.hash(&mut hasher);
+                c.title_shadow_color.hash(&mut hasher);
+                c.title_shadow_offset_x.to_bits().hash(&mut hasher);
+                c.title_shadow_offset_y.to_bits().hash(&mut hasher);
+                c.title_bg_box.hash(&mut hasher);
+                c.title_bg_box_color.hash(&mut hasher);
+                c.title_bg_box_padding.to_bits().hash(&mut hasher);
+                c.title_clip_bg_color.hash(&mut hasher);
+                c.title_secondary_text.hash(&mut hasher);
+                // Blend mode
+                (c.blend_mode as u8).hash(&mut hasher);
+                // Frei0r effects
+                c.frei0r_effects.len().hash(&mut hasher);
+                for fe in &c.frei0r_effects {
+                    fe.id.hash(&mut hasher);
+                    fe.plugin_name.hash(&mut hasher);
+                    fe.enabled.hash(&mut hasher);
+                    for (k, v) in &fe.params {
+                        k.hash(&mut hasher);
+                        v.to_bits().hash(&mut hasher);
+                    }
+                    for (k, v) in &fe.string_params {
+                        k.hash(&mut hasher);
+                        v.hash(&mut hasher);
+                    }
+                }
             }
         }
         hasher.finish()
@@ -5547,7 +5696,19 @@ impl ProgramPlayer {
     }
 
     fn should_prioritize_ui_responsiveness(&self) -> bool {
-        self.state != PlayerState::Playing && self.slots.len() >= 3 && !self.background_prerender
+        self.state != PlayerState::Playing
+    }
+
+    /// Returns true when the user is actively scrubbing the timeline — rapid
+    /// seeks arriving faster than 300ms apart.  During scrubbing we use very
+    /// tight wait budgets so the UI stays responsive, accepting that a few
+    /// frames may arrive after the display updates.
+    fn is_rapid_scrubbing(&self) -> bool {
+        if let Some(last) = self.last_seek_instant {
+            last.elapsed() < Duration::from_millis(300)
+        } else {
+            false
+        }
     }
 
     fn effective_wait_timeout_ms(&self, requested_ms: u64) -> u64 {
@@ -5560,7 +5721,16 @@ impl ProgramPlayer {
             let scale = self.rebuild_wait_scale();
             ((nominal as f64 * scale) as u64).max(60)
         } else if self.should_prioritize_ui_responsiveness() {
-            requested_ms.min(220)
+            // Paused (interactive scrubbing / editing): keep waits short so the
+            // GTK main thread stays responsive.  During rapid scrubbing, use
+            // very tight budgets — a briefly stale frame is much better than
+            // 200ms+ of UI freeze per scrub step.
+            let cap = if self.is_rapid_scrubbing() {
+                if self.slots.len() >= 3 { 60 } else { 30 }
+            } else {
+                if self.slots.len() >= 3 { 220 } else { 150 }
+            };
+            requested_ms.min(cap)
         } else {
             requested_ms
         }
@@ -5673,6 +5843,10 @@ impl ProgramPlayer {
     /// Returns true if all slots advanced within the timeout, false otherwise.
     fn wait_for_compositor_arrivals(&self, baseline: &[u64], timeout_ms: u64) -> bool {
         let effective_timeout_ms = self.effective_wait_timeout_ms(timeout_ms);
+        log::debug!(
+            "wait_for_compositor_arrivals: requested={}ms effective={}ms scrub={}",
+            timeout_ms, effective_timeout_ms, self.is_rapid_scrubbing()
+        );
         let deadline = Instant::now() + Duration::from_millis(effective_timeout_ms);
         // Use finer sleep granularity during playback for faster response.
         let sleep_ms = if self.state == PlayerState::Playing {
@@ -5783,7 +5957,13 @@ impl ProgramPlayer {
         if lock_audio {
             self.audio_sink.set_locked_state(true);
         }
-        let timeout_ms = if self.slots.len() >= 3 { 300 } else { 150 };
+        let timeout_ms = if self.slots.len() >= 3 {
+            300
+        } else if self.is_rapid_scrubbing() {
+            30
+        } else {
+            150
+        };
         let seq_before = self.scope_frame_seq.load(Ordering::Relaxed);
         let _ = self.pipeline.set_state(gst::State::Playing);
         let (res, cur, pend) = self
@@ -6199,13 +6379,19 @@ impl ProgramPlayer {
         proc_h: u32,
     ) {
         const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
+        // GStreamer textoverlay uses Pango which renders points ~4× larger than
+        // FFmpeg drawtext pixels at the same numeric value.  Empirically at
+        // 1080p: GStreamer 12pt ≈ FFmpeg 48px.  The export formula produces
+        // `base_size * (4/3) * (out_h / 1080)` pixels.  To match, we scale
+        // the Pango size by `(4/3) / 4 = 1/3` relative to the base size.
+        const PANGO_EXPORT_MATCH: f64 = 1.0 / 3.0;
         if let Some(ref to) = slot.textoverlay {
             let silent = text.is_empty();
             to.set_property("silent", silent);
             if !silent {
                 to.set_property("text", text);
                 let (family, base_size) = Self::parse_pango_font_desc(font);
-                let scaled_size = (base_size * (proc_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (proc_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
                 to.set_property_from_str("halignment", "position");
@@ -6219,6 +6405,30 @@ impl ProgramPlayer {
                 let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
                 to.set_property("color", argb);
             }
+        }
+    }
+
+    /// Apply extended title styling (outline, shadow, bg box) to the textoverlay.
+    fn apply_title_style_to_slot(
+        slot: &VideoSlot,
+        clip: &ProgramClip,
+    ) {
+        if let Some(ref to) = slot.textoverlay {
+            // Outline (GStreamer textoverlay uses draw-outline, fixed ~1px width)
+            to.set_property("draw-outline", clip.title_outline_width > 0.0);
+            if clip.title_outline_width > 0.0 {
+                let rgba = clip.title_outline_color;
+                let r = (rgba >> 24) & 0xFF;
+                let g = (rgba >> 16) & 0xFF;
+                let b = (rgba >> 8) & 0xFF;
+                let a = rgba & 0xFF;
+                let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                to.set_property("outline-color", argb);
+            }
+            // Shadow
+            to.set_property("draw-shadow", clip.title_shadow);
+            // Background box (shaded background)
+            to.set_property("shaded-background", clip.title_bg_box);
         }
     }
 
@@ -7242,6 +7452,10 @@ impl ProgramPlayer {
         }
         if let Some(ref to) = textoverlay {
             const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
+            // Match export sizing: GStreamer Pango renders ~4× larger per
+            // numeric point value than FFmpeg drawtext pixels.  See
+            // apply_title_to_slot for the full derivation.
+            const PANGO_EXPORT_MATCH: f64 = 1.0 / 3.0;
             if clip.title_text.is_empty() {
                 to.set_property("silent", true);
                 to.set_property("text", "");
@@ -7249,7 +7463,7 @@ impl ProgramPlayer {
                 to.set_property("silent", false);
                 to.set_property("text", &clip.title_text);
                 let (family, base_size) = Self::parse_pango_font_desc(&clip.title_font);
-                let scaled_size = (base_size * (target_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (target_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
                 to.set_property_from_str("halignment", "position");
@@ -8051,15 +8265,33 @@ impl ProgramPlayer {
             .arg("error")
             .arg("-nostats");
         for (clip, path, source_ns, _, _) in inputs {
-            let source_s = *source_ns as f64 / 1_000_000_000.0;
-            let clip_max_s = clip.source_duration_ns() as f64 / 1_000_000_000.0;
-            let t = duration_s.min(clip_max_s).max(0.05);
-            cmd.arg("-ss")
-                .arg(format!("{source_s:.6}"))
-                .arg("-t")
-                .arg(format!("{t:.6}"))
-                .arg("-i")
-                .arg(path);
+            if clip.is_title {
+                // Title clips use a lavfi color source instead of a file.
+                let bg = clip.title_clip_bg_color;
+                let a = bg & 0xFF;
+                let color_str = if a > 0 {
+                    let r = (bg >> 24) & 0xFF;
+                    let g = (bg >> 16) & 0xFF;
+                    let b = (bg >> 8) & 0xFF;
+                    format!("#{r:02x}{g:02x}{b:02x}")
+                } else {
+                    "black".to_string()
+                };
+                let lavfi = format!(
+                    "color=c={color_str}:size={out_w}x{out_h}:r={fps}:d={duration_s:.6},format=yuv420p,trim=duration={duration_s:.6},setpts=PTS-STARTPTS"
+                );
+                cmd.arg("-f").arg("lavfi").arg("-i").arg(lavfi);
+            } else {
+                let source_s = *source_ns as f64 / 1_000_000_000.0;
+                let clip_max_s = clip.source_duration_ns() as f64 / 1_000_000_000.0;
+                let t = duration_s.min(clip_max_s).max(0.05);
+                cmd.arg("-ss")
+                    .arg(format!("{source_s:.6}"))
+                    .arg("-t")
+                    .arg(format!("{t:.6}"))
+                    .arg("-i")
+                    .arg(path);
+            }
         }
 
         let use_transition_xfade = transition_spec
@@ -8071,7 +8303,7 @@ impl ProgramPlayer {
                 // Apply LUT at source resolution (before downscale) so it
                 // processes the same pixel values as the export path.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8087,13 +8319,15 @@ impl ProgramPlayer {
                     Self::prerender_build_grading_filter(clip),
                     Self::prerender_build_denoise_filter(clip),
                     Self::prerender_build_sharpen_filter(clip),
+                    Self::prerender_build_frei0r_effects_filter(clip),
+                    Self::prerender_build_title_filter(clip, out_h),
                 ));
             } else if i == 0 {
                 if clip.chroma_key_enabled {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8104,12 +8338,14 @@ impl ProgramPlayer {
                         Self::prerender_build_grading_filter(clip),
                         Self::prerender_build_denoise_filter(clip),
                         Self::prerender_build_sharpen_filter(clip),
+                        Self::prerender_build_frei0r_effects_filter(clip),
                         Self::prerender_build_chroma_key_filter(clip),
+                        Self::prerender_build_title_filter(clip, out_h),
                     ));
                 } else {
                     // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8120,13 +8356,15 @@ impl ProgramPlayer {
                         Self::prerender_build_grading_filter(clip),
                         Self::prerender_build_denoise_filter(clip),
                         Self::prerender_build_sharpen_filter(clip),
+                        Self::prerender_build_frei0r_effects_filter(clip),
+                        Self::prerender_build_title_filter(clip, out_h),
                     ));
                 }
             } else {
                 // Overlay tracks: convert to yuva420p early so pad fills transparent.
                 // Apply LUT at source resolution before format/scale for parity.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
@@ -8136,7 +8374,9 @@ impl ProgramPlayer {
                     Self::prerender_build_grading_filter(clip),
                     Self::prerender_build_denoise_filter(clip),
                     Self::prerender_build_sharpen_filter(clip),
+                    Self::prerender_build_frei0r_effects_filter(clip),
                     Self::prerender_build_chroma_key_filter(clip),
+                    Self::prerender_build_title_filter(clip, out_h),
                     clip.opacity.clamp(0.0, 1.0),
                 ));
             }
@@ -8157,7 +8397,13 @@ impl ProgramPlayer {
         } else {
             for i in 1..inputs.len() {
                 let next = format!("vcomp{i}");
-                nodes.push(format!("[{last_label}][pv{i}]overlay=x=0:y=0[{next}]"));
+                let clip = &inputs[i].0;
+                if clip.blend_mode != crate::model::clip::BlendMode::Normal {
+                    let mode = clip.blend_mode.ffmpeg_mode();
+                    nodes.push(format!("[{last_label}][pv{i}]blend=all_mode={mode}[{next}]"));
+                } else {
+                    nodes.push(format!("[{last_label}][pv{i}]overlay=x=0:y=0[{next}]"));
+                }
                 last_label = next;
             }
         }
@@ -8535,6 +8781,149 @@ impl ProgramPlayer {
         }
     }
 
+    /// Build a chain of ffmpeg frei0r filters for user-applied effects.
+    /// Mirrors the export-pipeline `build_frei0r_effects_filter()` logic
+    /// but operates on `ProgramClip` instead of `Clip`.
+    fn prerender_build_frei0r_effects_filter(clip: &ProgramClip) -> String {
+        use crate::media::frei0r_registry::{Frei0rNativeType, Frei0rRegistry};
+
+        if clip.frei0r_effects.is_empty() {
+            return String::new();
+        }
+        let mut result = String::new();
+        let registry = Frei0rRegistry::get_or_discover();
+        for effect in &clip.frei0r_effects {
+            if !effect.enabled {
+                continue;
+            }
+            let plugin = registry.find_by_name(&effect.plugin_name);
+            let params_str = if let Some(info) = plugin {
+                if !info.native_params.is_empty() {
+                    info.native_params
+                        .iter()
+                        .map(|np| match np.native_type {
+                            Frei0rNativeType::Color => {
+                                let r = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                                let g = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                                let b = np.gst_properties.get(2).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                                format!("{r:.6}/{g:.6}/{b:.6}")
+                            }
+                            Frei0rNativeType::Position => {
+                                let x = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                                let y = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                                format!("{x:.6}/{y:.6}")
+                            }
+                            Frei0rNativeType::NativeString => {
+                                let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
+                                effect.string_params.get(prop).cloned().unwrap_or_default()
+                            }
+                            _ => {
+                                let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
+                                if np.native_type == Frei0rNativeType::Bool {
+                                    let val = effect.params.get(prop).copied().unwrap_or(0.0);
+                                    if val > 0.5 { "y".to_string() } else { "n".to_string() }
+                                } else {
+                                    let val = effect.params.get(prop).copied().unwrap_or(0.0);
+                                    format!("{val:.6}")
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|")
+                } else {
+                    info.params
+                        .iter()
+                        .map(|p| {
+                            if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
+                                effect.string_params.get(&p.name).cloned()
+                                    .or_else(|| p.default_string.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                let val = effect.params.get(&p.name).copied().unwrap_or(p.default_value);
+                                format!("{val:.6}")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|")
+                }
+            } else {
+                effect.params.values().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join("|")
+            };
+            let ffmpeg_name = plugin.map(|p| p.ffmpeg_name.as_str()).unwrap_or(&effect.plugin_name);
+            if params_str.is_empty() {
+                result.push_str(&format!(",frei0r=filter_name={ffmpeg_name}"));
+            } else {
+                result.push_str(&format!(",frei0r=filter_name={ffmpeg_name}:filter_params={params_str}"));
+            }
+        }
+        result
+    }
+
+    /// Build an ffmpeg `drawtext` filter for a title clip's text overlay.
+    /// Mirrors the export-pipeline `build_title_filter()` logic but operates
+    /// on `ProgramClip` instead of `Clip`.
+    fn prerender_build_title_filter(clip: &ProgramClip, out_h: u32) -> String {
+        if clip.title_text.trim().is_empty() {
+            return String::new();
+        }
+        fn escape(value: &str) -> String {
+            value
+                .replace('\\', "\\\\")
+                .replace(':', "\\:")
+                .replace('\'', "\\'")
+                .replace('%', "\\%")
+        }
+        const REF_H: f64 = 1080.0;
+        let text = escape(&clip.title_text).replace('\n', "\\n");
+        let (font_name, font_size) = Self::parse_pango_font_desc(&clip.title_font);
+        let font_name = escape(&font_name);
+        let rel_x = clip.title_x.clamp(0.0, 1.0);
+        let rel_y = clip.title_y.clamp(0.0, 1.0);
+        let scale_factor = out_h as f64 / REF_H;
+        let scaled_size = font_size * (4.0 / 3.0) * scale_factor;
+        let rgba = clip.title_color;
+        let r = ((rgba >> 24) & 0xFF) as u8;
+        let g = ((rgba >> 16) & 0xFF) as u8;
+        let b = ((rgba >> 8) & 0xFF) as u8;
+        let a = (rgba & 0xFF) as u8;
+        let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
+        let mut filter = format!(
+            ",drawtext=font='{font_name}':text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
+        );
+        if clip.title_outline_width > 0.0 {
+            let bw = (clip.title_outline_width * scale_factor).max(0.5);
+            let oc = clip.title_outline_color;
+            let or_ = ((oc >> 24) & 0xFF) as u8;
+            let og = ((oc >> 16) & 0xFF) as u8;
+            let ob = ((oc >> 8) & 0xFF) as u8;
+            let oa = (oc & 0xFF) as u8;
+            let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
+            filter.push_str(&format!(":borderw={bw:.1}:bordercolor={or_:02x}{og:02x}{ob:02x}@{o_alpha:.4}"));
+        }
+        if clip.title_shadow {
+            let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
+            let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
+            let sc = clip.title_shadow_color;
+            let sr = ((sc >> 24) & 0xFF) as u8;
+            let sg = ((sc >> 16) & 0xFF) as u8;
+            let sb = ((sc >> 8) & 0xFF) as u8;
+            let sa = (sc & 0xFF) as u8;
+            let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
+            filter.push_str(&format!(":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"));
+        }
+        if clip.title_bg_box {
+            let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
+            let bc = clip.title_bg_box_color;
+            let br = ((bc >> 24) & 0xFF) as u8;
+            let bgg = ((bc >> 16) & 0xFF) as u8;
+            let bb = ((bc >> 8) & 0xFF) as u8;
+            let ba = (bc & 0xFF) as u8;
+            let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
+            filter.push_str(&format!(":box=1:boxcolor={br:02x}{bgg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"));
+        }
+        filter
+    }
+
     fn build_slot_for_clip(
         &mut self,
         clip_idx: usize,
@@ -8625,6 +9014,199 @@ impl ProgramPlayer {
             videobox_zoom,
             frei0r_user_effects,
         ) = Self::build_effects_bin(&clip, proc_w, proc_h, realtime_lut);
+
+        // Title clips use videotestsrc (solid color) instead of uridecodebin.
+        if clip.is_title {
+            let bg_color = clip.title_clip_bg_color;
+            let fg = if (bg_color & 0xFF) > 0 {
+                // RRGGBBAA → AARRGGBB for GStreamer foreground-color
+                let r = (bg_color >> 24) & 0xFF;
+                let g = (bg_color >> 16) & 0xFF;
+                let b = (bg_color >> 8) & 0xFF;
+                let a = bg_color & 0xFF;
+                (a << 24) | (r << 16) | (g << 8) | b
+            } else {
+                0 // fully transparent black
+            };
+
+            // Use continuous videotestsrc (no imagefreeze) — title clips don't
+            // go through imagefreeze because videotestsrc already produces a
+            // continuous stream with proper segment events.  Using imagefreeze
+            // with an external source causes "data flow before segment event"
+            // errors because the ghost pad doesn't propagate segments correctly
+            // from elements outside the effects_bin.
+            let src = match gst::ElementFactory::make("videotestsrc")
+                .property_from_str("pattern", "solid-color")
+                .property("foreground-color", fg)
+                .property("is-live", false)
+                .build()
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("ProgramPlayer: failed to create videotestsrc for title clip: {}", e);
+                    return None;
+                }
+            };
+
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
+                .field("width", proc_w as i32)
+                .field("height", proc_h as i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+                .build();
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .property("caps", &caps)
+                .build()
+                .unwrap();
+
+            if self.pipeline.add(&src).is_err()
+                || self.pipeline.add(&capsfilter).is_err()
+                || self.pipeline.add(effects_bin.upcast_ref::<gst::Element>()).is_err()
+            {
+                self.pipeline.remove(&src).ok();
+                self.pipeline.remove(&capsfilter).ok();
+                self.pipeline.remove(effects_bin.upcast_ref::<gst::Element>()).ok();
+                return None;
+            }
+
+            let _ = src.link(&capsfilter);
+
+            // Link capsfilter → effects_bin sink pad.
+            if let Some(sink) = effects_bin.static_pad("sink") {
+                let cf_src = capsfilter.static_pad("src").unwrap();
+                let _ = cf_src.link(&sink);
+            }
+
+            // Request compositor sink pad.
+            let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
+                Some(p) => p,
+                None => {
+                    self.pipeline.remove(&src).ok();
+                    self.pipeline.remove(&capsfilter).ok();
+                    self.pipeline.remove(effects_bin.upcast_ref::<gst::Element>()).ok();
+                    return None;
+                }
+            };
+            comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
+            comp_pad.set_property("alpha", clip.opacity_at_timeline_ns(self.timeline_pos_ns).clamp(0.0, 1.0));
+
+            // Link effects_bin → queue → compositor.
+            let slot_queue = gst::ElementFactory::make("queue")
+                .property("max-size-buffers", 1u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", 0u64)
+                .build()
+                .unwrap();
+            self.pipeline.add(&slot_queue).ok();
+            if let Some(ebs) = effects_bin.static_pad("src") {
+                let q_sink = slot_queue.static_pad("sink").unwrap();
+                let _ = ebs.link(&q_sink);
+            }
+            let q_src = slot_queue.static_pad("src").unwrap();
+            let _ = q_src.link(&comp_pad);
+
+            let comp_arrival_seq = Arc::new(AtomicU64::new(0));
+            let is_blend_mode = clip.blend_mode != crate::model::clip::BlendMode::Normal;
+            let blend_alpha = Arc::new(Mutex::new(clip.opacity_at_timeline_ns(self.timeline_pos_ns)));
+
+            let video_linked = Arc::new(AtomicBool::new(true));
+            let audio_linked = Arc::new(AtomicBool::new(false));
+
+            let slot_ref_for_transform = VideoSlot {
+                clip_idx,
+                decoder: src.clone(),
+                video_linked: video_linked.clone(),
+                audio_linked: audio_linked.clone(),
+                effects_bin: effects_bin.clone(),
+                compositor_pad: Some(comp_pad.clone()),
+                audio_mixer_pad: None,
+                audio_conv: None,
+                audio_panorama: None,
+                audio_level: None,
+                videobalance: videobalance.clone(),
+                coloradj_rgb: coloradj_rgb.clone(),
+                colorbalance_3pt: colorbalance_3pt.clone(),
+                gaussianblur: gaussianblur.clone(),
+                videocrop: videocrop.clone(),
+                videobox_crop_alpha: videobox_crop_alpha.clone(),
+                imagefreeze: imagefreeze.clone(),
+                videoflip_rotate: videoflip_rotate.clone(),
+                videoflip_flip: videoflip_flip.clone(),
+                textoverlay: textoverlay.clone(),
+                alpha_filter: alpha_filter.clone(),
+                alpha_chroma_key: alpha_chroma_key.clone(),
+                capsfilter_zoom: capsfilter_zoom.clone(),
+                videobox_zoom: videobox_zoom.clone(),
+                frei0r_user_effects: frei0r_user_effects.clone(),
+                slot_queue: Some(slot_queue.clone()),
+                comp_arrival_seq: comp_arrival_seq.clone(),
+                hidden: false,
+                is_prerender_slot: false,
+                prerender_segment_start_ns: None,
+                transition_enter_offset_ns: 0,
+                is_blend_mode,
+                blend_alpha: blend_alpha.clone(),
+            };
+            Self::apply_transform_to_slot(
+                &slot_ref_for_transform, clip.crop_left, clip.crop_right,
+                clip.crop_top, clip.crop_bottom, clip.rotate, clip.flip_h, clip.flip_v,
+            );
+            Self::apply_title_to_slot(
+                &slot_ref_for_transform, &clip.title_text, &clip.title_font,
+                clip.title_color, clip.title_x, clip.title_y, proc_h,
+            );
+            Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
+            Self::apply_zoom_to_slot(
+                &slot_ref_for_transform, &comp_pad,
+                clip.scale_at_timeline_ns(self.timeline_pos_ns),
+                clip.position_x_at_timeline_ns(self.timeline_pos_ns),
+                clip.position_y_at_timeline_ns(self.timeline_pos_ns),
+                proc_w, proc_h,
+            );
+
+            // Sync elements to pipeline state.
+            let _ = src.sync_state_with_parent();
+            let _ = capsfilter.sync_state_with_parent();
+            let _ = effects_bin.sync_state_with_parent();
+            let _ = slot_queue.sync_state_with_parent();
+
+            return Some(VideoSlot {
+                clip_idx,
+                decoder: src,
+                video_linked,
+                audio_linked,
+                effects_bin,
+                compositor_pad: Some(comp_pad),
+                audio_mixer_pad: None,
+                audio_conv: None,
+                audio_panorama: None,
+                audio_level: None,
+                videobalance,
+                coloradj_rgb,
+                colorbalance_3pt,
+                gaussianblur,
+                videocrop,
+                videobox_crop_alpha,
+                imagefreeze,
+                videoflip_rotate,
+                videoflip_flip,
+                textoverlay,
+                alpha_filter,
+                alpha_chroma_key,
+                capsfilter_zoom,
+                videobox_zoom,
+                frei0r_user_effects,
+                slot_queue: Some(slot_queue),
+                comp_arrival_seq,
+                hidden: false,
+                is_prerender_slot: false,
+                prerender_segment_start_ns: None,
+                transition_enter_offset_ns: 0,
+                is_blend_mode,
+                blend_alpha,
+            });
+        }
 
         // Create uridecodebin for this clip.
         let decoder = match gst::ElementFactory::make("uridecodebin")
@@ -8970,6 +9552,7 @@ impl ProgramPlayer {
             clip.title_y,
             proc_h,
         );
+        Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
         Self::apply_zoom_to_slot(
             &slot_ref_for_transform,
             &comp_pad,
@@ -9862,6 +10445,7 @@ impl ProgramPlayer {
                 clip.title_y,
                 proc_h,
             );
+            Self::apply_title_style_to_slot(slot, clip);
         }
 
         // Compositor pad: opacity + zoom/position
@@ -11130,6 +11714,18 @@ mod tests {
             bg_removal_enabled: false,
             bg_removal_threshold: 0.5,
             frei0r_effects: Vec::new(),
+            title_outline_color: 0x000000FF,
+            title_outline_width: 0.0,
+            title_shadow: false,
+            title_shadow_color: 0x000000AA,
+            title_shadow_offset_x: 2.0,
+            title_shadow_offset_y: 2.0,
+            title_bg_box: false,
+            title_bg_box_color: 0x00000088,
+            title_bg_box_padding: 8.0,
+            title_clip_bg_color: 0,
+            title_secondary_text: String::new(),
+            is_title: false,
         }
     }
 

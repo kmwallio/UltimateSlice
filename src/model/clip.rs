@@ -23,6 +23,7 @@ pub enum ClipKind {
     Video,
     Audio,
     Image,
+    Title,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +339,21 @@ fn default_title_x() -> f64 {
 fn default_title_y() -> f64 {
     0.9
 }
+fn default_title_outline_color() -> u32 {
+    0x000000FF
+}
+fn default_title_shadow_color() -> u32 {
+    0x000000AA
+}
+fn default_title_shadow_offset() -> f64 {
+    2.0
+}
+fn default_title_bg_box_color() -> u32 {
+    0x00000088
+}
+fn default_title_bg_box_padding() -> f64 {
+    8.0
+}
 fn default_chroma_key_color() -> u32 {
     0x00FF00
 }
@@ -529,6 +545,42 @@ pub struct Clip {
     pub title_x: f64, // 0.0–1.0 relative horizontal position
     #[serde(default = "default_title_y")]
     pub title_y: f64, // 0.0–1.0 relative vertical position
+    /// Template ID (e.g. "lower_third") for title clips.
+    #[serde(default)]
+    pub title_template: String,
+    /// Outline stroke color (RRGGBBAA).
+    #[serde(default = "default_title_outline_color")]
+    pub title_outline_color: u32,
+    /// Outline width in pts (0 = none).
+    #[serde(default)]
+    pub title_outline_width: f64,
+    /// Drop shadow enabled.
+    #[serde(default)]
+    pub title_shadow: bool,
+    /// Shadow color (RRGGBBAA).
+    #[serde(default = "default_title_shadow_color")]
+    pub title_shadow_color: u32,
+    /// Shadow X offset in pts.
+    #[serde(default = "default_title_shadow_offset")]
+    pub title_shadow_offset_x: f64,
+    /// Shadow Y offset in pts.
+    #[serde(default = "default_title_shadow_offset")]
+    pub title_shadow_offset_y: f64,
+    /// Background box enabled.
+    #[serde(default)]
+    pub title_bg_box: bool,
+    /// Background box color (RRGGBBAA).
+    #[serde(default = "default_title_bg_box_color")]
+    pub title_bg_box_color: u32,
+    /// Background box padding in pts.
+    #[serde(default = "default_title_bg_box_padding")]
+    pub title_bg_box_padding: f64,
+    /// Title clip background color (0 = transparent).
+    #[serde(default)]
+    pub title_clip_bg_color: u32,
+    /// Secondary line of text (used by some templates).
+    #[serde(default)]
+    pub title_secondary_text: String,
     /// Transition to the next clip on the same track (e.g. "cross_dissolve").
     #[serde(default)]
     pub transition_after: String,
@@ -839,6 +891,18 @@ impl Clip {
             title_color: default_title_color(),
             title_x: default_title_x(),
             title_y: default_title_y(),
+            title_template: String::new(),
+            title_outline_color: default_title_outline_color(),
+            title_outline_width: 0.0,
+            title_shadow: false,
+            title_shadow_color: default_title_shadow_color(),
+            title_shadow_offset_x: default_title_shadow_offset(),
+            title_shadow_offset_y: default_title_shadow_offset(),
+            title_bg_box: false,
+            title_bg_box_color: default_title_bg_box_color(),
+            title_bg_box_padding: default_title_bg_box_padding(),
+            title_clip_bg_color: 0,
+            title_secondary_text: String::new(),
             transition_after: String::new(),
             transition_after_ns: 0,
             lut_path: None,
@@ -901,7 +965,7 @@ impl Clip {
     /// clips or FCPXML imports without a probe result), or when the clip is
     /// a still image (images can be extended to any timeline length).
     pub fn max_source_out(&self) -> Option<u64> {
-        if self.kind == ClipKind::Image {
+        if self.kind == ClipKind::Image || self.kind == ClipKind::Title {
             return None;
         }
         self.media_duration_ns

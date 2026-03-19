@@ -9,7 +9,7 @@ use crate::ui::timecode;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
 use crate::ui::{
     effects_browser, inspector, keyframe_editor, media_browser, preferences, preview,
-    program_monitor, toolbar,
+    program_monitor, title_templates, titles_browser, toolbar,
 };
 use crate::undo::TrackClipsChange;
 use glib;
@@ -22,6 +22,19 @@ use std::rc::Rc;
 thread_local! {
     static MCP_MAIN_DISPATCH: RefCell<Option<Box<dyn FnMut(crate::mcp::McpCommand)>>> =
         RefCell::new(None);
+}
+
+/// Check whether the focused widget is a text-input widget.
+/// In GTK4, `Entry` delegates keyboard focus to an internal `gtk4::Text`
+/// child, so `focused.is::<Entry>()` returns false when the user is typing
+/// in an Entry.  We check for `Text`, `Entry`, `SearchEntry`, `TextView`,
+/// and `SpinButton` (which also contains a Text internally).
+fn is_text_input_focused(focused: &gtk4::Widget) -> bool {
+    focused.is::<gtk4::Text>()
+        || focused.is::<gtk4::Entry>()
+        || focused.is::<gtk4::SearchEntry>()
+        || focused.is::<gtk4::TextView>()
+        || focused.is::<gtk4::SpinButton>()
 }
 
 fn flash_window_status_title(
@@ -262,9 +275,15 @@ fn collect_media_source_paths(project: &Project, library: &[MediaItem]) -> HashS
         .tracks
         .iter()
         .flat_map(|track| track.clips.iter())
+        .filter(|clip| !clip.source_path.is_empty())
         .map(|clip| clip.source_path.clone())
         .collect();
-    paths.extend(library.iter().map(|item| item.source_path.clone()));
+    paths.extend(
+        library
+            .iter()
+            .filter(|item| !item.source_path.is_empty())
+            .map(|item| item.source_path.clone()),
+    );
     paths
 }
 
@@ -2060,6 +2079,33 @@ fn collect_near_playhead_clip_sources(
     out
 }
 
+/// Cancel any pending title-flush timer and schedule a new one.
+/// The timer fires after ~32ms of idle, calling
+/// `ProgramPlayer::flush_compositor_for_title_update()` once.
+/// This coalesces rapid keystrokes / slider drags into a single flush.
+fn schedule_title_flush(
+    timer_raw: &Rc<Cell<u32>>,
+    prog_player: &Rc<RefCell<crate::media::program_player::ProgramPlayer>>,
+) {
+    use glib::translate::FromGlib;
+    // Cancel previous pending flush
+    let old = timer_raw.get();
+    if old != 0 {
+        unsafe { glib::SourceId::from_glib(old) }.remove();
+        timer_raw.set(0);
+    }
+    let pp = prog_player.clone();
+    let timer = timer_raw.clone();
+    let new_id = glib::timeout_add_local_once(
+        std::time::Duration::from_millis(32),
+        move || {
+            timer.set(0);
+            pp.borrow().flush_compositor_for_title_update();
+        },
+    );
+    timer_raw.set(new_id.as_raw());
+}
+
 /// Build and show the main application window.
 pub fn build_window(
     app: &gtk::Application,
@@ -2463,6 +2509,12 @@ pub fn build_window(
             }
         })
     };
+    // Shared debounce timer for title property updates.  Both on_title_changed
+    // and on_title_style_changed set GStreamer properties instantly, then
+    // schedule a single compositor flush after a brief idle period so rapid
+    // keystrokes / slider drags don't flood GStreamer with flush seeks.
+    let title_flush_timer: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+
     let (inspector_box, inspector_view) = inspector::build_inspector(
         project.clone(),
         // on_clip_changed: name changes → full project-changed cycle
@@ -2590,30 +2642,74 @@ pub fn build_window(
                 }
             }
         },
-        // on_title_changed: text/position → direct update on textoverlay element
+        // on_title_changed: text/position → instant property set + debounced flush
         {
             let prog_player = prog_player.clone();
             let project = project.clone();
+            let timeline_state = timeline_state.clone();
             let window_weak = window_weak.clone();
+            let flush_timer = title_flush_timer.clone();
             move |text: String, x: f64, y: f64| {
-                // Get font/color from the currently selected clip
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                // Get font/color from the selected clip
                 let (font, color) = {
                     let proj = project.borrow();
-                    let pp = prog_player.borrow();
-                    if let Some(idx) = pp.current_clip_idx() {
-                        if let Some(clip) = proj.tracks.iter().flat_map(|t| t.clips.iter()).nth(idx)
-                        {
-                            (clip.title_font.clone(), clip.title_color)
-                        } else {
-                            ("Sans Bold 36".to_string(), 0xFFFFFFFF)
-                        }
+                    if let Some(ref clip_id) = selected {
+                        proj.tracks.iter().flat_map(|t| t.clips.iter())
+                            .find(|c| &c.id == clip_id)
+                            .map(|c| (c.title_font.clone(), c.title_color))
+                            .unwrap_or(("Sans Bold 36".to_string(), 0xFFFFFFFF))
                     } else {
                         ("Sans Bold 36".to_string(), 0xFFFFFFFF)
                     }
                 };
-                prog_player
-                    .borrow_mut()
-                    .update_current_title(&text, &font, color, x, y);
+                // Instant: set GStreamer textoverlay properties (non-blocking)
+                let pp = prog_player.borrow();
+                if let Some(ref clip_id) = selected {
+                    pp.update_title_for_clip(clip_id, &text, &font, color, x, y);
+                } else {
+                    pp.update_current_title(&text, &font, color, x, y);
+                }
+                drop(pp);
+                // Debounced: schedule a single compositor flush after 32ms idle
+                schedule_title_flush(&flush_timer, &prog_player);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
+        // on_title_style_changed: outline/shadow/bg_box → instant property set + debounced flush
+        {
+            let prog_player = prog_player.clone();
+            let window_weak = window_weak.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let flush_timer = title_flush_timer.clone();
+            move || {
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                let (outline_width, outline_color, shadow, bg_box) = {
+                    let proj = project.borrow();
+                    if let Some(ref clip_id) = selected {
+                        proj.tracks.iter().flat_map(|t| t.clips.iter())
+                            .find(|c| &c.id == clip_id)
+                            .map(|c| (c.title_outline_width, c.title_outline_color, c.title_shadow, c.title_bg_box))
+                            .unwrap_or((0.0, 0x000000FF, false, false))
+                    } else {
+                        (0.0, 0x000000FF, false, false)
+                    }
+                };
+                // Instant: set GStreamer textoverlay properties (non-blocking)
+                let pp = prog_player.borrow();
+                if let Some(ref clip_id) = selected {
+                    pp.update_title_style_for_clip(clip_id, outline_width, outline_color, shadow, bg_box);
+                } else {
+                    pp.update_current_title_style(outline_width, outline_color, shadow, bg_box);
+                }
+                drop(pp);
+                // Debounced: schedule a single compositor flush after 32ms idle
+                schedule_title_flush(&flush_timer, &prog_player);
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     let title = format!("UltimateSlice — {} •", proj.title);
@@ -4807,12 +4903,129 @@ pub fn build_window(
     let (effects_browser_widget, set_effects_registry) =
         effects_browser::build_effects_browser(on_apply_effect);
 
-    // Stack: Media Browser + Effects Browser as switchable tabs.
+    // ── Titles browser callbacks ─────────────────────────────────────────
+    let on_add_title: Rc<dyn Fn(String)> = {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        Rc::new(move |template_id: String| {
+            let template = match title_templates::find_template(&template_id) {
+                Some(t) => t,
+                None => return,
+            };
+            let playhead = {
+                let st = timeline_state.borrow();
+                st.playhead_ns
+            };
+            let clip = title_templates::create_title_clip(template, playhead);
+            let mut proj = project.borrow_mut();
+            // Prefer the selected track (if it's a video track), fall back to first video track.
+            let selected_tid = timeline_state.borrow().selected_track_id.clone();
+            let track_idx = selected_tid
+                .and_then(|tid| {
+                    proj.tracks
+                        .iter()
+                        .position(|t| t.id == tid && t.kind == TrackKind::Video)
+                })
+                .or_else(|| proj.tracks.iter().position(|t| t.kind == TrackKind::Video))
+                .unwrap_or_else(|| {
+                    let t = crate::model::track::Track::new_video("Video 1");
+                    proj.tracks.push(t);
+                    proj.tracks.len() - 1
+                });
+            let magnetic_mode = {
+                let st = timeline_state.borrow();
+                st.magnetic_mode
+            };
+            let track = &mut proj.tracks[track_idx];
+            let change = insert_clip_at_playhead_on_track(track, clip, playhead, magnetic_mode);
+            let cmd = crate::undo::SetTrackClipsCommand {
+                track_id: change.track_id,
+                old_clips: change.old_clips,
+                new_clips: change.new_clips,
+                label: "Add title clip".to_string(),
+            };
+            drop(proj);
+            {
+                let mut st = timeline_state.borrow_mut();
+                let mut proj = project.borrow_mut();
+                st.history.execute(Box::new(cmd), &mut proj);
+            }
+            let cb = {
+                let st = timeline_state.borrow();
+                st.on_project_changed.clone()
+            };
+            if let Some(cb) = cb {
+                cb();
+            }
+        })
+    };
+
+    let on_apply_title_to_clip: Rc<dyn Fn(String)> = {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        Rc::new(move |template_id: String| {
+            let template = match title_templates::find_template(&template_id) {
+                Some(t) => t,
+                None => return,
+            };
+            let clip_id = {
+                let st = timeline_state.borrow();
+                st.selected_clip_id.clone()
+            };
+            let clip_id = match clip_id {
+                Some(id) => id,
+                None => return,
+            };
+            // Find clip, snapshot, apply.
+            let cmd = {
+                let mut proj = project.borrow_mut();
+                let clip = proj.tracks.iter_mut()
+                    .flat_map(|t| t.clips.iter_mut())
+                    .find(|c| c.id == clip_id);
+                match clip {
+                    Some(clip) => {
+                        let before = crate::undo::TitlePropertySnapshot::from_clip(clip);
+                        title_templates::apply_template_to_clip(template, clip);
+                        if clip.title_text.is_empty() {
+                            clip.title_text = template.display_name.to_string();
+                        }
+                        let after = crate::undo::TitlePropertySnapshot::from_clip(clip);
+                        Some(crate::undo::SetTitlePropertiesCommand {
+                            clip_id: clip_id.clone(),
+                            before,
+                            after,
+                        })
+                    }
+                    None => None,
+                }
+            };
+            if let Some(cmd) = cmd {
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    st.history.execute(Box::new(cmd), &mut proj);
+                }
+                let cb = {
+                    let st = timeline_state.borrow();
+                    st.on_project_changed.clone()
+                };
+                if let Some(cb) = cb {
+                    cb();
+                }
+            }
+        })
+    };
+
+    let titles_browser_widget =
+        titles_browser::build_titles_browser(on_add_title, on_apply_title_to_clip);
+
+    // Stack: Media Browser + Effects Browser + Titles Browser as switchable tabs.
     let left_stack = gtk::Stack::new();
     left_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     left_stack.set_transition_duration(150);
     left_stack.add_titled(&browser, Some("media"), "Media");
     left_stack.add_titled(&effects_browser_widget, Some("effects"), "Effects");
+    left_stack.add_titled(&titles_browser_widget, Some("titles"), "Titles");
 
     let left_stack_switcher = gtk::StackSwitcher::new();
     left_stack_switcher.set_stack(Some(&left_stack));
@@ -5013,6 +5226,18 @@ pub fn build_window(
                             title_color: c.title_color,
                             title_x: c.title_x,
                             title_y: c.title_y,
+                            title_outline_color: c.title_outline_color,
+                            title_outline_width: c.title_outline_width,
+                            title_shadow: c.title_shadow,
+                            title_shadow_color: c.title_shadow_color,
+                            title_shadow_offset_x: c.title_shadow_offset_x,
+                            title_shadow_offset_y: c.title_shadow_offset_y,
+                            title_bg_box: c.title_bg_box,
+                            title_bg_box_color: c.title_bg_box_color,
+                            title_bg_box_padding: c.title_bg_box_padding,
+                            title_clip_bg_color: c.title_clip_bg_color,
+                            title_secondary_text: c.title_secondary_text.clone(),
+                            is_title: c.kind == ClipKind::Title,
                             speed: c.speed,
                             speed_keyframes: c.speed_keyframes.clone(),
                             reverse: c.reverse,
@@ -5045,6 +5270,7 @@ pub fn build_window(
                             shadows_warmth: c.shadows_warmth as f64,
                             shadows_tint: c.shadows_tint as f64,
                             has_audio: !c.is_freeze_frame()
+                                && c.kind != ClipKind::Title
                                 && !suppress_embedded_audio_ids.contains(&c.id),
                             is_image: c.kind == ClipKind::Image,
                             chroma_key_enabled: c.chroma_key_enabled,
@@ -5936,7 +6162,7 @@ pub fn build_window(
             // Don't intercept when a text entry has focus.
             if let Some(widget) = ctrl.widget() {
                 if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                    if is_text_input_focused(&focused) {
                         return glib::Propagation::Proceed;
                     }
                 }
@@ -5982,7 +6208,7 @@ pub fn build_window(
             // Don't intercept M when a text entry or similar has focus
             if let Some(widget) = ctrl.widget() {
                 if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                    if is_text_input_focused(&focused) {
                         return glib::Propagation::Proceed;
                     }
                 }
@@ -6012,7 +6238,7 @@ pub fn build_window(
             // Don't intercept when a text entry has focus
             if let Some(widget) = ctrl.widget() {
                 if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                    if is_text_input_focused(&focused) {
                         return glib::Propagation::Proceed;
                     }
                 }
@@ -6038,7 +6264,7 @@ pub fn build_window(
             }
             if let Some(widget) = ctrl.widget() {
                 if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                    if is_text_input_focused(&focused) {
                         return glib::Propagation::Proceed;
                     }
                 }
@@ -6082,7 +6308,7 @@ pub fn build_window(
             }
             if let Some(widget) = ctrl.widget() {
                 if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                    if is_text_input_focused(&focused) {
                         return glib::Propagation::Proceed;
                     }
                 }
@@ -6141,7 +6367,7 @@ pub fn build_window(
             }
             if let Some(widget) = ctrl.widget() {
                 if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if focused.is::<gtk4::Entry>() || focused.is::<gtk4::TextView>() {
+                    if is_text_input_focused(&focused) {
                         return glib::Propagation::Proceed;
                     }
                 }
@@ -9231,6 +9457,136 @@ fn handle_mcp_command(
             drop(proj);
             if found {
                 on_project_changed_full();
+            }
+            reply.send(json!({"success": found})).ok();
+        }
+
+        McpCommand::AddTitleClip {
+            template_id,
+            track_index,
+            timeline_start_ns,
+            duration_ns,
+            title_text,
+            reply,
+        } => {
+            let template = crate::ui::title_templates::find_template(&template_id);
+            if template.is_none() {
+                reply.send(json!({"error": format!("Unknown template: {template_id}")})).ok();
+            } else {
+                let template = template.unwrap();
+                let playhead = timeline_state.borrow().playhead_ns;
+                let start = timeline_start_ns.unwrap_or(playhead);
+                let mut clip = crate::ui::title_templates::create_title_clip(template, start);
+                if let Some(dur) = duration_ns {
+                    clip.source_out = dur;
+                }
+                if let Some(text) = title_text {
+                    clip.title_text = text.clone();
+                    clip.label = text;
+                }
+                let clip_id = clip.id.clone();
+                let mut proj = project.borrow_mut();
+                let ti = track_index.unwrap_or_else(|| {
+                    proj.tracks.iter().position(|t| t.kind == TrackKind::Video).unwrap_or(0)
+                });
+                if ti < proj.tracks.len() {
+                    let magnetic_mode = timeline_state.borrow().magnetic_mode;
+                    let change = insert_clip_at_playhead_on_track(
+                        &mut proj.tracks[ti], clip, start, magnetic_mode,
+                    );
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id: change.track_id,
+                        old_clips: change.old_clips,
+                        new_clips: change.new_clips,
+                        label: "Add title clip (MCP)".to_string(),
+                    };
+                    drop(proj);
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        let mut proj = project.borrow_mut();
+                        st.history.execute(Box::new(cmd), &mut proj);
+                    }
+                    on_project_changed_full();
+                    reply.send(json!({"clip_id": clip_id})).ok();
+                } else {
+                    drop(proj);
+                    reply.send(json!({"error": "track_index out of range"})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetClipTitleStyle {
+            clip_id,
+            title_text,
+            title_font,
+            title_color,
+            title_x,
+            title_y,
+            title_outline_width,
+            title_outline_color,
+            title_shadow,
+            title_shadow_color,
+            title_shadow_offset_x,
+            title_shadow_offset_y,
+            title_bg_box,
+            title_bg_box_color,
+            title_bg_box_padding,
+            title_clip_bg_color,
+            title_secondary_text,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.tracks.iter_mut()
+                .flat_map(|t| t.clips.iter_mut())
+                .find(|c| c.id == clip_id)
+            {
+                if let Some(v) = title_text { clip.title_text = v; }
+                if let Some(v) = title_font { clip.title_font = v; }
+                if let Some(v) = title_color { clip.title_color = v; }
+                if let Some(v) = title_x { clip.title_x = v; }
+                if let Some(v) = title_y { clip.title_y = v; }
+                if let Some(v) = title_outline_width { clip.title_outline_width = v; }
+                if let Some(v) = title_outline_color { clip.title_outline_color = v; }
+                if let Some(v) = title_shadow { clip.title_shadow = v; }
+                if let Some(v) = title_shadow_color { clip.title_shadow_color = v; }
+                if let Some(v) = title_shadow_offset_x { clip.title_shadow_offset_x = v; }
+                if let Some(v) = title_shadow_offset_y { clip.title_shadow_offset_y = v; }
+                if let Some(v) = title_bg_box { clip.title_bg_box = v; }
+                if let Some(v) = title_bg_box_color { clip.title_bg_box_color = v; }
+                if let Some(v) = title_bg_box_padding { clip.title_bg_box_padding = v; }
+                if let Some(v) = title_clip_bg_color { clip.title_clip_bg_color = v; }
+                if let Some(v) = title_secondary_text { clip.title_secondary_text = v; }
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            // Lightweight live update: read the final clip values while we
+            // still hold borrow_mut, then drop the borrow and push to player.
+            let title_vals = if found {
+                proj.tracks.iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == clip_id)
+                    .map(|clip| (
+                        clip.title_text.clone(),
+                        clip.title_font.clone(),
+                        clip.title_color,
+                        clip.title_x,
+                        clip.title_y,
+                        clip.title_outline_width,
+                        clip.title_outline_color,
+                        clip.title_shadow,
+                        clip.title_bg_box,
+                    ))
+            } else {
+                None
+            };
+            drop(proj);
+            if let Some((text, font, color, x, y, ow, oc, shadow, bg)) = title_vals {
+                let pp = prog_player.borrow();
+                pp.update_current_title(&text, &font, color, x, y);
+                pp.update_current_title_style(ow, oc, shadow, bg);
+                pp.flush_compositor_for_title_update();
             }
             reply.send(json!({"success": found})).ok();
         }

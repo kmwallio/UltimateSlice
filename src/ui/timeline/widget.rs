@@ -2289,7 +2289,7 @@ impl TimelineState {
 fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
     match kind {
         ClipKind::Audio => TrackKind::Audio,
-        ClipKind::Video | ClipKind::Image => TrackKind::Video,
+        ClipKind::Video | ClipKind::Image | ClipKind::Title => TrackKind::Video,
     }
 }
 
@@ -4752,11 +4752,31 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     {
         let state = state.clone();
         let area_weak = area.downgrade();
-        key_ctrl.connect_key_pressed(move |_, key, _, modifiers| {
+        key_ctrl.connect_key_pressed(move |ctrl_ev, key, _, modifiers| {
             use gtk::gdk::Key;
             let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             let alt = modifiers.contains(gtk::gdk::ModifierType::ALT_MASK);
+
+            // Don't intercept when a text entry has focus — prevents Space
+            // from triggering play/pause while editing title text, and
+            // single-letter shortcuts (B, T, R, S, …) from firing while
+            // the user is typing in an Entry or SearchEntry.
+            if !ctrl {
+                if let Some(widget) = ctrl_ev.widget() {
+                    if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                        if focused.is::<gtk4::Text>()
+                            || focused.is::<gtk4::Entry>()
+                            || focused.is::<gtk4::SearchEntry>()
+                            || focused.is::<gtk4::TextView>()
+                            || focused.is::<gtk4::SpinButton>()
+                        {
+                            return glib::Propagation::Proceed;
+                        }
+                    }
+                }
+            }
+
             let mut st = state.borrow_mut();
 
             // Track whether we need to fire on_project_changed after releasing the borrow
@@ -5837,8 +5857,36 @@ fn draw_clip(
     rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
     cr.fill().ok();
 
+    // ── Title clip text label ───────────────────────────────────────────
+    if clip.kind == crate::model::clip::ClipKind::Title && cw > 20.0 {
+        cr.save().ok();
+        rounded_rect(cr, cx + 1.0, cy + 1.0, (cw - 2.0).max(0.0), (ch - 2.0).max(0.0), 3.0);
+        cr.clip();
+        // Draw "T" badge
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
+        cr.set_font_size(10.0);
+        let _ = cr.move_to(cx + 4.0, cy + 12.0);
+        let _ = cr.show_text("T");
+        // Draw title text centered
+        let display = if clip.title_text.is_empty() { &clip.label } else { &clip.title_text };
+        let max_chars = ((cw - 10.0) / 7.0).max(1.0) as usize;
+        let truncated = if display.len() > max_chars {
+            format!("{}…", &display[..max_chars.saturating_sub(1)])
+        } else {
+            display.to_string()
+        };
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        cr.set_font_size((ch * 0.4).clamp(8.0, 16.0));
+        let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("X").unwrap());
+        let tx = cx + (cw - te.width()) / 2.0;
+        let ty = cy + (ch + te.height()) / 2.0;
+        let _ = cr.move_to(tx, ty);
+        let _ = cr.show_text(&truncated);
+        cr.restore().ok();
+    }
+
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.kind == TrackKind::Video && cw > 20.0 {
+    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -6073,7 +6121,8 @@ fn draw_clip(
             .as_ref()
             .map(|p| !p.is_empty())
             .unwrap_or(false);
-        let has_missing_badge = st.source_is_missing(&clip.source_path);
+        let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
+            && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
             .as_ref()
@@ -6419,10 +6468,15 @@ fn clip_phase1_keyframe_count(clip: &Clip) -> usize {
 
 fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
     match clip.color_label {
-        crate::model::clip::ClipColorLabel::None => match track_kind {
-            TrackKind::Video => (0.17, 0.47, 0.85),
-            TrackKind::Audio => (0.18, 0.65, 0.45),
-        },
+        crate::model::clip::ClipColorLabel::None => {
+            if clip.kind == crate::model::clip::ClipKind::Title {
+                return (0.75, 0.62, 0.22); // warm gold for title clips
+            }
+            match track_kind {
+                TrackKind::Video => (0.17, 0.47, 0.85),
+                TrackKind::Audio => (0.18, 0.65, 0.45),
+            }
+        }
         crate::model::clip::ClipColorLabel::Red => (0.78, 0.27, 0.27),
         crate::model::clip::ClipColorLabel::Orange => (0.83, 0.49, 0.20),
         crate::model::clip::ClipColorLabel::Yellow => (0.78, 0.68, 0.20),

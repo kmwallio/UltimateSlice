@@ -9,6 +9,8 @@ pub mod preview;
 pub mod program_monitor;
 pub mod timecode;
 pub mod timeline;
+pub mod title_templates;
+pub mod titles_browser;
 pub mod toolbar;
 pub mod transform_overlay;
 pub mod window;

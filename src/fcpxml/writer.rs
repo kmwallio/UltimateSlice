@@ -648,8 +648,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         .push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
-                            let escaped = json.replace('"', "&quot;");
-                            asset_clip.push_attribute(("us:frei0r-effects", escaped.as_str()));
+                            // Don't manually escape quotes — quick_xml's
+                            // push_attribute handles XML escaping correctly.
+                            asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
                         }
                     }
                     asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
@@ -766,6 +767,33 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     ));
                     asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
                     asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
+                    if !clip.title_template.is_empty() {
+                        asset_clip.push_attribute(("us:title-template", clip.title_template.as_str()));
+                    }
+                    if clip.title_outline_width > 0.0 {
+                        asset_clip.push_attribute(("us:title-outline-color", format!("{:08X}", clip.title_outline_color).as_str()));
+                        asset_clip.push_attribute(("us:title-outline-width", clip.title_outline_width.to_string().as_str()));
+                    }
+                    if clip.title_shadow {
+                        asset_clip.push_attribute(("us:title-shadow", "true"));
+                        asset_clip.push_attribute(("us:title-shadow-color", format!("{:08X}", clip.title_shadow_color).as_str()));
+                        asset_clip.push_attribute(("us:title-shadow-offset-x", clip.title_shadow_offset_x.to_string().as_str()));
+                        asset_clip.push_attribute(("us:title-shadow-offset-y", clip.title_shadow_offset_y.to_string().as_str()));
+                    }
+                    if clip.title_bg_box {
+                        asset_clip.push_attribute(("us:title-bg-box", "true"));
+                        asset_clip.push_attribute(("us:title-bg-box-color", format!("{:08X}", clip.title_bg_box_color).as_str()));
+                        asset_clip.push_attribute(("us:title-bg-box-padding", clip.title_bg_box_padding.to_string().as_str()));
+                    }
+                    if clip.title_clip_bg_color != 0 {
+                        asset_clip.push_attribute(("us:title-clip-bg-color", format!("{:08X}", clip.title_clip_bg_color).as_str()));
+                    }
+                    if !clip.title_secondary_text.is_empty() {
+                        asset_clip.push_attribute(("us:title-secondary-text", clip.title_secondary_text.as_str()));
+                    }
+                    if clip.kind == crate::model::clip::ClipKind::Title {
+                        asset_clip.push_attribute(("us:clip-kind", "title"));
+                    }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
                         None
@@ -1469,6 +1497,13 @@ fn patch_imported_fcpxml_transform(project: &Project, original: &str) -> Option<
         return None;
     }
 
+    // If clips were added or deleted, the patch path can't handle the
+    // structural change — fall through to the full rewrite path.
+    let original_clip_count = original.matches("<asset-clip").count();
+    if clips.len() != original_clip_count {
+        return None;
+    }
+
     let mut xml = original.to_string();
     let mut by_ref_occurrence: HashMap<String, usize> = HashMap::new();
     let mut any_change = false;
@@ -2018,6 +2053,47 @@ fn patch_asset_clip_block_transform(
         ),
     ];
     for (attr, value) in keyframe_attrs {
+        let next = if let Some(v) = value {
+            replace_or_insert_attr(&updated_start, attr, &v)?
+        } else {
+            remove_attr(&updated_start, attr)
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    // Patch title styling attributes.
+    for (attr, value) in [
+        ("us:title-text", clip.title_text.clone()),
+        ("us:title-font", clip.title_font.clone()),
+        ("us:title-color", format!("{:08X}", clip.title_color)),
+        ("us:title-x", clip.title_x.to_string()),
+        ("us:title-y", clip.title_y.to_string()),
+    ] {
+        let next = replace_or_insert_attr(&updated_start, attr, &value)?;
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+    // Conditional title attrs
+    for (attr, value) in [
+        ("us:title-template", if clip.title_template.is_empty() { None } else { Some(clip.title_template.clone()) }),
+        ("us:title-outline-color", if clip.title_outline_width > 0.0 { Some(format!("{:08X}", clip.title_outline_color)) } else { None }),
+        ("us:title-outline-width", if clip.title_outline_width > 0.0 { Some(clip.title_outline_width.to_string()) } else { None }),
+        ("us:title-shadow", if clip.title_shadow { Some("true".to_string()) } else { None }),
+        ("us:title-shadow-color", if clip.title_shadow { Some(format!("{:08X}", clip.title_shadow_color)) } else { None }),
+        ("us:title-shadow-offset-x", if clip.title_shadow { Some(clip.title_shadow_offset_x.to_string()) } else { None }),
+        ("us:title-shadow-offset-y", if clip.title_shadow { Some(clip.title_shadow_offset_y.to_string()) } else { None }),
+        ("us:title-bg-box", if clip.title_bg_box { Some("true".to_string()) } else { None }),
+        ("us:title-bg-box-color", if clip.title_bg_box { Some(format!("{:08X}", clip.title_bg_box_color)) } else { None }),
+        ("us:title-bg-box-padding", if clip.title_bg_box { Some(clip.title_bg_box_padding.to_string()) } else { None }),
+        ("us:title-clip-bg-color", if clip.title_clip_bg_color != 0 { Some(format!("{:08X}", clip.title_clip_bg_color)) } else { None }),
+        ("us:title-secondary-text", if clip.title_secondary_text.is_empty() { None } else { Some(clip.title_secondary_text.clone()) }),
+        ("us:clip-kind", if clip.kind == crate::model::clip::ClipKind::Title { Some("title".to_string()) } else { None }),
+    ] {
         let next = if let Some(v) = value {
             replace_or_insert_attr(&updated_start, attr, &v)?
         } else {
