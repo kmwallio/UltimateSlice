@@ -438,6 +438,8 @@ Tracking docs:
   - [x] FCPXML round-trip via `us:frei0r-effects` vendor attribute (JSON quotes escaped to `&quot;` on write; backward-compatible sanitizer for older files)
   - [x] MCP tools: `list_frei0r_plugins`, `add_clip_frei0r_effect`, `remove_clip_frei0r_effect`, `set_clip_frei0r_effect_params`, `reorder_clip_frei0r_effects`, `list_clip_frei0r_effects`
   - [x] Five undo commands (add, remove, reorder, set params, toggle)
+  - [x] Graphical curve editor for curves plugin — 240×240 DrawingArea with Catmull-Rom spline, 2–5 draggable control points, channel selector (R/G/B/RGB/Luma), double-click to add/remove points
+  - [x] Graphical levels editor for levels plugin — transfer function visualization (240×80), input/output black/white sliders, gamma slider (0.1–4.0 mapped from frei0r 0–1), channel selector (R/G/B/Luma)
 - [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Titles Browser with 9 built-in templates (Standard, Cinematic, Informational categories)

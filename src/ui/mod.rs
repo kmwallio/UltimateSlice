@@ -1,8 +1,10 @@
 pub mod color_scopes;
 pub mod color_wheel;
+pub mod curves_editor;
 pub mod effects_browser;
 pub mod inspector;
 pub mod keyframe_editor;
+pub mod levels_editor;
 pub mod media_browser;
 pub mod preferences;
 pub mod preview;

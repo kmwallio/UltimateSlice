@@ -381,11 +381,17 @@ impl InspectorView {
             let params_box = GBox::new(Orientation::Vertical, 2);
             let has_params = !effect.params.is_empty() || !effect.string_params.is_empty();
 
-            // ── Special UI: 3-point color balance → color wheels ──
+            // ── Special UI: graphical editors for specific effects ──
             let is_3point = effect.plugin_name == "3-point-color-balance";
+            let is_curves = effect.plugin_name == "curves";
+            let is_levels = effect.plugin_name == "levels";
 
             if is_3point {
                 self.build_3point_color_wheels(effect, &params_box);
+            } else if is_curves {
+                self.build_curves_editor(effect, &params_box);
+            } else if is_levels {
+                self.build_levels_editor(effect, &params_box);
             } else {
             for (param_name, &param_val) in &effect.params {
                 let param_type = plugin_info
@@ -630,12 +636,21 @@ impl InspectorView {
                 params_box.append(&param_row);
             }
 
-            } // end else (non-3-point generic params)
+            } // end else (non-special generic params)
 
-            if has_params || is_3point {
-                let label = if is_3point { "Color Wheels" } else { "Parameters" };
+            let is_special = is_3point || is_curves || is_levels;
+            if has_params || is_special {
+                let label = if is_3point {
+                    "Color Wheels"
+                } else if is_curves {
+                    "Curve Editor"
+                } else if is_levels {
+                    "Levels Editor"
+                } else {
+                    "Parameters"
+                };
                 let expander = Expander::new(Some(label));
-                expander.set_expanded(is_3point);
+                expander.set_expanded(is_special);
                 expander.set_margin_start(4);
                 expander.set_child(Some(&params_box));
                 row.append(&expander);
@@ -779,6 +794,151 @@ impl InspectorView {
         }
 
         container.append(&bottom_row);
+    }
+
+    /// Build a graphical curve editor for the frei0r "curves" effect.
+    fn build_curves_editor(
+        &self,
+        effect: &crate::model::clip::Frei0rEffect,
+        container: &GBox,
+    ) {
+        use crate::ui::curves_editor;
+
+        // Extract current state from effect params
+        let channel = *effect.params.get("channel").unwrap_or(&0.5);
+        let point_count_raw = *effect.params.get("curve-point-number").unwrap_or(&0.2);
+        let point_count = ((point_count_raw * 10.0).round() as usize).clamp(2, 5);
+
+        let mut points = Vec::new();
+        for i in 1..=point_count {
+            let default_val = (i - 1) as f64 / (point_count - 1).max(1) as f64;
+            let inp = *effect
+                .params
+                .get(&format!("point-{i}-input-value"))
+                .unwrap_or(&default_val);
+            let out = *effect
+                .params
+                .get(&format!("point-{i}-output-value"))
+                .unwrap_or(&default_val);
+            points.push((inp, out));
+        }
+        if points.len() < 2 {
+            points = vec![(0.0, 0.0), (1.0, 1.0)];
+        }
+
+        let project = self.project.clone();
+        let selected_clip_id = self.selected_clip_id.clone();
+        let effect_id = effect.id.clone();
+        let on_params_changed = self.on_frei0r_params_changed.clone();
+        let updating = self.updating.clone();
+
+        let widget = curves_editor::build_curves_widget(channel, points, move |ch_val, pts| {
+            if *updating.borrow() {
+                return;
+            }
+            let cid = selected_clip_id.borrow().clone();
+            if let Some(cid) = cid {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
+                            if let Some(e) =
+                                clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                            {
+                                e.params.insert("channel".to_string(), ch_val);
+                                e.params.insert("show-curves".to_string(), 0.0);
+                                e.params.insert(
+                                    "curve-point-number".to_string(),
+                                    pts.len() as f64 / 10.0,
+                                );
+                                for (i, &(inp, out)) in pts.iter().enumerate() {
+                                    e.params.insert(
+                                        format!("point-{}-input-value", i + 1),
+                                        inp,
+                                    );
+                                    e.params.insert(
+                                        format!("point-{}-output-value", i + 1),
+                                        out,
+                                    );
+                                }
+                                // Clear unused point slots
+                                for i in (pts.len() + 1)..=5 {
+                                    e.params
+                                        .remove(&format!("point-{i}-input-value"));
+                                    e.params
+                                        .remove(&format!("point-{i}-output-value"));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    proj.dirty = true;
+                }
+                on_params_changed();
+            }
+        });
+        container.append(&widget);
+    }
+
+    /// Build a graphical levels editor for the frei0r "levels" effect.
+    fn build_levels_editor(
+        &self,
+        effect: &crate::model::clip::Frei0rEffect,
+        container: &GBox,
+    ) {
+        use crate::ui::levels_editor;
+
+        let channel = *effect.params.get("channel").unwrap_or(&0.3);
+        let input_black = *effect.params.get("input-black-level").unwrap_or(&0.0);
+        let input_white = *effect.params.get("input-white-level").unwrap_or(&1.0);
+        let gamma_frei0r = *effect.params.get("gamma").unwrap_or(&0.25);
+        let output_black = *effect.params.get("black-output").unwrap_or(&0.0);
+        let output_white = *effect.params.get("white-output").unwrap_or(&1.0);
+
+        let project = self.project.clone();
+        let selected_clip_id = self.selected_clip_id.clone();
+        let effect_id = effect.id.clone();
+        let on_params_changed = self.on_frei0r_params_changed.clone();
+        let updating = self.updating.clone();
+
+        let widget = levels_editor::build_levels_widget(
+            channel,
+            input_black,
+            input_white,
+            gamma_frei0r,
+            output_black,
+            output_white,
+            move |ch_val, ib, iw, gamma, ob, ow| {
+                if *updating.borrow() {
+                    return;
+                }
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
+                                if let Some(e) =
+                                    clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                                {
+                                    e.params.insert("channel".to_string(), ch_val);
+                                    e.params.insert("input-black-level".to_string(), ib);
+                                    e.params.insert("input-white-level".to_string(), iw);
+                                    e.params.insert("gamma".to_string(), gamma);
+                                    e.params.insert("black-output".to_string(), ob);
+                                    e.params.insert("white-output".to_string(), ow);
+                                    e.params.insert("show-histogram".to_string(), 0.0);
+                                }
+                                break;
+                            }
+                        }
+                        proj.dirty = true;
+                    }
+                    on_params_changed();
+                }
+            },
+        );
+        container.append(&widget);
     }
 
     /// Refresh all fields to show the given clip, or clear if None.
