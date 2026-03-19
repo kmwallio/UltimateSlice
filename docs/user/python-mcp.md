@@ -117,13 +117,64 @@ Set a scale keyframe on a clip at an absolute timeline time:
 python3 tools/mcp_call.py set_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000,"value":1.35}'
 ```
 
+Set a keyframe with custom Bezier controls for its outgoing segment:
+
+```bash
+python3 tools/mcp_call.py set_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000,"value":1.35,"bezier_controls":{"x1":0.20,"y1":0.05,"x2":0.80,"y2":0.95}}'
+```
+
 Remove the keyframe for that property at the same timeline time:
 
 ```bash
 python3 tools/mcp_call.py remove_clip_keyframe '{"clip_id":"<clip-id>","property":"scale","timeline_pos_ns":1000000000}'
 ```
 
-Use `list_clips` to discover `clip_id` values and inspect phase-1 keyframe arrays (`scale_keyframes`, `opacity_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `volume_keyframes`).
+Use `list_clips` to discover `clip_id` values and inspect phase-1 keyframe arrays (`scale_keyframes`, `opacity_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `volume_keyframes`). Keyframes may include optional `bezier_controls` for custom tangent-authored segments.
+
+## Frei0r effects MCP examples
+
+List all available frei0r filter plugins:
+
+```bash
+python3 tools/mcp_call.py list_frei0r_plugins '{}'
+```
+
+Add a "cartoon" effect to a clip:
+
+```bash
+python3 tools/mcp_call.py add_clip_frei0r_effect '{"clip_id":"<clip-id>","plugin_name":"cartoon"}'
+```
+
+Add a "cairogradient" effect with a string parameter override:
+
+```bash
+python3 tools/mcp_call.py add_clip_frei0r_effect '{"clip_id":"<clip-id>","plugin_name":"cairogradient","string_params":{"blend-mode":"multiply"}}'
+```
+
+List effects applied to a clip:
+
+```bash
+python3 tools/mcp_call.py list_clip_frei0r_effects '{"clip_id":"<clip-id>"}'
+```
+
+Update effect parameters (numeric and string):
+
+```bash
+python3 tools/mcp_call.py set_clip_frei0r_effect_params '{"clip_id":"<clip-id>","effect_id":"<effect-id>","params":{"Triplevel":0.7}}'
+python3 tools/mcp_call.py set_clip_frei0r_effect_params '{"clip_id":"<clip-id>","effect_id":"<effect-id>","params":{},"string_params":{"blend-mode":"screen"}}'
+```
+
+Reorder effects on a clip:
+
+```bash
+python3 tools/mcp_call.py reorder_clip_frei0r_effects '{"clip_id":"<clip-id>","effect_ids":["<eid2>","<eid1>"]}'
+```
+
+Remove an effect:
+
+```bash
+python3 tools/mcp_call.py remove_clip_frei0r_effect '{"clip_id":"<clip-id>","effect_id":"<effect-id>"}'
+```
 
 ## `.mcp.json` server entry
 

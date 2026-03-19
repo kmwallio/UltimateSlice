@@ -77,9 +77,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             if !project.dirty {
                 return Ok(original.clone());
             }
-            if let Some(patched) = patch_imported_fcpxml_transform(project, original) {
-                return Ok(patched);
-            }
+            // The patch path only updates a subset of clip fields (transform,
+            // color, title, keyframes).  Many fields — blend mode, speed,
+            // reverse, freeze-frame, chroma key, LUT, grading extensions,
+            // frei0r effects, transitions, audio, etc. — are NOT patched,
+            // causing silent data loss.  Always use the full rewrite for
+            // dirty projects to ensure all fields are persisted correctly.
+            // (The non-dirty case above still returns the original verbatim.)
         }
     }
 
@@ -115,8 +119,26 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         None
     };
 
+    // Build a map from source path → shared asset ID so that multiple clips
+    // referencing the same source file share a single <asset> element.
+    let asset_id_by_source: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        for track in project.video_tracks().chain(project.audio_tracks()) {
+            for clip in &track.clips {
+                let src = clip
+                    .fcpxml_original_source_path
+                    .as_deref()
+                    .unwrap_or(&clip.source_path)
+                    .to_string();
+                map.entry(src)
+                    .or_insert_with(|| format!("a_{}", sanitize_id(&clip.id)));
+            }
+        }
+        map
+    };
+
     // <resources>
-    write_resources(project, &mut writer, options, export_ctx.as_ref())?;
+    write_resources(project, &mut writer, options, export_ctx.as_ref(), &asset_id_by_source)?;
 
     // <library>
     let mut library = BytesStart::new("library");
@@ -230,13 +252,16 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                       lane: Option<i32>,
                                       parent_clip: Option<&crate::model::clip::Clip>|
          -> Result<u64> {
-            let asset_ref = format!("a_{}", sanitize_id(&clip.id));
-
-            // Look up probed media info for this clip and its parent.
             let clip_source = clip
                 .fcpxml_original_source_path
                 .as_deref()
                 .unwrap_or(&clip.source_path);
+            let asset_ref = asset_id_by_source
+                .get(clip_source)
+                .cloned()
+                .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
+
+            // Look up probed media info for this clip and its parent.
             let clip_media = export_ctx
                 .as_ref()
                 .and_then(|ctx| ctx.media.get(clip_source));
@@ -506,7 +531,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 crate::model::track::TrackKind::Audio => "audio",
             };
             for (clip_idx, clip) in track.clips.iter().enumerate() {
-                let asset_ref = format!("a_{}", sanitize_id(&clip.id));
+                let clip_source_key = clip
+                    .fcpxml_original_source_path
+                    .as_deref()
+                    .unwrap_or(&clip.source_path);
+                let asset_ref = asset_id_by_source
+                    .get(clip_source_key)
+                    .cloned()
+                    .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
                 let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
                 let source_start_ns =
@@ -551,6 +583,20 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             crate::model::clip::ClipColorLabel::Magenta => "magenta",
                         },
                     ));
+                    if clip.blend_mode != crate::model::clip::BlendMode::Normal {
+                        asset_clip.push_attribute((
+                            "us:blend-mode",
+                            match clip.blend_mode {
+                                crate::model::clip::BlendMode::Normal => "normal",
+                                crate::model::clip::BlendMode::Multiply => "multiply",
+                                crate::model::clip::BlendMode::Screen => "screen",
+                                crate::model::clip::BlendMode::Overlay => "overlay",
+                                crate::model::clip::BlendMode::Add => "add",
+                                crate::model::clip::BlendMode::Difference => "difference",
+                                crate::model::clip::BlendMode::SoftLight => "soft_light",
+                            },
+                        ));
+                    }
                     // Store color/effects as custom vendor attributes (us: prefix).
                     // Final Cut Pro ignores unknown attributes, so round-trip is lossless.
                     asset_clip
@@ -604,6 +650,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
                     asset_clip
                         .push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
+                    if !clip.frei0r_effects.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
+                            // Don't manually escape quotes — quick_xml's
+                            // push_attribute handles XML escaping correctly.
+                            asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
+                        }
+                    }
                     asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
                     let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
                         None
@@ -718,6 +771,33 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     ));
                     asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
                     asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
+                    if !clip.title_template.is_empty() {
+                        asset_clip.push_attribute(("us:title-template", clip.title_template.as_str()));
+                    }
+                    if clip.title_outline_width > 0.0 {
+                        asset_clip.push_attribute(("us:title-outline-color", format!("{:08X}", clip.title_outline_color).as_str()));
+                        asset_clip.push_attribute(("us:title-outline-width", clip.title_outline_width.to_string().as_str()));
+                    }
+                    if clip.title_shadow {
+                        asset_clip.push_attribute(("us:title-shadow", "true"));
+                        asset_clip.push_attribute(("us:title-shadow-color", format!("{:08X}", clip.title_shadow_color).as_str()));
+                        asset_clip.push_attribute(("us:title-shadow-offset-x", clip.title_shadow_offset_x.to_string().as_str()));
+                        asset_clip.push_attribute(("us:title-shadow-offset-y", clip.title_shadow_offset_y.to_string().as_str()));
+                    }
+                    if clip.title_bg_box {
+                        asset_clip.push_attribute(("us:title-bg-box", "true"));
+                        asset_clip.push_attribute(("us:title-bg-box-color", format!("{:08X}", clip.title_bg_box_color).as_str()));
+                        asset_clip.push_attribute(("us:title-bg-box-padding", clip.title_bg_box_padding.to_string().as_str()));
+                    }
+                    if clip.title_clip_bg_color != 0 {
+                        asset_clip.push_attribute(("us:title-clip-bg-color", format!("{:08X}", clip.title_clip_bg_color).as_str()));
+                    }
+                    if !clip.title_secondary_text.is_empty() {
+                        asset_clip.push_attribute(("us:title-secondary-text", clip.title_secondary_text.as_str()));
+                    }
+                    if clip.kind == crate::model::clip::ClipKind::Title {
+                        asset_clip.push_attribute(("us:clip-kind", "title"));
+                    }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
                         None
@@ -1421,6 +1501,13 @@ fn patch_imported_fcpxml_transform(project: &Project, original: &str) -> Option<
         return None;
     }
 
+    // If clips were added or deleted, the patch path can't handle the
+    // structural change — fall through to the full rewrite path.
+    let original_clip_count = original.matches("<asset-clip").count();
+    if clips.len() != original_clip_count {
+        return None;
+    }
+
     let mut xml = original.to_string();
     let mut by_ref_occurrence: HashMap<String, usize> = HashMap::new();
     let mut any_change = false;
@@ -1795,6 +1882,10 @@ fn patch_asset_clip_block_transform(
                 &project.frame_rate,
             ),
         ),
+        (
+            "duration",
+            ns_to_fcpxml_time(clip.duration(), &project.frame_rate),
+        ),
     ] {
         let next = replace_or_insert_attr(&updated_start, attr, &value)?;
         if next != updated_start {
@@ -1970,6 +2061,67 @@ fn patch_asset_clip_block_transform(
             replace_or_insert_attr(&updated_start, attr, &v)?
         } else {
             remove_attr(&updated_start, attr)
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    // Patch title styling attributes.
+    for (attr, value) in [
+        ("us:title-text", clip.title_text.clone()),
+        ("us:title-font", clip.title_font.clone()),
+        ("us:title-color", format!("{:08X}", clip.title_color)),
+        ("us:title-x", clip.title_x.to_string()),
+        ("us:title-y", clip.title_y.to_string()),
+    ] {
+        let next = replace_or_insert_attr(&updated_start, attr, &value)?;
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+    // Conditional title attrs
+    for (attr, value) in [
+        ("us:title-template", if clip.title_template.is_empty() { None } else { Some(clip.title_template.clone()) }),
+        ("us:title-outline-color", if clip.title_outline_width > 0.0 { Some(format!("{:08X}", clip.title_outline_color)) } else { None }),
+        ("us:title-outline-width", if clip.title_outline_width > 0.0 { Some(clip.title_outline_width.to_string()) } else { None }),
+        ("us:title-shadow", if clip.title_shadow { Some("true".to_string()) } else { None }),
+        ("us:title-shadow-color", if clip.title_shadow { Some(format!("{:08X}", clip.title_shadow_color)) } else { None }),
+        ("us:title-shadow-offset-x", if clip.title_shadow { Some(clip.title_shadow_offset_x.to_string()) } else { None }),
+        ("us:title-shadow-offset-y", if clip.title_shadow { Some(clip.title_shadow_offset_y.to_string()) } else { None }),
+        ("us:title-bg-box", if clip.title_bg_box { Some("true".to_string()) } else { None }),
+        ("us:title-bg-box-color", if clip.title_bg_box { Some(format!("{:08X}", clip.title_bg_box_color)) } else { None }),
+        ("us:title-bg-box-padding", if clip.title_bg_box { Some(clip.title_bg_box_padding.to_string()) } else { None }),
+        ("us:title-clip-bg-color", if clip.title_clip_bg_color != 0 { Some(format!("{:08X}", clip.title_clip_bg_color)) } else { None }),
+        ("us:title-secondary-text", if clip.title_secondary_text.is_empty() { None } else { Some(clip.title_secondary_text.clone()) }),
+        ("us:clip-kind", if clip.kind == crate::model::clip::ClipKind::Title { Some("title".to_string()) } else { None }),
+    ] {
+        let next = if let Some(v) = value {
+            replace_or_insert_attr(&updated_start, attr, &v)?
+        } else {
+            remove_attr(&updated_start, attr)
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    // Patch frei0r effects JSON attribute.
+    {
+        let frei0r_value = if clip.frei0r_effects.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&clip.frei0r_effects)
+                .ok()
+                .map(|s| s.replace('"', "&quot;"))
+        };
+        let next = if let Some(v) = frei0r_value {
+            replace_or_insert_attr(&updated_start, "us:frei0r-effects", &v)?
+        } else {
+            remove_attr(&updated_start, "us:frei0r-effects")
         };
         if next != updated_start {
             changed = true;
@@ -2372,6 +2524,7 @@ fn write_resources(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     options: WriterOptions,
     export_ctx: Option<&ExportContext>,
+    asset_id_by_source: &HashMap<String, String>,
 ) -> Result<()> {
     let strip_unknown_fields = options.strict_dtd;
     let mut resources = BytesStart::new("resources");
@@ -2455,16 +2608,28 @@ fn write_resources(
         }
     }
 
-    // Asset resources for each unique clip.
-    // hasVideo/hasAudio describe the MEDIA FILE capabilities, not which
-    // track the clip lives on, so we use probed resolution to decide.
+    // Asset resources — deduplicated by source path so clips from the same
+    // media file share a single <asset> element.
+    let mut written_asset_sources: std::collections::HashSet<String> = std::collections::HashSet::new();
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
-            let asset_id = format!("a_{}", sanitize_id(&clip.id));
+            // Title clips have no source media — skip to avoid writing
+            // broken asset references with empty file:// URIs.
+            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title {
+                continue;
+            }
             let export_source_path = clip
                 .fcpxml_original_source_path
                 .as_deref()
                 .unwrap_or(&clip.source_path);
+            // Skip if we already wrote an asset for this source path.
+            if !written_asset_sources.insert(export_source_path.to_string()) {
+                continue;
+            }
+            let asset_id = asset_id_by_source
+                .get(export_source_path)
+                .cloned()
+                .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
             let uri = fcpxml_media_src_uri(export_source_path);
 
             // Use export context for accurate timecode and format, with fallbacks.
@@ -2481,7 +2646,6 @@ fn write_resources(
             } else {
                 media_info
                     .and_then(|m| m.timecode_ns)
-                    .or(clip.source_timecode_base_ns)
                     .map(|ns| ns_to_fcpxml_time(ns, asset_fps))
                     .unwrap_or_else(|| "0s".to_string())
             };
@@ -2767,6 +2931,14 @@ fn integrate_speed_distance_to_time_ns(
     integrated
 }
 
+fn keyframe_curve_attr(kf: &crate::model::clip::NumericKeyframe) -> Option<&'static str> {
+    if kf.bezier_controls.is_some() {
+        Some("smooth")
+    } else {
+        None
+    }
+}
+
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for transform properties.
 /// `source_start_ns` is the FCPXML `start` attribute value in nanoseconds — keyframe times
 /// are offset by this amount so they appear in absolute source time as FCP expects.
@@ -2827,6 +2999,18 @@ fn write_transform_keyframe_params(
                 ns_to_fcpxml_time(t + source_start_ns, fps).as_str(),
             ));
             kf_elem.push_attribute(("value", format!("{} {}", fx, fy).as_str()));
+            let x_kf = clip.position_x_keyframes.iter().find(|kf| kf.time_ns == t);
+            let y_kf = clip.position_y_keyframes.iter().find(|kf| kf.time_ns == t);
+            let interp = x_kf
+                .map(|kf| kf.interpolation)
+                .or_else(|| y_kf.map(|kf| kf.interpolation))
+                .unwrap_or(crate::model::clip::KeyframeInterpolation::Linear);
+            kf_elem.push_attribute(("interp", interp.to_fcpxml()));
+            let has_curve = x_kf.and_then(keyframe_curve_attr).is_some()
+                || y_kf.and_then(keyframe_curve_attr).is_some();
+            if has_curve {
+                kf_elem.push_attribute(("curve", "smooth"));
+            }
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2855,6 +3039,10 @@ fn write_transform_keyframe_params(
                 ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
             ));
             kf_elem.push_attribute(("value", format!("{} {}", kf.value, kf.value).as_str()));
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2883,6 +3071,10 @@ fn write_transform_keyframe_params(
                 ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
             ));
             kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
             writer.write_event(Event::Empty(kf_elem))?;
         }
 
@@ -2925,6 +3117,9 @@ fn write_opacity_keyframe_params(
         ));
         kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
         kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+        if let Some(curve) = keyframe_curve_attr(kf) {
+            kf_elem.push_attribute(("curve", curve));
+        }
         writer.write_event(Event::Empty(kf_elem))?;
     }
 
@@ -2972,6 +3167,9 @@ fn write_volume_keyframe_params(
         // FCP ignores interp on volume param keyframes — omit in strict mode.
         if !strict {
             kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
         }
         writer.write_event(Event::Empty(kf_elem))?;
     }
@@ -3022,6 +3220,9 @@ fn write_pan_keyframe_params(
         // FCP ignores interp on pan param keyframes — omit in strict mode.
         if !strict {
             kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
         }
         writer.write_event(Event::Empty(kf_elem))?;
     }
@@ -3129,6 +3330,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
+            | "us:frei0r-effects"
             | "us:volume"
             | "us:volume-keyframes"
             | "us:pan"
@@ -3177,6 +3379,30 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
+            | "us:blend-mode"
+            | "us:exposure"
+            | "us:black-point"
+            | "us:highlights-warmth"
+            | "us:highlights-tint"
+            | "us:midtones-warmth"
+            | "us:midtones-tint"
+            | "us:shadows-warmth"
+            | "us:shadows-tint"
+            | "us:bg-removal-enabled"
+            | "us:bg-removal-threshold"
+            | "us:title-template"
+            | "us:title-outline-color"
+            | "us:title-outline-width"
+            | "us:title-shadow"
+            | "us:title-shadow-color"
+            | "us:title-shadow-offset-x"
+            | "us:title-shadow-offset-y"
+            | "us:title-bg-box"
+            | "us:title-bg-box-color"
+            | "us:title-bg-box-padding"
+            | "us:title-clip-bg-color"
+            | "us:title-secondary-text"
+            | "us:clip-kind"
     )
 }
 
@@ -3533,11 +3759,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 2.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -3562,6 +3790,7 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 2.0,
             interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+            bezier_controls: None,
         }];
         track.add_clip(clip);
         project.tracks.push(track);
@@ -3582,11 +3811,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 2.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -3815,16 +4046,19 @@ mod tests {
             time_ns: 250_000_000,
             value: 0.7,
             interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+            bezier_controls: None,
         }];
         clip.volume_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 250_000_000,
             value: 0.9,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.pan_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 250_000_000,
             value: 0.2,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         track.add_clip(clip);
         project.tracks.push(track);
@@ -3870,11 +4104,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.5,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -3957,11 +4193,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 0.5,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4037,7 +4275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_fcpxml_dirty_scale_edit_preserves_unknown_fields() {
+    fn test_write_fcpxml_dirty_scale_edit_preserves_fields_via_full_rewrite() {
         let original = r#"<?xml version="1.0" encoding="UTF-8"?>
 <fcpxml version="1.14" customRoot="keep-root">
   <resources>
@@ -4076,73 +4314,88 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.75,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.opacity_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 250_000_000,
             value: 0.5,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.position_x_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 500_000_000,
             value: 0.25,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.position_y_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 500_000_000,
             value: -0.5,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.volume_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 0,
             value: 0.8,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.pan_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 500_000_000,
             value: -0.25,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.brightness_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 0,
             value: -0.2,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.contrast_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 1.4,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.saturation_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.7,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.temperature_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 7500.0,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         clip.tint_keyframes = vec![crate::model::clip::NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.3,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
+        // Full rewrite preserves unknown attributes via fcpxml_unknown_* fields.
         assert!(written.contains("customRoot=\"keep-root\""));
         assert!(written.contains("customAsset=\"keep-asset\""));
         assert!(written.contains("customSequence=\"keep-seq\""));
         assert!(written.contains("customClip=\"keep-clip\""));
         assert!(written.contains("<metadata key=\"com.example.unknown\" value=\"keep-meta\""));
+        // Verify data values are correct.
         assert!(written.contains("us:scale=\"1.75\""));
         assert!(written.contains("us:position-x=\"0.25\""));
+        assert!(written.contains("us:position-y=\"-0.5\""));
         assert!(written.contains("us:scale-keyframes="));
         assert!(written.contains("us:opacity-keyframes="));
         assert!(written.contains("us:position-x-keyframes="));
@@ -4153,10 +4406,15 @@ mod tests {
         assert!(written.contains("us:saturation-keyframes="));
         assert!(written.contains("us:temperature-keyframes="));
         assert!(written.contains("us:tint-keyframes="));
-        assert!(written.contains("us:position-y=\"-0.5\""));
-        assert!(written.contains("adjust-transform position=\"-16.666666"));
-        assert!(written.contains(" scale=\"1.75 1.75\" rotation=\"0\""));
-        assert!(written.contains(" -18.75\""));
+        // Verify round-trip: parse the written XML back and check data values.
+        let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
+        let clip2 = reparsed.tracks.iter().flat_map(|t| t.clips.iter()).next()
+            .expect("clip should survive round-trip");
+        assert!((clip2.scale - 1.75).abs() < 0.001, "scale should round-trip");
+        assert!((clip2.position_x - 0.25).abs() < 0.001, "position_x should round-trip");
+        assert!((clip2.position_y - (-0.5)).abs() < 0.001, "position_y should round-trip");
+        assert_eq!(clip2.scale_keyframes.len(), 2, "scale keyframes should round-trip");
+        assert_eq!(clip2.opacity_keyframes.len(), 1, "opacity keyframes should round-trip");
     }
 
     #[test]
@@ -4341,7 +4599,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_fcpxml_dirty_transform_edit_prefers_in_place_patch_for_multi_clip_import() {
+    fn test_write_fcpxml_dirty_transform_edit_uses_full_rewrite_for_multi_clip_import() {
         let original = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.14">
@@ -4386,14 +4644,20 @@ mod tests {
         project.dirty = true;
 
         let written = write_fcpxml(&project).expect("write should succeed");
-        assert!(written.contains("<asset id=\"r1v\""));
-        assert!(written.contains("<asset id=\"r2v\""));
-        assert!(written.contains("<smart-collection name=\"Projects\""));
+        // Full rewrite generates its own asset IDs and includes vendor extensions.
         assert!(written.contains("scale=\"0.75 0.75\""));
         assert!(written.contains("rotation=\"37\""));
-        assert!(!written.contains("us:track-idx="));
-        assert!(!written.contains("<asset id=\"a_"));
-        assert!(!written.contains("ref=\"a_"));
+        // Verify the smart-collection is preserved via unknown library children.
+        assert!(written.contains("<smart-collection name=\"Projects\""));
+        // Verify the full rewrite emits USPXML vendor extensions.
+        assert!(written.contains("us:track-idx="));
+        // Round-trip: verify the written XML can be parsed back.
+        let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
+        let overlay = reparsed.tracks.iter().flat_map(|t| t.clips.iter())
+            .find(|c| c.label == "overlay")
+            .expect("overlay clip should survive round-trip");
+        assert!((overlay.scale - 0.75).abs() < 0.001);
+        assert_eq!(overlay.rotate, 37);
     }
 
     #[test]
@@ -4462,11 +4726,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.scale_keyframes = vec![
@@ -4474,11 +4740,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 5_000_000_000,
                 value: 1.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.volume_keyframes = vec![
@@ -4486,11 +4754,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.pan_keyframes = vec![
@@ -4498,11 +4768,13 @@ mod tests {
                 time_ns: 0,
                 value: -0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.rotate_keyframes = vec![
@@ -4510,11 +4782,13 @@ mod tests {
                 time_ns: 0,
                 value: -30.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 45.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.crop_left_keyframes = vec![
@@ -4522,11 +4796,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 3_000_000_000,
                 value: 120.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4596,6 +4872,48 @@ mod tests {
     }
 
     #[test]
+    fn test_write_fcpxml_strict_emits_native_curve_for_custom_bezier_keyframes() {
+        use crate::model::clip::{
+            BezierControls, Clip, ClipKind, KeyframeInterpolation, NumericKeyframe,
+        };
+        use crate::model::track::Track;
+
+        let mut project = Project::new("StrictBezierCurve");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/clip.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.scale_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::EaseOut,
+                bezier_controls: Some(BezierControls {
+                    x1: 0.10,
+                    y1: 0.05,
+                    x2: 0.72,
+                    y2: 0.95,
+                }),
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 1.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
+        assert!(!xml.contains("xmlns:us="), "strict export should omit vendor ns");
+        assert!(xml.contains("<param name=\"scale\""), "missing scale param");
+        assert!(
+            xml.contains("curve=\"smooth\""),
+            "strict keyframe should emit native curve attribute for custom tangents: {xml}"
+        );
+    }
+
+    #[test]
     fn test_write_read_native_keyframe_round_trip() {
         use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
         use crate::model::track::Track;
@@ -4609,11 +4927,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.3,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.pan_keyframes = vec![
@@ -4621,11 +4941,13 @@ mod tests {
                 time_ns: 0,
                 value: -0.2,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.4,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4669,11 +4991,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 1.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.rotate_keyframes = vec![
@@ -4681,11 +5005,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 45.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.opacity_keyframes = vec![
@@ -4693,11 +5019,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip);
@@ -4803,8 +5131,8 @@ mod tests {
         let srcs = media_rep_src_values(&xml);
         assert_eq!(
             srcs.len(),
-            3,
-            "three clips should produce three media-rep refs"
+            2,
+            "two unique source files should produce two media-rep refs (deduplicated)"
         );
         let library_uri_prefix = format!(
             "file://{}/",
@@ -4939,11 +5267,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 500_000_000,
                 value: 0.75,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+                bezier_controls: None,
             },
         ];
         let mut clip_b = Clip::new(
@@ -4960,11 +5290,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 750_000_000,
                 value: 1.2,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+                bezier_controls: None,
             },
         ];
         track.add_clip(clip_a);
@@ -5102,11 +5434,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 500_000_000,
                 value: 0.8,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseIn,
+                bezier_controls: None,
             },
         ];
         video_1.add_clip(clip_a);
@@ -5126,11 +5460,13 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             crate::model::clip::NumericKeyframe {
                 time_ns: 750_000_000,
                 value: 1.15,
                 interpolation: crate::model::clip::KeyframeInterpolation::EaseOut,
+                bezier_controls: None,
             },
         ];
         video_2.add_clip(clip_b);
@@ -5149,6 +5485,7 @@ mod tests {
             time_ns: 250_000_000,
             value: -0.25,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         audio_1.add_clip(clip_c);
 
@@ -5434,6 +5771,7 @@ mod tests {
             time_ns: 0,
             value: 0.8,
             interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
         track.add_clip(clip);
         project.tracks.push(track);

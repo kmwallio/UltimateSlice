@@ -594,6 +594,105 @@ impl EditCommand for SetClipColorCommand {
     }
 }
 
+/// Match one clip's color to another — stores all color parameters before/after.
+pub struct MatchColorCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_brightness: f32,
+    pub old_contrast: f32,
+    pub old_saturation: f32,
+    pub old_temperature: f32,
+    pub old_tint: f32,
+    pub old_exposure: f32,
+    pub old_black_point: f32,
+    pub old_shadows: f32,
+    pub old_midtones: f32,
+    pub old_highlights: f32,
+    pub old_highlights_warmth: f32,
+    pub old_highlights_tint: f32,
+    pub old_midtones_warmth: f32,
+    pub old_midtones_tint: f32,
+    pub old_shadows_warmth: f32,
+    pub old_shadows_tint: f32,
+    pub old_lut_path: Option<String>,
+    pub new_brightness: f32,
+    pub new_contrast: f32,
+    pub new_saturation: f32,
+    pub new_temperature: f32,
+    pub new_tint: f32,
+    pub new_exposure: f32,
+    pub new_black_point: f32,
+    pub new_shadows: f32,
+    pub new_midtones: f32,
+    pub new_highlights: f32,
+    pub new_highlights_warmth: f32,
+    pub new_highlights_tint: f32,
+    pub new_midtones_warmth: f32,
+    pub new_midtones_tint: f32,
+    pub new_shadows_warmth: f32,
+    pub new_shadows_tint: f32,
+    pub new_lut_path: Option<String>,
+}
+
+impl MatchColorCommand {
+    fn apply_values(&self, project: &mut Project, use_new: bool) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if use_new {
+                    clip.brightness = self.new_brightness;
+                    clip.contrast = self.new_contrast;
+                    clip.saturation = self.new_saturation;
+                    clip.temperature = self.new_temperature;
+                    clip.tint = self.new_tint;
+                    clip.exposure = self.new_exposure;
+                    clip.black_point = self.new_black_point;
+                    clip.shadows = self.new_shadows;
+                    clip.midtones = self.new_midtones;
+                    clip.highlights = self.new_highlights;
+                    clip.highlights_warmth = self.new_highlights_warmth;
+                    clip.highlights_tint = self.new_highlights_tint;
+                    clip.midtones_warmth = self.new_midtones_warmth;
+                    clip.midtones_tint = self.new_midtones_tint;
+                    clip.shadows_warmth = self.new_shadows_warmth;
+                    clip.shadows_tint = self.new_shadows_tint;
+                    clip.lut_path = self.new_lut_path.clone();
+                } else {
+                    clip.brightness = self.old_brightness;
+                    clip.contrast = self.old_contrast;
+                    clip.saturation = self.old_saturation;
+                    clip.temperature = self.old_temperature;
+                    clip.tint = self.old_tint;
+                    clip.exposure = self.old_exposure;
+                    clip.black_point = self.old_black_point;
+                    clip.shadows = self.old_shadows;
+                    clip.midtones = self.old_midtones;
+                    clip.highlights = self.old_highlights;
+                    clip.highlights_warmth = self.old_highlights_warmth;
+                    clip.highlights_tint = self.old_highlights_tint;
+                    clip.midtones_warmth = self.old_midtones_warmth;
+                    clip.midtones_tint = self.old_midtones_tint;
+                    clip.shadows_warmth = self.old_shadows_warmth;
+                    clip.shadows_tint = self.old_shadows_tint;
+                    clip.lut_path = self.old_lut_path.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+}
+
+impl EditCommand for MatchColorCommand {
+    fn execute(&self, project: &mut Project) {
+        self.apply_values(project, true);
+    }
+    fn undo(&self, project: &mut Project) {
+        self.apply_values(project, false);
+    }
+    fn description(&self) -> &str {
+        "Match clip color"
+    }
+}
+
 /// Set transition metadata on a clip boundary (clip -> next clip).
 pub struct SetClipTransitionCommand {
     pub clip_id: String,
@@ -779,6 +878,257 @@ fn move_clip(
             to_track.add_clip(clip);
         }
         project.dirty = true;
+    }
+}
+
+// ── Frei0r Effect Commands ──────────────────────────────────────────────────
+
+/// Add a frei0r effect to a clip.
+pub struct AddFrei0rEffectCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect: crate::model::clip::Frei0rEffect,
+    pub index: usize,
+}
+
+impl EditCommand for AddFrei0rEffectCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                let idx = self.index.min(clip.frei0r_effects.len());
+                clip.frei0r_effects.insert(idx, self.effect.clone());
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.frei0r_effects.retain(|e| e.id != self.effect.id);
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add frei0r effect"
+    }
+}
+
+/// Remove a frei0r effect from a clip.
+pub struct RemoveFrei0rEffectCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect: crate::model::clip::Frei0rEffect,
+    pub index: usize,
+}
+
+impl EditCommand for RemoveFrei0rEffectCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.frei0r_effects.retain(|e| e.id != self.effect.id);
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                let idx = self.index.min(clip.frei0r_effects.len());
+                clip.frei0r_effects.insert(idx, self.effect.clone());
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Remove frei0r effect"
+    }
+}
+
+/// Reorder frei0r effects on a clip (swap two adjacent entries).
+pub struct ReorderFrei0rEffectsCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub index_a: usize,
+    pub index_b: usize,
+}
+
+impl EditCommand for ReorderFrei0rEffectsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                let len = clip.frei0r_effects.len();
+                if self.index_a < len && self.index_b < len {
+                    clip.frei0r_effects.swap(self.index_a, self.index_b);
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        // Swapping the same pair reverses the operation.
+        self.execute(project);
+    }
+    fn description(&self) -> &str {
+        "Reorder frei0r effects"
+    }
+}
+
+/// Change parameters of a frei0r effect on a clip.
+pub struct SetFrei0rEffectParamsCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect_id: String,
+    pub old_params: std::collections::HashMap<String, f64>,
+    pub new_params: std::collections::HashMap<String, f64>,
+}
+
+impl EditCommand for SetFrei0rEffectParamsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                    effect.params = self.new_params.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                    effect.params = self.old_params.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set frei0r effect parameters"
+    }
+}
+
+/// Toggle the enabled state of a frei0r effect on a clip.
+pub struct ToggleFrei0rEffectCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub effect_id: String,
+}
+
+impl EditCommand for ToggleFrei0rEffectCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                    effect.enabled = !effect.enabled;
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        // Toggling again reverses the operation.
+        self.execute(project);
+    }
+    fn description(&self) -> &str {
+        "Toggle frei0r effect"
+    }
+}
+
+/// Snapshot of all title-related properties for undo/redo.
+#[derive(Clone, Debug)]
+pub struct TitlePropertySnapshot {
+    pub title_text: String,
+    pub title_font: String,
+    pub title_color: u32,
+    pub title_x: f64,
+    pub title_y: f64,
+    pub title_template: String,
+    pub title_outline_color: u32,
+    pub title_outline_width: f64,
+    pub title_shadow: bool,
+    pub title_shadow_color: u32,
+    pub title_shadow_offset_x: f64,
+    pub title_shadow_offset_y: f64,
+    pub title_bg_box: bool,
+    pub title_bg_box_color: u32,
+    pub title_bg_box_padding: f64,
+    pub title_clip_bg_color: u32,
+    pub title_secondary_text: String,
+}
+
+impl TitlePropertySnapshot {
+    pub fn from_clip(clip: &Clip) -> Self {
+        Self {
+            title_text: clip.title_text.clone(),
+            title_font: clip.title_font.clone(),
+            title_color: clip.title_color,
+            title_x: clip.title_x,
+            title_y: clip.title_y,
+            title_template: clip.title_template.clone(),
+            title_outline_color: clip.title_outline_color,
+            title_outline_width: clip.title_outline_width,
+            title_shadow: clip.title_shadow,
+            title_shadow_color: clip.title_shadow_color,
+            title_shadow_offset_x: clip.title_shadow_offset_x,
+            title_shadow_offset_y: clip.title_shadow_offset_y,
+            title_bg_box: clip.title_bg_box,
+            title_bg_box_color: clip.title_bg_box_color,
+            title_bg_box_padding: clip.title_bg_box_padding,
+            title_clip_bg_color: clip.title_clip_bg_color,
+            title_secondary_text: clip.title_secondary_text.clone(),
+        }
+    }
+
+    fn apply_to_clip(&self, clip: &mut Clip) {
+        clip.title_text = self.title_text.clone();
+        clip.title_font = self.title_font.clone();
+        clip.title_color = self.title_color;
+        clip.title_x = self.title_x;
+        clip.title_y = self.title_y;
+        clip.title_template = self.title_template.clone();
+        clip.title_outline_color = self.title_outline_color;
+        clip.title_outline_width = self.title_outline_width;
+        clip.title_shadow = self.title_shadow;
+        clip.title_shadow_color = self.title_shadow_color;
+        clip.title_shadow_offset_x = self.title_shadow_offset_x;
+        clip.title_shadow_offset_y = self.title_shadow_offset_y;
+        clip.title_bg_box = self.title_bg_box;
+        clip.title_bg_box_color = self.title_bg_box_color;
+        clip.title_bg_box_padding = self.title_bg_box_padding;
+        clip.title_clip_bg_color = self.title_clip_bg_color;
+        clip.title_secondary_text = self.title_secondary_text.clone();
+    }
+}
+
+pub struct SetTitlePropertiesCommand {
+    pub clip_id: String,
+    pub before: TitlePropertySnapshot,
+    pub after: TitlePropertySnapshot,
+}
+
+impl EditCommand for SetTitlePropertiesCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.tracks.iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .find(|c| c.id == self.clip_id)
+        {
+            self.after.apply_to_clip(clip);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.tracks.iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .find(|c| c.id == self.clip_id)
+        {
+            self.before.apply_to_clip(clip);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set title properties"
     }
 }
 

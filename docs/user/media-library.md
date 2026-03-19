@@ -10,6 +10,7 @@ The **Media Library** panel (left side) holds all source clips available for you
 4. Imported items appear in the list showing the clip name and filename.
 5. GStreamer probes each file on import to determine its duration and extract source timecode (creation date/time) when available.
 6. **Still images** (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) are detected by file extension and assigned a **4-second default duration**. They are classified as image clips rather than video or audio.
+7. If a source path is unavailable on disk, the media card shows an **OFFLINE** badge and warning outline.
 
 You can also drag files directly from your file manager into the **Media Library** pane to import them.
 
@@ -44,3 +45,9 @@ Supported formats depend on your installed GStreamer plugins (any format `playbi
 - Thumbnails are generated asynchronously and refresh automatically as they become available (no manual panel/window resize needed).
 - Source timecode (from camera creation timestamps) is automatically extracted during import and used for timecode-based alignment of grouped clips without manual entry.
 - When the library is empty, the panel shows a short hint reminding you that you can import or drag files to begin.
+
+## Relinking offline media
+
+- Use **Relink…** in the main toolbar to recover missing source files.
+- Choose a folder to scan. UltimateSlice searches recursively and remaps missing paths by filename, then breaks ties using deepest tail-path match.
+- The relink pass reports how many items were remapped and how many remain unresolved.

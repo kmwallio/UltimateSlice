@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Common image file extensions (lowercase).
@@ -22,6 +23,7 @@ pub enum ClipKind {
     Video,
     Audio,
     Image,
+    Title,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +43,56 @@ pub enum ClipColorLabel {
 impl Default for ClipColorLabel {
     fn default() -> Self {
         Self::None
+    }
+}
+
+/// Compositing blend mode for a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Add,
+    Difference,
+    SoftLight,
+}
+
+impl BlendMode {
+    pub const ALL: &'static [BlendMode] = &[
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Add,
+        BlendMode::Difference,
+        BlendMode::SoftLight,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            BlendMode::Normal => "Normal",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::Add => "Add",
+            BlendMode::Difference => "Difference",
+            BlendMode::SoftLight => "Soft Light",
+        }
+    }
+
+    pub fn ffmpeg_mode(&self) -> &'static str {
+        match self {
+            BlendMode::Normal => "normal",
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Overlay => "overlay",
+            BlendMode::Add => "addition",
+            BlendMode::Difference => "difference",
+            BlendMode::SoftLight => "softlight",
+        }
     }
 }
 
@@ -98,6 +150,15 @@ impl KeyframeInterpolation {
             Self::EaseInOut => cubic_bezier_ease(0.42, 0.0, 0.58, 1.0, t),
         }
     }
+
+    pub fn control_points(self) -> (f64, f64, f64, f64) {
+        match self {
+            Self::Linear => (1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0),
+            Self::EaseIn => (0.42, 0.0, 1.0, 1.0),
+            Self::EaseOut => (0.0, 0.0, 0.58, 1.0),
+            Self::EaseInOut => (0.42, 0.0, 0.58, 1.0),
+        }
+    }
 }
 
 /// Evaluate a cubic bezier curve with control points (x1,y1) and (x2,y2)
@@ -144,12 +205,39 @@ fn bezier_component_derivative(p1: f64, p2: f64, s: f64) -> f64 {
     3.0 * (1.0 - s) * (1.0 - s) * p1 + 6.0 * (1.0 - s) * s * (p2 - p1) + 3.0 * s2 * (1.0 - p2)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BezierControls {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NumericKeyframe {
     pub time_ns: u64,
     pub value: f64,
     #[serde(default)]
     pub interpolation: KeyframeInterpolation,
+    /// Optional outgoing custom cubic-bezier controls for the segment from
+    /// this keyframe to the next keyframe in the same lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bezier_controls: Option<BezierControls>,
+}
+
+impl NumericKeyframe {
+    pub fn segment_control_points(&self) -> (f64, f64, f64, f64) {
+        if let Some(ref bezier) = self.bezier_controls {
+            (
+                bezier.x1.clamp(0.0, 1.0),
+                bezier.y1.clamp(0.0, 1.0),
+                bezier.x2.clamp(0.0, 1.0),
+                bezier.y2.clamp(0.0, 1.0),
+            )
+        } else {
+            self.interpolation.control_points()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -251,6 +339,21 @@ fn default_title_x() -> f64 {
 fn default_title_y() -> f64 {
     0.9
 }
+fn default_title_outline_color() -> u32 {
+    0x000000FF
+}
+fn default_title_shadow_color() -> u32 {
+    0x000000AA
+}
+fn default_title_shadow_offset() -> f64 {
+    2.0
+}
+fn default_title_bg_box_color() -> u32 {
+    0x00000088
+}
+fn default_title_bg_box_padding() -> f64 {
+    8.0
+}
 fn default_chroma_key_color() -> u32 {
     0x00FF00
 }
@@ -265,6 +368,69 @@ fn default_bg_removal_threshold() -> f64 {
 }
 fn default_temperature() -> f32 {
     6500.0
+}
+
+/// An instance of a frei0r filter effect applied to a clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Frei0rEffect {
+    /// Unique instance id (UUID v4).
+    pub id: String,
+    /// Short frei0r plugin name (e.g. `"cartoon"`), matching
+    /// [`crate::media::frei0r_registry::Frei0rPluginInfo::frei0r_name`].
+    pub plugin_name: String,
+    /// Whether the effect is currently active in the filter chain.
+    #[serde(default = "default_effect_enabled")]
+    pub enabled: bool,
+    /// Numeric parameter values keyed by GStreamer property name.
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
+    /// String parameter values keyed by GStreamer property name
+    /// (e.g. blend-mode → "normal").
+    #[serde(default)]
+    pub string_params: HashMap<String, String>,
+}
+
+fn default_effect_enabled() -> bool {
+    true
+}
+
+impl Frei0rEffect {
+    /// Create a new effect instance with default parameters.
+    pub fn new(plugin_name: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            enabled: true,
+            params: HashMap::new(),
+            string_params: HashMap::new(),
+        }
+    }
+
+    /// Create a new effect instance with the given parameters.
+    pub fn with_params(plugin_name: &str, params: HashMap<String, f64>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            enabled: true,
+            params,
+            string_params: HashMap::new(),
+        }
+    }
+
+    /// Create a new effect instance with both numeric and string parameters.
+    pub fn with_all_params(
+        plugin_name: &str,
+        params: HashMap<String, f64>,
+        string_params: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            enabled: true,
+            params,
+            string_params,
+        }
+    }
 }
 
 /// A single clip placed on the timeline
@@ -379,6 +545,42 @@ pub struct Clip {
     pub title_x: f64, // 0.0–1.0 relative horizontal position
     #[serde(default = "default_title_y")]
     pub title_y: f64, // 0.0–1.0 relative vertical position
+    /// Template ID (e.g. "lower_third") for title clips.
+    #[serde(default)]
+    pub title_template: String,
+    /// Outline stroke color (RRGGBBAA).
+    #[serde(default = "default_title_outline_color")]
+    pub title_outline_color: u32,
+    /// Outline width in pts (0 = none).
+    #[serde(default)]
+    pub title_outline_width: f64,
+    /// Drop shadow enabled.
+    #[serde(default)]
+    pub title_shadow: bool,
+    /// Shadow color (RRGGBBAA).
+    #[serde(default = "default_title_shadow_color")]
+    pub title_shadow_color: u32,
+    /// Shadow X offset in pts.
+    #[serde(default = "default_title_shadow_offset")]
+    pub title_shadow_offset_x: f64,
+    /// Shadow Y offset in pts.
+    #[serde(default = "default_title_shadow_offset")]
+    pub title_shadow_offset_y: f64,
+    /// Background box enabled.
+    #[serde(default)]
+    pub title_bg_box: bool,
+    /// Background box color (RRGGBBAA).
+    #[serde(default = "default_title_bg_box_color")]
+    pub title_bg_box_color: u32,
+    /// Background box padding in pts.
+    #[serde(default = "default_title_bg_box_padding")]
+    pub title_bg_box_padding: f64,
+    /// Title clip background color (0 = transparent).
+    #[serde(default)]
+    pub title_clip_bg_color: u32,
+    /// Secondary line of text (used by some templates).
+    #[serde(default)]
+    pub title_secondary_text: String,
     /// Transition to the next clip on the same track (e.g. "cross_dissolve").
     #[serde(default)]
     pub transition_after: String,
@@ -402,6 +604,9 @@ pub struct Clip {
     /// Optional opacity keyframes over clip-local timeline.
     #[serde(default)]
     pub opacity_keyframes: Vec<NumericKeyframe>,
+    /// Compositing blend mode: Normal, Multiply, Screen, Overlay, Add, Difference, SoftLight.
+    #[serde(default)]
+    pub blend_mode: BlendMode,
     /// Horizontal position offset: −1.0 (clip anchored to left edge) to 1.0 (right edge).
     /// Meaningful when scale ≠ 1.0. Default 0.0 (centered).
     #[serde(default)]
@@ -506,6 +711,9 @@ pub struct Clip {
     /// be expanded beyond their actual running time.
     #[serde(default)]
     pub media_duration_ns: Option<u64>,
+    /// Applied frei0r filter effects, ordered from first to last in the chain.
+    #[serde(default)]
+    pub frei0r_effects: Vec<Frei0rEffect>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -545,6 +753,7 @@ impl Clip {
         for kf in keyframes.iter_mut() {
             if kf.time_ns == local_time_ns {
                 kf.interpolation = interpolation;
+                kf.bezier_controls = None;
                 updated += 1;
             }
         }
@@ -593,6 +802,37 @@ impl Clip {
         rebuilt.sort_by_key(|kf| kf.time_ns);
         *keyframes = rebuilt;
         changed
+    }
+
+    /// Retain only keyframes in a single vec that fall within `[start_ns, end_ns)`,
+    /// then rebase their `time_ns` so `start_ns` maps to 0.
+    fn retain_and_rebase_keyframes(kfs: &mut Vec<NumericKeyframe>, start_ns: u64, end_ns: u64) {
+        kfs.retain(|kf| kf.time_ns >= start_ns && kf.time_ns < end_ns);
+        for kf in kfs.iter_mut() {
+            kf.time_ns = kf.time_ns.saturating_sub(start_ns);
+        }
+    }
+
+    /// Filter all 17 keyframe vectors to the clip-local time range `[start_ns, end_ns)`,
+    /// rebasing retained keyframes so `start_ns` maps to time 0.
+    pub fn retain_keyframes_in_local_range(&mut self, start_ns: u64, end_ns: u64) {
+        Self::retain_and_rebase_keyframes(&mut self.brightness_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.contrast_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.saturation_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.temperature_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.tint_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.volume_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.pan_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.rotate_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_left_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_right_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_top_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.crop_bottom_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.speed_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.scale_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.opacity_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.position_x_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.position_y_keyframes, start_ns, end_ns);
     }
 
     pub fn new(
@@ -651,6 +891,18 @@ impl Clip {
             title_color: default_title_color(),
             title_x: default_title_x(),
             title_y: default_title_y(),
+            title_template: String::new(),
+            title_outline_color: default_title_outline_color(),
+            title_outline_width: 0.0,
+            title_shadow: false,
+            title_shadow_color: default_title_shadow_color(),
+            title_shadow_offset_x: default_title_shadow_offset(),
+            title_shadow_offset_y: default_title_shadow_offset(),
+            title_bg_box: false,
+            title_bg_box_color: default_title_bg_box_color(),
+            title_bg_box_padding: default_title_bg_box_padding(),
+            title_clip_bg_color: 0,
+            title_secondary_text: String::new(),
             transition_after: String::new(),
             transition_after_ns: 0,
             lut_path: None,
@@ -658,6 +910,7 @@ impl Clip {
             scale_keyframes: Vec::new(),
             opacity: 1.0,
             opacity_keyframes: Vec::new(),
+            blend_mode: BlendMode::Normal,
             position_x: 0.0,
             position_x_keyframes: Vec::new(),
             position_y: 0.0,
@@ -687,6 +940,7 @@ impl Clip {
             link_group_id: None,
             source_timecode_base_ns: None,
             media_duration_ns: None,
+            frei0r_effects: Vec::new(),
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
@@ -701,12 +955,17 @@ impl Clip {
         self.source_out.saturating_sub(self.source_in)
     }
 
+    /// Returns `true` when the clip has one or more frei0r effects applied.
+    pub fn has_frei0r_effects(&self) -> bool {
+        !self.frei0r_effects.is_empty()
+    }
+
     /// Maximum allowed `source_out` value, derived from the probed media
     /// duration.  Returns `None` when the media duration is unknown (legacy
     /// clips or FCPXML imports without a probe result), or when the clip is
     /// a still image (images can be extended to any timeline length).
     pub fn max_source_out(&self) -> Option<u64> {
-        if self.kind == ClipKind::Image {
+        if self.kind == ClipKind::Image || self.kind == ClipKind::Title {
             return None;
         }
         self.media_duration_ns
@@ -722,14 +981,34 @@ impl Clip {
     }
 
     /// Convert a timeline-space delta to source-space using the clip's speed.
+    /// When speed keyframes are present, uses the mean speed over the clip duration.
     pub fn timeline_to_source_delta(&self, timeline_delta_ns: i64) -> i64 {
-        let speed = self.speed.max(0.01);
+        let speed = if !self.speed_keyframes.is_empty() {
+            let dur = self.duration();
+            if dur > 0 {
+                self.integrated_source_distance_for_local_timeline_ns(dur) / dur as f64
+            } else {
+                self.speed.max(0.01)
+            }
+        } else {
+            self.speed.max(0.01)
+        };
         (timeline_delta_ns as f64 * speed) as i64
     }
 
     /// Convert a timeline-space duration to source-space using the clip's speed.
+    /// When speed keyframes are present, uses the mean speed over the clip duration.
     pub fn timeline_to_source_dur(&self, timeline_dur_ns: u64) -> u64 {
-        let speed = self.speed.max(0.01);
+        let speed = if !self.speed_keyframes.is_empty() {
+            let dur = self.duration();
+            if dur > 0 {
+                self.integrated_source_distance_for_local_timeline_ns(dur) / dur as f64
+            } else {
+                self.speed.max(0.01)
+            }
+        } else {
+            self.speed.max(0.01)
+        };
         (timeline_dur_ns as f64 * speed) as u64
     }
 
@@ -755,7 +1034,8 @@ impl Clip {
                     return next.value;
                 }
                 let t = (local_timeline_ns.saturating_sub(prev.time_ns)) as f64 / span as f64;
-                let eased_t = prev.interpolation.ease(t);
+                let (x1, y1, x2, y2) = prev.segment_control_points();
+                let eased_t = cubic_bezier_ease(x1, y1, x2, y2, t);
                 return prev.value + (next.value - prev.value) * eased_t;
             }
             prev = next;
@@ -897,19 +1177,60 @@ impl Clip {
         value: f64,
         interpolation: KeyframeInterpolation,
     ) -> u64 {
-        let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        // For speed keyframes, don't clamp to duration() — speed keyframes
+        // define the speed curve that *determines* the duration, so they must
+        // be positioned independently of it. The clip duration adjusts to
+        // encompass whatever speed curve the keyframes define.
+        let local_time_ns = if property == Phase1KeyframeProperty::Speed {
+            timeline_pos_ns.saturating_sub(self.timeline_start)
+        } else {
+            self.local_timeline_position_ns(timeline_pos_ns)
+        };
         let clamped_value = Self::clamp_phase1_property_value(property, value);
+        // Capture duration before the change so we can rescale siblings.
+        let old_dur = if property == Phase1KeyframeProperty::Speed
+            && !self.speed_keyframes.is_empty()
+        {
+            Some(self.duration())
+        } else {
+            None
+        };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
-        if let Some(existing) = keyframes.iter_mut().find(|kf| kf.time_ns == local_time_ns) {
+        // Snap to an existing keyframe within half a frame (~20ms) to avoid
+        // creating near-duplicates when the playhead is close but not exact.
+        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
+        let mut changed_time_ns: Option<u64> = None;
+        if let Some(existing) = keyframes
+            .iter_mut()
+            .find(|kf| kf.time_ns.abs_diff(local_time_ns) <= SNAP_TOLERANCE_NS)
+        {
+            changed_time_ns = Some(existing.time_ns);
             existing.value = clamped_value;
             existing.interpolation = interpolation;
+            existing.bezier_controls = None;
         } else {
             keyframes.push(NumericKeyframe {
                 time_ns: local_time_ns,
                 value: clamped_value,
                 interpolation,
+                bezier_controls: None,
             });
             keyframes.sort_by_key(|kf| kf.time_ns);
+        }
+        // When a speed keyframe's VALUE changes (not a new insertion),
+        // proportionally rescale all OTHER keyframes so they maintain
+        // their relative position within the clip.
+        if let (Some(old_d), Some(anchor)) = (old_dur, changed_time_ns) {
+            let new_d = self.duration();
+            if old_d > 0 && new_d > 0 && old_d != new_d {
+                let ratio = new_d as f64 / old_d as f64;
+                for kf in &mut self.speed_keyframes {
+                    if kf.time_ns != anchor {
+                        kf.time_ns = (kf.time_ns as f64 * ratio).round() as u64;
+                    }
+                }
+                self.speed_keyframes.sort_by_key(|kf| kf.time_ns);
+            }
         }
         local_time_ns
     }
@@ -919,10 +1240,15 @@ impl Clip {
         property: Phase1KeyframeProperty,
         timeline_pos_ns: u64,
     ) -> bool {
-        let local_time_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        let local_time_ns = if property == Phase1KeyframeProperty::Speed {
+            timeline_pos_ns.saturating_sub(self.timeline_start)
+        } else {
+            self.local_timeline_position_ns(timeline_pos_ns)
+        };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
         let before = keyframes.len();
-        keyframes.retain(|kf| kf.time_ns != local_time_ns);
+        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
+        keyframes.retain(|kf| kf.time_ns.abs_diff(local_time_ns) > SNAP_TOLERANCE_NS);
         keyframes.len() != before
     }
 
@@ -1211,6 +1537,27 @@ impl Clip {
     }
 
     pub fn speed_at_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+        if !self.speed_keyframes.is_empty() {
+            // For speed, use clip.speed (the base value) before the first keyframe
+            // and after the last keyframe, rather than holding the nearest keyframe
+            // value. This lets users set a base speed and add ramp keyframes at
+            // specific points without the base being overridden.
+            let first_ns = self
+                .speed_keyframes
+                .iter()
+                .map(|kf| kf.time_ns)
+                .min()
+                .unwrap_or(0);
+            let last_ns = self
+                .speed_keyframes
+                .iter()
+                .map(|kf| kf.time_ns)
+                .max()
+                .unwrap_or(0);
+            if local_timeline_ns < first_ns || local_timeline_ns > last_ns {
+                return self.speed.clamp(0.05, 16.0);
+            }
+        }
         Self::evaluate_keyframed_value(&self.speed_keyframes, local_timeline_ns, self.speed)
             .clamp(0.05, 16.0)
     }
@@ -1222,28 +1569,45 @@ impl Clip {
         self.speed_at_local_timeline_ns(local_ns)
     }
 
-    fn integrated_source_distance_for_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+    pub(crate) fn integrated_source_distance_for_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
         if local_timeline_ns == 0 {
             return 0.0;
         }
         if self.speed_keyframes.is_empty() {
             return local_timeline_ns as f64 * self.speed.clamp(0.05, 16.0);
         }
-        const MAX_SAMPLES: u64 = 4096;
-        const STEP_NS: u64 = 8_333_333; // ~120Hz
-        let sample_count = (local_timeline_ns / STEP_NS).max(1).min(MAX_SAMPLES);
+        // Adaptive sampling: place samples at keyframe boundaries plus a fixed
+        // number of intermediate points per segment. This gives accurate results
+        // for piecewise-linear speed curves with far fewer evaluations than the
+        // previous fixed 4096-sample approach.
+        let mut breakpoints: Vec<u64> = Vec::with_capacity(self.speed_keyframes.len() + 2);
+        breakpoints.push(0);
+        for kf in &self.speed_keyframes {
+            if kf.time_ns > 0 && kf.time_ns < local_timeline_ns {
+                breakpoints.push(kf.time_ns);
+            }
+        }
+        breakpoints.push(local_timeline_ns);
+        breakpoints.sort_unstable();
+        breakpoints.dedup();
+
+        const SAMPLES_PER_SEGMENT: u64 = 8;
         let mut integrated = 0.0f64;
-        for i in 0..sample_count {
-            let t0 =
-                (u128::from(local_timeline_ns) * u128::from(i) / u128::from(sample_count)) as u64;
-            let t1 = (u128::from(local_timeline_ns) * u128::from(i + 1) / u128::from(sample_count))
-                as u64;
-            let dt = t1.saturating_sub(t0);
-            if dt == 0 {
+        for win in breakpoints.windows(2) {
+            let seg_start = win[0];
+            let seg_end = win[1];
+            let seg_len = seg_end - seg_start;
+            if seg_len == 0 {
                 continue;
             }
-            let mid = t0.saturating_add(dt / 2);
-            integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
+            let n = SAMPLES_PER_SEGMENT.min(seg_len / 1_000_000).max(1);
+            for j in 0..n {
+                let t0 = seg_start + (u128::from(seg_len) * u128::from(j) / u128::from(n)) as u64;
+                let t1 = seg_start + (u128::from(seg_len) * u128::from(j + 1) / u128::from(n)) as u64;
+                let dt = t1 - t0;
+                let mid = t0 + dt / 2;
+                integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
+            }
         }
         integrated
     }
@@ -1258,7 +1622,22 @@ impl Clip {
 
     fn playback_duration_from_speed(&self) -> u64 {
         let src = self.source_duration();
-        if self.speed > 0.0 {
+        if !self.speed_keyframes.is_empty() {
+            // Bisect to find timeline duration T where
+            // integrated_source_distance(T) == source_duration.
+            let min_speed = self.min_effective_speed_hint();
+            let upper = (src as f64 / min_speed) as u64 + 1_000_000_000; // +1s headroom
+            let (mut lo, mut hi): (u64, u64) = (0, upper);
+            for _ in 0..40 {
+                let mid = lo + (hi - lo) / 2;
+                if self.integrated_source_distance_for_local_timeline_ns(mid) < src as f64 {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            hi.max(1)
+        } else if self.speed > 0.0 {
             (src as f64 / self.speed) as u64
         } else {
             src
@@ -1509,11 +1888,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let v = Clip::evaluate_keyframed_value(&keyframes, 500_000_000, 9.0);
@@ -1527,11 +1908,13 @@ mod tests {
                 time_ns: 100,
                 value: 2.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 300,
                 value: 6.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         assert!((Clip::evaluate_keyframed_value(&keyframes, 50, 9.0) - 2.0).abs() < 1e-9);
@@ -1545,16 +1928,19 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 0,
                 value: 3.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 10,
                 value: 5.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         assert!((Clip::evaluate_keyframed_value(&keyframes, 0, 0.0) - 3.0).abs() < 1e-9);
@@ -1568,11 +1954,13 @@ mod tests {
                 time_ns: 0,
                 value: -1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let local_ns = 2_500_000_000_u64.saturating_sub(clip.timeline_start);
@@ -1640,16 +2028,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 1.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.position_x_keyframes.push(NumericKeyframe {
             time_ns: 3_000_000_000,
             value: 0.2,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         // next from 0 -> 1s (scale)
@@ -1690,6 +2081,7 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         let one_frame_24fps = 1_000_000_000 / 24; // ~41.6ms
@@ -1713,16 +2105,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 2.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.position_y_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.3,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         // next from 0 -> 1s (deduplicated)
@@ -1746,16 +2141,19 @@ mod tests {
             time_ns: 500_000_000,
             value: 0.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.volume_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.scale_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 1.5,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         // Volume nav: 0 → 500ms → 2s
@@ -1811,11 +2209,13 @@ mod tests {
                 time_ns: 0,
                 value: -2.0, // clamp to -1.0
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 2.0, // clamp to 1.0
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let local = 500_000_000;
@@ -1941,11 +2341,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::EaseIn,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 100.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         // At t=0.5 (500ms), EaseIn should give a value less than 50 (slow start)
@@ -1961,11 +2363,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::EaseOut,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 100.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         // At t=0.5, EaseOut should give a value greater than 50 (fast start)
@@ -1982,11 +2386,13 @@ mod tests {
                 time_ns: 0,
                 value: 0.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 100.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         let v = Clip::evaluate_keyframed_value(&kfs, 500_000_000, 0.0);
@@ -2019,16 +2425,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 1.2,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::EaseOut,
+            bezier_controls: None,
         });
         clip.position_x_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 0.3,
             interpolation: KeyframeInterpolation::EaseIn,
+            bezier_controls: None,
         });
 
         let removed = clip.remove_all_phase1_keyframes_at_local_ns(1_000_000_000);
@@ -2045,11 +2454,13 @@ mod tests {
             time_ns: 500_000_000,
             value: 1.1,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.volume_keyframes.push(NumericKeyframe {
             time_ns: 500_000_000,
             value: 0.6,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
 
         let updated = clip.set_phase1_keyframe_interpolation_at_local_ns(
@@ -2074,16 +2485,19 @@ mod tests {
             time_ns: 1_000_000_000,
             value: 1.4,
             interpolation: KeyframeInterpolation::EaseOut,
+            bezier_controls: None,
         });
         clip.scale_keyframes.push(NumericKeyframe {
             time_ns: 2_000_000_000,
             value: 2.2,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         });
         clip.opacity_keyframes.push(NumericKeyframe {
             time_ns: 1_000_000_000,
             value: 0.75,
             interpolation: KeyframeInterpolation::EaseIn,
+            bezier_controls: None,
         });
 
         let moved = clip.move_all_phase1_keyframes_local_ns(&[(1_000_000_000, 2_000_000_000)]);
@@ -2189,5 +2603,147 @@ mod tests {
         // Extending the clip by moving source_out increases the duration
         clip.source_out = 10_000_000_000;
         assert_eq!(clip.duration(), 10_000_000_000);
+    }
+
+    #[test]
+    fn test_speed_keyframes_constant_matches_scalar() {
+        // A clip with speed_keyframes all at 2× should produce the same
+        // duration as clip.speed = 2.0.
+        let src_dur: u64 = 10_000_000_000; // 10s
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 2.0;
+        let expected = clip.duration(); // 5s
+
+        let mut kf_clip = make_test_clip(src_dur, 0);
+        kf_clip.speed = 2.0;
+        kf_clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: src_dur, // far enough out
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let actual = kf_clip.duration();
+        // Allow 1% tolerance due to numerical integration
+        let tolerance = (expected as f64 * 0.01) as u64;
+        assert!(
+            actual.abs_diff(expected) <= tolerance,
+            "constant 2× keyframes: expected ~{expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn test_speed_keyframes_ramp_duration_satisfies_integral() {
+        // A 1× → 2× linear ramp over a 10s source clip.
+        // Mean speed ≈ 1.5×, so timeline duration ≈ 10/1.5 ≈ 6.67s.
+        let src_dur: u64 = 10_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 20_000_000_000, // place second KF far out so ramp spans the clip
+                value: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let dur = clip.duration();
+        // Verify: integrating speed over [0, dur] should ≈ source_duration
+        let integrated = clip.integrated_source_distance_for_local_timeline_ns(dur);
+        let src = src_dur as f64;
+        let error = (integrated - src).abs() / src;
+        assert!(
+            error < 0.02,
+            "integral over computed duration should ≈ source_duration, got {integrated} vs {src} (error {error:.4})"
+        );
+    }
+
+    #[test]
+    fn test_speed_keyframes_slow_ramp_longer_than_1x() {
+        // A 1× → 0.5× ramp should produce a longer timeline duration than 1×.
+        let src_dur: u64 = 10_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 20_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let dur = clip.duration();
+        assert!(
+            dur > src_dur,
+            "slow ramp should produce longer duration: {dur} vs {src_dur}"
+        );
+    }
+
+    #[test]
+    fn test_speed_keyframes_empty_uses_constant_speed() {
+        // No speed keyframes → should use clip.speed as before
+        let src_dur: u64 = 10_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 2.0;
+        assert_eq!(clip.duration(), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_speed_keyframes_determine_duration() {
+        // 120s of source material, base speed 1.0 → clip duration = 120s
+        let src_dur: u64 = 120_000_000_000;
+        let mut clip = make_test_clip(src_dur, 0);
+        clip.speed = 1.0;
+        assert_eq!(clip.duration(), 120_000_000_000);
+
+        // Adding a 4x keyframe should shorten the clip (source consumed faster).
+        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+            Phase1KeyframeProperty::Speed,
+            10_000_000_000,
+            1.0,
+            KeyframeInterpolation::Linear,
+        );
+        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+            Phase1KeyframeProperty::Speed,
+            20_000_000_000,
+            4.0,
+            KeyframeInterpolation::Linear,
+        );
+        let dur_with_ramp = clip.duration();
+        assert!(dur_with_ramp < 120_000_000_000, "4x ramp should shorten clip");
+
+        // Adding a third keyframe that ramps back to 1x changes the curve
+        // and thus the duration. The keyframe is placed wherever the user
+        // puts the playhead — it is NOT clamped or pruned.
+        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+            Phase1KeyframeProperty::Speed,
+            90_000_000_000,
+            1.0,
+            KeyframeInterpolation::Linear,
+        );
+        assert_eq!(clip.speed_keyframes.len(), 3, "all 3 keyframes should be kept");
+        // Duration changes because the speed curve changed.
+        let dur_with_three = clip.duration();
+        assert!(dur_with_three > 0);
+        assert_ne!(dur_with_three, dur_with_ramp, "3rd KF should change duration");
     }
 }

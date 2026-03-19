@@ -152,7 +152,7 @@ Tracking docs:
 - [x] JSON-RPC 2.0 over stdio (MCP 2024-11-05 protocol)
 - [x] `--mcp` flag is stripped from argv before GLib sees it
 - [x] Background thread reads stdin; main-thread polling via `glib::timeout_add_local`
-- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`
+- [x] Tools: `get_project`, `list_tracks`, `list_clips`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `set_project_title`, `save_fcpxml`, `export_mp4`, `list_library`, `import_media`, `relink_media`
 - [x] MCP performance profiling tool `get_performance_snapshot` (prerender queue/transition hit-rate/rebuild telemetry snapshot)
 - [x] MCP preference controls expanded with `set_realtime_preview` and `set_experimental_preview_optimizations` for playback-path tuning automation
 - [x] MCP preference control `set_background_prerender` for early boundary prewarm tuning automation
@@ -221,6 +221,7 @@ Tracking docs:
 - [x] Roll edit mode
 - [x] Slip/slide edit modes
 - [x] Copy/Paste (Ctrl+C/V for clips, paste-attributes, paste-insert)
+- [x] Copy/Paste Color Grade (Ctrl+Alt+C/V for color-grading-only copy/paste between clips)
 - [x] Multi-Select (rubber-band selection, Shift+click range select, Ctrl+A select all)
   - [x] Phase 1: Shift+click range select (same-track + cross-track time-range), Ctrl/Cmd+click toggle selection, Ctrl+A select all
   - [x] Phase 2: rubber-band marquee selection
@@ -254,7 +255,7 @@ Tracking docs:
 - [x] Speed indicator badge on clip in timeline (yellow "2×" badge)
 - [x] Persist speed data in FCPXML (`us:speed` attribute)
 - [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies to Program Monitor preview and export (`reverse`/`areverse`), timeline shows `◀` badge, and state persists via `us:reverse` FCPXML attribute
-- [ ] Variable speed ramps: multiple keyframed speed segments within a single clip
+- [x] Variable speed ramps: multiple keyframed speed segments within a single clip
 - [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
 
 ### Keyframe Animation
@@ -265,7 +266,15 @@ Tracking docs:
   - [x] Keyframe navigation (◀/▶ buttons, `Alt+Left`/`Alt+Right` shortcuts, timeline marker click-to-seek, ◆ indicator)
   - [x] Animation mode: "Record Keyframes" toggle (`Shift+K`) auto-creates keyframes on transform drags and slider changes
   - [x] Additional interpolation modes: EaseIn, EaseOut, EaseInOut with cubic bezier evaluation (preview), quadratic FFmpeg expressions (export), FCPXML `interp` attribute round-trip, Inspector dropdown, and MCP `interpolation` parameter
-- [ ] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
+- [x] Curve editor / dopesheet UI (visual editor for keyframe timing and bezier handles)
+  - [x] Phase 1: Dopesheet panel appears as a dedicated panel beneath the timeline tracks (with show/hide control on the track-management bar), includes per-lane visibility toggles, keyframe point selection (including additive/range multi-select), drag-to-retime, add/remove controls, interpolation apply control, value-curve overlays, keyboard delete/nudge controls, time zoom/pan controls, and full undo/redo integration.
+  - [x] Phase 2: Bezier-handle curve editing for per-segment shape/tangent authoring.
+    - [x] Phase 2a: selected keyframe segments now show Bezier handles; dragging a handle updates segment easing (snapped to nearest preset interpolation mode) with undo/redo integration.
+    - [x] Phase 2b: continuous custom tangent values (non-preset Bezier control points) across preview/export/FCPXML/MCP paths.
+      - [x] Phase 2b.1: dopesheet handle drags now store exact per-segment Bezier controls on keyframes and preview/runtime evaluation uses those controls.
+      - [x] Phase 2b.2: FCPXML/MCP parity for custom controls (export parity now uses piecewise cubic-bezier approximation from stored controls).
+        - [x] Phase 2b.2a: MCP `set_clip_keyframe` supports optional `bezier_controls` and `list_clips` exposes stored custom controls in keyframe arrays.
+        - [x] Phase 2b.2b: Native FCPXML representation/parity for custom controls beyond vendor attrs (`curve="smooth"` + `interp` native keyframe metadata import/export mapping).
 
 ### Program Monitor
 - [x] Program Monitor panel showing assembled timeline playback
@@ -402,7 +411,8 @@ Tracking docs:
   - [ ] Prerender keyframe interpolation — support brightness/contrast/saturation/temperature/tint keyframes in the prerender pipeline (currently only static values are applied; animated color adjustments are not visible in proxy mode)
   - [ ] Configurable prerender quality — expose CRF / encoding preset in Preferences (currently CRF 20 veryfast) to let users trade cache size and prerender speed for higher color fidelity
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
-- [ ] Advanced color grading
+- [x] Advanced color grading
+  - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.
 - [ ] Color management pipeline via OpenColorIO (OCIO)
   - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
   - [ ] OCIO config loading (ACES 2.0, Rec.709, sRGB built-in configs; user-supplied config file path in Preferences)
@@ -418,13 +428,27 @@ Tracking docs:
   - [ ] High-quality upscaling/downscaling (libplacebo polar/orthogonal scalers as alternative to GStreamer `videoscale`)
   - [ ] HDR export metadata (PQ/HLG transfer characteristics, mastering display color volume, MaxCLL/MaxFALL)
   - [ ] HDR passthrough mode for native HDR display output
-- [ ] Frei0r video effects plugin support
-  - [ ] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
-  - [ ] Effects browser UI listing available Frei0r filters/generators/mixers with categories
-  - [ ] Per-clip Frei0r effect application with parameter controls in Inspector
-  - [ ] Effect stacking (multiple Frei0r filters per clip, reorderable)
+- [x] Frei0r video effects plugin support
+  - [x] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
+  - [x] Effects browser UI listing available Frei0r filters with categories and search
+  - [x] Per-clip Frei0r effect application with parameter controls in Inspector
+  - [x] Effect stacking (multiple Frei0r filters per clip, reorderable)
+  - [x] GStreamer preview pipeline integration with live parameter updates
+  - [x] FFmpeg export pipeline integration (frei0r filter_complex chain)
+  - [x] FCPXML round-trip via `us:frei0r-effects` vendor attribute (JSON quotes escaped to `&quot;` on write; backward-compatible sanitizer for older files)
+  - [x] MCP tools: `list_frei0r_plugins`, `add_clip_frei0r_effect`, `remove_clip_frei0r_effect`, `set_clip_frei0r_effect_params`, `reorder_clip_frei0r_effects`, `list_clip_frei0r_effects`
+  - [x] Five undo commands (add, remove, reorder, set params, toggle)
 - [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
 - [x] Titles / text overlay (`textoverlay`)
+- [x] Titles Browser with 9 built-in templates (Standard, Cinematic, Informational categories)
+- [x] Standalone `ClipKind::Title` clips — transparent/solid-color background, no source media required
+- [x] Extended title styling — font picker, color picker, outline stroke, drop shadow, background box, secondary text
+- [x] Live title style editing — all 11 styling controls (font, color, outline, shadow, bg box) update preview in real-time
+- [x] Debounced title reseek — compositor-only flush during title edits (avoids expensive all-slot decoder re-seek)
+- [x] Velocity-adaptive scrub waits — 30ms arrival/pulse budgets during rapid scrubbing (2.6× faster)
+- [x] Title clips in background prerender — lavfi color + drawtext source for title overlay clips
+- [x] Frei0r effects in background prerender — applied in ffmpeg filter chain, hashed in signature
+- [x] MCP tools: `add_title_clip`, `set_clip_title_style`
 - [x] Transition effects (fade to black, wipe right, wipe left)
 - [x] Transition preview matching — program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions using compositor alpha animation and videocrop, matching FFmpeg `xfade` export output
 
@@ -432,7 +456,7 @@ Tracking docs:
 - [x] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls; GStreamer `alpha` element in preview, ffmpeg `colorkey` filter in export; Inspector panel with enable toggle, green/blue/custom color presets, tolerance and edge-softness sliders
 - [x] AI background removal — offline ONNX Runtime inference (MODNet segmentation model) produces alpha-channel VP9 WebM files; BgRemovalCache with 2-thread worker pool; preview and export use pre-processed result; Inspector toggle + threshold slider; MCP `set_clip_bg_removal` tool; FCPXML persistence
 - [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
-- [ ] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
+- [x] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
 - [ ] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
 - [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
 
@@ -488,9 +512,9 @@ Tracking docs:
 - [ ] Auto-backup with versioned history (timestamped backups to dedicated directory with restore UI)
 
 ### Media Management
-- [ ] Relink dialog — general-purpose UI to find and repoint all offline/missing media
+- [x] Relink dialog — general-purpose UI to find and repoint all offline/missing media
 - [ ] Bins / folders — hierarchical media browser organization for large projects
-- [ ] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
+- [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
 - [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
 - [ ] Metadata display & filtering — show resolution, codec, frame rate, duration, file size in media browser
 
@@ -537,6 +561,7 @@ Tracking docs:
 - [ ] Multicam editing (sync by audio or timecode)
   - [x] Audio cross-correlation sync for selected clips (FFT-based, background thread, MCP tool)
   - [x] Automatic timecode extraction from media files on import (GST_TAG_DATE_TIME)
+- [x] Remove Silent Parts: right-click context menu action to detect and remove silent segments via ffmpeg `silencedetect`, with configurable threshold/duration and single-undo support
 - [ ] Nested Timelines / Compound Clips
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)

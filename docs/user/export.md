@@ -127,14 +127,22 @@ Clips with a speed multiplier are exported correctly:
 
 For reversed clips, export applies `reverse`/`areverse` before speed scaling so both video and audio are rendered backward.
 
-## Keyframed Properties (Phase 1)
+### Variable speed ramps
 
-Export now evaluates phase-1 clip keyframes with **linear interpolation**:
+Clips with speed keyframes use dynamic expressions for export:
+- Video: `setpts=PTS/(speed_expr)` where `speed_expr` is a piecewise interpolation of the speed keyframes (supports linear and eased curves).
+- Audio: uses the mean speed over the clip as a constant `atempo` chain (FFmpeg's `atempo` and `asetrate` filters do not support time-varying expressions). Pitch-preserving variable-speed audio (e.g. via Rubberband) is a future roadmap item.
+
+The exported clip duration matches the timeline duration computed from the speed integral.
+
+## Keyframed Properties
+
+Export evaluates phase-1 clip keyframes with interpolation-aware curves:
 
 - **Video:** `scale`, `position_x`, `position_y`, and `opacity`
 - **Audio:** `volume`
 
-Keyframes are evaluated in clip-local timeline time and rendered directly into ffmpeg filter chains so exported animation follows the same keyframe timing model used by Program Monitor preview.
+Keyframes are evaluated in clip-local timeline time and rendered directly into ffmpeg filter chains so exported animation follows the same keyframe timing model used by Program Monitor preview. Dopesheet custom Bezier handle shapes are exported through a piecewise cubic-bezier approximation.
 
 ## Freeze-Frame Clips
 

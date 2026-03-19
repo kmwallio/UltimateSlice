@@ -613,6 +613,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "relink_media",
+            "description": "Attempt to relink missing/offline media by recursively scanning a root folder and remapping missing source paths to matching files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "root_path": { "type": "string", "description": "Absolute folder path to scan for replacement media files." }
+                },
+                "required": ["root_path"]
+            }
+        },
+        {
             "name": "reorder_track",
             "description": "Move a track from one position to another (0-based indices).",
             "inputSchema": {
@@ -689,6 +700,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_blend_mode",
+            "description": "Set compositing blend mode for a clip by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":     { "type": "string", "description": "Clip id (from list_clips)." },
+                    "blend_mode":  { "type": "string", "enum": ["normal", "multiply", "screen", "overlay", "add", "difference", "soft_light"], "description": "Blend mode for compositing." }
+                },
+                "required": ["clip_id", "blend_mode"]
+            }
+        },
+        {
             "name": "set_clip_keyframe",
             "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) for a clip at a timeline position.",
             "inputSchema": {
@@ -698,7 +721,17 @@ fn tools_list() -> Value {
                     "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property to keyframe." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
                     "value": { "type": "number", "description": "Property value at this keyframe time." },
-                    "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." }
+                    "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." },
+                    "bezier_controls": {
+                        "type": "object",
+                        "description": "Optional custom cubic-bezier controls for the outgoing segment from this keyframe. Values are normalized 0.0..1.0.",
+                        "properties": {
+                            "x1": { "type": "number" },
+                            "y1": { "type": "number" },
+                            "x2": { "type": "number" },
+                            "y2": { "type": "number" }
+                        }
+                    }
                 },
                 "required": ["clip_id", "property", "value"]
             }
@@ -942,6 +975,152 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_ids"]
             }
+        },
+        {
+            "name": "copy_clip_color_grade",
+            "description": "Copy color grading values from a clip into an internal clipboard. The copied grade can then be pasted onto other clips with paste_clip_color_grade. Copies static values only (brightness, contrast, saturation, temperature, tint, exposure, black_point, shadows, midtones, highlights, warmth/tint per tonal region, denoise, sharpness, lut_path).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Source clip id to copy color grade from" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "paste_clip_color_grade",
+            "description": "Paste the previously copied color grading values onto a target clip. Requires a prior copy_clip_color_grade call. Applies static color values only (no keyframes).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Target clip id to paste color grade onto" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "match_clip_colors",
+            "description": "Automatically grade a source clip to match the color appearance of a reference clip. Samples frames from both clips, analyses color statistics in CIE L*a*b* space, and computes slider adjustments (brightness, contrast, saturation, temperature, tint). Optionally generates a .cube 3D LUT for finer non-linear matching. The operation is undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_clip_id": { "type": "string", "description": "Clip id to adjust (the one that will be modified)" },
+                    "reference_clip_id": { "type": "string", "description": "Clip id to match (the target look)" },
+                    "generate_lut": { "type": "boolean", "description": "When true, also generate and assign a .cube 3D LUT for finer matching (default false)" },
+                    "sample_count": { "type": "integer", "description": "Number of frames to sample from each clip (1–20, default 8)" }
+                },
+                "required": ["source_clip_id", "reference_clip_id"]
+            }
+        },
+        {
+            "name": "list_frei0r_plugins",
+            "description": "List all available frei0r filter plugins discovered from the GStreamer registry. Returns plugin names, display names, categories, and parameter info.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "list_clip_frei0r_effects",
+            "description": "List frei0r effects currently applied to a clip, in order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "add_clip_frei0r_effect",
+            "description": "Add a frei0r filter effect to a clip. The effect is appended to the end of the effect chain. Returns the generated effect id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "plugin_name": { "type": "string", "description": "Frei0r plugin name (e.g. 'cartoon', 'glow')" },
+                    "params": { "type": "object", "description": "Optional numeric parameter overrides as {param_name: value} (frei0r doubles 0.0-1.0)" },
+                    "string_params": { "type": "object", "description": "Optional string parameter overrides as {param_name: value} (e.g. blend-mode, pattern)" }
+                },
+                "required": ["clip_id", "plugin_name"]
+            }
+        },
+        {
+            "name": "remove_clip_frei0r_effect",
+            "description": "Remove a frei0r effect from a clip by its effect instance id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "effect_id": { "type": "string", "description": "Effect instance id (from list_clip_frei0r_effects)" }
+                },
+                "required": ["clip_id", "effect_id"]
+            }
+        },
+        {
+            "name": "set_clip_frei0r_effect_params",
+            "description": "Update parameters on a frei0r effect applied to a clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "effect_id": { "type": "string", "description": "Effect instance id" },
+                    "params": { "type": "object", "description": "Numeric parameter values as {param_name: value}" },
+                    "string_params": { "type": "object", "description": "Optional string parameter values as {param_name: value}" }
+                },
+                "required": ["clip_id", "effect_id", "params"]
+            }
+        },
+        {
+            "name": "reorder_clip_frei0r_effects",
+            "description": "Reorder frei0r effects on a clip. Provide the complete list of effect ids in the desired order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "effect_ids": { "type": "array", "items": { "type": "string" }, "description": "All effect ids in desired order" }
+                },
+                "required": ["clip_id", "effect_ids"]
+            }
+        }
+        ,{
+            "name": "add_title_clip",
+            "description": "Add a standalone title clip to the timeline from a built-in template. Templates: lower_third_banner, lower_third_clean, centered_title, subtitle, full_screen, chapter_heading, cinematic, end_credits, callout.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "template_id": { "type": "string", "description": "Template id (e.g. 'centered_title')" },
+                    "track_index": { "type": "integer", "description": "Video track index (default: first video track)" },
+                    "timeline_start_ns": { "type": "integer", "description": "Timeline start position in nanoseconds (default: playhead)" },
+                    "duration_ns": { "type": "integer", "description": "Clip duration in nanoseconds (default: 5 seconds)" },
+                    "title_text": { "type": "string", "description": "Override title text (default: template name)" }
+                },
+                "required": ["template_id"]
+            }
+        },
+        {
+            "name": "set_clip_title_style",
+            "description": "Set title/text overlay styling properties on a clip. Includes font, color, position, outline, shadow, background box.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "title_text": { "type": "string" },
+                    "title_font": { "type": "string", "description": "Pango font description (e.g. 'Sans Bold 36')" },
+                    "title_color": { "type": "integer", "description": "Text color as 0xRRGGBBAA" },
+                    "title_x": { "type": "number", "description": "Horizontal position 0.0-1.0" },
+                    "title_y": { "type": "number", "description": "Vertical position 0.0-1.0" },
+                    "title_outline_width": { "type": "number", "description": "Outline width in pts (0=none)" },
+                    "title_outline_color": { "type": "integer", "description": "Outline color as 0xRRGGBBAA" },
+                    "title_shadow": { "type": "boolean", "description": "Enable drop shadow" },
+                    "title_shadow_color": { "type": "integer" },
+                    "title_shadow_offset_x": { "type": "number" },
+                    "title_shadow_offset_y": { "type": "number" },
+                    "title_bg_box": { "type": "boolean", "description": "Enable background box" },
+                    "title_bg_box_color": { "type": "integer" },
+                    "title_bg_box_padding": { "type": "number" },
+                    "title_clip_bg_color": { "type": "integer", "description": "Title clip background color (0=transparent)" },
+                    "title_secondary_text": { "type": "string" }
+                },
+                "required": ["clip_id"]
+            }
         }
     ]})
 }
@@ -964,6 +1143,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "get_preferences"
             | "list_export_presets"
             | "list_library"
+            | "list_frei0r_plugins"
     )
 }
 
@@ -1213,6 +1393,10 @@ fn dispatch_tool_payload(
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
+        "relink_media" => McpCommand::RelinkMedia {
+            root_path: args["root_path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
 
         "reorder_track" => McpCommand::ReorderTrack {
             from_index: args["from_index"].as_u64().unwrap_or(0) as usize,
@@ -1255,6 +1439,11 @@ fn dispatch_tool_payload(
             opacity: args["opacity"].as_f64().unwrap_or(1.0),
             reply: tx,
         },
+        "set_clip_blend_mode" => McpCommand::SetClipBlendMode {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            blend_mode: args["blend_mode"].as_str().unwrap_or("normal").to_string(),
+            reply: tx,
+        },
         "set_clip_keyframe" => McpCommand::SetClipKeyframe {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             property: args["property"].as_str().unwrap_or("").to_string(),
@@ -1264,6 +1453,14 @@ fn dispatch_tool_payload(
                 .get("interpolation")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            bezier_controls: args.get("bezier_controls").and_then(|v| {
+                let obj = v.as_object()?;
+                let x1 = obj.get("x1")?.as_f64()?;
+                let y1 = obj.get("y1")?.as_f64()?;
+                let x2 = obj.get("x2")?.as_f64()?;
+                let y2 = obj.get("y2")?.as_f64()?;
+                Some((x1, y1, x2, y2))
+            }),
             reply: tx,
         },
         "remove_clip_keyframe" => McpCommand::RemoveClipKeyframe {
@@ -1360,6 +1557,106 @@ fn dispatch_tool_payload(
                         .collect()
                 })
                 .unwrap_or_default(),
+            reply: tx,
+        },
+        "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "paste_clip_color_grade" => McpCommand::PasteClipColorGrade {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "match_clip_colors" => McpCommand::MatchClipColors {
+            source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
+            reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
+            generate_lut: args.get("generate_lut").and_then(|v| v.as_bool()).unwrap_or(false),
+            reply: tx,
+        },
+        "list_frei0r_plugins" => McpCommand::ListFrei0rPlugins { reply: tx },
+        "list_clip_frei0r_effects" => McpCommand::ListClipFrei0rEffects {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "add_clip_frei0r_effect" => McpCommand::AddClipFrei0rEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            plugin_name: args["plugin_name"].as_str().unwrap_or("").to_string(),
+            params: args.get("params").and_then(|v| v.as_object()).map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+                    .collect()
+            }),
+            string_params: args
+                .get("string_params")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
+            reply: tx,
+        },
+        "remove_clip_frei0r_effect" => McpCommand::RemoveClipFrei0rEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_clip_frei0r_effect_params" => McpCommand::SetClipFrei0rEffectParams {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            params: args
+                .get("params")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            string_params: args
+                .get("string_params")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
+            reply: tx,
+        },
+        "reorder_clip_frei0r_effects" => McpCommand::ReorderClipFrei0rEffects {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_ids: args["effect_ids"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            reply: tx,
+        },
+        "add_title_clip" => McpCommand::AddTitleClip {
+            template_id: args["template_id"].as_str().unwrap_or("").to_string(),
+            track_index: args["track_index"].as_u64().map(|v| v as usize),
+            timeline_start_ns: args["timeline_start_ns"].as_u64(),
+            duration_ns: args["duration_ns"].as_u64(),
+            title_text: args["title_text"].as_str().map(String::from),
+            reply: tx,
+        },
+        "set_clip_title_style" => McpCommand::SetClipTitleStyle {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            title_text: args["title_text"].as_str().map(String::from),
+            title_font: args["title_font"].as_str().map(String::from),
+            title_color: args["title_color"].as_u64().map(|v| v as u32),
+            title_x: args["title_x"].as_f64(),
+            title_y: args["title_y"].as_f64(),
+            title_outline_width: args["title_outline_width"].as_f64(),
+            title_outline_color: args["title_outline_color"].as_u64().map(|v| v as u32),
+            title_shadow: args["title_shadow"].as_bool(),
+            title_shadow_color: args["title_shadow_color"].as_u64().map(|v| v as u32),
+            title_shadow_offset_x: args["title_shadow_offset_x"].as_f64(),
+            title_shadow_offset_y: args["title_shadow_offset_y"].as_f64(),
+            title_bg_box: args["title_bg_box"].as_bool(),
+            title_bg_box_color: args["title_bg_box_color"].as_u64().map(|v| v as u32),
+            title_bg_box_padding: args["title_bg_box_padding"].as_f64(),
+            title_clip_bg_color: args["title_clip_bg_color"].as_u64().map(|v| v as u32),
+            title_secondary_text: args["title_secondary_text"].as_str().map(String::from),
             reply: tx,
         },
 

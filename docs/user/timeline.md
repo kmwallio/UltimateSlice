@@ -178,6 +178,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Link behavior is intentionally narrower than clip grouping: trims remain independent in this first pass.
 - Right-clicking a selected clip opens a context menu that only shows currently actionable clip operations (for example Link/Unlink when applicable), so link editing is available without extra disabled entries.
 - Linked clips show a **LINK** badge in the timeline so linked relationships stay visible even when nothing is selected.
+- Clips whose source files are unavailable show an **OFFLINE** badge in the timeline clip header.
 - When a linked selection spans multiple clips, non-primary linked peers also get a cyan inset border so they stay visually distinct from the primary selected clip.
 
 ## Keyboard Shortcuts
@@ -262,9 +263,26 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Preview shows transition fade ramps at clip boundaries for cross-dissolve markers.
 - Transitions are designed to be extensible: future transition types will appear in the same pane.
 
+## Keyframes panel (dopesheet)
+
+- Use the **Show/Hide Keyframes** button on the right side of the track-management bar to toggle the panel (hidden by default).
+- The dopesheet appears as a resizable panel between the timeline tracks and the track-management bar. Drag the split handle to resize the dopesheet area.
+- The dopesheet shows per-property lanes with keyframe points and value-curve overlays; drag points left/right to retime.
+- When a keyframe is selected and has a following keyframe in the same lane, the segment shows Bezier handles. Drag either handle to shape the segment curve live; the exact handle shape is preserved in preview/runtime, while the interpolation dropdown reflects the nearest preset mode.
+- **◀ Prev / Next ▶** buttons jump the playhead to the previous or next keyframe across all properties (same as **Alt+Left/Right**).
+- **Ctrl/Cmd+Click** toggles a keyframe in the current dopesheet selection.
+- **Shift+Click** on a keyframe selects a same-lane range between the anchor and the clicked keyframe.
+- **Add @ Playhead** adds a keyframe at the playhead on the selected lane.
+- **Remove** deletes selected keyframe(s).
+- **Apply Interp** applies the selected interpolation mode (Linear / Ease In / Ease Out / Ease In/Out) to selected keyframe(s).
+- Lane visibility toggles let you focus on specific animated properties while editing.
+- Keyboard edits (panel focus): **Delete/Backspace** removes selected keyframe(s), **Left/Right** nudges by 1 frame, and **Shift+Left/Right** nudges by 10 frames.
+- Time-scale controls: use **− / + / 100%** in the panel header row or **Ctrl+Scroll** over the dopesheet to zoom in/out.
+- Scroll over the dopesheet to pan along time when zoomed in.
+
 ## Undo / Redo
 
-All clip moves, trims, splits, deletions, track add/remove operations, and transition application are undoable.
+All clip moves, trims, splits, deletions, track add/remove operations, transition application, and keyframe panel edits are undoable.
 
 - `Ctrl+Z` — Undo
 - `Ctrl+Y` or `Ctrl+Shift+Z` — Redo
@@ -277,7 +295,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Thumbnail strips now load progressively with adaptive tile density to keep timeline warm-up responsive on heavy media.
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
-- A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0.
+- A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0. Clips with speed keyframes (variable speed ramps) show a **⏲ Ramp** badge instead.
 - Clips with phase-1 keyframes show color-coded keyframe ticks/guides on the clip body (Scale, Opacity, Position X, Position Y, Volume, Pan, Rotate, Crop Left/Right/Top/Bottom), a `KF <count>` badge, and a `◆` prefix in the clip label when keyframes are present. **Click a keyframe tick** to select the clip and jump the playhead to that keyframe time.
 - Hovering a keyframe marker shows a tooltip with the clip name, keyframe time, and which properties are modified at that keyframe moment.
 - Clips can use semantic color labels (set in the Inspector) for quick visual categorization.

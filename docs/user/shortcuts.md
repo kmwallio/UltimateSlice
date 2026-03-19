@@ -60,6 +60,9 @@
 | `Ctrl+C` | Copy selected timeline clip |
 | `Ctrl+V` | Paste copied clip as insert at playhead |
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
+| `Ctrl+Alt+C` | Copy color grade from selected clip |
+| `Ctrl+Alt+V` | Paste color grade onto selected clip |
+| `Ctrl+Alt+M` | Match selected clip's color to a reference clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
@@ -88,6 +91,13 @@ All Inspector controls are mouse-driven sliders and text fields. Transform edits
 | `Shift + Arrow` | Nudge selected clip position by 0.1 |
 | `+` | Increase selected clip scale |
 | `-` | Decrease selected clip scale |
+| `Ctrl`/`Cmd` + Click *(Keyframes panel focused)* | Toggle clicked keyframe in dopesheet selection |
+| `Shift+Click` *(Keyframes panel focused)* | Select same-lane keyframe range from anchor to clicked keyframe |
+| `Delete` / `Backspace` *(Keyframes panel focused)* | Remove selected dopesheet keyframe(s) |
+| `←` / `→` *(Keyframes panel focused)* | Nudge selected dopesheet keyframe(s) by 1 frame |
+| `Shift + ←` / `Shift + →` *(Keyframes panel focused)* | Nudge selected dopesheet keyframe(s) by 10 frames |
+| `Ctrl + Scroll` *(Keyframes panel focused)* | Zoom dopesheet time scale in/out |
+| `Scroll` *(Keyframes panel focused)* | Pan dopesheet time view |
 
 ---
 

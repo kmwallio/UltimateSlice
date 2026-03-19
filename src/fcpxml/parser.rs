@@ -1,4 +1,6 @@
-use crate::model::clip::{Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe};
+use crate::model::clip::{
+    BezierControls, Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe,
+};
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
 use anyhow::{anyhow, bail, Result};
@@ -815,7 +817,7 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image => {
+                ClipKind::Video | ClipKind::Image | ClipKind::Title => {
                     lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
                 }
             };
@@ -911,6 +913,17 @@ fn parse_asset_clip(
                     _ => ClipColorLabel::None,
                 };
             }
+            if let Some(v) = attrs.get("us:blend-mode") {
+                clip.blend_mode = match v.as_str() {
+                    "multiply" => crate::model::clip::BlendMode::Multiply,
+                    "screen" => crate::model::clip::BlendMode::Screen,
+                    "overlay" => crate::model::clip::BlendMode::Overlay,
+                    "add" => crate::model::clip::BlendMode::Add,
+                    "difference" => crate::model::clip::BlendMode::Difference,
+                    "soft_light" => crate::model::clip::BlendMode::SoftLight,
+                    _ => crate::model::clip::BlendMode::Normal,
+                };
+            }
             if let Some(v) = attrs.get("us:temperature") {
                 clip.temperature = v.parse().unwrap_or(6500.0);
             }
@@ -942,6 +955,14 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:sharpness") {
                 clip.sharpness = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:frei0r-effects") {
+                // The writer escapes " → &quot; then XML serialization escapes
+                // & → &amp;, producing &amp;quot; in the file.  quick_xml's
+                // unescape decodes &amp;quot; → &quot; but not the second level.
+                // Decode any remaining &quot; so JSON parsing succeeds.
+                let json_str = v.replace("&quot;", "\"");
+                clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:volume") {
                 clip.volume = v.parse().unwrap_or(1.0);
@@ -1040,6 +1061,47 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:title-y") {
                 clip.title_y = v.parse().unwrap_or(0.9);
+            }
+            if let Some(v) = attrs.get("us:title-template") {
+                clip.title_template = v.clone();
+            }
+            if let Some(v) = attrs.get("us:title-outline-color") {
+                clip.title_outline_color = u32::from_str_radix(v, 16).unwrap_or(0x000000FF);
+            }
+            if let Some(v) = attrs.get("us:title-outline-width") {
+                clip.title_outline_width = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:title-shadow") {
+                clip.title_shadow = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:title-shadow-color") {
+                clip.title_shadow_color = u32::from_str_radix(v, 16).unwrap_or(0x000000AA);
+            }
+            if let Some(v) = attrs.get("us:title-shadow-offset-x") {
+                clip.title_shadow_offset_x = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:title-shadow-offset-y") {
+                clip.title_shadow_offset_y = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:title-bg-box") {
+                clip.title_bg_box = v == "true" || v == "1";
+            }
+            if let Some(v) = attrs.get("us:title-bg-box-color") {
+                clip.title_bg_box_color = u32::from_str_radix(v, 16).unwrap_or(0x00000088);
+            }
+            if let Some(v) = attrs.get("us:title-bg-box-padding") {
+                clip.title_bg_box_padding = v.parse().unwrap_or(8.0);
+            }
+            if let Some(v) = attrs.get("us:title-clip-bg-color") {
+                clip.title_clip_bg_color = u32::from_str_radix(v, 16).unwrap_or(0);
+            }
+            if let Some(v) = attrs.get("us:title-secondary-text") {
+                clip.title_secondary_text = v.clone();
+            }
+            if let Some(v) = attrs.get("us:clip-kind") {
+                if v == "title" {
+                    clip.kind = ClipKind::Title;
+                }
             }
             if let Some(v) = attrs.get("us:speed") {
                 clip.speed = v.parse().unwrap_or(1.0);
@@ -1140,6 +1202,20 @@ fn parse_asset_clip(
                     clip.fcpxml_unknown_attrs.push((k.clone(), v.clone()));
                 }
             }
+            // The FCPXML `duration` attribute is the *timeline* duration.
+            // For sped-up clips, the source range is larger: source_dur = timeline_dur × speed.
+            // With speed keyframes, compute via integration over the timeline duration.
+            if !clip.speed_keyframes.is_empty() {
+                let timeline_dur = duration; // = source_out - source_in as originally parsed
+                let source_dur =
+                    clip.integrated_source_distance_for_local_timeline_ns(timeline_dur) as u64;
+                clip.source_out = clip.source_in.saturating_add(source_dur);
+            } else if (clip.speed - 1.0).abs() > 0.001 {
+                let timeline_dur = duration as f64;
+                let source_dur = (timeline_dur * clip.speed) as u64;
+                clip.source_out = clip.source_in.saturating_add(source_dur);
+            }
+
             let clip_index = track.clips.len();
             track.push_unsorted(clip);
             return Some(ActiveClipContext {
@@ -1588,6 +1664,7 @@ fn apply_native_time_map(
             time_ns: 0,
             value: first_speed,
             interpolation: points[0].interp,
+            bezier_controls: None,
         });
         for segment_idx in 1..segment_speeds.len() {
             let boundary_time_ns = points[segment_idx].time_ns.saturating_sub(base_time_ns);
@@ -1600,11 +1677,13 @@ fn apply_native_time_map(
                 time_ns: boundary_time_ns,
                 value: incoming,
                 interpolation: points[segment_idx - 1].interp,
+                bezier_controls: None,
             });
             speed_keyframes.push(NumericKeyframe {
                 time_ns: boundary_time_ns,
                 value: outgoing,
                 interpolation: points[segment_idx].interp,
+                bezier_controls: None,
             });
         }
         clip.speed_keyframes = speed_keyframes;
@@ -1669,7 +1748,7 @@ fn apply_adjust_crop(
 /// Keyframe data parsed from native FCPXML `<param>/<keyframeAnimation>/<keyframe>` elements.
 #[derive(Default)]
 struct NativeKeyframeParams {
-    position_keyframes: Vec<(u64, f64, f64, KeyframeInterpolation)>, // (time_ns, fcpxml_x, fcpxml_y, interp)
+    position_keyframes: Vec<(u64, f64, f64, KeyframeInterpolation, Option<BezierControls>)>, // (time_ns, fcpxml_x, fcpxml_y, interp, bezier_controls)
     scale_keyframes: Vec<NumericKeyframe>,
     rotation_keyframes: Vec<NumericKeyframe>,
     opacity_keyframes: Vec<NumericKeyframe>,
@@ -1697,36 +1776,41 @@ fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeK
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "position" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some((x, y)) = parse_vec2(val_str) {
-                                result.position_keyframes.push((*time_ns, x, y, *interp));
+                                result
+                                    .position_keyframes
+                                    .push((*time_ns, x, y, *interp, *bezier_controls));
                             }
                         }
                     } else if param_name_lower == "scale" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some((sx, _sy)) = parse_vec2(val_str) {
                                 result.scale_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: sx,
                                     interpolation: *interp,
+                                    bezier_controls: *bezier_controls,
                                 });
                             } else if let Ok(s) = val_str.parse::<f64>() {
                                 result.scale_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: s,
                                     interpolation: *interp,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
                     } else if param_name_lower == "rotation" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Ok(r) = val_str.parse::<f64>() {
                                 result.rotation_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: r,
                                     interpolation: *interp,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1777,12 +1861,13 @@ fn parse_adjust_blend_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyfr
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "opacity" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Ok(v) = val_str.parse::<f64>() {
                                 result.opacity_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: v,
                                     interpolation: *interp,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1883,12 +1968,13 @@ fn parse_adjust_volume_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "volume" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some(linear) = parse_fcpxml_volume_amount(val_str) {
                                 result.volume_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: linear,
                                     interpolation: *interp,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1938,12 +2024,13 @@ fn parse_adjust_panner_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
                     let param_name_lower = param_name.to_ascii_lowercase();
                     if param_name_lower == "amount" || param_name_lower == "pan" {
                         let kfs = parse_keyframe_animation_children(reader)?;
-                        for (time_ns, val_str, interp) in &kfs {
+                        for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some(pan) = parse_fcpxml_pan_amount(val_str) {
                                 result.pan_keyframes.push(NumericKeyframe {
                                     time_ns: *time_ns,
                                     value: pan,
                                     interpolation: *interp,
+                                    bezier_controls: *bezier_controls,
                                 });
                             }
                         }
@@ -1978,10 +2065,28 @@ fn parse_adjust_panner_children(reader: &mut Reader<&[u8]>) -> Result<NativeKeyf
 /// Parse the children of a `<param>` element, looking for `<keyframeAnimation>/<keyframe>`.
 /// Returns a vec of (time_ns, value_string, interpolation) tuples.
 /// Consumes events until the matching `</param>` End event.
+fn native_curve_to_bezier_controls(
+    interpolation: KeyframeInterpolation,
+    curve: Option<&str>,
+) -> Option<BezierControls> {
+    let curve = curve?;
+    if !curve.eq_ignore_ascii_case("smooth") {
+        return None;
+    }
+    let interpolation = if interpolation == KeyframeInterpolation::Linear {
+        KeyframeInterpolation::EaseInOut
+    } else {
+        interpolation
+    };
+    let (x1, y1, x2, y2) = interpolation.control_points();
+    Some(BezierControls { x1, y1, x2, y2 })
+}
+
 fn parse_keyframe_animation_children(
     reader: &mut Reader<&[u8]>,
-) -> Result<Vec<(u64, String, KeyframeInterpolation)>> {
-    let mut keyframes: Vec<(u64, String, KeyframeInterpolation)> = Vec::new();
+) -> Result<Vec<(u64, String, KeyframeInterpolation, Option<BezierControls>)>> {
+    let mut keyframes: Vec<(u64, String, KeyframeInterpolation, Option<BezierControls>)> =
+        Vec::new();
     let mut buf = Vec::new();
     let mut depth = 1usize; // already inside <param>
     let mut in_keyframe_animation = false;
@@ -2009,7 +2114,11 @@ fn parse_keyframe_animation_children(
                                 .get("interp")
                                 .map(|s| KeyframeInterpolation::from_fcpxml(s))
                                 .unwrap_or(KeyframeInterpolation::Linear);
-                            keyframes.push((time_ns, value_str.clone(), interp));
+                            let bezier_controls = native_curve_to_bezier_controls(
+                                interp,
+                                attrs.get("curve").map(|s| s.as_str()),
+                            );
+                            keyframes.push((time_ns, value_str.clone(), interp, bezier_controls));
                         }
                     }
                 }
@@ -2047,7 +2156,7 @@ fn apply_native_transform_keyframes(
     if !ctx.has_us_position_keyframes && !params.position_keyframes.is_empty() {
         let mut x_kfs = Vec::new();
         let mut y_kfs = Vec::new();
-        for &(time_ns, fcpxml_x, fcpxml_y, interp) in &params.position_keyframes {
+        for &(time_ns, fcpxml_x, fcpxml_y, interp, bezier_controls) in &params.position_keyframes {
             // For position conversion, we need the scale at this keyframe's time.
             // Use scale keyframes if present, otherwise static clip scale.
             // Note: params.scale_keyframes and time_ns are both in absolute source
@@ -2069,11 +2178,13 @@ fn apply_native_transform_keyframes(
                 time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: ix,
                 interpolation: interp,
+                bezier_controls,
             });
             y_kfs.push(NumericKeyframe {
                 time_ns: time_ns.saturating_sub(ctx.raw_source_start_ns),
                 value: iy,
                 interpolation: interp,
+                bezier_controls,
             });
         }
         clip.position_x_keyframes = x_kfs;
@@ -2259,6 +2370,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
+            | "us:frei0r-effects"
             | "us:volume"
             | "us:volume-keyframes"
             | "us:pan"
@@ -2317,6 +2429,20 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
+            | "us:blend-mode"
+            | "us:title-template"
+            | "us:title-outline-color"
+            | "us:title-outline-width"
+            | "us:title-shadow"
+            | "us:title-shadow-color"
+            | "us:title-shadow-offset-x"
+            | "us:title-shadow-offset-y"
+            | "us:title-bg-box"
+            | "us:title-bg-box-color"
+            | "us:title-bg-box-padding"
+            | "us:title-clip-bg-color"
+            | "us:title-secondary-text"
+            | "us:clip-kind"
     )
 }
 
@@ -2719,7 +2845,7 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
 }
 
 fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
-    const KEYFRAME_ATTR_PREFIXES: [&str; 16] = [
+    const KEYFRAME_ATTR_PREFIXES: [&str; 17] = [
         "us:brightness-keyframes=\"",
         "us:contrast-keyframes=\"",
         "us:saturation-keyframes=\"",
@@ -2736,6 +2862,7 @@ fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
         "us:crop-right-keyframes=\"",
         "us:crop-top-keyframes=\"",
         "us:crop-bottom-keyframes=\"",
+        "us:frei0r-effects=\"",
     ];
 
     let mut cursor = 0usize;
@@ -4671,6 +4798,47 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_native_fcp_curve_smooth_sets_bezier_controls() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///tmp/clip.mp4" duration="10s"/>
+  </resources>
+  <project name="FCP Smooth Curve">
+    <sequence format="r1">
+      <spine>
+        <asset-clip ref="a1" offset="0s" start="0s" duration="5s">
+          <adjust-transform>
+            <param name="scale">
+              <keyframeAnimation>
+                <keyframe time="0s" value="1.0 1.0" interp="easeOut" curve="smooth"/>
+                <keyframe time="5s" value="2.0 2.0" interp="linear"/>
+              </keyframeAnimation>
+            </param>
+          </adjust-transform>
+        </asset-clip>
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let clip = &project.video_tracks().next().unwrap().clips[0];
+        assert_eq!(clip.scale_keyframes.len(), 2);
+        let first = &clip.scale_keyframes[0];
+        assert_eq!(first.interpolation, KeyframeInterpolation::EaseOut);
+        let bezier = first
+            .bezier_controls
+            .as_ref()
+            .expect("curve=smooth should map to bezier controls");
+        assert!((bezier.x1 - 0.0).abs() < 1e-9);
+        assert!((bezier.y1 - 0.0).abs() < 1e-9);
+        assert!((bezier.x2 - 0.58).abs() < 1e-9);
+        assert!((bezier.y2 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_parse_native_fcp_transform_keyframes_with_offset() {
         // When start != "0s", keyframe times in FCPXML are absolute source-media
         // times. The parser must subtract source_in to produce clip-local times.
@@ -5069,5 +5237,79 @@ mod tests {
             "shadows_warmth"
         );
         assert!((clip.shadows_tint - 0.7).abs() < 1e-5, "shadows_tint");
+    }
+
+    #[test]
+    fn test_parse_silence_removal_shared_asset_clips() {
+        // Regression: silence-removal creates multiple clips from the same source
+        // with different start times, sharing a single <asset>.
+        // Verify source_in/source_out are parsed correctly (relative to timecode base).
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+    <resources>
+        <format id="r1" name="FFVideoFormat1080p24" frameDuration="1/24s" width="1920" height="1080"/>
+        <asset id="a1" name="C0381" start="1700856/24s" format="r1" hasVideo="1" hasAudio="1">
+            <media-rep kind="original-media" src="file:///tmp/C0381.MP4"/>
+        </asset>
+    </resources>
+    <library><event><project name="Test">
+        <sequence duration="546/24s" format="r1" tcFormat="NDF"><spine>
+            <asset-clip ref="a1" offset="0/24s" duration="50/24s" start="1700856/24s" name="C0381"
+                us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                us:source-timecode-base-ns="70869000000000"/>
+            <asset-clip ref="a1" offset="50/24s" duration="475/24s" start="1700967/24s" name="C0381"
+                us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                us:source-timecode-base-ns="70869000000000"/>
+            <asset-clip ref="a1" offset="525/24s" duration="21/24s" start="1701495/24s" name="C0381"
+                us:track-idx="0" us:track-kind="video" us:track-name="Video 1"
+                us:source-timecode-base-ns="70869000000000"/>
+        </spine></sequence>
+    </project></event></library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse silence-removal XML");
+        let clips: Vec<_> = project.tracks[0].clips.iter().collect();
+        assert_eq!(clips.len(), 3, "expected 3 clips");
+
+        let base_ns: u64 = 70_869_000_000_000;
+
+        // Clip 1: start=1700856/24s, source_in should be 0 (start == base)
+        let c1_expected_source_in = 0u64;
+        assert_eq!(clips[0].source_in, c1_expected_source_in,
+            "clip 1 source_in: {} != {}", clips[0].source_in, c1_expected_source_in);
+        let c1_dur = parse_fcpxml_time("50/24s").unwrap();
+        assert_eq!(clips[0].source_out, c1_expected_source_in + c1_dur,
+            "clip 1 source_out");
+        assert_eq!(clips[0].source_timecode_base_ns, Some(base_ns));
+
+        // Clip 2: start=1700967/24s, source_in = (1700967/24 - 70869) seconds
+        let c2_start_ns = parse_fcpxml_time("1700967/24s").unwrap();
+        let c2_expected_source_in = c2_start_ns - base_ns;
+        assert_eq!(clips[1].source_in, c2_expected_source_in,
+            "clip 2 source_in: {} != {} ({:.6}s != {:.6}s)",
+            clips[1].source_in, c2_expected_source_in,
+            clips[1].source_in as f64 / 1e9, c2_expected_source_in as f64 / 1e9);
+        let c2_dur = parse_fcpxml_time("475/24s").unwrap();
+        assert_eq!(clips[1].source_out, c2_expected_source_in + c2_dur,
+            "clip 2 source_out");
+
+        // Clip 3: start=1701495/24s
+        let c3_start_ns = parse_fcpxml_time("1701495/24s").unwrap();
+        let c3_expected_source_in = c3_start_ns - base_ns;
+        assert_eq!(clips[2].source_in, c3_expected_source_in,
+            "clip 3 source_in: {} != {} ({:.6}s != {:.6}s)",
+            clips[2].source_in, c3_expected_source_in,
+            clips[2].source_in as f64 / 1e9, c3_expected_source_in as f64 / 1e9);
+        let c3_dur = parse_fcpxml_time("21/24s").unwrap();
+        assert_eq!(clips[2].source_out, c3_expected_source_in + c3_dur,
+            "clip 3 source_out");
+
+        // Verify source_in values are reasonable seconds into the file
+        assert!(clips[0].source_in == 0, "clip 1 starts at file beginning");
+        assert!(clips[1].source_in > 4_000_000_000 && clips[1].source_in < 5_000_000_000,
+            "clip 2 source_in should be ~4.625s, got {}s", clips[1].source_in as f64 / 1e9);
+        assert!(clips[2].source_in > 26_000_000_000 && clips[2].source_in < 27_000_000_000,
+            "clip 3 source_in should be ~26.625s, got {}s", clips[2].source_in as f64 / 1e9);
     }
 }

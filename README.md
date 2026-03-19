@@ -40,6 +40,8 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 
 For exact versions and full dependency tree, see `Cargo.toml`, `Cargo.lock`, and `io.github.kmwallio.ultimateslice.yml`.
 
+![UltimateSlice Screenshot](layer-demo.gif)
+
 ### 🔜 Planned
 See `ROADMAP.md` for upcoming features like thumbnails, audio waveforms, multi-track editing, transitions, and a program monitor.
 

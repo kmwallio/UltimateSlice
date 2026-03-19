@@ -1,11 +1,16 @@
 pub mod color_scopes;
+pub mod color_wheel;
+pub mod effects_browser;
 pub mod inspector;
+pub mod keyframe_editor;
 pub mod media_browser;
 pub mod preferences;
 pub mod preview;
 pub mod program_monitor;
 pub mod timecode;
 pub mod timeline;
+pub mod title_templates;
+pub mod titles_browser;
 pub mod toolbar;
 pub mod transform_overlay;
 pub mod window;

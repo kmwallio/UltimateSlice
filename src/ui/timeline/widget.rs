@@ -157,6 +157,82 @@ struct TimelineClipboard {
     source_track_id: String,
 }
 
+/// Clipboard holding only color-grading static values (no keyframes).
+#[derive(Debug, Clone)]
+pub struct ColorGradeClipboard {
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub exposure: f32,
+    pub black_point: f32,
+    pub shadows: f32,
+    pub midtones: f32,
+    pub highlights: f32,
+    pub highlights_warmth: f32,
+    pub highlights_tint: f32,
+    pub midtones_warmth: f32,
+    pub midtones_tint: f32,
+    pub shadows_warmth: f32,
+    pub shadows_tint: f32,
+    pub denoise: f32,
+    pub sharpness: f32,
+    pub lut_path: Option<String>,
+}
+
+impl ColorGradeClipboard {
+    /// Extract color grading values from a clip.
+    pub fn from_clip(clip: &Clip) -> Self {
+        Self {
+            brightness: clip.brightness,
+            contrast: clip.contrast,
+            saturation: clip.saturation,
+            temperature: clip.temperature,
+            tint: clip.tint,
+            exposure: clip.exposure,
+            black_point: clip.black_point,
+            shadows: clip.shadows,
+            midtones: clip.midtones,
+            highlights: clip.highlights,
+            highlights_warmth: clip.highlights_warmth,
+            highlights_tint: clip.highlights_tint,
+            midtones_warmth: clip.midtones_warmth,
+            midtones_tint: clip.midtones_tint,
+            shadows_warmth: clip.shadows_warmth,
+            shadows_tint: clip.shadows_tint,
+            denoise: clip.denoise,
+            sharpness: clip.sharpness,
+            lut_path: clip.lut_path.clone(),
+        }
+    }
+
+    /// Apply color grading values to a target clip. Returns true if anything changed.
+    pub fn apply_to(&self, target: &mut Clip) -> bool {
+        let before = target.clone();
+        target.brightness = self.brightness;
+        target.contrast = self.contrast;
+        target.saturation = self.saturation;
+        target.temperature = self.temperature;
+        target.tint = self.tint;
+        target.exposure = self.exposure;
+        target.black_point = self.black_point;
+        target.shadows = self.shadows;
+        target.midtones = self.midtones;
+        target.highlights = self.highlights;
+        target.highlights_warmth = self.highlights_warmth;
+        target.highlights_tint = self.highlights_tint;
+        target.midtones_warmth = self.midtones_warmth;
+        target.midtones_tint = self.midtones_tint;
+        target.shadows_warmth = self.shadows_warmth;
+        target.shadows_tint = self.shadows_tint;
+        target.denoise = self.denoise;
+        target.sharpness = self.sharpness;
+        target.lut_path = self.lut_path.clone();
+        before != *target
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MarqueeSelection {
     start_x: f64,
@@ -208,6 +284,8 @@ pub struct TimelineState {
     pub on_clip_selected: Option<Rc<dyn Fn(Option<String>)>>,
     /// Callback fired when user requests audio sync: Vec<(clip_id, source_path, source_in, source_out, timeline_start, track_id)>
     pub on_sync_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
+    /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
+    pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
@@ -224,6 +302,8 @@ pub struct TimelineState {
     pub show_track_audio_levels: bool,
     /// Single-clip timeline clipboard payload for copy/paste operations.
     clipboard: Option<TimelineClipboard>,
+    /// Color-grade-only clipboard for copy/paste color grading between clips.
+    pub color_grade_clipboard: Option<ColorGradeClipboard>,
     /// Multi-selection set (primary selection remains in `selected_clip_id`).
     selected_clip_ids: HashSet<String>,
     /// Anchor clip used for Shift+click range selection.
@@ -236,6 +316,10 @@ pub struct TimelineState {
     keyframe_marquee_selection: Option<KeyframeMarqueeSelection>,
     /// Callback fired when the active tool changes (via keyboard shortcut).
     pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
+    /// Set of source paths currently resolved as missing/offline.
+    pub missing_media_paths: HashSet<String>,
+    /// Callback fired when user presses the match-color shortcut (Ctrl+Alt+M).
+    pub on_match_color: Option<Rc<dyn Fn()>>,
 }
 
 impl TimelineState {
@@ -258,6 +342,7 @@ impl TimelineState {
             on_drop_clip: None,
             on_clip_selected: None,
             on_sync_audio: None,
+            on_remove_silent_parts: None,
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
@@ -266,13 +351,20 @@ impl TimelineState {
             track_audio_peak_db: Vec::new(),
             show_track_audio_levels: true,
             clipboard: None,
+            color_grade_clipboard: None,
             selected_clip_ids: HashSet::new(),
             selection_anchor_clip_id: None,
             marquee_selection: None,
             selected_keyframe_local_times: HashMap::new(),
             keyframe_marquee_selection: None,
             on_tool_changed: None,
+            missing_media_paths: HashSet::new(),
+            on_match_color: None,
         }
+    }
+
+    pub fn source_is_missing(&self, source_path: &str) -> bool {
+        self.missing_media_paths.contains(source_path)
     }
 
     pub fn ns_to_x(&self, ns: u64) -> f64 {
@@ -829,6 +921,21 @@ impl TimelineState {
         true
     }
 
+    fn can_remove_silent_parts(&self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() != 1 {
+            return false;
+        }
+        let clip_id = ids.iter().next().unwrap();
+        let proj = self.project.borrow();
+        proj.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| &c.id == clip_id)
+            .map(|c| c.kind != ClipKind::Image)
+            .unwrap_or(false)
+    }
+
     fn clip_context_menu_actionability(&self) -> ClipContextMenuActionability {
         ClipContextMenuActionability {
             join_through_edit: self.can_join_selected_through_edit(),
@@ -837,6 +944,7 @@ impl TimelineState {
             unlink_selected: self.can_unlink_selected_clips(),
             align_grouped: self.can_align_selected_groups_by_timecode(),
             sync_audio: self.can_sync_selected_clips_by_audio(),
+            remove_silent_parts: self.can_remove_silent_parts(),
         }
     }
 
@@ -1264,6 +1372,71 @@ impl TimelineState {
             old_clips,
             new_clips: std::mem::take(&mut new_clips),
             label: "Paste clip attributes".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
+    /// Copy color grading values from the selected clip into the color-grade clipboard.
+    pub fn copy_color_grade(&mut self) -> bool {
+        let Some(clip_id) = self.selected_clip_id.clone() else {
+            return false;
+        };
+        let grade = {
+            let proj = self.project.borrow();
+            proj.tracks.iter().find_map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .map(|clip| ColorGradeClipboard::from_clip(clip))
+            })
+        };
+        if let Some(payload) = grade {
+            self.color_grade_clipboard = Some(payload);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Paste color grading values from the color-grade clipboard onto the selected clip.
+    pub fn paste_color_grade(&mut self) -> bool {
+        let Some(grade) = self.color_grade_clipboard.clone() else {
+            return false;
+        };
+        let Some(selected_clip_id) = self.selected_clip_id.clone() else {
+            return false;
+        };
+
+        let (track_id, old_clips, mut new_clips) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj
+                .tracks
+                .iter()
+                .find(|t| t.clips.iter().any(|c| c.id == selected_clip_id))
+            else {
+                return false;
+            };
+            let Some(target_idx) = track.clips.iter().position(|c| c.id == selected_clip_id) else {
+                return false;
+            };
+            let old_clips = track.clips.clone();
+            let mut new_clips = old_clips.clone();
+            if !grade.apply_to(&mut new_clips[target_idx]) {
+                return false;
+            }
+            (track.id.clone(), old_clips, new_clips)
+        };
+        if old_clips == new_clips {
+            return false;
+        }
+        let cmd = SetTrackClipsCommand {
+            track_id,
+            old_clips,
+            new_clips: std::mem::take(&mut new_clips),
+            label: "Paste color grade".to_string(),
         };
         let mut proj = self.project.borrow_mut();
         self.history.execute(Box::new(cmd), &mut proj);
@@ -2116,7 +2289,7 @@ impl TimelineState {
 fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
     match kind {
         ClipKind::Audio => TrackKind::Audio,
-        ClipKind::Video | ClipKind::Image => TrackKind::Video,
+        ClipKind::Video | ClipKind::Image | ClipKind::Title => TrackKind::Video,
     }
 }
 
@@ -2215,15 +2388,132 @@ pub fn open_freeze_frame_dialog(state: Rc<RefCell<TimelineState>>, area: Drawing
     dialog.present();
 }
 
+#[allow(deprecated)]
+pub fn open_remove_silent_parts_dialog(state: Rc<RefCell<TimelineState>>) {
+    if !state.borrow().can_remove_silent_parts() {
+        return;
+    }
+
+    // Gather clip info before showing dialog
+    let (clip_id, track_id, source_path, source_in, source_out) = {
+        let st = state.borrow();
+        let ids = st.selected_ids_or_primary();
+        let clip_id = ids.iter().next().unwrap().clone();
+        let proj = st.project.borrow();
+        let mut info = None;
+        for track in &proj.tracks {
+            if let Some(c) = track.clips.iter().find(|c| c.id == clip_id) {
+                info = Some((
+                    c.id.clone(),
+                    track.id.clone(),
+                    c.source_path.clone(),
+                    c.source_in,
+                    c.source_out,
+                ));
+                break;
+            }
+        }
+        match info {
+            Some(i) => i,
+            None => return,
+        }
+    };
+
+    let dialog = gtk::Dialog::builder()
+        .title("Remove Silent Parts")
+        .default_width(360)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Remove", gtk::ResponseType::Accept);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+
+    let noise_label = gtk::Label::new(Some("Silence threshold (dBFS):"));
+    noise_label.set_halign(gtk::Align::Start);
+    let noise_spin = gtk::SpinButton::with_range(-60.0, -10.0, 1.0);
+    noise_spin.set_digits(0);
+    noise_spin.set_value(-50.0);
+    noise_spin.set_halign(gtk::Align::Start);
+    noise_spin.set_hexpand(false);
+
+    let dur_label = gtk::Label::new(Some("Minimum silence duration (seconds):"));
+    dur_label.set_halign(gtk::Align::Start);
+    let dur_spin = gtk::SpinButton::with_range(0.1, 5.0, 0.1);
+    dur_spin.set_digits(1);
+    dur_spin.set_value(0.5);
+    dur_spin.set_halign(gtk::Align::Start);
+    dur_spin.set_hexpand(false);
+
+    let hint = gtk::Label::new(Some(
+        "Audio below the threshold is considered silence (VU meter scale).\n\
+         Green zone starts at \u{2212}18 dBFS. Try \u{2212}50 for speech, \u{2212}40 for noisy rooms.",
+    ));
+    hint.set_halign(gtk::Align::Start);
+    hint.add_css_class("dim-label");
+
+    body.append(&noise_label);
+    body.append(&noise_spin);
+    body.append(&dur_label);
+    body.append(&dur_spin);
+    body.append(&hint);
+    dialog.content_area().append(&body);
+
+    dialog.connect_response(move |d, resp| {
+        if resp == gtk::ResponseType::Accept {
+            let noise_db = noise_spin.value();
+            let min_duration = dur_spin.value().max(0.1);
+            let st = state.borrow();
+            if let Some(ref cb) = st.on_remove_silent_parts {
+                cb(
+                    clip_id.clone(),
+                    track_id.clone(),
+                    source_path.clone(),
+                    source_in,
+                    source_out,
+                    noise_db,
+                    min_duration,
+                );
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
 fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     let before = target.clone();
+    // Color grading (primary)
     target.brightness = source.brightness;
     target.contrast = source.contrast;
     target.saturation = source.saturation;
+    target.temperature = source.temperature;
+    target.tint = source.tint;
+    // Color grading (extended)
+    target.exposure = source.exposure;
+    target.black_point = source.black_point;
+    target.shadows = source.shadows;
+    target.midtones = source.midtones;
+    target.highlights = source.highlights;
+    target.highlights_warmth = source.highlights_warmth;
+    target.highlights_tint = source.highlights_tint;
+    target.midtones_warmth = source.midtones_warmth;
+    target.midtones_tint = source.midtones_tint;
+    target.shadows_warmth = source.shadows_warmth;
+    target.shadows_tint = source.shadows_tint;
+    // Enhancement
     target.denoise = source.denoise;
     target.sharpness = source.sharpness;
+    target.lut_path = source.lut_path.clone();
+    // Audio
     target.volume = source.volume;
     target.pan = source.pan;
+    // Video effects
     target.speed = source.speed;
     target.crop_left = source.crop_left;
     target.crop_right = source.crop_right;
@@ -2232,25 +2522,43 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     target.rotate = source.rotate;
     target.flip_h = source.flip_h;
     target.flip_v = source.flip_v;
+    // Title/Text overlay
     target.title_text = source.title_text.clone();
     target.title_font = source.title_font.clone();
     target.title_color = source.title_color;
     target.title_x = source.title_x;
     target.title_y = source.title_y;
+    // Transitions
     target.transition_after = source.transition_after.clone();
     target.transition_after_ns = source.transition_after_ns;
-    target.lut_path = source.lut_path.clone();
+    // Transform
     target.scale = source.scale;
     target.opacity = source.opacity;
     target.position_x = source.position_x;
     target.position_y = source.position_y;
-    target.shadows = source.shadows;
-    target.midtones = source.midtones;
-    target.highlights = source.highlights;
+    target.blend_mode = source.blend_mode;
+    // Reverse & Freeze-frame
     target.reverse = source.reverse;
     target.freeze_frame = source.freeze_frame;
     target.freeze_frame_source_ns = source.freeze_frame_source_ns;
     target.freeze_frame_hold_duration_ns = source.freeze_frame_hold_duration_ns;
+    // Chroma key & BG removal
+    target.chroma_key_enabled = source.chroma_key_enabled;
+    target.chroma_key_color = source.chroma_key_color;
+    target.chroma_key_tolerance = source.chroma_key_tolerance;
+    target.chroma_key_softness = source.chroma_key_softness;
+    target.bg_removal_enabled = source.bg_removal_enabled;
+    target.bg_removal_threshold = source.bg_removal_threshold;
+    // Frei0r effects — clone with fresh UUIDs
+    target.frei0r_effects = source
+        .frei0r_effects
+        .iter()
+        .map(|e| {
+            let mut new_effect = e.clone();
+            new_effect.id = uuid::Uuid::new_v4().to_string();
+            new_effect
+        })
+        .collect();
     before != *target
 }
 
@@ -2307,6 +2615,7 @@ struct ClipContextMenuActionability {
     unlink_selected: bool,
     align_grouped: bool,
     sync_audio: bool,
+    remove_silent_parts: bool,
 }
 
 impl ClipContextMenuActionability {
@@ -2317,6 +2626,7 @@ impl ClipContextMenuActionability {
             || self.unlink_selected
             || self.align_grouped
             || self.sync_audio
+            || self.remove_silent_parts
     }
 }
 
@@ -2327,6 +2637,7 @@ fn apply_clip_context_menu_actionability(
     btn_unlink_selected: &gtk::Button,
     btn_align_grouped: &gtk::Button,
     btn_sync_audio: &gtk::Button,
+    btn_remove_silent_parts: &gtk::Button,
     actionability: ClipContextMenuActionability,
 ) -> bool {
     let set_state = |button: &gtk::Button, actionable: bool| {
@@ -2339,6 +2650,7 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_unlink_selected, actionability.unlink_selected);
     set_state(btn_align_grouped, actionability.align_grouped);
     set_state(btn_sync_audio, actionability.sync_audio);
+    set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
     actionability.any()
 }
 
@@ -2411,12 +2723,18 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     btn_sync_audio.set_tooltip_text(Some(
         "Align selected clips using audio cross-correlation (requires 2+ clips with audio)",
     ));
+    let btn_remove_silent_parts = gtk::Button::with_label("Remove Silent Parts\u{2026}");
+    btn_remove_silent_parts.add_css_class("flat");
+    btn_remove_silent_parts.set_tooltip_text(Some(
+        "Detect and remove silent segments from this clip using ffmpeg silencedetect",
+    ));
     clip_context_box.append(&btn_join_through_edit);
     clip_context_box.append(&btn_freeze_frame);
     clip_context_box.append(&btn_link_selected);
     clip_context_box.append(&btn_unlink_selected);
     clip_context_box.append(&btn_align_grouped);
     clip_context_box.append(&btn_sync_audio);
+    clip_context_box.append(&btn_remove_silent_parts);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -2569,6 +2887,17 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_remove_silent_parts.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            open_remove_silent_parts_dialog(state.clone());
         });
     }
 
@@ -2936,6 +3265,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_unlink_selected,
                                 &btn_align_grouped,
                                 &btn_sync_audio,
+                                &btn_remove_silent_parts,
                                 actionability,
                             ) {
                                 clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -4422,10 +4752,31 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     {
         let state = state.clone();
         let area_weak = area.downgrade();
-        key_ctrl.connect_key_pressed(move |_, key, _, modifiers| {
+        key_ctrl.connect_key_pressed(move |ctrl_ev, key, _, modifiers| {
             use gtk::gdk::Key;
             let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            let alt = modifiers.contains(gtk::gdk::ModifierType::ALT_MASK);
+
+            // Don't intercept when a text entry has focus — prevents Space
+            // from triggering play/pause while editing title text, and
+            // single-letter shortcuts (B, T, R, S, …) from firing while
+            // the user is typing in an Entry or SearchEntry.
+            if !ctrl {
+                if let Some(widget) = ctrl_ev.widget() {
+                    if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                        if focused.is::<gtk4::Text>()
+                            || focused.is::<gtk4::Entry>()
+                            || focused.is::<gtk4::SearchEntry>()
+                            || focused.is::<gtk4::TextView>()
+                            || focused.is::<gtk4::SpinButton>()
+                        {
+                            return glib::Propagation::Proceed;
+                        }
+                    }
+                }
+            }
+
             let mut st = state.borrow_mut();
 
             // Track whether we need to fire on_project_changed after releasing the borrow
@@ -4453,6 +4804,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let changed = st.select_all_clips();
                     if changed {
                         notify_selection = true;
+                    }
+                    changed
+                }
+                Key::c | Key::C if ctrl && alt => st.copy_color_grade(),
+                Key::m | Key::M if ctrl && alt => {
+                    if st.selected_clip_id.is_some() {
+                        let cb = st.on_match_color.clone();
+                        drop(st);
+                        if let Some(cb) = cb {
+                            cb();
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    false
+                }
+                Key::v | Key::V if ctrl && alt => {
+                    let changed = st.paste_color_grade();
+                    if changed {
+                        notify_project = true;
                     }
                     changed
                 }
@@ -5487,8 +5857,36 @@ fn draw_clip(
     rounded_rect(cr, cx, cy, cw.max(4.0), ch, 4.0);
     cr.fill().ok();
 
+    // ── Title clip text label ───────────────────────────────────────────
+    if clip.kind == crate::model::clip::ClipKind::Title && cw > 20.0 {
+        cr.save().ok();
+        rounded_rect(cr, cx + 1.0, cy + 1.0, (cw - 2.0).max(0.0), (ch - 2.0).max(0.0), 3.0);
+        cr.clip();
+        // Draw "T" badge
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
+        cr.set_font_size(10.0);
+        let _ = cr.move_to(cx + 4.0, cy + 12.0);
+        let _ = cr.show_text("T");
+        // Draw title text centered
+        let display = if clip.title_text.is_empty() { &clip.label } else { &clip.title_text };
+        let max_chars = ((cw - 10.0) / 7.0).max(1.0) as usize;
+        let truncated = if display.len() > max_chars {
+            format!("{}…", &display[..max_chars.saturating_sub(1)])
+        } else {
+            display.to_string()
+        };
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        cr.set_font_size((ch * 0.4).clamp(8.0, 16.0));
+        let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("X").unwrap());
+        let tx = cx + (cw - te.width()) / 2.0;
+        let ty = cy + (ch + te.height()) / 2.0;
+        let _ = cr.move_to(tx, ty);
+        let _ = cr.show_text(&truncated);
+        cr.restore().ok();
+    }
+
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.kind == TrackKind::Video && cw > 20.0 {
+    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -5717,12 +6115,14 @@ fn draw_clip(
         let _ = cr.show_text(&display_label);
 
         // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0, and "◀" when reversed
-        let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse;
+        let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
         let has_lut_badge = clip
             .lut_path
             .as_ref()
             .map(|p| !p.is_empty())
             .unwrap_or(false);
+        let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
+            && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
             .as_ref()
@@ -5745,7 +6145,13 @@ fn draw_clip(
             }
         }
         if has_speed_badge && cw > 60.0 {
-            let badge = if clip.reverse {
+            let badge = if !clip.speed_keyframes.is_empty() {
+                if clip.reverse {
+                    "\u{23F2} \u{25C0} Ramp".to_string()
+                } else {
+                    "\u{23F2} Ramp".to_string()
+                }
+            } else if clip.reverse {
                 if (clip.speed - 1.0).abs() > 0.01 {
                     let speed_str = if clip.speed == clip.speed.floor() {
                         format!("{}×", clip.speed as u32)
@@ -5787,6 +6193,22 @@ fn draw_clip(
                 rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
                 cr.fill().ok();
                 cr.set_source_rgb(0.4, 0.8, 1.0);
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
+                badge_right = bx - 8.0;
+            }
+        }
+
+        if has_missing_badge && cw > 95.0 {
+            let badge = "OFFLINE";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(1.0, 0.45, 0.45);
                 let _ = cr.move_to(bx, by);
                 let _ = cr.show_text(badge);
                 badge_right = bx - 8.0;
@@ -6046,10 +6468,15 @@ fn clip_phase1_keyframe_count(clip: &Clip) -> usize {
 
 fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
     match clip.color_label {
-        crate::model::clip::ClipColorLabel::None => match track_kind {
-            TrackKind::Video => (0.17, 0.47, 0.85),
-            TrackKind::Audio => (0.18, 0.65, 0.45),
-        },
+        crate::model::clip::ClipColorLabel::None => {
+            if clip.kind == crate::model::clip::ClipKind::Title {
+                return (0.75, 0.62, 0.22); // warm gold for title clips
+            }
+            match track_kind {
+                TrackKind::Video => (0.17, 0.47, 0.85),
+                TrackKind::Audio => (0.18, 0.65, 0.45),
+            }
+        }
         crate::model::clip::ClipColorLabel::Red => (0.78, 0.27, 0.27),
         crate::model::clip::ClipColorLabel::Orange => (0.83, 0.49, 0.20),
         crate::model::clip::ClipColorLabel::Yellow => (0.78, 0.68, 0.20),
@@ -6797,6 +7224,7 @@ mod tests {
         assert!(!actionability.unlink_selected);
         assert!(!actionability.align_grouped);
         assert!(!actionability.sync_audio);
+        assert!(actionability.remove_silent_parts);
         assert!(actionability.any());
     }
 
@@ -6817,6 +7245,7 @@ mod tests {
         assert!(!actionability.unlink_selected);
         assert!(!actionability.align_grouped);
         assert!(actionability.sync_audio);
+        assert!(!actionability.remove_silent_parts);
         assert!(actionability.any());
     }
 
@@ -7734,22 +8163,26 @@ mod tests {
                 time_ns: 0,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 1_000_000_000,
                 value: 1.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 2.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
         clip.volume_keyframes = vec![NumericKeyframe {
             time_ns: 500_000_000,
             value: 0.8,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         }];
 
         let markers = clip_keyframe_marker_geometry(&clip, 200.0, 300.0, TRACK_LABEL_WIDTH, 800.0);
@@ -7774,11 +8207,13 @@ mod tests {
                 time_ns: 200_000_000,
                 value: 1.0,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
             NumericKeyframe {
                 time_ns: 2_000_000_000,
                 value: 0.5,
                 interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
             },
         ];
 
@@ -7801,6 +8236,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.scale_keyframes = vec![mk(0)];
         clip.opacity_keyframes = vec![mk(0)];
@@ -7825,6 +8261,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.scale_keyframes = vec![mk(1_000_000_000)];
         clip.position_x_keyframes = vec![mk(1_000_000_000)];
@@ -7843,6 +8280,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.opacity_keyframes = vec![mk(2_000_000_000)];
         clip.crop_bottom_keyframes = vec![mk(5_000_000_000)];
@@ -7858,6 +8296,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.scale_keyframes = vec![mk(100_000_000), mk(500_000_000), mk(1_200_000_000)];
         clip.opacity_keyframes = vec![mk(500_000_000), mk(900_000_000)];
@@ -7876,6 +8315,7 @@ mod tests {
             time_ns,
             value: 1.0,
             interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
         };
         clip.crop_left_keyframes = vec![mk(1_500_000_000)];
         clip.crop_right_keyframes = vec![mk(2_500_000_000)];
