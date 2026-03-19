@@ -222,6 +222,27 @@ The **Applied Effects** section in the Inspector shows the per-clip effect chain
 
 Effects process in order from top to bottom, after built-in color corrections and before chroma key.
 
+### Curves Editor
+
+The **curves** frei0r plugin renders as a graphical curve editor instead of raw sliders:
+
+- **Channel selector**: Red, Green, Blue, RGB, or Luma
+- **240×240 canvas**: Dark grid with diagonal identity baseline and smooth Catmull-Rom spline
+- **2–5 control points**: Click to select, drag to move (auto-sorted by input value, clamped to 0–1)
+- **Double-click**: On empty area to add a new point (up to 5), on existing point to remove it (minimum 2)
+- Changes update the preview in real-time
+
+### Levels Editor
+
+The **levels** frei0r plugin renders as a graphical levels editor:
+
+- **Channel selector**: Red, Green, Blue, or Luma
+- **Transfer function visualization**: 240×80 canvas showing the input→output mapping curve with vertical markers for input black/white levels
+- **Input Black / Input White**: Set the input range (0–1)
+- **Gamma**: Midtone adjustment (0.1–4.0, mark at 1.0 = neutral; mapped from frei0r 0–1 range)
+- **Output Black / Output White**: Set the output range (0–1)
+- The transfer function curve updates in real-time as sliders move
+
 ### Copy/Paste Effects
 
 Copy and paste buttons in the **Applied Effects** header let you transfer all frei0r effects between clips. Also included in Paste Attributes (`Ctrl+Shift+V`).
@@ -236,8 +257,8 @@ Here is a selection of commonly used frei0r effects. The full list depends on yo
 |--------|-------------|
 | **coloradj_RGB** | Per-channel RGB level adjustment |
 | **3-point-color-balance** | Shadows/midtones/highlights color balance (renders as color wheels in Inspector) |
-| **curves** | Tone curve adjustment |
-| **levels** | Input/output level control with gamma |
+| **curves** | Tone curve adjustment (renders as graphical curve editor in Inspector) |
+| **levels** | Input/output level control with gamma (renders as graphical levels editor in Inspector) |
 | **brightness** | Simple brightness control |
 | **gamma** | Gamma correction |
 | **saturat0r** | Saturation adjustment |

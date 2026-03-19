@@ -2863,6 +2863,11 @@ pub fn build_window(
             let prog_player = prog_player.clone();
             let project = project.clone();
             let timeline_state = timeline_state.clone();
+            // Debounce timer for paused-frame reseek after frei0r param changes.
+            // Avoids blocking the GTK main loop inside a slider callback and
+            // prevents crash-prone flush-seeks in some frei0r plugins (cairogradient)
+            // by coalescing rapid slider changes into a single deferred reseek.
+            let frei0r_reseek_timer: Rc<Cell<u32>> = Rc::new(Cell::new(0));
             move || {
                 let effects = {
                     let proj = project.borrow();
@@ -2876,7 +2881,31 @@ pub fn build_window(
                     })
                 };
                 if let Some(effects) = effects {
-                    prog_player.borrow_mut().update_frei0r_effects(&effects);
+                    let needs_reseek = prog_player
+                        .borrow_mut()
+                        .update_frei0r_effects(&effects);
+                    if needs_reseek {
+                        // Schedule a debounced reseek: cancel the previous timer
+                        // (via ticket) and set a new one. The 32ms delay coalesces
+                        // rapid slider changes into a single flush-seek, reducing
+                        // crash risk and improving responsiveness.
+                        let ticket = frei0r_reseek_timer.get().wrapping_add(1);
+                        frei0r_reseek_timer.set(ticket);
+                        let pp = prog_player.clone();
+                        let timer_check = frei0r_reseek_timer.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(32),
+                            move || {
+                                if timer_check.get() != ticket {
+                                    return; // superseded by a newer change
+                                }
+                                let p = pp.borrow();
+                                if !p.is_playing() {
+                                    p.reseek_paused();
+                                }
+                            },
+                        );
+                    }
                 }
             }
         },

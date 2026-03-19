@@ -3428,10 +3428,20 @@ impl ProgramPlayer {
     /// If the effect topology changed (add/remove/reorder/toggle), syncs the
     /// clip model and triggers a full pipeline rebuild. Otherwise updates
     /// GStreamer element properties in-place for zero-latency slider feedback.
-    pub fn update_frei0r_effects(&mut self, effects: &[crate::model::clip::Frei0rEffect]) {
+    ///
+    /// Returns `true` if the caller should schedule a paused-frame refresh
+    /// (via `reseek_paused`). The reseek is NOT done internally so that the
+    /// caller can debounce rapid slider changes and avoid blocking the GTK
+    /// main loop inside a signal handler — some frei0r plugins (cairogradient)
+    /// crash when a flush-seek is issued synchronously from a property-change
+    /// callback.
+    pub fn update_frei0r_effects(
+        &mut self,
+        effects: &[crate::model::clip::Frei0rEffect],
+    ) -> bool {
         let clip_idx = match self.current_idx {
             Some(i) => i,
-            None => return,
+            None => return false,
         };
 
         // Check topology: does the slot already have matching elements?
@@ -3457,18 +3467,37 @@ impl ProgramPlayer {
             false
         };
 
+        // Detect string-param changes BEFORE syncing, because some frei0r
+        // plugins (cairogradient) SIGSEGV in f0r_set_param_value → strlen
+        // when a string property is re-set on a live element. If any string
+        // param changed we force a full pipeline rebuild (which creates a
+        // fresh element with the new values baked in) instead of live update.
+        let string_params_changed = topology_matches
+            && self.clips.get(clip_idx).map_or(false, |old_clip| {
+                let old = &old_clip.frei0r_effects;
+                old.len() != effects.len()
+                    || old
+                        .iter()
+                        .zip(effects.iter())
+                        .any(|(o, n)| o.string_params != n.string_params)
+            });
+
         // Always sync the clip model.
         if let Some(clip) = self.clips.get_mut(clip_idx) {
             clip.frei0r_effects = effects.to_vec();
         }
 
-        if !topology_matches {
+        if !topology_matches || string_params_changed {
             let pos = self.timeline_pos_ns;
             self.rebuild_pipeline_at(pos);
-            return;
+            return false; // rebuild already reseeks internally
         }
 
-        // Live param update — set properties on existing GStreamer elements.
+        // Live param update — ONLY numeric params.  String params are baked
+        // into the element during pipeline construction; changing them triggers
+        // a rebuild above.  Skipping them here avoids a SIGSEGV in
+        // f0r_set_param_value for plugins whose C code crashes when an
+        // unchanged string property is re-set on a running element.
         if let Some(slot) = self.slot_for_clip(clip_idx) {
             let enabled: Vec<&crate::model::clip::Frei0rEffect> =
                 effects.iter().filter(|e| e.enabled).collect();
@@ -3478,18 +3507,11 @@ impl ProgramPlayer {
                         set_frei0r_property(elem, param, val);
                     }
                 }
-                for (param, val) in &effect.string_params {
-                    if elem.has_property(param) {
-                        set_frei0r_string_property(elem, param, val);
-                    }
-                }
             }
         }
 
-        // Force frame redraw when paused.
-        if self.current_idx.is_some() && self.state != PlayerState::Playing {
-            self.reseek_slot_for_current();
-        }
+        // Tell caller a paused-frame refresh is needed (but don't block here).
+        self.current_idx.is_some() && self.state != PlayerState::Playing
     }
 
     #[allow(dead_code)]
@@ -6133,7 +6155,6 @@ impl ProgramPlayer {
     }
 
     /// Public entry point to force a paused frame refresh on the current slot.
-    #[allow(dead_code)]
     pub fn reseek_paused(&self) {
         if self.state != PlayerState::Playing {
             self.reseek_slot_for_current();
@@ -11577,16 +11598,50 @@ fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
         return;
     };
     let vtype = pspec.value_type();
-    if vtype == glib::Type::BOOL {
-        elem.set_property(param, val > 0.5);
-    } else if vtype == glib::Type::F64 {
-        elem.set_property(param, val);
-    } else if vtype == glib::Type::F32 {
-        elem.set_property(param, val as f32);
-    } else if vtype == glib::Type::STRING {
-        // String params are handled by set_frei0r_string_property.
-    } else {
-        // Unknown type (Object, etc.) — skip silently.
+    // Wrap in catch_unwind: some frei0r plugins (e.g. cairogradient) have C-level
+    // property setters that can panic or trigger GLib assertions for edge-case
+    // values. Catching here prevents a single bad property from crashing the app.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if vtype == glib::Type::BOOL {
+            elem.set_property(param, val > 0.5);
+        } else if vtype == glib::Type::F64 {
+            // Clamp to the property spec's actual range to avoid assertion failures.
+            let clamped = if let Some(ps) = pspec.downcast_ref::<glib::ParamSpecDouble>() {
+                let pmin = ps.minimum();
+                let pmax = ps.maximum();
+                if pmin.is_finite() && pmax.is_finite() && pmin < pmax {
+                    val.clamp(pmin, pmax)
+                } else {
+                    val
+                }
+            } else {
+                val
+            };
+            elem.set_property(param, clamped);
+        } else if vtype == glib::Type::F32 {
+            let clamped = if let Some(ps) = pspec.downcast_ref::<glib::ParamSpecFloat>() {
+                let pmin = ps.minimum();
+                let pmax = ps.maximum();
+                if pmin.is_finite() && pmax.is_finite() && pmin < pmax {
+                    (val as f32).clamp(pmin, pmax)
+                } else {
+                    val as f32
+                }
+            } else {
+                val as f32
+            };
+            elem.set_property(param, clamped);
+        } else if vtype == glib::Type::STRING {
+            // String params are handled by set_frei0r_string_property.
+        } else {
+            // Unknown type (Object, etc.) — skip silently.
+        }
+    }));
+    if let Err(e) = result {
+        log::warn!(
+            "set_frei0r_property: panic setting '{param}' = {val} — {:?}",
+            e.downcast_ref::<String>().map(|s| s.as_str()).unwrap_or("unknown")
+        );
     }
 }
 
@@ -11595,7 +11650,15 @@ fn set_frei0r_string_property(elem: &gst::Element, param: &str, val: &str) {
         return;
     };
     if pspec.value_type() == glib::Type::STRING {
-        elem.set_property(param, val);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            elem.set_property(param, val);
+        }));
+        if let Err(e) = result {
+            log::warn!(
+                "set_frei0r_string_property: panic setting '{param}' = '{val}' — {:?}",
+                e.downcast_ref::<String>().map(|s| s.as_str()).unwrap_or("unknown")
+            );
+        }
     }
 }
 

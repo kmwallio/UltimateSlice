@@ -27,7 +27,8 @@ jobs:
             gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-gl \
-            libglib2.0-dev
+            libglib2.0-dev \
+            frei0r-plugins
 
       - name: Build
         run: cargo build --locked

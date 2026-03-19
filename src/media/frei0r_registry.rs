@@ -265,6 +265,19 @@ impl Frei0rRegistry {
     }
 }
 
+/// Clamp frei0r parameter min/max to sane finite values.
+/// Some plugins report NaN, Inf, or extreme bounds (f64::MIN/MAX, ±1e308)
+/// which crash GTK `Scale::with_range()` or produce unusable sliders.
+fn sanitize_param_bounds(raw_min: f64, raw_max: f64) -> (f64, f64) {
+    let min = if raw_min.is_finite() && raw_min > -1e6 { raw_min } else { 0.0 };
+    let max = if raw_max.is_finite() && raw_max < 1e6 { raw_max } else { 1.0 };
+    if min >= max {
+        (0.0, 1.0)
+    } else {
+        (min, max)
+    }
+}
+
 fn inspect_param(
     element: &gstreamer::Element,
     pspec: &glib::ParamSpec,
@@ -282,13 +295,18 @@ fn inspect_param(
             let mid = (pspec_double.minimum() + pspec_double.maximum()) / 2.0;
             if mid.is_finite() { mid } else { 0.0 }
         };
+        // Sanitize min/max: some frei0r plugins report NaN, Inf, or
+        // extreme bounds (e.g. f64::MIN/MAX) which crash GTK sliders.
+        let raw_min = pspec_double.minimum();
+        let raw_max = pspec_double.maximum();
+        let (min, max) = sanitize_param_bounds(raw_min, raw_max);
         return Some(Frei0rParamInfo {
             display_name,
             name,
             param_type: Frei0rParamType::Double,
-            default_value: safe_default,
-            min: pspec_double.minimum(),
-            max: pspec_double.maximum(),
+            default_value: safe_default.clamp(min, max),
+            min,
+            max,
             enum_values: None,
             default_string: None,
         });
@@ -302,13 +320,16 @@ fn inspect_param(
             let mid = (pspec_float.minimum() as f64 + pspec_float.maximum() as f64) / 2.0;
             if mid.is_finite() { mid } else { 0.0 }
         };
+        let raw_min = pspec_float.minimum() as f64;
+        let raw_max = pspec_float.maximum() as f64;
+        let (min, max) = sanitize_param_bounds(raw_min, raw_max);
         return Some(Frei0rParamInfo {
             display_name,
             name,
             param_type: Frei0rParamType::Double,
-            default_value: safe_default,
-            min: pspec_float.minimum() as f64,
-            max: pspec_float.maximum() as f64,
+            default_value: safe_default.clamp(min, max),
+            min,
+            max,
             enum_values: None,
             default_string: None,
         });
@@ -337,7 +358,12 @@ fn inspect_param(
             .property::<Option<String>>(&name)
             .unwrap_or_default();
         let blurb = pspec.blurb().map(|s| s.to_string()).unwrap_or_default();
-        let enum_values = parse_accepted_values(&blurb);
+        let factory_hint = element
+            .factory()
+            .map(|f| f.name().to_string())
+            .unwrap_or_default();
+        let enum_values = parse_accepted_values(&blurb)
+            .or_else(|| known_string_param_values(&factory_hint, &name));
         return Some(Frei0rParamInfo {
             display_name,
             name,
@@ -567,6 +593,59 @@ fn parse_accepted_values(blurb: &str) -> Option<Vec<String>> {
     }
 }
 
+/// Fallback accepted-value lists for frei0r string parameters whose GStreamer
+/// blurbs omit the `Accepted values:` annotation.  Keyed by (GStreamer element
+/// factory name, property name) to avoid false positives on generic names like
+/// "type" or "pattern".
+fn known_string_param_values(factory_name: &str, property_name: &str) -> Option<Vec<String>> {
+    let v = |vals: &[&str]| Some(vals.iter().map(|s| (*s).into()).collect());
+    match (factory_name, property_name) {
+        // cairogradient: "Linear or radial gradient"
+        ("frei0r-filter-cairogradient", "pattern") => {
+            v(&["gradient_linear", "gradient_radial"])
+        }
+        // colortap: "One of: xpro, sepia, heat, red_green, old_photo, xray, esses, yellow_blue"
+        ("frei0r-filter-colortap", "table") => v(&[
+            "xpro",
+            "sepia",
+            "heat",
+            "red_green",
+            "old_photo",
+            "xray",
+            "esses",
+            "yellow_blue",
+        ]),
+        // keyspillm0pup: mask-type "[0,1,2,3]", operation-1/2 "[0,1,2]"
+        ("frei0r-filter-keyspillm0pup", "mask-type") => v(&["0", "1", "2", "3"]),
+        ("frei0r-filter-keyspillm0pup", "operation-1") => v(&["0", "1", "2"]),
+        ("frei0r-filter-keyspillm0pup", "operation-2") => v(&["0", "1", "2"]),
+        // medians: "Cross5, Square3x3, Bilevel, Diamond3x3, Square5x5, Temp3,
+        //           Temp5, ArceBI, ML3D, ML3dEX, VarSize"
+        ("frei0r-filter-medians", "type") => v(&[
+            "Cross5",
+            "Square3x3",
+            "Bilevel",
+            "Diamond3x3",
+            "Square5x5",
+            "Temp3",
+            "Temp5",
+            "ArceBI",
+            "ML3D",
+            "ML3dEX",
+            "VarSize",
+        ]),
+        // ndvi-filter: five string params with "One of ..." blurbs
+        ("frei0r-filter-ndvi-filter", "color-map") => {
+            v(&["earth", "grayscale", "heat", "rainbow"])
+        }
+        ("frei0r-filter-ndvi-filter", "index-calculation") => v(&["ndvi", "vi"]),
+        ("frei0r-filter-ndvi-filter", "legend") => v(&["off", "bottom"]),
+        ("frei0r-filter-ndvi-filter", "nir-channel") => v(&["r", "g", "b"]),
+        ("frei0r-filter-ndvi-filter", "visible-channel") => v(&["r", "g", "b"]),
+        _ => None,
+    }
+}
+
 /// Convert a frei0r name like `"3-point-color-balance"` to `"3 Point Color Balance"`.
 fn humanize_name(name: &str) -> String {
     name.split('-')
@@ -655,3 +734,4 @@ mod tests {
         }
     }
 }
+// end of file
