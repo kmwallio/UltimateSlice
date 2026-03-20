@@ -614,7 +614,7 @@ pub struct MatchColorCommand {
     pub old_midtones_tint: f32,
     pub old_shadows_warmth: f32,
     pub old_shadows_tint: f32,
-    pub old_lut_path: Option<String>,
+    pub old_lut_paths: Vec<String>,
     pub new_brightness: f32,
     pub new_contrast: f32,
     pub new_saturation: f32,
@@ -631,7 +631,7 @@ pub struct MatchColorCommand {
     pub new_midtones_tint: f32,
     pub new_shadows_warmth: f32,
     pub new_shadows_tint: f32,
-    pub new_lut_path: Option<String>,
+    pub new_lut_paths: Vec<String>,
 }
 
 impl MatchColorCommand {
@@ -655,7 +655,7 @@ impl MatchColorCommand {
                     clip.midtones_tint = self.new_midtones_tint;
                     clip.shadows_warmth = self.new_shadows_warmth;
                     clip.shadows_tint = self.new_shadows_tint;
-                    clip.lut_path = self.new_lut_path.clone();
+                    clip.lut_paths = self.new_lut_paths.clone();
                 } else {
                     clip.brightness = self.old_brightness;
                     clip.contrast = self.old_contrast;
@@ -673,7 +673,7 @@ impl MatchColorCommand {
                     clip.midtones_tint = self.old_midtones_tint;
                     clip.shadows_warmth = self.old_shadows_warmth;
                     clip.shadows_tint = self.old_shadows_tint;
-                    clip.lut_path = self.old_lut_path.clone();
+                    clip.lut_paths = self.old_lut_paths.clone();
                 }
             }
         }

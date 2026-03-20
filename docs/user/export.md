@@ -135,6 +135,15 @@ Clips with speed keyframes use dynamic expressions for export:
 
 The exported clip duration matches the timeline duration computed from the speed integral.
 
+### Slow-motion interpolation
+
+When **Slow-Motion Interpolation** is enabled in the Inspector (Frame Blending or Optical Flow), export appends `minterpolate` after the speed filter for clips with effective speed < 1.0:
+
+- **Frame Blending** (`mi_mode=blend`): fast temporal averaging between frames.
+- **Optical Flow** (`mi_mode=mci`): motion-compensated interpolation for the smoothest result (significantly slower to encode).
+
+The filter is set to the project frame rate (`fps=NUM/DEN`) so synthesized frames match the output timeline. Normal-speed and fast clips are unaffected. Background prerender also applies minterpolate when enabled.
+
 ## Keyframed Properties
 
 Export evaluates phase-1 clip keyframes with interpolation-aware curves:

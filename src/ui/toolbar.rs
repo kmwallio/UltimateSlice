@@ -628,7 +628,7 @@ pub fn build_toolbar(
 
             let dialog = gtk::Dialog::builder()
                 .title("Project Settings")
-                .default_width(360)
+                .default_width(400)
                 .build();
             dialog.set_transient_for(window.as_ref());
             dialog.set_modal(true);
@@ -641,31 +641,129 @@ pub fn build_toolbar(
             grid.set_row_spacing(10);
             grid.set_column_spacing(12);
 
-            // Resolution preset
+            // ── Aspect ratio / resolution presets ──
+            // Each aspect ratio group: (label, [(width, height, display_label)])
+            let ar_presets: Vec<(&str, Vec<(u32, u32, &str)>)> = vec![
+                ("16:9 (Widescreen)", vec![
+                    (3840, 2160, "3840 × 2160  (4K UHD)"),
+                    (2560, 1440, "2560 × 1440  (1440p QHD)"),
+                    (1920, 1080, "1920 × 1080  (1080p HD)"),
+                    (1280, 720,  "1280 × 720   (720p HD)"),
+                ]),
+                ("4:3 (Standard)", vec![
+                    (1440, 1080, "1440 × 1080  (HD 4:3)"),
+                    (1024, 768,  "1024 × 768   (XGA)"),
+                    (720, 480,   "720 × 480    (SD NTSC)"),
+                ]),
+                ("9:16 (Vertical)", vec![
+                    (1080, 1920, "1080 × 1920  (Full HD Vertical)"),
+                    (720, 1280,  "720 × 1280   (HD Vertical)"),
+                ]),
+                ("1:1 (Square)", vec![
+                    (2160, 2160, "2160 × 2160  (4K Square)"),
+                    (1080, 1080, "1080 × 1080  (HD Square)"),
+                ]),
+            ];
+
+            // Detect current aspect ratio and resolution index
+            let (init_ar_idx, init_res_idx) = {
+                let mut found = (4u32, 0u32); // default: Custom
+                'outer: for (ai, (_label, resolutions)) in ar_presets.iter().enumerate() {
+                    for (ri, &(w, h, _)) in resolutions.iter().enumerate() {
+                        if w == proj.width && h == proj.height {
+                            found = (ai as u32, ri as u32);
+                            break 'outer;
+                        }
+                    }
+                }
+                found
+            };
+
+            // Row 0: Aspect Ratio dropdown
+            let ar_label = gtk::Label::new(Some("Aspect Ratio:"));
+            ar_label.set_halign(gtk::Align::End);
+            let ar_combo = gtk::DropDown::from_strings(&[
+                "16:9 (Widescreen)",
+                "4:3 (Standard)",
+                "9:16 (Vertical)",
+                "1:1 (Square)",
+                "Custom",
+            ]);
+            grid.attach(&ar_label, 0, 0, 1, 1);
+            grid.attach(&ar_combo, 1, 0, 2, 1);
+
+            // Row 1: Resolution dropdown (hidden when Custom)
             let res_label = gtk::Label::new(Some("Resolution:"));
             res_label.set_halign(gtk::Align::End);
-            let res_combo = gtk::DropDown::from_strings(&[
-                "1920 × 1080  (1080p HD)",
-                "3840 × 2160  (4K UHD)",
-                "1280 × 720   (720p HD)",
-                "720 × 480    (SD NTSC)",
-                "1080 × 1920  (9:16 Vertical)",
-                "1080 × 1080  (1:1 Square)",
-            ]);
-            let res_idx = match (proj.width, proj.height) {
-                (1920, 1080) => 0,
-                (3840, 2160) => 1,
-                (1280, 720) => 2,
-                (720, 480) => 3,
-                (1080, 1920) => 4,
-                (1080, 1080) => 5,
-                _ => 0,
+            let initial_res_strings: Vec<&str> = if (init_ar_idx as usize) < ar_presets.len() {
+                ar_presets[init_ar_idx as usize].1.iter().map(|r| r.2).collect()
+            } else {
+                vec!["1920 × 1080  (1080p HD)"]
             };
-            res_combo.set_selected(res_idx);
-            grid.attach(&res_label, 0, 0, 1, 1);
-            grid.attach(&res_combo, 1, 0, 1, 1);
+            let res_string_list = gtk::StringList::new(&initial_res_strings.iter().map(|s| *s).collect::<Vec<&str>>());
+            let res_combo = gtk::DropDown::builder()
+                .model(&res_string_list)
+                .build();
+            grid.attach(&res_label, 0, 1, 1, 1);
+            grid.attach(&res_combo, 1, 1, 2, 1);
 
-            // Frame rate preset
+            // Row 2: Custom W×H spin buttons (visible only when Custom)
+            let w_label = gtk::Label::new(Some("Width:"));
+            w_label.set_halign(gtk::Align::End);
+            let w_spin = gtk::SpinButton::with_range(128.0, 7680.0, 2.0);
+            w_spin.set_value(proj.width as f64);
+            let h_label = gtk::Label::new(Some("Height:"));
+            h_label.set_halign(gtk::Align::End);
+            let h_spin = gtk::SpinButton::with_range(128.0, 4320.0, 2.0);
+            h_spin.set_value(proj.height as f64);
+            let custom_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            custom_box.append(&w_label);
+            custom_box.append(&w_spin);
+            custom_box.append(&h_label);
+            custom_box.append(&h_spin);
+            grid.attach(&custom_box, 0, 2, 3, 1);
+
+            // Show/hide based on initial state
+            let is_custom = init_ar_idx == 4;
+            res_label.set_visible(!is_custom);
+            res_combo.set_visible(!is_custom);
+            custom_box.set_visible(is_custom);
+
+            // Set initial selections BEFORE connecting signals
+            ar_combo.set_selected(init_ar_idx);
+            if !is_custom {
+                res_combo.set_selected(init_res_idx);
+            }
+
+            // Wire aspect ratio change → repopulate resolution list
+            {
+                let res_combo = res_combo.clone();
+                let res_label = res_label.clone();
+                let custom_box = custom_box.clone();
+                let ar_presets_labels: Vec<Vec<String>> = ar_presets.iter()
+                    .map(|(_, resolutions)| resolutions.iter().map(|r| r.2.to_string()).collect())
+                    .collect();
+                ar_combo.connect_selected_notify(move |combo| {
+                    let idx = combo.selected() as usize;
+                    if idx < ar_presets_labels.len() {
+                        // Preset aspect ratio: show resolution dropdown, hide custom
+                        let labels: Vec<&str> = ar_presets_labels[idx].iter().map(|s| s.as_str()).collect();
+                        let new_model = gtk::StringList::new(&labels);
+                        res_combo.set_model(Some(&new_model));
+                        res_combo.set_selected(0);
+                        res_label.set_visible(true);
+                        res_combo.set_visible(true);
+                        custom_box.set_visible(false);
+                    } else {
+                        // Custom: hide resolution dropdown, show spin buttons
+                        res_label.set_visible(false);
+                        res_combo.set_visible(false);
+                        custom_box.set_visible(true);
+                    }
+                });
+            }
+
+            // Row 3: Frame rate preset (unchanged)
             let fps_label = gtk::Label::new(Some("Frame Rate:"));
             fps_label.set_halign(gtk::Align::End);
             let fps_combo = gtk::DropDown::from_strings(&[
@@ -686,26 +784,35 @@ pub fn build_toolbar(
                 _ => 1,
             };
             fps_combo.set_selected(fps_idx);
-            grid.attach(&fps_label, 0, 1, 1, 1);
-            grid.attach(&fps_combo, 1, 1, 1, 1);
+            grid.attach(&fps_label, 0, 3, 1, 1);
+            grid.attach(&fps_combo, 1, 3, 2, 1);
 
             dialog.content_area().append(&grid);
             dialog.add_button("Cancel", gtk::ResponseType::Cancel);
             dialog.add_button("Apply", gtk::ResponseType::Accept);
+
+            // Clone presets data for the response handler
+            let ar_res_data: Vec<Vec<(u32, u32)>> = ar_presets.iter()
+                .map(|(_, resolutions)| resolutions.iter().map(|r| (r.0, r.1)).collect())
+                .collect();
 
             drop(proj);
             let project = project.clone();
             let on_project_changed = on_project_changed.clone();
             dialog.connect_response(move |d, resp| {
                 if resp == gtk::ResponseType::Accept {
-                    let (w, h) = match res_combo.selected() {
-                        0 => (1920, 1080),
-                        1 => (3840, 2160),
-                        2 => (1280, 720),
-                        3 => (720, 480),
-                        4 => (1080, 1920),
-                        5 => (1080, 1080),
-                        _ => (1920, 1080),
+                    let ar_idx = ar_combo.selected() as usize;
+                    let (w, h) = if ar_idx < ar_res_data.len() {
+                        // Preset aspect ratio + resolution
+                        let res_idx = res_combo.selected() as usize;
+                        if res_idx < ar_res_data[ar_idx].len() {
+                            ar_res_data[ar_idx][res_idx]
+                        } else {
+                            ar_res_data[ar_idx][0]
+                        }
+                    } else {
+                        // Custom
+                        (w_spin.value() as u32, h_spin.value() as u32)
                     };
                     let fr = match fps_combo.selected() {
                         0 => FrameRate {

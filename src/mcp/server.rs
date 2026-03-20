@@ -662,12 +662,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_lut",
-            "description": "Assign or clear a 3D LUT (.cube) file for a clip. The LUT is applied on export via ffmpeg lut3d. Pass null or omit lut_path to clear.",
+            "description": "Set the 3D LUT (.cube) stack for a clip. LUTs are applied sequentially on export via ffmpeg lut3d. Pass an array of paths to set (empty array or null to clear). A single string path is accepted for backward compatibility (sets a single-element stack).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id":  { "type": "string", "description": "Clip id (from list_clips)." },
-                    "lut_path": { "type": ["string", "null"], "description": "Absolute path to a .cube LUT file, or null to clear." }
+                    "lut_paths": { "type": ["array", "string", "null"], "description": "Array of absolute .cube LUT file paths (applied in order), a single path string, or null to clear." }
                 },
                 "required": ["clip_id"]
             }
@@ -978,7 +978,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "copy_clip_color_grade",
-            "description": "Copy color grading values from a clip into an internal clipboard. The copied grade can then be pasted onto other clips with paste_clip_color_grade. Copies static values only (brightness, contrast, saturation, temperature, tint, exposure, black_point, shadows, midtones, highlights, warmth/tint per tonal region, denoise, sharpness, lut_path).",
+            "description": "Copy color grading values from a clip into an internal clipboard. The copied grade can then be pasted onto other clips with paste_clip_color_grade. Copies static values only (brightness, contrast, saturation, temperature, tint, exposure, black_point, shadows, midtones, highlights, warmth/tint per tonal region, denoise, sharpness, lut_paths).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1416,13 +1416,18 @@ fn dispatch_tool_payload(
         },
         "set_clip_lut" => McpCommand::SetClipLut {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            lut_path: match &args["lut_path"] {
-                Value::String(s) => Some(s.clone()),
-                Value::Null
-                | Value::Bool(_)
-                | Value::Number(_)
-                | Value::Array(_)
-                | Value::Object(_) => None,
+            lut_paths: {
+                // Accept: array of strings, single string, "lut_paths" key, or legacy "lut_path" key
+                let raw = if !args["lut_paths"].is_null() {
+                    &args["lut_paths"]
+                } else {
+                    &args["lut_path"]
+                };
+                match raw {
+                    Value::Array(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+                    Value::String(s) => vec![s.clone()],
+                    _ => Vec::new(),
+                }
             },
             reply: tx,
         },

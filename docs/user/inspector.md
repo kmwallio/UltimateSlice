@@ -196,8 +196,18 @@ Controls the playback speed and direction of the clip. Changing speed adjusts th
 |---|---|---|---|
 | **Speed Multiplier** | 0.25× → 4.0× | 1.0× | 0.5× = slow-motion, 2.0× = fast-forward |
 | **Reverse** | Checkbox | Off | Play the clip backwards (reversed frame order) |
+| **Slow-Motion Interpolation** | Off / Frame Blending / Optical Flow | Off | Synthesizes intermediate frames on export for smooth slow-motion (speed < 1.0 only) |
 
 Marks at **½×**, **1×**, **2×** for quick snapping.
+
+### Slow-motion interpolation
+
+When a clip's speed is below 1.0, the default behavior repeats frames to fill the longer duration, which can look stuttery. The **Slow-Motion Interpolation** dropdown offers two alternatives:
+
+- **Frame Blending** — fast temporal averaging (`minterpolate mi_mode=blend`). Produces a slight motion-blur effect between frames.
+- **Optical Flow** — motion-compensated interpolation (`minterpolate mi_mode=mci`). Slower to encode but produces the smoothest result by synthesizing true intermediate frames.
+
+This is an **export-only** feature — `minterpolate` is too CPU-intensive for real-time preview. Background prerender includes it when enabled. The setting has no effect when speed is 1.0 or higher. Persists via FCPXML.
 
 ### Variable speed ramps
 

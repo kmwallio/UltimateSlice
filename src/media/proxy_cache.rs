@@ -95,7 +95,7 @@ pub struct ProxyCache {
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyWorkerUpdate>,
-    work_tx: Option<mpsc::Sender<(String, ProxyScale, Option<String>, bool)>>,
+    work_tx: Option<mpsc::Sender<(String, ProxyScale, Vec<String>, bool)>>,
     /// Per-job estimated bytes and written bytes for byte-based status progress.
     estimated_bytes: HashMap<String, u64>,
     written_bytes: HashMap<String, u64>,
@@ -123,7 +123,7 @@ impl ProxyCache {
             );
         }
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
-        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Option<String>, bool)>();
+        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Vec<String>, bool)>();
 
         // Pool of worker threads to transcode proxies in parallel.
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
@@ -138,12 +138,13 @@ impl ProxyCache {
                     lock.recv()
                 };
                 match item {
-                    Ok((source_path, scale, lut_path, sidecar_mirror_enabled)) => {
-                        let key = proxy_key(&source_path, lut_path.as_deref());
+                    Ok((source_path, scale, lut_paths, sidecar_mirror_enabled)) => {
+                        let lut_composite = if lut_paths.is_empty() { None } else { Some(lut_paths.join("|")) };
+                        let key = proxy_key(&source_path, lut_composite.as_deref());
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
                             scale,
-                            lut_path.as_deref(),
+                            &lut_paths,
                             &local_root,
                             &key,
                             &tx,
@@ -186,7 +187,7 @@ impl ProxyCache {
         self.sidecar_mirror_enabled = enabled;
     }
 
-    /// Enqueue a proxy transcode for `source_path` (with optional `lut_path`).
+    /// Enqueue a proxy transcode for `source_path` (with optional LUT paths).
     /// No-op if already cached or pending for this exact (source, lut, scale) combination.
     pub fn request(&mut self, source_path: &str, scale: ProxyScale, lut_path: Option<&str>) {
         let key = proxy_key(source_path, lut_path);
@@ -212,10 +213,17 @@ impl ProxyCache {
         self.written_bytes
             .insert(proxy_key(source_path, lut_path), 0);
         if let Some(ref tx) = self.work_tx {
+            // Split composite key back into individual paths for the worker.
+            let lut_paths: Vec<String> = match lut_path {
+                Some(composite) if !composite.is_empty() => {
+                    composite.split('|').map(|s| s.to_string()).collect()
+                }
+                _ => Vec::new(),
+            };
             let _ = tx.send((
                 source_path.to_string(),
                 scale,
-                lut_path.map(|s| s.to_string()),
+                lut_paths,
                 self.sidecar_mirror_enabled,
             ));
         }
@@ -802,30 +810,31 @@ fn mirror_local_proxy_to_sidecar(local_proxy_path: &str, sidecar_path: &str, ffp
 fn transcode_proxy(
     source_path: &str,
     scale: ProxyScale,
-    lut_path: Option<&str>,
+    lut_paths: &[String],
     local_root: &Path,
     cache_key: &str,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
     sidecar_mirror_enabled: bool,
 ) -> (String, bool, bool) {
-    let local_proxy_path = match local_proxy_path_for(source_path, scale, lut_path, local_root) {
+    let lut_composite = if lut_paths.is_empty() { None } else { Some(lut_paths.join("|")) };
+    let lut_key = lut_composite.as_deref();
+    let local_proxy_path = match local_proxy_path_for(source_path, scale, lut_key, local_root) {
         Some(p) => p,
         None => return (String::new(), false, false),
     };
-    let sidecar_proxy_path = alongside_proxy_path_for(source_path, scale, lut_path);
+    let sidecar_proxy_path = alongside_proxy_path_for(source_path, scale, lut_key);
 
     let ffmpeg = match crate::media::export::find_ffmpeg() {
         Ok(f) => f,
         Err(_) => return (local_proxy_path, false, false),
     };
-    let estimated_size_bytes = estimate_proxy_size_bytes(source_path, scale, lut_path, &ffmpeg);
+    let estimated_size_bytes = estimate_proxy_size_bytes(source_path, scale, lut_key, &ffmpeg);
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
 
-    // Build the -vf filter string: scale, then optional lut3d.
+    // Build the -vf filter string: scale, then LUT chain.
     let mut filter = scale.ffmpeg_scale_filter().to_string();
-    if let Some(lut) = lut_path {
+    for lut in lut_paths {
         if !lut.is_empty() {
-            // Escape colons in the path for ffmpeg filter syntax.
             let escaped = lut.replace('\\', "\\\\").replace(':', "\\:");
             filter.push_str(&format!(",lut3d={escaped}"));
         }

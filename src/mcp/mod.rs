@@ -218,7 +218,7 @@ pub enum McpCommand {
     },
     SetClipLut {
         clip_id: String,
-        lut_path: Option<String>,
+        lut_paths: Vec<String>,
         reply: SyncSender<Value>,
     },
     SetClipTransform {

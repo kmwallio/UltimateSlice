@@ -2,18 +2,59 @@
 
 Click **⚙ Settings** in the toolbar to open the Project Settings dialog.
 
-## Canvas Size (Resolution)
+## Aspect Ratio
 
-Choose the output frame size for the project:
+Choose an aspect ratio to filter available resolution presets:
 
-| Preset | Resolution | Aspect Ratio | Use Case |
-|---|---|---|---|
-| **1920 × 1080 (1080p HD)** | 1920 × 1080 | 16:9 | Standard HD (default) |
-| **3840 × 2160 (4K UHD)** | 3840 × 2160 | 16:9 | 4K delivery |
-| **1280 × 720 (720p HD)** | 1280 × 720 | 16:9 | Web / streaming |
-| **720 × 480 (SD NTSC)** | 720 × 480 | ~4:3 | Standard definition |
-| **1080 × 1920 (9:16 Vertical)** | 1080 × 1920 | 9:16 | Mobile / stories / reels |
-| **1080 × 1080 (1:1 Square)** | 1080 × 1080 | 1:1 | Social media square |
+| Option | Description |
+|---|---|
+| **16:9 (Widescreen)** | Standard widescreen — TV, YouTube, cinema |
+| **4:3 (Standard)** | Classic TV / presentation format |
+| **9:16 (Vertical)** | Portrait — mobile stories, reels, TikTok |
+| **1:1 (Square)** | Square — Instagram, social media |
+| **Custom** | Enter any width × height manually |
+
+## Resolution Presets
+
+When a preset aspect ratio is selected, the Resolution dropdown shows matching canvas sizes:
+
+### 16:9 (Widescreen)
+
+| Preset | Resolution |
+|---|---|
+| 3840 × 2160 (4K UHD) | 3840 × 2160 |
+| 2560 × 1440 (1440p QHD) | 2560 × 1440 |
+| 1920 × 1080 (1080p HD) | 1920 × 1080 |
+| 1280 × 720 (720p HD) | 1280 × 720 |
+
+### 4:3 (Standard)
+
+| Preset | Resolution |
+|---|---|
+| 1440 × 1080 (HD 4:3) | 1440 × 1080 |
+| 1024 × 768 (XGA) | 1024 × 768 |
+| 720 × 480 (SD NTSC) | 720 × 480 |
+
+### 9:16 (Vertical)
+
+| Preset | Resolution |
+|---|---|
+| 1080 × 1920 (Full HD Vertical) | 1080 × 1920 |
+| 720 × 1280 (HD Vertical) | 720 × 1280 |
+
+### 1:1 (Square)
+
+| Preset | Resolution |
+|---|---|
+| 2160 × 2160 (4K Square) | 2160 × 2160 |
+| 1080 × 1080 (HD Square) | 1080 × 1080 |
+
+## Custom Resolution
+
+Select **Custom** from the Aspect Ratio dropdown to enter any width and height using spin buttons:
+
+- **Width**: 128–7680 pixels (step 2)
+- **Height**: 128–4320 pixels (step 2)
 
 All clips are automatically scaled and letterboxed/pillarboxed to fit the chosen canvas during both preview and export.
 

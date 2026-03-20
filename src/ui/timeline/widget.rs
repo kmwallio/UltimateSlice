@@ -178,7 +178,7 @@ pub struct ColorGradeClipboard {
     pub shadows_tint: f32,
     pub denoise: f32,
     pub sharpness: f32,
-    pub lut_path: Option<String>,
+    pub lut_paths: Vec<String>,
 }
 
 impl ColorGradeClipboard {
@@ -203,7 +203,7 @@ impl ColorGradeClipboard {
             shadows_tint: clip.shadows_tint,
             denoise: clip.denoise,
             sharpness: clip.sharpness,
-            lut_path: clip.lut_path.clone(),
+            lut_paths: clip.lut_paths.clone(),
         }
     }
 
@@ -228,7 +228,7 @@ impl ColorGradeClipboard {
         target.shadows_tint = self.shadows_tint;
         target.denoise = self.denoise;
         target.sharpness = self.sharpness;
-        target.lut_path = self.lut_path.clone();
+        target.lut_paths = self.lut_paths.clone();
         before != *target
     }
 }
@@ -2509,7 +2509,7 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     // Enhancement
     target.denoise = source.denoise;
     target.sharpness = source.sharpness;
-    target.lut_path = source.lut_path.clone();
+    target.lut_paths = source.lut_paths.clone();
     // Audio
     target.volume = source.volume;
     target.pan = source.pan;
@@ -6116,11 +6116,7 @@ fn draw_clip(
 
         // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0, and "◀" when reversed
         let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
-        let has_lut_badge = clip
-            .lut_path
-            .as_ref()
-            .map(|p| !p.is_empty())
-            .unwrap_or(false);
+        let has_lut_badge = !clip.lut_paths.is_empty();
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
             && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
@@ -7862,7 +7858,7 @@ mod tests {
                     clip.group_id = Some("group-1".to_string());
                     clip.link_group_id = Some("link-1".to_string());
                     clip.brightness = 0.25;
-                    clip.lut_path = Some("/tmp/look.cube".to_string());
+                    clip.lut_paths = vec!["/tmp/look.cube".to_string()];
                 }
                 if clip.id == "right" {
                     clip.transition_after = "cross_dissolve".to_string();
@@ -7901,7 +7897,7 @@ mod tests {
             assert_eq!(merged.group_id.as_deref(), Some("group-1"));
             assert_eq!(merged.link_group_id.as_deref(), Some("link-1"));
             assert_eq!(merged.brightness, 0.25);
-            assert_eq!(merged.lut_path.as_deref(), Some("/tmp/look.cube"));
+            assert_eq!(merged.lut_paths, vec!["/tmp/look.cube"]);
             assert_eq!(merged.transition_after, "cross_dissolve");
             assert_eq!(merged.transition_after_ns, 250_000_000);
         }

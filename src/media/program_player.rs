@@ -320,6 +320,8 @@ pub struct ProgramClip {
     pub speed: f64,
     /// Optional variable speed keyframes over clip-local timeline.
     pub speed_keyframes: Vec<NumericKeyframe>,
+    /// Slow-motion frame interpolation mode (export/prerender only).
+    pub slow_motion_interp: crate::model::clip::SlowMotionInterp,
     /// Reverse playback when true.
     pub reverse: bool,
     /// Freeze-frame enabled for this clip (video-only hold semantics).
@@ -337,8 +339,8 @@ pub struct ProgramClip {
     pub transition_after: String,
     /// Transition duration in nanoseconds.
     pub transition_after_ns: u64,
-    /// LUT file path for color grading (used for proxy lookup when proxy mode is enabled).
-    pub lut_path: Option<String>,
+    /// LUT file paths for color grading (used for proxy lookup when proxy mode is enabled).
+    pub lut_paths: Vec<String>,
     /// Scale multiplier: 1.0 = fill frame, >1.0 = zoom in, <1.0 = shrink with black borders.
     pub scale: f64,
     pub scale_keyframes: Vec<NumericKeyframe>,
@@ -4383,21 +4385,16 @@ impl ProgramPlayer {
             }
         }
 
+        let lut_composite = if clip.lut_paths.is_empty() { None } else { Some(clip.lut_paths.join("|")) };
         if self.proxy_enabled {
             let key =
-                crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+                crate::media::proxy_cache::proxy_key(&clip.source_path, lut_composite.as_deref());
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
-        } else if self.preview_luts
-            && clip
-                .lut_path
-                .as_deref()
-                .map(|p| !p.is_empty())
-                .unwrap_or(false)
-        {
+        } else if self.preview_luts && !clip.lut_paths.is_empty() {
             let key =
-                crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+                crate::media::proxy_cache::proxy_key(&clip.source_path, lut_composite.as_deref());
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
@@ -5103,7 +5100,7 @@ impl ProgramPlayer {
                 c.shadows.to_bits().hash(&mut hasher);
                 c.midtones.to_bits().hash(&mut hasher);
                 c.highlights.to_bits().hash(&mut hasher);
-                c.lut_path.hash(&mut hasher);
+                c.lut_paths.hash(&mut hasher);
                 c.exposure.to_bits().hash(&mut hasher);
                 c.black_point.to_bits().hash(&mut hasher);
                 c.highlights_warmth.to_bits().hash(&mut hasher);
@@ -5151,6 +5148,8 @@ impl ProgramPlayer {
                         v.hash(&mut hasher);
                     }
                 }
+                // Slow-motion interpolation mode
+                c.slow_motion_interp.hash(&mut hasher);
             }
         }
         hasher.finish()
@@ -8324,7 +8323,7 @@ impl ProgramPlayer {
                 // Apply LUT at source resolution (before downscale) so it
                 // processes the same pixel values as the export path.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8342,13 +8341,14 @@ impl ProgramPlayer {
                     Self::prerender_build_sharpen_filter(clip),
                     Self::prerender_build_frei0r_effects_filter(clip),
                     Self::prerender_build_title_filter(clip, out_h),
+                    Self::prerender_build_minterpolate_filter(clip, fps),
                 ));
             } else if i == 0 {
                 if clip.chroma_key_enabled {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8362,11 +8362,12 @@ impl ProgramPlayer {
                         Self::prerender_build_frei0r_effects_filter(clip),
                         Self::prerender_build_chroma_key_filter(clip),
                         Self::prerender_build_title_filter(clip, out_h),
+                        Self::prerender_build_minterpolate_filter(clip, fps),
                     ));
                 } else {
                     // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8379,13 +8380,14 @@ impl ProgramPlayer {
                         Self::prerender_build_sharpen_filter(clip),
                         Self::prerender_build_frei0r_effects_filter(clip),
                         Self::prerender_build_title_filter(clip, out_h),
+                        Self::prerender_build_minterpolate_filter(clip, fps),
                     ));
                 }
             } else {
                 // Overlay tracks: convert to yuva420p early so pad fills transparent.
                 // Apply LUT at source resolution before format/scale for parity.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
@@ -8398,6 +8400,7 @@ impl ProgramPlayer {
                     Self::prerender_build_frei0r_effects_filter(clip),
                     Self::prerender_build_chroma_key_filter(clip),
                     Self::prerender_build_title_filter(clip, out_h),
+                    Self::prerender_build_minterpolate_filter(clip, fps),
                     clip.opacity.clamp(0.0, 1.0),
                 ));
             }
@@ -8642,13 +8645,14 @@ impl ProgramPlayer {
         if source_is_proxy {
             return String::new();
         }
-        if let Some(path) = clip.lut_path.as_deref() {
+        let mut result = String::new();
+        for path in &clip.lut_paths {
             if !path.is_empty() && Path::new(path).exists() {
                 let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
-                return format!(",lut3d={escaped}");
+                result.push_str(&format!(",lut3d={escaped}"));
             }
         }
-        String::new()
+        result
     }
 
     fn prerender_build_chroma_key_filter(clip: &ProgramClip) -> String {
@@ -8945,6 +8949,28 @@ impl ProgramPlayer {
         filter
     }
 
+    fn prerender_build_minterpolate_filter(clip: &ProgramClip, fps: u32) -> String {
+        use crate::model::clip::SlowMotionInterp;
+        if clip.slow_motion_interp == SlowMotionInterp::Off {
+            return String::new();
+        }
+        // Only apply for slow-motion clips
+        let is_slow = if !clip.speed_keyframes.is_empty() {
+            clip.speed_keyframes.iter().any(|kf| kf.value < 1.0)
+        } else {
+            clip.speed < 1.0 - 0.001
+        };
+        if !is_slow {
+            return String::new();
+        }
+        let mi_mode = match clip.slow_motion_interp {
+            SlowMotionInterp::Blend => "blend",
+            SlowMotionInterp::OpticalFlow => "mci",
+            SlowMotionInterp::Off => unreachable!(),
+        };
+        format!(",minterpolate=fps={fps}:mi_mode={mi_mode}")
+    }
+
     fn build_slot_for_clip(
         &mut self,
         clip_idx: usize,
@@ -9005,11 +9031,10 @@ impl ProgramPlayer {
 
         let (proc_w, proc_h) = self.preview_processing_dimensions();
 
-        // Resolve real-time LUT: only apply via pad probe when the source
-        // is NOT already LUT-baked (proxy or preview-LUT media).
+        // Apply first LUT in realtime preview; full stack applied in prerender/export.
         let realtime_lut = if !using_proxy {
-            clip.lut_path
-                .as_deref()
+            clip.lut_paths
+                .first()
                 .filter(|p| !p.is_empty())
                 .and_then(|p| self.get_or_parse_lut(p))
         } else {
@@ -11739,6 +11764,7 @@ mod tests {
             title_y: 0.0,
             speed: 1.0,
             speed_keyframes: Vec::new(),
+            slow_motion_interp: crate::model::clip::SlowMotionInterp::Off,
             reverse: false,
             freeze_frame: false,
             freeze_frame_source_ns: None,
@@ -11747,7 +11773,7 @@ mod tests {
             track_index: 0,
             transition_after: String::new(),
             transition_after_ns: 0,
-            lut_path: None,
+            lut_paths: Vec::new(),
             scale: 1.0,
             scale_keyframes: Vec::new(),
             opacity: 1.0,
@@ -11966,7 +11992,7 @@ mod tests {
             clip.id
         );
         std::fs::write(&lut_path, "LUT_3D_SIZE 2\n0 0 0\n1 1 1\n").expect("write LUT test file");
-        clip.lut_path = Some(lut_path.clone());
+        clip.lut_paths = vec![lut_path.clone()];
         let with_original = ProgramPlayer::prerender_build_lut_filter(&clip, false);
         let with_proxy = ProgramPlayer::prerender_build_lut_filter(&clip, true);
         assert!(with_original.contains("lut3d="));

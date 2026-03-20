@@ -1,5 +1,6 @@
 use crate::model::clip::{
     BezierControls, Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe,
+    SlowMotionInterp,
 };
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
@@ -1113,6 +1114,13 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:reverse") {
                 clip.reverse = v.parse().unwrap_or(false);
             }
+            if let Some(v) = attrs.get("us:slow-motion-interp") {
+                clip.slow_motion_interp = match v.as_str() {
+                    "blend" => SlowMotionInterp::Blend,
+                    "optical-flow" => SlowMotionInterp::OpticalFlow,
+                    _ => SlowMotionInterp::Off,
+                };
+            }
             if let Some(v) = attrs.get("us:freeze-frame") {
                 clip.freeze_frame = v == "true" || v == "1";
             }
@@ -1188,8 +1196,14 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:bg-removal-threshold") {
                 clip.bg_removal_threshold = v.parse().unwrap_or(0.5);
             }
-            if let Some(v) = attrs.get("us:lut-path") {
-                clip.lut_path = Some(v.clone());
+            if let Some(v) = attrs.get("us:lut-paths") {
+                // New multi-LUT format: JSON array of paths
+                if let Ok(paths) = serde_json::from_str::<Vec<String>>(v) {
+                    clip.lut_paths = paths;
+                }
+            } else if let Some(v) = attrs.get("us:lut-path") {
+                // Backward compat: old single-LUT format
+                clip.lut_paths = vec![v.clone()];
             }
             if let Some(v) = attrs.get("us:transition-after") {
                 clip.transition_after = v.clone();

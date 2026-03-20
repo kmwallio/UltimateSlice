@@ -1,5 +1,5 @@
 use crate::media::program_player::ProgramPlayer;
-use crate::model::clip::{Clip, ClipKind, NumericKeyframe};
+use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -267,7 +267,7 @@ pub fn export_project(
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
         let title_filter = build_title_filter(clip, out_h);
-        let speed_filter = build_timing_filter(clip, frame_duration_s);
+        let speed_filter = build_timing_filter(clip, frame_duration_s, project.frame_rate.numerator, project.frame_rate.denominator);
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
@@ -404,7 +404,7 @@ pub fn export_project(
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
         let title_filter = build_title_filter(clip, out_h);
-        let speed_filter = build_timing_filter(clip, frame_duration_s);
+        let speed_filter = build_timing_filter(clip, frame_duration_s, project.frame_rate.numerator, project.frame_rate.denominator);
         let lut_prefix = build_lut_filter_prefix(clip);        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let rotate_filter = build_rotation_filter(clip, true);
         let has_transform_keyframes = has_transform_keyframes(clip);
@@ -1263,16 +1263,17 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
     result
 }
 
-/// LUT filter for use at the start of a chain (trailing comma, no leading).
-/// Returns `lut3d={path},` or empty string.
+/// LUT filter chain for use at the start of a filter pipeline (trailing comma, no leading).
+/// Returns `lut3d={path1},lut3d={path2},` or empty string.
 fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
-    if let Some(ref path) = clip.lut_path {
+    let mut result = String::new();
+    for path in &clip.lut_paths {
         if !path.is_empty() && std::path::Path::new(path).exists() {
             let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
-            return format!("lut3d={escaped},");
+            result.push_str(&format!("lut3d={escaped},"));
         }
     }
-    String::new()
+    result
 }
 
 fn parse_title_font(font_desc: &str) -> (String, f64) {
@@ -1525,7 +1526,12 @@ fn title_clip_lavfi_color(
     )
 }
 
-fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -> String {
+fn build_timing_filter(
+    clip: &crate::model::clip::Clip,
+    frame_duration_s: f64,
+    fps_num: u32,
+    fps_den: u32,
+) -> String {
     if clip.kind == ClipKind::Title {
         // Title clips are generated at exact duration by lavfi, no timing filter needed.
         return String::new();
@@ -1538,6 +1544,9 @@ fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -
             ",trim=duration={frame_s:.6},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={pad_s:.6},trim=duration={hold_s:.6},setpts=PTS-STARTPTS"
         );
     }
+
+    let minterp_suffix = build_minterpolate_suffix(clip, fps_num, fps_den);
+
     if !clip.speed_keyframes.is_empty() {
         // Build a source→timeline time mapping for setpts.  Speed keyframes
         // are in timeline coordinates, but FFmpeg's PTS is in source
@@ -1611,20 +1620,50 @@ fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -
         // Wrap: convert seconds → PTS units, trim to clip duration.
         let dur_s = clip_dur_ns as f64 / 1_000_000_000.0;
         return if clip.reverse {
-            format!(",reverse,setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS")
+            format!(",reverse,setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS{minterp_suffix}")
         } else {
-            format!(",setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS")
+            format!(",setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS{minterp_suffix}")
         };
     }
     let has_speed = (clip.speed - 1.0).abs() > 0.001;
     match (clip.reverse, has_speed) {
-        (false, false) => String::new(),
-        (false, true) => format!(",setpts=PTS/{:.6}", clip.speed),
+        (false, false) => minterp_suffix,
+        (false, true) => format!(",setpts=PTS/{:.6}{minterp_suffix}", clip.speed),
         // `reverse` already emits a valid timeline in ffmpeg; STARTPTS-PTS here can
         // cause non-monotonic DTS and near-empty video output.
-        (true, false) => ",reverse".to_string(),
-        (true, true) => format!(",reverse,setpts=PTS/{:.6}", clip.speed),
+        (true, false) => format!(",reverse{minterp_suffix}"),
+        (true, true) => format!(",reverse,setpts=PTS/{:.6}{minterp_suffix}", clip.speed),
     }
+}
+
+/// Build the minterpolate filter suffix for slow-motion frame interpolation.
+/// Returns empty string if interpolation is Off or the clip isn't slow-motion.
+fn build_minterpolate_suffix(clip: &Clip, fps_num: u32, fps_den: u32) -> String {
+    if clip.slow_motion_interp == SlowMotionInterp::Off {
+        return String::new();
+    }
+    // Check if clip has slow-motion segments:
+    // - For constant speed: speed < 1.0
+    // - For speed keyframes: any keyframe value < 1.0
+    let is_slow = if !clip.speed_keyframes.is_empty() {
+        clip.speed_keyframes.iter().any(|kf| kf.value < 1.0)
+    } else {
+        clip.speed < 1.0 - 0.001
+    };
+    if !is_slow {
+        return String::new();
+    }
+    let mi_mode = match clip.slow_motion_interp {
+        SlowMotionInterp::Blend => "blend",
+        SlowMotionInterp::OpticalFlow => "mci",
+        SlowMotionInterp::Off => unreachable!(),
+    };
+    let fps = if fps_den > 0 {
+        format!("{fps_num}/{fps_den}")
+    } else {
+        format!("{fps_num}")
+    };
+    format!(",minterpolate=fps={fps}:mi_mode={mi_mode}")
 }
 
 /// Build an ffmpeg crop + re-pad filter for user-controlled crop.
@@ -2476,7 +2515,7 @@ mod tests {
         clip.freeze_frame = true;
         clip.freeze_frame_hold_duration_ns = Some(2_500_000_000);
 
-        let filter = build_timing_filter(&clip, 1.0 / 25.0);
+        let filter = build_timing_filter(&clip, 1.0 / 25.0, 25, 1);
         assert!(filter.contains("trim=duration=0.040000"));
         assert!(filter.contains("tpad=stop_mode=clone:stop_duration=2.460000"));
         assert!(filter.contains("trim=duration=2.500000"));

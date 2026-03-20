@@ -111,8 +111,9 @@ pub struct InspectorView {
     // Speed
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
+    pub slow_motion_dropdown: DropDown,
     // LUT (color grading)
-    pub lut_path_label: Label,
+    pub lut_display_box: GBox,
     pub lut_clear_btn: Button,
     pub match_color_btn: Button,
     /// Set true while update() runs to suppress feedback from slider signals
@@ -1161,20 +1162,36 @@ impl InspectorView {
                     self.speed_slider.set_value(c.speed);
                 }
                 self.reverse_check.set_active(c.reverse);
+                self.slow_motion_dropdown.set_selected(match c.slow_motion_interp {
+                    crate::model::clip::SlowMotionInterp::Off => 0,
+                    crate::model::clip::SlowMotionInterp::Blend => 1,
+                    crate::model::clip::SlowMotionInterp::OpticalFlow => 2,
+                });
                 // LUT
-                match &c.lut_path {
-                    Some(p) => {
-                        let name = std::path::Path::new(p)
+                // Rebuild LUT list display
+                while let Some(child) = self.lut_display_box.first_child() {
+                    self.lut_display_box.remove(&child);
+                }
+                if c.lut_paths.is_empty() {
+                    let none_label = Label::new(Some("None"));
+                    none_label.set_halign(gtk4::Align::Start);
+                    none_label.add_css_class("clip-path");
+                    self.lut_display_box.append(&none_label);
+                    self.lut_clear_btn.set_sensitive(false);
+                } else {
+                    for (i, path) in c.lut_paths.iter().enumerate() {
+                        let name = std::path::Path::new(path)
                             .file_name()
                             .and_then(|n| n.to_str())
-                            .unwrap_or(p.as_str());
-                        self.lut_path_label.set_text(name);
-                        self.lut_clear_btn.set_sensitive(true);
+                            .unwrap_or(path.as_str());
+                        let label = Label::new(Some(&format!("{}. {}", i + 1, name)));
+                        label.set_halign(gtk4::Align::Start);
+                        label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
+                        label.set_tooltip_text(Some(path));
+                        label.add_css_class("clip-path");
+                        self.lut_display_box.append(&label);
                     }
-                    None => {
-                        self.lut_path_label.set_text("None");
-                        self.lut_clear_btn.set_sensitive(false);
-                    }
+                    self.lut_clear_btn.set_sensitive(true);
                 }
                 // Chroma Key
                 self.chroma_key_enable.set_active(c.chroma_key_enabled);
@@ -1264,7 +1281,14 @@ impl InspectorView {
                 self.title_bg_box_padding_slider.set_value(8.0);
                 self.speed_slider.set_value(1.0);
                 self.reverse_check.set_active(false);
-                self.lut_path_label.set_text("None");
+                self.slow_motion_dropdown.set_selected(0);
+                while let Some(child) = self.lut_display_box.first_child() {
+                    self.lut_display_box.remove(&child);
+                }
+                let none_label = Label::new(Some("None"));
+                none_label.set_halign(gtk4::Align::Start);
+                none_label.add_css_class("clip-path");
+                self.lut_display_box.append(&none_label);
                 self.lut_clear_btn.set_sensitive(false);
                 // Chroma Key defaults
                 self.chroma_key_enable.set_active(false);
@@ -2350,6 +2374,20 @@ pub fn build_inspector(
     ));
     speed_inner.append(&reverse_check);
 
+    // Slow-motion interpolation dropdown
+    row_label(&speed_inner, "Slow-Motion Interpolation:");
+    let smo_interp_model = StringList::new(&["Off", "Frame Blending", "Optical Flow"]);
+    let slow_motion_dropdown = DropDown::new(Some(smo_interp_model), gtk4::Expression::NONE);
+    slow_motion_dropdown.set_selected(0);
+    slow_motion_dropdown.set_tooltip_text(Some(
+        "Synthesizes intermediate frames on export for smooth slow-motion (clips with speed < 1.0 only)",
+    ));
+    speed_inner.append(&slow_motion_dropdown);
+    let smo_note = Label::new(Some("Synthesizes frames on export (slow-motion clips only)"));
+    smo_note.set_halign(gtk4::Align::Start);
+    smo_note.add_css_class("clip-path");
+    speed_inner.append(&smo_note);
+
     // ── LUT section (Video + Image only) ─────────────────────────────────────
     let lut_section_box = GBox::new(Orientation::Vertical, 8);
     content_box.append(&lut_section_box);
@@ -2361,16 +2399,16 @@ pub fn build_inspector(
     let lut_inner = GBox::new(Orientation::Vertical, 8);
     lut_expander.set_child(Some(&lut_inner));
 
-    let lut_path_label = Label::new(Some("None"));
-    lut_path_label.set_halign(gtk4::Align::Start);
-    lut_path_label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
-    lut_path_label.set_max_width_chars(22);
-    lut_path_label.add_css_class("clip-path");
-    lut_inner.append(&lut_path_label);
+    let lut_display_box = GBox::new(Orientation::Vertical, 2);
+    let lut_none_label = Label::new(Some("None"));
+    lut_none_label.set_halign(gtk4::Align::Start);
+    lut_none_label.add_css_class("clip-path");
+    lut_display_box.append(&lut_none_label);
+    lut_inner.append(&lut_display_box);
 
     let lut_btn_row = GBox::new(Orientation::Horizontal, 8);
-    let lut_import_btn = Button::with_label("Import LUT…");
-    let lut_clear_btn = Button::with_label("Clear");
+    let lut_import_btn = Button::with_label("Add LUT…");
+    let lut_clear_btn = Button::with_label("Clear All");
     lut_clear_btn.set_sensitive(false);
     lut_btn_row.append(&lut_import_btn);
     lut_btn_row.append(&lut_clear_btn);
@@ -4502,16 +4540,50 @@ pub fn build_inspector(
         });
     }
 
-    // LUT import button
+    // Slow-motion interpolation dropdown
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        slow_motion_dropdown.connect_selected_notify(move |dd| {
+            if *updating.borrow() {
+                return;
+            }
+            let interp = match dd.selected() {
+                1 => crate::model::clip::SlowMotionInterp::Blend,
+                2 => crate::model::clip::SlowMotionInterp::OpticalFlow,
+                _ => crate::model::clip::SlowMotionInterp::Off,
+            };
+            if let Some(ref id) = *selected_clip_id.borrow() {
+                let mut proj = project.borrow_mut();
+                let mut found = false;
+                for track in &mut proj.tracks {
+                    for clip in &mut track.clips {
+                        if clip.id == *id {
+                            clip.slow_motion_interp = interp;
+                            found = true;
+                        }
+                    }
+                }
+                if found {
+                    proj.dirty = true;
+                }
+            }
+            on_clip_changed();
+        });
+    }
+
+    // LUT add button
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let on_lut_changed = on_lut_changed.clone();
-        let lut_path_label = lut_path_label.clone();
+        let lut_display_box = lut_display_box.clone();
         let lut_clear_btn = lut_clear_btn.clone();
         lut_import_btn.connect_clicked(move |btn| {
             let dialog = gtk4::FileDialog::new();
-            dialog.set_title("Import LUT");
+            dialog.set_title("Add LUT");
             let filter = gtk4::FileFilter::new();
             filter.add_pattern("*.cube");
             filter.set_name(Some("3D LUT Files (*.cube)"));
@@ -4522,7 +4594,7 @@ pub fn build_inspector(
             let project = project.clone();
             let selected_clip_id = selected_clip_id.clone();
             let on_lut_changed = on_lut_changed.clone();
-            let lut_path_label = lut_path_label.clone();
+            let lut_display_box = lut_display_box.clone();
             let lut_clear_btn = lut_clear_btn.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
 
@@ -4531,25 +4603,50 @@ pub fn build_inspector(
                     if let Some(path) = file.path() {
                         let path_str = path.to_string_lossy().to_string();
                         let id = selected_clip_id.borrow().clone();
+                        let mut count = 0usize;
                         if let Some(ref clip_id) = id {
                             let mut proj = project.borrow_mut();
                             for track in &mut proj.tracks {
                                 if let Some(clip) =
                                     track.clips.iter_mut().find(|c| &c.id == clip_id)
                                 {
-                                    clip.lut_path = Some(path_str.clone());
+                                    clip.lut_paths.push(path_str.clone());
+                                    count = clip.lut_paths.len();
                                     proj.dirty = true;
                                     break;
                                 }
                             }
                         }
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(&path_str)
-                            .to_string();
-                        lut_path_label.set_text(&name);
-                        lut_clear_btn.set_sensitive(true);
+                        // Rebuild display
+                        while let Some(child) = lut_display_box.first_child() {
+                            lut_display_box.remove(&child);
+                        }
+                        // Re-read clip paths
+                        let lut_paths: Vec<String> = {
+                            let id = selected_clip_id.borrow();
+                            let proj = project.borrow();
+                            if let Some(ref clip_id) = *id {
+                                proj.tracks.iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .find(|c| &c.id == clip_id)
+                                    .map(|c| c.lut_paths.clone())
+                                    .unwrap_or_default()
+                            } else { Vec::new() }
+                        };
+                        for (i, p) in lut_paths.iter().enumerate() {
+                            let name = std::path::Path::new(p)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(p)
+                                .to_string();
+                            let label = Label::new(Some(&format!("{}. {}", i + 1, name)));
+                            label.set_halign(gtk4::Align::Start);
+                            label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
+                            label.set_tooltip_text(Some(p.as_str()));
+                            label.add_css_class("clip-path");
+                            lut_display_box.append(&label);
+                        }
+                        lut_clear_btn.set_sensitive(count > 0);
                         on_lut_changed(Some(path_str));
                     }
                 }
@@ -4557,12 +4654,12 @@ pub fn build_inspector(
         });
     }
 
-    // LUT clear button
+    // LUT clear all button
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
         let on_lut_changed = on_lut_changed.clone();
-        let lut_path_label = lut_path_label.clone();
+        let lut_display_box_clear = lut_display_box.clone();
         let lut_clear_btn_cb = lut_clear_btn.clone();
         lut_clear_btn.connect_clicked(move |_| {
             let id = selected_clip_id.borrow().clone();
@@ -4570,13 +4667,19 @@ pub fn build_inspector(
                 let mut proj = project.borrow_mut();
                 for track in &mut proj.tracks {
                     if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                        clip.lut_path = None;
+                        clip.lut_paths.clear();
                         proj.dirty = true;
                         break;
                     }
                 }
             }
-            lut_path_label.set_text("None");
+            while let Some(child) = lut_display_box_clear.first_child() {
+                lut_display_box_clear.remove(&child);
+            }
+            let none_label = Label::new(Some("None"));
+            none_label.set_halign(gtk4::Align::Start);
+            none_label.add_css_class("clip-path");
+            lut_display_box_clear.append(&none_label);
             lut_clear_btn_cb.set_sensitive(false);
             on_lut_changed(None);
         });
@@ -4607,8 +4710,7 @@ pub fn build_inspector(
         let denoise_slider = denoise_slider.clone();
         let sharpness_slider = sharpness_slider.clone();
         let on_lut_changed = on_lut_changed.clone();
-        let lut_path_label = lut_path_label.clone();
-        let lut_clear_btn = lut_clear_btn.clone();
+        let lut_display_box = lut_display_box.clone();
         match_color_btn.connect_clicked(move |btn| {
             let source_id = selected_clip_id.borrow().clone();
             let Some(source_clip_id) = source_id else {
@@ -4708,8 +4810,7 @@ pub fn build_inspector(
             let denoise_slider = denoise_slider.clone();
             let sharpness_slider = sharpness_slider.clone();
             let on_lut_changed = on_lut_changed.clone();
-            let lut_path_label = lut_path_label.clone();
-            let lut_clear_btn = lut_clear_btn.clone();
+            let lut_display_box = lut_display_box.clone();
             ok_btn.connect_clicked(move |_| {
                 let idx = dropdown.selected() as usize;
                 if idx >= candidates.len() {
@@ -4788,7 +4889,9 @@ pub fn build_inspector(
                                     clip.midtones_tint = r.midtones_tint;
                                     clip.shadows_warmth = r.shadows_warmth;
                                     clip.shadows_tint = r.shadows_tint;
-                                    clip.lut_path = outcome.lut_path.clone();
+                                    if let Some(ref lp) = outcome.lut_path {
+                                        clip.lut_paths.push(lp.clone());
+                                    }
                                     proj.dirty = true;
                                     break;
                                 }
@@ -4839,18 +4942,31 @@ pub fn build_inspector(
 
                         // Update LUT label for generated or cleared LUT.
                         if let Some(ref lut_path) = outcome.lut_path {
-                            let name = std::path::Path::new(lut_path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(lut_path)
-                                .to_string();
-                            lut_path_label.set_text(&name);
-                            lut_clear_btn.set_sensitive(true);
+                            // Re-read and rebuild display from current clip state
+                            let lut_paths: Vec<String> = {
+                                let proj = project.borrow();
+                                proj.tracks.iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .find(|c| c.id == source_clip_id)
+                                    .map(|c| c.lut_paths.clone())
+                                    .unwrap_or_default()
+                            };
+                            while let Some(child) = lut_display_box.first_child() {
+                                lut_display_box.remove(&child);
+                            }
+                            for (i, p) in lut_paths.iter().enumerate() {
+                                let name = std::path::Path::new(p)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(p)
+                                    .to_string();
+                                let label = Label::new(Some(&format!("{}. {}", i + 1, name)));
+                                label.set_halign(gtk4::Align::Start);
+                                label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
+                                label.add_css_class("clip-path");
+                                lut_display_box.append(&label);
+                            }
                             on_lut_changed(Some(lut_path.clone()));
-                        } else {
-                            lut_path_label.set_text("None");
-                            lut_clear_btn.set_sensitive(false);
-                            on_lut_changed(None);
                         }
 
                         log::info!("color_match: applied to clip {source_clip_id}");
@@ -5164,7 +5280,8 @@ pub fn build_inspector(
         title_bg_box_padding_slider,
         speed_slider,
         reverse_check,
-        lut_path_label,
+        slow_motion_dropdown,
+        lut_display_box,
         lut_clear_btn,
         match_color_btn,
         updating,

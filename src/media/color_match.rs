@@ -862,7 +862,7 @@ pub struct ReferenceGrading {
     pub midtones_tint: f32,
     pub shadows_warmth: f32,
     pub shadows_tint: f32,
-    pub lut_path: Option<String>,
+    pub lut_paths: Vec<String>,
 }
 
 impl ReferenceGrading {
@@ -885,7 +885,7 @@ impl ReferenceGrading {
             midtones_tint: clip.midtones_tint,
             shadows_warmth: clip.shadows_warmth,
             shadows_tint: clip.shadows_tint,
-            lut_path: clip.lut_path.clone(),
+            lut_paths: clip.lut_paths.clone(),
         }
     }
 
@@ -907,7 +907,7 @@ impl ReferenceGrading {
             && self.midtones_tint.abs() < f32::EPSILON
             && self.shadows_warmth.abs() < f32::EPSILON
             && self.shadows_tint.abs() < f32::EPSILON
-            && self.lut_path.is_none()
+            && self.lut_paths.is_empty()
     }
 }
 
@@ -1007,7 +1007,7 @@ pub fn apply_grading_to_frames(frames: &mut [SampledFrame], grading: &ReferenceG
     }
 
     // Apply LUT after slider adjustments (matches pipeline order).
-    if let Some(ref lut_path) = grading.lut_path {
+    for lut_path in &grading.lut_paths {
         match CubeLut::from_file(std::path::Path::new(lut_path)) {
             Ok(lut) => {
                 for frame in frames.iter_mut() {
@@ -1830,7 +1830,7 @@ mod tests {
             midtones_tint: 0.0,
             highlights_warmth: 0.0,
             highlights_tint: 0.0,
-            lut_path: None,
+            lut_paths: Vec::new(),
         };
         assert!(grading.is_neutral(), "default grading should be neutral");
     }
@@ -1854,12 +1854,12 @@ mod tests {
             midtones_tint: 0.0,
             highlights_warmth: 0.0,
             highlights_tint: 0.0,
-            lut_path: None,
+            lut_paths: Vec::new(),
         };
         assert!(!grading.is_neutral(), "brightness != 0 should be non-neutral");
         grading.brightness = 0.0;
-        grading.lut_path = Some("/tmp/test.cube".to_string());
-        assert!(!grading.is_neutral(), "lut_path should make it non-neutral");
+        grading.lut_paths = vec!["/tmp/test.cube".to_string()];
+        assert!(!grading.is_neutral(), "lut_paths should make it non-neutral");
     }
 
     #[test]
@@ -1894,7 +1894,7 @@ mod tests {
             midtones_tint: 0.0,
             highlights_warmth: 0.0,
             highlights_tint: 0.0,
-            lut_path: None,
+            lut_paths: Vec::new(),
         };
 
         apply_grading_to_frames(&mut frames, &grading);
@@ -1942,7 +1942,7 @@ mod tests {
             midtones_tint: 0.0,
             highlights_warmth: 0.0,
             highlights_tint: 0.0,
-            lut_path: None,
+            lut_paths: Vec::new(),
         };
 
         apply_grading_to_frames(&mut frames, &grading);

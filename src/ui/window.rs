@@ -1977,9 +1977,9 @@ fn proxy_scale_for_mode(
 fn ready_proxy_path_for_source(
     cache: &crate::media::proxy_cache::ProxyCache,
     source_path: &str,
-    lut_path: Option<&str>,
+    lut_key: Option<&str>,
 ) -> Option<String> {
-    cache.get(source_path, lut_path).and_then(|proxy_path| {
+    cache.get(source_path, lut_key).and_then(|proxy_path| {
         std::fs::metadata(proxy_path)
             .ok()
             .filter(|m| m.len() > 0)
@@ -1995,7 +1995,7 @@ fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>
         .filter(|t| t.kind == TrackKind::Video)
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
-            let key = (c.source_path.clone(), c.lut_path.clone());
+            let key = (c.source_path.clone(), c.lut_key());
             if seen.insert(key.clone()) {
                 Some(key)
             } else {
@@ -2013,11 +2013,11 @@ fn collect_unique_lut_clip_sources(project: &Project) -> Vec<(String, Option<Str
         .filter(|t| t.kind == TrackKind::Video)
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
-            let lut = c.lut_path.as_ref()?;
+            let lut = c.lut_key()?;
             if lut.is_empty() {
                 return None;
             }
-            let key = (c.source_path.clone(), Some(lut.clone()));
+            let key = (c.source_path.clone(), Some(lut));
             if seen.insert(key.clone()) {
                 Some(key)
             } else {
@@ -2058,7 +2058,7 @@ fn collect_near_playhead_clip_sources(
                 distance,
                 c.timeline_start,
                 c.source_path.clone(),
-                c.lut_path.clone(),
+                c.lut_key(),
             )
         })
         .collect();
@@ -2417,7 +2417,7 @@ pub fn build_window(
                                 proj.tracks
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
-                                    .map(|c| (c.source_path.clone(), c.lut_path.clone()))
+                                    .map(|c| (c.source_path.clone(), c.lut_key()))
                                     .collect()
                             };
                             {
@@ -2753,7 +2753,7 @@ pub fn build_window(
                                 proj.tracks
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
-                                    .map(|c| (c.source_path.clone(), c.lut_path.clone()))
+                                    .map(|c| (c.source_path.clone(), c.lut_key()))
                                     .collect(),
                             )
                         } else {
@@ -5269,6 +5269,7 @@ pub fn build_window(
                             is_title: c.kind == ClipKind::Title,
                             speed: c.speed,
                             speed_keyframes: c.speed_keyframes.clone(),
+                            slow_motion_interp: c.slow_motion_interp,
                             reverse: c.reverse,
                             freeze_frame: c.freeze_frame,
                             freeze_frame_source_ns: c.freeze_frame_source_ns,
@@ -5277,7 +5278,7 @@ pub fn build_window(
                             track_index: t_idx,
                             transition_after: c.transition_after.clone(),
                             transition_after_ns: c.transition_after_ns,
-                            lut_path: c.lut_path.clone(),
+                            lut_paths: c.lut_paths.clone(),
                             scale: c.scale,
                             scale_keyframes: c.scale_keyframes.clone(),
                             opacity: c.opacity,
@@ -5455,7 +5456,7 @@ pub fn build_window(
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
                                     .filter_map(|c| {
-                                        let key = (c.source_path.clone(), c.lut_path.clone());
+                                        let key = (c.source_path.clone(), c.lut_key());
                                         if seen.insert(key.clone()) {
                                             Some(key)
                                         } else {
@@ -6986,7 +6987,7 @@ fn handle_mcp_command(
                         .iter()
                         .flat_map(|t| t.clips.iter())
                         .filter_map(|c| {
-                            let key = (c.source_path.clone(), c.lut_path.clone());
+                            let key = (c.source_path.clone(), c.lut_key());
                             if seen.insert(key.clone()) {
                                 Some(key)
                             } else {
@@ -7636,7 +7637,7 @@ fn handle_mcp_command(
                             c.midtones_tint,
                             c.shadows_warmth,
                             c.shadows_tint,
-                            c.lut_path.clone(),
+                            c.lut_paths.clone(),
                         )
                     })
             };
@@ -7684,7 +7685,7 @@ fn handle_mcp_command(
                         old_midtones_tint: old.13,
                         old_shadows_warmth: old.14,
                         old_shadows_tint: old.15,
-                        old_lut_path: old.16,
+                        old_lut_paths: old.16.clone(),
                         new_brightness: r.brightness,
                         new_contrast: r.contrast,
                         new_saturation: r.saturation,
@@ -7701,7 +7702,13 @@ fn handle_mcp_command(
                         new_midtones_tint: r.midtones_tint,
                         new_shadows_warmth: r.shadows_warmth,
                         new_shadows_tint: r.shadows_tint,
-                        new_lut_path: outcome.lut_path.clone(),
+                        new_lut_paths: {
+                            let mut paths = old.16.clone();
+                            if let Some(ref lp) = outcome.lut_path {
+                                paths.push(lp.clone());
+                            }
+                            paths
+                        },
                     };
 
                     {
@@ -7710,14 +7717,14 @@ fn handle_mcp_command(
                         ts.history.execute(Box::new(cmd), &mut proj);
                     }
 
-                    // Also assign the LUT if generated.
+                    // Also assign the generated LUT if any.
                     if let Some(ref lut_path) = outcome.lut_path {
                         let mut proj = project.borrow_mut();
                         for track in &mut proj.tracks {
                             if let Some(clip) =
                                 track.clips.iter_mut().find(|c| c.id == source_clip_id)
                             {
-                                clip.lut_path = Some(lut_path.clone());
+                                clip.lut_paths.push(lut_path.clone());
                                 break;
                             }
                         }
@@ -8056,7 +8063,7 @@ fn handle_mcp_command(
 
         McpCommand::SetClipLut {
             clip_id,
-            lut_path,
+            lut_paths,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -8064,7 +8071,7 @@ fn handle_mcp_command(
             'outer: for track in proj.tracks.iter_mut() {
                 for clip in track.clips.iter_mut() {
                     if clip.id == clip_id {
-                        clip.lut_path = lut_path.clone();
+                        clip.lut_paths = lut_paths.clone();
                         proj.dirty = true;
                         found = true;
                         break 'outer;

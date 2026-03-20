@@ -46,6 +46,18 @@ impl Default for ClipColorLabel {
     }
 }
 
+/// Slow-motion frame interpolation mode (export-only).
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlowMotionInterp {
+    #[default]
+    Off,
+    /// Temporal frame blending (minterpolate mi_mode=blend). Fast.
+    Blend,
+    /// Motion-compensated interpolation (minterpolate mi_mode=mci). Slow but smooth.
+    OpticalFlow,
+}
+
 /// Compositing blend mode for a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -519,6 +531,10 @@ pub struct Clip {
     /// Optional variable speed keyframes over clip-local timeline.
     #[serde(default)]
     pub speed_keyframes: Vec<NumericKeyframe>,
+    /// Slow-motion frame interpolation mode (export-only).
+    /// Applies minterpolate filter when speed < 1.0.
+    #[serde(default)]
+    pub slow_motion_interp: SlowMotionInterp,
     #[serde(default)]
     pub crop_left: i32,
     #[serde(default)]
@@ -587,10 +603,10 @@ pub struct Clip {
     /// Transition duration in nanoseconds for `transition_after` (0 = none).
     #[serde(default)]
     pub transition_after_ns: u64,
-    /// Absolute path to a .cube LUT file for color grading (applied on export via ffmpeg lut3d).
-    /// None means no LUT is assigned.
+    /// Ordered list of .cube LUT file paths for color grading (applied sequentially on export via ffmpeg lut3d).
+    /// Empty means no LUTs are assigned.
     #[serde(default)]
-    pub lut_path: Option<String>,
+    pub lut_paths: Vec<String>,
     /// Scale multiplier for the clip within the frame: 1.0 = fill frame, 2.0 = zoom in 2×,
     /// 0.5 = half-size with black borders. Range 0.1–4.0, default 1.0.
     #[serde(default = "default_scale")]
@@ -735,6 +751,16 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Compute composite cache key for all assigned LUTs.
+    /// Returns `None` if no LUTs are assigned.
+    pub fn lut_key(&self) -> Option<String> {
+        if self.lut_paths.is_empty() {
+            None
+        } else {
+            Some(self.lut_paths.join("|"))
+        }
+    }
+
     fn remove_keyframes_at_local_time(
         keyframes: &mut Vec<NumericKeyframe>,
         local_time_ns: u64,
@@ -879,6 +905,7 @@ impl Clip {
             crop_bottom_keyframes: Vec::new(),
             speed: 1.0,
             speed_keyframes: Vec::new(),
+            slow_motion_interp: SlowMotionInterp::Off,
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
@@ -905,7 +932,7 @@ impl Clip {
             title_secondary_text: String::new(),
             transition_after: String::new(),
             transition_after_ns: 0,
-            lut_path: None,
+            lut_paths: Vec::new(),
             scale: 1.0,
             scale_keyframes: Vec::new(),
             opacity: 1.0,
@@ -1712,7 +1739,7 @@ mod tests {
         assert!(!clip.freeze_frame);
         assert!(clip.freeze_frame_source_ns.is_none());
         assert!(clip.freeze_frame_hold_duration_ns.is_none());
-        assert!(clip.lut_path.is_none());
+        assert!(clip.lut_paths.is_empty());
         assert!(clip.group_id.is_none());
         assert!(clip.link_group_id.is_none());
         assert!(clip.source_timecode_base_ns.is_none());

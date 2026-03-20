@@ -808,6 +808,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         asset_clip.push_attribute(("us:speed-keyframes", value));
                     }
                     asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
+                    if clip.slow_motion_interp != crate::model::clip::SlowMotionInterp::Off {
+                        let val = match clip.slow_motion_interp {
+                            crate::model::clip::SlowMotionInterp::Blend => "blend",
+                            crate::model::clip::SlowMotionInterp::OpticalFlow => "optical-flow",
+                            crate::model::clip::SlowMotionInterp::Off => unreachable!(),
+                        };
+                        asset_clip.push_attribute(("us:slow-motion-interp", val));
+                    }
                     if clip.freeze_frame {
                         asset_clip.push_attribute(("us:freeze-frame", "true"));
                     }
@@ -892,8 +900,11 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.bg_removal_threshold.to_string().as_str(),
                         ));
                     }
-                    if let Some(ref lut) = clip.lut_path {
-                        asset_clip.push_attribute(("us:lut-path", lut.as_str()));
+                    if !clip.lut_paths.is_empty() {
+                        let lut_json = serde_json::to_string(&clip.lut_paths).unwrap_or_default();
+                        asset_clip.push_attribute(("us:lut-paths", lut_json.as_str()));
+                        // Also write first LUT as us:lut-path for backward compat
+                        asset_clip.push_attribute(("us:lut-path", clip.lut_paths[0].as_str()));
                     }
                     if !clip.transition_after.is_empty() {
                         asset_clip.push_attribute((
@@ -1299,41 +1310,42 @@ where
         .iter_mut()
         .flat_map(|track| track.clips.iter_mut())
     {
-        let lut_path_str = match clip.lut_path {
-            Some(ref p) => p.clone(),
-            None => continue,
-        };
-        let lut_local = source_path_to_local_path(&lut_path_str)?;
-        if !lut_local.exists() {
-            // LUT file missing — clear the reference rather than fail the export.
-            clip.lut_path = None;
-            continue;
+        let mut rewritten: Vec<String> = Vec::new();
+        for lut_path_str in &clip.lut_paths {
+            let lut_local = match source_path_to_local_path(lut_path_str) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !lut_local.exists() {
+                continue;
+            }
+            let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
+            if let Some(existing_export) = lut_canonical_to_export.get(&lut_canonical) {
+                let portable = normalize_packaged_path_for_portability(existing_export);
+                rewritten.push(portable.to_string_lossy().to_string());
+                continue;
+            }
+            let lut_file_name = lut_canonical
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("lut.cube");
+            let unique_lut_name =
+                unique_packaged_media_name(lut_file_name, &lut_canonical, &lut_used_names);
+            lut_used_names.insert(unique_lut_name.clone());
+            let lut_dest = library_dir.join(&unique_lut_name);
+            std::fs::copy(&lut_canonical, &lut_dest).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to copy LUT {} to {}: {e}",
+                    lut_canonical.display(),
+                    lut_dest.display()
+                )
+            })?;
+            let resolved_dest = std::fs::canonicalize(&lut_dest).unwrap_or(lut_dest);
+            lut_canonical_to_export.insert(lut_canonical, resolved_dest.clone());
+            let portable = normalize_packaged_path_for_portability(&resolved_dest);
+            rewritten.push(portable.to_string_lossy().to_string());
         }
-        let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
-        if let Some(existing_export) = lut_canonical_to_export.get(&lut_canonical) {
-            let portable = normalize_packaged_path_for_portability(existing_export);
-            clip.lut_path = Some(portable.to_string_lossy().to_string());
-            continue;
-        }
-        let lut_file_name = lut_canonical
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("lut.cube");
-        let unique_lut_name =
-            unique_packaged_media_name(lut_file_name, &lut_canonical, &lut_used_names);
-        lut_used_names.insert(unique_lut_name.clone());
-        let lut_dest = library_dir.join(&unique_lut_name);
-        std::fs::copy(&lut_canonical, &lut_dest).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to copy LUT {} to {}: {e}",
-                lut_canonical.display(),
-                lut_dest.display()
-            )
-        })?;
-        let resolved_dest = std::fs::canonicalize(&lut_dest).unwrap_or(lut_dest);
-        lut_canonical_to_export.insert(lut_canonical, resolved_dest.clone());
-        let portable = normalize_packaged_path_for_portability(&resolved_dest);
-        clip.lut_path = Some(portable.to_string_lossy().to_string());
+        clip.lut_paths = rewritten;
     }
 
     on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
@@ -5558,7 +5570,7 @@ mod tests {
             0,
             ClipKind::Video,
         );
-        clip.lut_path = Some(lut.to_string_lossy().to_string());
+        clip.lut_paths = vec![lut.to_string_lossy().to_string()];
         clip.exposure = 0.5;
         track.add_clip(clip);
         project.tracks.push(track);
@@ -5618,7 +5630,7 @@ mod tests {
             0,
             ClipKind::Video,
         );
-        clip.lut_path = Some(lut.to_string_lossy().to_string());
+        clip.lut_paths = vec![lut.to_string_lossy().to_string()];
         track.add_clip(clip);
         project.tracks.push(track);
 

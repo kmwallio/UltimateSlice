@@ -256,7 +256,7 @@ Tracking docs:
 - [x] Persist speed data in FCPXML (`us:speed` attribute)
 - [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies to Program Monitor preview and export (`reverse`/`areverse`), timeline shows `◀` badge, and state persists via `us:reverse` FCPXML attribute
 - [x] Variable speed ramps: multiple keyframed speed segments within a single clip
-- [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
+- [x] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
 
 ### Keyframe Animation
 - [ ] Property keyframes with interpolation (position, scale, opacity, volume, pan over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
@@ -404,7 +404,7 @@ Tracking docs:
 - [x] Denoise filter per clip (GStreamer `gaussianblur` positive sigma; ffmpeg `hqdn3d` on export)
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [x] LUT import / apply
-- [ ] Apply multiple LUTs to a clip
+- [x] Apply multiple LUTs to a clip (multi-LUT UI in inspector with numbered list, add/clear all, copy/paste support)
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Preview/Export color parity improvements
   - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
@@ -523,7 +523,7 @@ Tracking docs:
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
 - [x] Frame rate selector in project settings (23.976, 24, 25, 29.97, 30, 60 fps)
-- [ ] Aspect ratio presets (16:9, 4:3, 9:16 vertical, 1:1 square)
+- [x] Aspect ratio presets (16:9, 4:3, 9:16 vertical, 1:1 square)
 - [x] Persist canvas settings in FCPXML `<format>` element
 
 ### Export
