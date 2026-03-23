@@ -272,6 +272,7 @@ pub enum Phase1KeyframeProperty {
     CropRight,
     CropTop,
     CropBottom,
+    Blur,
 }
 
 impl Phase1KeyframeProperty {
@@ -294,6 +295,7 @@ impl Phase1KeyframeProperty {
             Self::CropRight => "crop_right",
             Self::CropTop => "crop_top",
             Self::CropBottom => "crop_bottom",
+            Self::Blur => "blur",
         }
     }
 
@@ -316,6 +318,7 @@ impl Phase1KeyframeProperty {
             "crop_right" | "crop-right" => Some(Self::CropRight),
             "crop_top" | "crop-top" => Some(Self::CropTop),
             "crop_bottom" | "crop-bottom" => Some(Self::CropBottom),
+            "blur" => Some(Self::Blur),
             _ => None,
         }
     }
@@ -500,6 +503,12 @@ pub struct Clip {
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen), default 0.0
     #[serde(default)]
     pub sharpness: f32,
+    /// Creative blur strength: 0.0 (off) to 1.0 (heavy), default 0.0
+    #[serde(default)]
+    pub blur: f32,
+    /// Optional blur keyframes over clip-local timeline.
+    #[serde(default)]
+    pub blur_keyframes: Vec<NumericKeyframe>,
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
@@ -854,6 +863,7 @@ impl Clip {
         Self::retain_and_rebase_keyframes(&mut self.crop_right_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_top_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_bottom_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.blur_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.speed_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.scale_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.opacity_keyframes, start_ns, end_ns);
@@ -894,6 +904,8 @@ impl Clip {
             tint_keyframes: Vec::new(),
             denoise: 0.0,
             sharpness: 0.0,
+            blur: 0.0,
+            blur_keyframes: Vec::new(),
             volume: 1.0,
             volume_keyframes: Vec::new(),
             pan: 0.0,
@@ -1098,6 +1110,7 @@ impl Clip {
             Phase1KeyframeProperty::CropRight => &self.crop_right_keyframes,
             Phase1KeyframeProperty::CropTop => &self.crop_top_keyframes,
             Phase1KeyframeProperty::CropBottom => &self.crop_bottom_keyframes,
+            Phase1KeyframeProperty::Blur => &self.blur_keyframes,
         }
     }
 
@@ -1123,6 +1136,7 @@ impl Clip {
             Phase1KeyframeProperty::CropRight => &mut self.crop_right_keyframes,
             Phase1KeyframeProperty::CropTop => &mut self.crop_top_keyframes,
             Phase1KeyframeProperty::CropBottom => &mut self.crop_bottom_keyframes,
+            Phase1KeyframeProperty::Blur => &mut self.blur_keyframes,
         }
     }
 
@@ -1145,6 +1159,7 @@ impl Clip {
             Phase1KeyframeProperty::CropRight => self.crop_right as f64,
             Phase1KeyframeProperty::CropTop => self.crop_top as f64,
             Phase1KeyframeProperty::CropBottom => self.crop_bottom as f64,
+            Phase1KeyframeProperty::Blur => self.blur as f64,
         }
     }
 
@@ -1168,6 +1183,7 @@ impl Clip {
             | Phase1KeyframeProperty::CropRight
             | Phase1KeyframeProperty::CropTop
             | Phase1KeyframeProperty::CropBottom => value.clamp(0.0, 500.0),
+            Phase1KeyframeProperty::Blur => value.clamp(0.0, 1.0),
         }
     }
 

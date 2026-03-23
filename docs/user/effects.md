@@ -69,12 +69,13 @@ Optionally generates a 17^3 3D `.cube` LUT for fine-grained non-linear residual 
 
 ---
 
-## Denoise & Sharpness
+## Denoise / Sharpness / Blur
 
 | Slider | Range | Default | Description |
 |--------|-------|---------|-------------|
 | **Denoise** | 0.0 to 1.0 | 0.0 | Gaussian blur strength for noise reduction |
 | **Sharpness** | -1.0 to 1.0 | 0.0 | Negative = soften, positive = sharpen |
+| **Blur** | 0.0 to 1.0 | 0.0 | Creative blur for censoring, depth-of-field, background defocus. Preview via gaussianblur, export via boxblur. Supports keyframe animation. |
 
 ---
 

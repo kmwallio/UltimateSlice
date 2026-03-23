@@ -650,6 +650,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
                     asset_clip
                         .push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:blur", clip.blur.to_string().as_str()));
+                    if !clip.blur_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.blur_keyframes) {
+                            asset_clip.push_attribute(("us:blur-keyframes", json.as_str()));
+                        }
+                    }
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
                             // Don't manually escape quotes — quick_xml's
@@ -3342,6 +3349,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
+            | "us:blur"
+            | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"
             | "us:volume-keyframes"

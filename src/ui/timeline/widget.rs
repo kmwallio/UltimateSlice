@@ -178,6 +178,7 @@ pub struct ColorGradeClipboard {
     pub shadows_tint: f32,
     pub denoise: f32,
     pub sharpness: f32,
+    pub blur: f32,
     pub lut_paths: Vec<String>,
 }
 
@@ -203,6 +204,7 @@ impl ColorGradeClipboard {
             shadows_tint: clip.shadows_tint,
             denoise: clip.denoise,
             sharpness: clip.sharpness,
+            blur: clip.blur,
             lut_paths: clip.lut_paths.clone(),
         }
     }
@@ -228,6 +230,7 @@ impl ColorGradeClipboard {
         target.shadows_tint = self.shadows_tint;
         target.denoise = self.denoise;
         target.sharpness = self.sharpness;
+        target.blur = self.blur;
         target.lut_paths = self.lut_paths.clone();
         before != *target
     }
@@ -2509,6 +2512,8 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     // Enhancement
     target.denoise = source.denoise;
     target.sharpness = source.sharpness;
+    target.blur = source.blur;
+    target.blur_keyframes = source.blur_keyframes.clone();
     target.lut_paths = source.lut_paths.clone();
     // Audio
     target.volume = source.volume;

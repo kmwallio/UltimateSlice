@@ -61,9 +61,10 @@ pub struct InspectorView {
     pub saturation_slider: Scale,
     pub temperature_slider: Scale,
     pub tint_slider: Scale,
-    // Denoise / sharpness sliders
+    // Denoise / sharpness / blur sliders
     pub denoise_slider: Scale,
     pub sharpness_slider: Scale,
+    pub blur_slider: Scale,
     // Grading sliders
     pub shadows_slider: Scale,
     pub midtones_slider: Scale,
@@ -1038,6 +1039,7 @@ impl InspectorView {
                 self.tint_slider.set_value(c.tint as f64);
                 self.denoise_slider.set_value(c.denoise as f64);
                 self.sharpness_slider.set_value(c.sharpness as f64);
+                self.blur_slider.set_value(c.blur as f64);
                 self.shadows_slider.set_value(c.shadows as f64);
                 self.midtones_slider.set_value(c.midtones as f64);
                 self.highlights_slider.set_value(c.highlights as f64);
@@ -1248,6 +1250,7 @@ impl InspectorView {
                 self.tint_slider.set_value(0.0);
                 self.denoise_slider.set_value(0.0);
                 self.sharpness_slider.set_value(0.0);
+                self.blur_slider.set_value(0.0);
                 self.shadows_slider.set_value(0.0);
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
@@ -1455,13 +1458,13 @@ impl InspectorView {
 ///
 /// - `on_clip_changed`: fired when the clip name is applied (triggers full project-changed cycle).
 /// - `on_color_changed`: fired on every color/effects slider movement with
-///   `(brightness, contrast, saturation, temperature, tint, denoise, sharpness, shadows, midtones, highlights)`;
+///   `(brightness, contrast, saturation, temperature, tint, denoise, sharpness, blur, shadows, midtones, highlights, ...)`;
 ///   should update the program player's video filter elements directly without a full pipeline reload.
 /// - `on_audio_changed`: fired on every audio slider movement with `(clip_id, volume, pan)`.
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)
+    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)
         + 'static,
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
@@ -1632,7 +1635,7 @@ pub fn build_inspector(
     black_point_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&black_point_slider);
 
-    let ds_title = Label::new(Some("Denoise / Sharpness"));
+    let ds_title = Label::new(Some("Denoise / Sharpness / Blur"));
     ds_title.set_halign(gtk::Align::Start);
     ds_title.add_css_class("browser-header");
     color_inner.append(&ds_title);
@@ -1652,6 +1655,14 @@ pub fn build_inspector(
     sharpness_slider.set_digits(2);
     sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&sharpness_slider);
+
+    row_label(&color_inner, "Blur");
+    let blur_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    blur_slider.set_value(0.0);
+    blur_slider.set_draw_value(true);
+    blur_slider.set_digits(2);
+    blur_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    color_inner.append(&blur_slider);
 
     let grading_title = Label::new(Some("Grading"));
     grading_title.set_halign(gtk::Align::Start);
@@ -2446,6 +2457,7 @@ pub fn build_inspector(
             f32,
             f32,
             f32,
+            f32,
         ),
     > = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
@@ -2521,6 +2533,7 @@ pub fn build_inspector(
                 f32,
                 f32,
                 f32,
+                f32,
             ),
         >,
         brightness_slider: Scale,
@@ -2530,6 +2543,7 @@ pub fn build_inspector(
         tint_slider: Scale,
         denoise_slider: Scale,
         sharpness_slider: Scale,
+        blur_slider: Scale,
         shadows_slider: Scale,
         midtones_slider: Scale,
         highlights_slider: Scale,
@@ -2567,6 +2581,7 @@ pub fn build_inspector(
                 let tnt = tint_slider.value() as f32;
                 let d = denoise_slider.value() as f32;
                 let sh = sharpness_slider.value() as f32;
+                let bl = blur_slider.value() as f32;
                 let shd = shadows_slider.value() as f32;
                 let mid = midtones_slider.value() as f32;
                 let hil = highlights_slider.value() as f32;
@@ -2579,7 +2594,7 @@ pub fn build_inspector(
                 let sw = shadows_warmth_slider.value() as f32;
                 let st = shadows_tint_slider.value() as f32;
                 on_color_changed(
-                    b, c, sat, temp, tnt, d, sh, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st,
+                    b, c, sat, temp, tnt, d, sh, bl, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st,
                 );
             }
         });
@@ -2600,6 +2615,7 @@ pub fn build_inspector(
                 tint_slider.clone(),
                 denoise_slider.clone(),
                 sharpness_slider.clone(),
+                blur_slider.clone(),
                 shadows_slider.clone(),
                 midtones_slider.clone(),
                 highlights_slider.clone(),
@@ -2623,6 +2639,7 @@ pub fn build_inspector(
     wire_color_slider!(tint_slider, |clip, v| clip.tint = v);
     wire_color_slider!(denoise_slider, |clip, v| clip.denoise = v);
     wire_color_slider!(sharpness_slider, |clip, v| clip.sharpness = v);
+    wire_color_slider!(blur_slider, |clip, v| clip.blur = v);
     wire_color_slider!(shadows_slider, |clip, v| clip.shadows = v);
     wire_color_slider!(midtones_slider, |clip, v| clip.midtones = v);
     wire_color_slider!(highlights_slider, |clip, v| clip.highlights = v);
@@ -4709,6 +4726,7 @@ pub fn build_inspector(
         let shadows_tint_slider = shadows_tint_slider.clone();
         let denoise_slider = denoise_slider.clone();
         let sharpness_slider = sharpness_slider.clone();
+        let blur_slider = blur_slider.clone();
         let on_lut_changed = on_lut_changed.clone();
         let lut_display_box = lut_display_box.clone();
         match_color_btn.connect_clicked(move |btn| {
@@ -4809,6 +4827,7 @@ pub fn build_inspector(
             let shadows_tint_slider = shadows_tint_slider.clone();
             let denoise_slider = denoise_slider.clone();
             let sharpness_slider = sharpness_slider.clone();
+            let blur_slider = blur_slider.clone();
             let on_lut_changed = on_lut_changed.clone();
             let lut_display_box = lut_display_box.clone();
             ok_btn.connect_clicked(move |_| {
@@ -4927,6 +4946,7 @@ pub fn build_inspector(
                             r.tint,
                             denoise_slider.value() as f32,
                             sharpness_slider.value() as f32,
+                            blur_slider.value() as f32,
                             r.shadows,
                             r.midtones,
                             r.highlights,
@@ -5239,6 +5259,7 @@ pub fn build_inspector(
         tint_slider,
         denoise_slider,
         sharpness_slider,
+        blur_slider,
         shadows_slider,
         midtones_slider,
         highlights_slider,

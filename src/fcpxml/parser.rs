@@ -957,6 +957,13 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:sharpness") {
                 clip.sharpness = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:blur") {
+                clip.blur = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:blur-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.blur_keyframes = serde_json::from_str(&json_str).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:frei0r-effects") {
                 // The writer escapes " → &quot; then XML serialization escapes
                 // & → &amp;, producing &amp;quot; in the file.  quick_xml's
@@ -2384,6 +2391,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
+            | "us:blur"
+            | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"
             | "us:volume-keyframes"

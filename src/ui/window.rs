@@ -2527,7 +2527,7 @@ pub fn build_window(
             let prog_player = prog_player.clone();
             let window_weak = window_weak.clone();
             let project = project.clone();
-            move |b, c, s, temp, tnt, d, sh, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st| {
+            move |b, c, s, temp, tnt, d, sh, bl, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st| {
                 prog_player.borrow_mut().update_current_effects(
                     b as f64,
                     c as f64,
@@ -2547,6 +2547,7 @@ pub fn build_window(
                     mt as f64,
                     sw as f64,
                     st as f64,
+                    bl as f64,
                 );
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {
@@ -5234,6 +5235,8 @@ pub fn build_window(
                             tint_keyframes: c.tint_keyframes.clone(),
                             denoise: c.denoise as f64,
                             sharpness: c.sharpness as f64,
+                            blur: c.blur as f64,
+                            blur_keyframes: c.blur_keyframes.clone(),
                             volume: c.volume as f64,
                             volume_keyframes: c.volume_keyframes.clone(),
                             pan: c.pan as f64,
@@ -7900,6 +7903,7 @@ fn handle_mcp_command(
             tint,
             denoise,
             sharpness,
+            blur,
             shadows,
             midtones,
             highlights,
@@ -7925,6 +7929,7 @@ fn handle_mcp_command(
                         clip.tint = tint as f32;
                         clip.denoise = denoise as f32;
                         clip.sharpness = sharpness as f32;
+                        clip.blur = blur as f32;
                         clip.shadows = shadows as f32;
                         clip.midtones = midtones as f32;
                         clip.highlights = highlights as f32;

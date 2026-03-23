@@ -440,7 +440,7 @@ Tracking docs:
   - [x] Five undo commands (add, remove, reorder, set params, toggle)
   - [x] Graphical curve editor for curves plugin — 240×240 DrawingArea with Catmull-Rom spline, 2–5 draggable control points, channel selector (R/G/B/RGB/Luma), double-click to add/remove points
   - [x] Graphical levels editor for levels plugin — transfer function visualization (240×80), input/output black/white sliders, gamma slider (0.1–4.0 mapped from frei0r 0–1), channel selector (R/G/B/Luma)
-- [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
+- [x] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus) — Inspector slider (0.0–1.0), GStreamer gaussianblur preview, FFmpeg boxblur export, keyframe animation, FCPXML persistence, MCP access, color grade copy/paste
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Titles Browser with 9 built-in templates (Standard, Cinematic, Informational categories)
 - [x] Standalone `ClipKind::Title` clips — transparent/solid-color background, no source media required

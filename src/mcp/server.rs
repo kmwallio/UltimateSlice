@@ -428,7 +428,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_color",
-            "description": "Set color correction and denoise/sharpness effects for a clip by id.",
+            "description": "Set color correction and denoise/sharpness/blur effects for a clip by id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -440,6 +440,7 @@ fn tools_list() -> Value {
                     "tint":       { "type": "number",  "description": "Tint on green-magenta axis: -1.0 (green) to 1.0 (magenta). Default 0.0." },
                     "denoise":    { "type": "number",  "description": "Denoise strength: 0.0 (off) to 1.0 (heavy). Default 0.0." },
                     "sharpness":  { "type": "number",  "description": "Sharpness: -1.0 (soften) to 1.0 (sharpen). Default 0.0." },
+                    "blur":       { "type": "number",  "description": "Creative blur strength: 0.0 (off) to 1.0 (heavy). Default 0.0." },
                     "shadows":    { "type": "number",  "description": "Shadow grading: -1.0 (crush) to 1.0 (lift). Default 0.0." },
                     "midtones":   { "type": "number",  "description": "Midtone grading: -1.0 (darken) to 1.0 (brighten). Default 0.0." },
                     "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." },
@@ -713,12 +714,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_keyframe",
-            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) for a clip at a timeline position.",
+            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom, blur) for a clip at a timeline position.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
-                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property to keyframe." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom", "blur"], "description": "Animated property to keyframe." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
                     "value": { "type": "number", "description": "Property value at this keyframe time." },
                     "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." },
@@ -738,12 +739,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "remove_clip_keyframe",
-            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) at a timeline position for a clip.",
+            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom, blur) at a timeline position for a clip.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
-                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property keyframe lane." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom", "blur"], "description": "Animated property keyframe lane." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." }
                 },
                 "required": ["clip_id", "property"]
@@ -1302,6 +1303,7 @@ fn dispatch_tool_payload(
             tint: args["tint"].as_f64().unwrap_or(0.0),
             denoise: args["denoise"].as_f64().unwrap_or(0.0),
             sharpness: args["sharpness"].as_f64().unwrap_or(0.0),
+            blur: args["blur"].as_f64().unwrap_or(0.0),
             shadows: args["shadows"].as_f64().unwrap_or(0.0),
             midtones: args["midtones"].as_f64().unwrap_or(0.0),
             highlights: args["highlights"].as_f64().unwrap_or(0.0),

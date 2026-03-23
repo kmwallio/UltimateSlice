@@ -276,6 +276,9 @@ pub struct ProgramClip {
     pub denoise: f64,
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen)
     pub sharpness: f64,
+    /// Creative blur strength: 0.0 (off) to 1.0 (heavy)
+    pub blur: f64,
+    pub blur_keyframes: Vec<NumericKeyframe>,
     /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     pub volume: f64,
     pub volume_keyframes: Vec<NumericKeyframe>,
@@ -467,6 +470,15 @@ impl ProgramClip {
             self.tint,
         )
         .clamp(-1.0, 1.0)
+    }
+
+    pub fn blur_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.blur_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.blur,
+        )
+        .clamp(0.0, 1.0)
     }
 
     pub fn position_x_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
@@ -782,6 +794,8 @@ struct VideoSlot {
     /// frei0r 3-point-color-balance for shadows/midtones/highlights.
     colorbalance_3pt: Option<gst::Element>,
     gaussianblur: Option<gst::Element>,
+    /// frei0r squareblur for creative blur effect (RGBA-native, no format conversion needed).
+    squareblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
     imagefreeze: Option<gst::Element>,
@@ -3211,7 +3225,7 @@ impl ProgramPlayer {
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
         self.update_current_effects(
             brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
     }
 
@@ -3235,6 +3249,7 @@ impl ProgramPlayer {
         midtones_tint: f64,
         shadows_warmth: f64,
         shadows_tint: f64,
+        blur: f64,
     ) {
         // Check whether the required effect elements exist.  If the slider
         // values moved away from defaults but the slot was built without the
@@ -3259,6 +3274,7 @@ impl ProgramPlayer {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
         };
+        let need_creative_blur = blur > f64::EPSILON;
         let topology_changed = if let Some(slot) =
             self.current_idx.and_then(|idx| self.slot_for_clip(idx))
         {
@@ -3266,6 +3282,7 @@ impl ProgramPlayer {
                 || (need_coloradj && slot.coloradj_rgb.is_none() && slot.videobalance.is_none())
                 || (need_3point && slot.colorbalance_3pt.is_none() && slot.videobalance.is_none())
                 || (need_blur && slot.gaussianblur.is_none())
+                || (need_creative_blur && slot.squareblur.is_none())
         } else {
             false
         };
@@ -3284,6 +3301,7 @@ impl ProgramPlayer {
                 clip.tint = tint;
                 clip.denoise = denoise;
                 clip.sharpness = sharpness;
+                clip.blur = blur;
                 clip.shadows = shadows;
                 clip.midtones = midtones;
                 clip.highlights = highlights;
@@ -3363,6 +3381,9 @@ impl ProgramPlayer {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
                 gb.set_property("sigma", sigma);
             }
+            if let Some(ref sb) = slot.squareblur {
+                sb.set_property("kernel-size", blur.clamp(0.0, 1.0));
+            }
         }
         // Keep self.clips in sync so future slot reuse and topology checks
         // see the current slider values (self.clips is only fully refreshed
@@ -3376,6 +3397,7 @@ impl ProgramPlayer {
             clip.tint = tint;
             clip.denoise = denoise;
             clip.sharpness = sharpness;
+            clip.blur = blur;
             clip.shadows = shadows;
             clip.midtones = midtones;
             clip.highlights = highlights;
@@ -5097,6 +5119,8 @@ impl ProgramPlayer {
                 hash_keyframes(&mut hasher, &c.tint_keyframes);
                 c.denoise.to_bits().hash(&mut hasher);
                 c.sharpness.to_bits().hash(&mut hasher);
+                c.blur.to_bits().hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.blur_keyframes);
                 c.shadows.to_bits().hash(&mut hasher);
                 c.midtones.to_bits().hash(&mut hasher);
                 c.highlights.to_bits().hash(&mut hasher);
@@ -7176,6 +7200,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // coloradj_rgb (frei0r temperature/tint)
         Option<gst::Element>, // colorbalance_3pt (frei0r shadows/midtones/highlights)
         Option<gst::Element>, // gaussianblur
+        Option<gst::Element>, // squareblur (creative blur)
         Option<gst::Element>, // videocrop
         Option<gst::Element>, // videobox_crop_alpha
         Option<gst::Element>, // imagefreeze
@@ -7285,7 +7310,7 @@ impl ProgramPlayer {
             (conv1, videobalance)
         };
 
-        // conv2 + gaussianblur: only if blur/sharpen is active.
+        // conv2 + gaussianblur: only if denoise/sharpen is active.
         let (conv2, gaussianblur) = if need_blur {
             (
                 gst::ElementFactory::make("videoconvert").build().ok(),
@@ -7293,6 +7318,15 @@ impl ProgramPlayer {
             )
         } else {
             (None, None)
+        };
+
+        // Separate squareblur element for creative blur (RGBA-native, no
+        // format conversion needed unlike gaussianblur which requires AYUV).
+        let need_creative_blur = clip.blur > f64::EPSILON;
+        let squareblur = if need_creative_blur {
+            gst::ElementFactory::make("frei0r-filter-squareblur").build().ok()
+        } else {
+            None
         };
 
         // User-applied frei0r filter effects (from clip.frei0r_effects).
@@ -7448,6 +7482,9 @@ impl ProgramPlayer {
         }
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
+        }
+        if let Some(ref sb) = squareblur {
+            sb.set_property("kernel-size", clip.blur.clamp(0.0, 1.0));
         }
         if let Some(ref a) = alpha_filter {
             a.set_property("alpha", 1.0_f64);
@@ -7608,6 +7645,9 @@ impl ProgramPlayer {
         if let Some(ref e) = gaussianblur {
             chain.push(e.clone());
         }
+        if let Some(ref e) = squareblur {
+            chain.push(e.clone());
+        }
         // 3a. User-applied frei0r filter effects (after built-in color/blur).
         for e in &frei0r_user_effects {
             chain.push(e.clone());
@@ -7698,6 +7738,7 @@ impl ProgramPlayer {
             coloradj_rgb,
             colorbalance_3pt,
             gaussianblur,
+            squareblur,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -7970,6 +8011,7 @@ impl ProgramPlayer {
             coloradj_rgb: None,
             colorbalance_3pt: None,
             gaussianblur: None,
+            squareblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: None,
@@ -8238,6 +8280,7 @@ impl ProgramPlayer {
             coloradj_rgb: None,
             colorbalance_3pt: None,
             gaussianblur: None,
+            squareblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: None,
@@ -9048,6 +9091,7 @@ impl ProgramPlayer {
             coloradj_rgb,
             colorbalance_3pt,
             gaussianblur,
+            squareblur,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -9174,6 +9218,7 @@ impl ProgramPlayer {
                 coloradj_rgb: coloradj_rgb.clone(),
                 colorbalance_3pt: colorbalance_3pt.clone(),
                 gaussianblur: gaussianblur.clone(),
+                squareblur: squareblur.clone(),
                 videocrop: videocrop.clone(),
                 videobox_crop_alpha: videobox_crop_alpha.clone(),
                 imagefreeze: imagefreeze.clone(),
@@ -9232,6 +9277,7 @@ impl ProgramPlayer {
                 coloradj_rgb,
                 colorbalance_3pt,
                 gaussianblur,
+                squareblur,
                 videocrop,
                 videobox_crop_alpha,
                 imagefreeze,
@@ -9559,6 +9605,7 @@ impl ProgramPlayer {
             coloradj_rgb: coloradj_rgb.clone(),
             colorbalance_3pt: colorbalance_3pt.clone(),
             gaussianblur: gaussianblur.clone(),
+            squareblur: squareblur.clone(),
             videocrop: videocrop.clone(),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
             imagefreeze: imagefreeze.clone(),
@@ -9624,6 +9671,7 @@ impl ProgramPlayer {
             coloradj_rgb,
             colorbalance_3pt,
             gaussianblur,
+            squareblur,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -10197,6 +10245,7 @@ impl ProgramPlayer {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
         };
+        let need_creative_blur = |c: &ProgramClip| c.blur > f64::EPSILON;
         let need_rotate = |c: &ProgramClip| c.rotate.rem_euclid(360) != 0;
         let need_flip = |c: &ProgramClip| c.flip_h || c.flip_v;
         let need_title = |c: &ProgramClip| !c.title_text.is_empty();
@@ -10206,6 +10255,7 @@ impl ProgramPlayer {
             && need_coloradj(a) == need_coloradj(b)
             && need_3point(a) == need_3point(b)
             && need_blur(a) == need_blur(b)
+            && need_creative_blur(a) == need_creative_blur(b)
             && need_rotate(a) == need_rotate(b)
             && need_flip(a) == need_flip(b)
             && need_title(a) == need_title(b)
@@ -10244,6 +10294,7 @@ impl ProgramPlayer {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
         };
+        let need_creative_blur = clip.blur > f64::EPSILON;
         let need_rotate = clip.rotate.rem_euclid(360) != 0;
         let need_flip = clip.flip_h || clip.flip_v;
         let need_title = !clip.title_text.is_empty();
@@ -10285,6 +10336,7 @@ impl ProgramPlayer {
             && coloradj_ok
             && threepoint_ok
             && (!need_blur || slot.gaussianblur.is_some())
+            && (!need_creative_blur || slot.squareblur.is_some())
             && (!need_rotate || slot.videoflip_rotate.is_some())
             && (!need_flip || slot.videoflip_flip.is_some())
             && (!need_title || slot.textoverlay.is_some())
@@ -10443,10 +10495,15 @@ impl ProgramPlayer {
             tp.set_property("white-color-b", p.white_b as f32);
         }
 
-        // Gaussianblur
+        // Gaussianblur (denoise/sharpness)
         if let Some(ref gb) = slot.gaussianblur {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             gb.set_property("sigma", sigma);
+        }
+
+        // Squareblur (creative blur)
+        if let Some(ref sb) = slot.squareblur {
+            sb.set_property("kernel-size", clip.blur.clamp(0.0, 1.0));
         }
 
         // Chroma key alpha element
@@ -11741,6 +11798,8 @@ mod tests {
             tint_keyframes: Vec::new(),
             denoise: 0.0,
             sharpness: 0.0,
+            blur: 0.0,
+            blur_keyframes: Vec::new(),
             volume: 1.0,
             volume_keyframes: Vec::new(),
             pan: 0.0,
@@ -12460,6 +12519,7 @@ mod tests {
                 None
             },
             gaussianblur: if has_gaussianblur { identity() } else { None },
+            squareblur: None, // no squareblur in test slots
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: if has_imagefreeze { identity() } else { None },

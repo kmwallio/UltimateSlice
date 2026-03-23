@@ -114,6 +114,7 @@ pub enum McpCommand {
         tint: f64,
         denoise: f64,
         sharpness: f64,
+        blur: f64,
         shadows: f64,
         midtones: f64,
         highlights: f64,

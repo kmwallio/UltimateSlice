@@ -45,14 +45,15 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 
 ---
 
-## Denoise & Sharpness
+## Denoise / Sharpness / Blur
 
-Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (export).
+Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp`/`boxblur` (export).
 
 | Slider | Range | Default | Effect |
 |---|---|---|---|
 | **Denoise** | 0.0 → 1.0 | 0.0 | Gaussian blur strength (noise reduction) |
 | **Sharpness** | −1.0 → 1.0 | 0.0 | Negative = soften, positive = sharpen |
+| **Blur** | 0.0 → 1.0 | 0.0 | Creative blur (censoring, depth-of-field, background defocus). Preview via gaussianblur, export via boxblur. Supports keyframe animation. |
 
 ---
 
@@ -252,7 +253,7 @@ You can copy all color grading values from one clip and paste them onto another.
 | **Ctrl+Alt+C** | Copy color grade from the selected clip |
 | **Ctrl+Alt+V** | Paste color grade onto the selected clip |
 
-**Copied properties:** Brightness, Contrast, Saturation, Temperature, Tint, Exposure, Black Point, Shadows, Midtones, Highlights, per-tone Warmth/Tint, Denoise, Sharpness, and LUT path. Static values only — keyframe animations are not included.
+**Copied properties:** Brightness, Contrast, Saturation, Temperature, Tint, Exposure, Black Point, Shadows, Midtones, Highlights, per-tone Warmth/Tint, Denoise, Sharpness, Blur, and LUT path. Static values only — keyframe animations are not included.
 
 > **Tip:** Use **Ctrl+Shift+V** (Paste Attributes) to copy *all* clip attributes including audio, transforms, and effects. Use **Ctrl+Alt+V** (Paste Color Grade) when you only want to match the color look between clips.
 
@@ -335,7 +336,7 @@ Each applied effect row shows:
 
 ### Preview & Export
 
-- **Preview**: GStreamer `frei0r-filter-*` elements inserted after the built-in color pipeline (brightness/contrast/saturation/LUT/temperature/tint/grading/denoise/sharpness) and before chroma key. Parameter changes update live without pipeline rebuild.
+- **Preview**: GStreamer `frei0r-filter-*` elements inserted after the built-in color pipeline (brightness/contrast/saturation/LUT/temperature/tint/grading/denoise/sharpness/blur) and before chroma key. Parameter changes update live without pipeline rebuild.
 - **Export**: FFmpeg `frei0r=filter_name={name}:filter_params={p1}|{p2}|...` filter chain. Parameters are passed in registry-defined order.
 
 ### MCP tools
