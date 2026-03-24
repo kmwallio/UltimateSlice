@@ -30,3 +30,6 @@ ndarray = { version = "0.17", optional = true }
 [features]
 default = []
 ai-inference = ["ort", "ndarray"]
+
+[profile.dev]
+opt-level = 1

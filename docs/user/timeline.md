@@ -304,3 +304,4 @@ The undo history is per-session (not persisted in the FCPXML).
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.
 - Linked clips show a `LINK` badge whenever they belong to a clip link group.
 - Non-primary linked peers in the current linked selection show a cyan inset border.
+- **Adjustment layers** appear as purple hatched clips with an "ADJ" badge. They have no source media — their effects (color grading, LUTs, frei0r, blur) apply to the composited result of all tracks below. Add one by right-clicking a video track label and choosing "Add Adjustment Layer". Use the Inspector to set effects. Opacity controls effect intensity (0.0 = no effect, 1.0 = full effect).

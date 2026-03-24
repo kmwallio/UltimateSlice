@@ -24,6 +24,7 @@ pub enum ClipKind {
     Audio,
     Image,
     Title,
+    Adjustment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -989,6 +990,14 @@ impl Clip {
         }
     }
 
+    /// Create a new adjustment layer clip (no source media; effects apply to
+    /// the composited result of all tracks below).
+    pub fn new_adjustment(timeline_start: u64, duration_ns: u64) -> Self {
+        let mut c = Self::new("", duration_ns, timeline_start, ClipKind::Adjustment);
+        c.label = "Adjustment".to_string();
+        c
+    }
+
     /// Raw source material duration (source_out − source_in), unaffected by speed.
     pub fn source_duration(&self) -> u64 {
         self.source_out.saturating_sub(self.source_in)
@@ -1004,7 +1013,7 @@ impl Clip {
     /// clips or FCPXML imports without a probe result), or when the clip is
     /// a still image (images can be extended to any timeline length).
     pub fn max_source_out(&self) -> Option<u64> {
-        if self.kind == ClipKind::Image || self.kind == ClipKind::Title {
+        if self.kind == ClipKind::Image || self.kind == ClipKind::Title || self.kind == ClipKind::Adjustment {
             return None;
         }
         self.media_duration_ns

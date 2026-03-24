@@ -1097,6 +1097,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "add_adjustment_layer",
+            "description": "Add an adjustment layer clip at a track index and timeline position. Adjustment layer effects (color grading, LUTs, frei0r) apply to the composited result of all tracks below.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_index": { "type": "integer", "description": "Video track index" },
+                    "timeline_start_ns": { "type": "integer", "description": "Timeline start position in nanoseconds" },
+                    "duration_ns": { "type": "integer", "description": "Duration in nanoseconds" }
+                },
+                "required": ["track_index", "timeline_start_ns", "duration_ns"]
+            }
+        },
+        {
             "name": "set_clip_title_style",
             "description": "Set title/text overlay styling properties on a clip. Includes font, color, position, outline, shadow, background box.",
             "inputSchema": {
@@ -1644,6 +1657,12 @@ fn dispatch_tool_payload(
             timeline_start_ns: args["timeline_start_ns"].as_u64(),
             duration_ns: args["duration_ns"].as_u64(),
             title_text: args["title_text"].as_str().map(String::from),
+            reply: tx,
+        },
+        "add_adjustment_layer" => McpCommand::AddAdjustmentLayer {
+            track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
+            timeline_start_ns: args["timeline_start_ns"].as_u64().unwrap_or(0),
+            duration_ns: args["duration_ns"].as_u64().unwrap_or(5_000_000_000),
             reply: tx,
         },
         "set_clip_title_style" => McpCommand::SetClipTitleStyle {

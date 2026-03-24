@@ -384,6 +384,8 @@ pub struct ProgramClip {
     pub has_audio: bool,
     /// True when this clip is a still image (PNG, JPEG, etc.).
     pub is_image: bool,
+    /// True when this clip is an adjustment layer (effects apply to composite below).
+    pub is_adjustment: bool,
     /// Chroma key enabled flag.
     pub chroma_key_enabled: bool,
     /// Chroma key target color as 0xRRGGBB.
@@ -980,6 +982,16 @@ struct BlendOverlay {
     zorder: u32,
 }
 
+/// Adjustment layer time-range metadata (kept for potential future use).
+struct AdjustmentOverlay {
+    #[allow(dead_code)]
+    track_index: usize,
+    #[allow(dead_code)]
+    timeline_start_ns: u64,
+    #[allow(dead_code)]
+    timeline_end_ns: u64,
+}
+
 pub struct ProgramPlayer {
     /// The single GStreamer pipeline containing compositor + audiomixer.
     pipeline: gst::Pipeline,
@@ -1051,6 +1063,19 @@ pub struct ProgramPlayer {
     /// The blend probe on compositor output reads these to apply per-pixel
     /// blend math against the real base layers.
     blend_overlays: Arc<Mutex<HashMap<usize, BlendOverlay>>>,
+    /// Adjustment layer overlays for post-compositor color grading.
+    adjustment_overlays: Arc<Mutex<Vec<AdjustmentOverlay>>>,
+    /// Shared timeline position (ns) for the adjustment probe to check time ranges.
+    adjustment_timeline_pos: Arc<AtomicU64>,
+    /// Permanent adjustment layer videobalance element between compositor output
+    /// and display chain.  Set to neutral when no adjustment layer is active.
+    adj_videobalance: gst::Element,
+    /// Permanent adjustment layer frei0r coloradj-rgb element (temperature/tint).
+    /// None if frei0r is not available.
+    adj_coloradj: Option<gst::Element>,
+    /// Permanent adjustment layer frei0r three-point-color-balance element.
+    /// None if frei0r is not available.
+    adj_3point: Option<gst::Element>,
     /// When false, the scope appsink callback skips frame allocation (scopes panel hidden).
     scope_enabled: Arc<AtomicBool>,
     /// Monotonic counter incremented whenever a new scope frame is captured.
@@ -1202,6 +1227,9 @@ impl ProgramPlayer {
         let latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
         let blend_overlays: Arc<Mutex<HashMap<usize, BlendOverlay>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let adjustment_overlays: Arc<Mutex<Vec<AdjustmentOverlay>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let adjustment_timeline_pos: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         // Flag set false when the scopes panel is hidden to skip the frame copy allocation.
         let scope_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
         let scope_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
@@ -1458,15 +1486,59 @@ impl ProgramPlayer {
         comp_bg_pad.set_property("zorder", 0u32);
         black_caps.static_pad("src").unwrap().link(&comp_bg_pad)?;
 
-        // Link compositor → processing caps → convert → scale → output caps → display/scope
-        gst::Element::link_many([
+        // Permanent adjustment layer elements between compositor output and
+        // display chain.  Properties are set to neutral values by default and
+        // updated when an adjustment layer is active.  This avoids any pipeline
+        // topology changes (which can deadlock GStreamer's state-change machinery).
+        let adj_videoconvert = gst::ElementFactory::make("videoconvert")
+            .build()
+            .map_err(|_| anyhow!("videoconvert not available"))?;
+        let adj_videobalance = gst::ElementFactory::make("videobalance")
+            .build()
+            .map_err(|_| anyhow!("videobalance not available"))?;
+        // Neutral defaults (identity transform).
+        adj_videobalance.set_property("brightness", 0.0_f64);
+        adj_videobalance.set_property("contrast", 1.0_f64);
+        adj_videobalance.set_property("saturation", 1.0_f64);
+        adj_videobalance.set_property("hue", 0.0_f64);
+
+        let adj_coloradj: Option<gst::Element> = None;
+        let adj_3point: Option<gst::Element> = None;
+
+        pipeline.add(&adj_videoconvert)?;
+        pipeline.add(&adj_videobalance)?;
+
+        // Link: compositor → caps → [adj_convert → adj_videobalance →] convert → scale → caps → display
+        // The permanent videobalance handles brightness/contrast/saturation for
+        // adjustment layers.  Temperature/tint/3-point and frei0r user effects
+        // are applied on export only (frei0r elements cannot be safely added to
+        // or removed from a live GStreamer pipeline without deadlocking).
+        //
+        // Try linking with the adjustment elements; fall back to direct link
+        // if videobalance causes caps negotiation issues on this system.
+        let adj_link_ok = gst::Element::link_many([
             &compositor,
             &comp_capsfilter,
+            &adj_videoconvert,
+            &adj_videobalance,
             &videoconvert_out,
             &videoscale_out,
             &preview_capsfilter,
             &video_sink_bin,
-        ])?;
+        ]).is_ok();
+        if !adj_link_ok {
+            log::warn!("ProgramPlayer: adjustment elements could not be linked — falling back");
+            pipeline.remove(&adj_videoconvert).ok();
+            pipeline.remove(&adj_videobalance).ok();
+            gst::Element::link_many([
+                &compositor,
+                &comp_capsfilter,
+                &videoconvert_out,
+                &videoscale_out,
+                &preview_capsfilter,
+                &video_sink_bin,
+            ])?;
+        }
         // Blend-mode probe on compositor output.  For each frame, reads captured
         // overlay buffers from blend-mode clips and applies pixel-accurate blend
         // math against the compositor's normal "over" output (where the blend-mode
@@ -1523,6 +1595,11 @@ impl ProgramPlayer {
                 });
             }
         }
+
+        // NOTE: Adjustment layer effects are handled by the permanent
+        // adj_effects_bin (GStreamer elements between compositor and display),
+        // NOT by a buffer probe.  The bin is rebuilt in rebuild_pipeline_at()
+        // and on slider changes via rebuild_adjustment_effects_chain().
 
         // Probe on compositor output: always increments cseq (cheap) but only
         // copies the full-res frame when compositor_capture_enabled is set (during
@@ -1695,6 +1772,11 @@ impl ProgramPlayer {
                 latest_scope_frame,
                 latest_compositor_frame,
                 blend_overlays,
+                adjustment_overlays,
+                adjustment_timeline_pos,
+                adj_videobalance,
+                adj_coloradj,
+                adj_3point,
                 scope_enabled,
                 scope_frame_seq,
                 compositor_frame_seq,
@@ -2406,6 +2488,114 @@ impl ProgramPlayer {
         self.current_prerender_segment_key = None;
         self.teardown_prepreroll_sidecars();
         self.cleanup_background_prerender_cache();
+
+        // Populate adjustment overlays from the loaded clips.
+        self.rebuild_adjustment_overlays();
+    }
+
+    /// Update the adjustment overlay time-range metadata from the current clip set.
+    fn rebuild_adjustment_overlays(&self) {
+        if let Ok(mut overlays) = self.adjustment_overlays.lock() {
+            overlays.clear();
+            for clip in &self.clips {
+                if clip.is_adjustment {
+                    overlays.push(AdjustmentOverlay {
+                        track_index: clip.track_index,
+                        timeline_start_ns: clip.timeline_start_ns,
+                        timeline_end_ns: clip.timeline_start_ns + clip.source_out_ns.saturating_sub(clip.source_in_ns),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Rebuild the GStreamer effects chain inside the permanent adjustment
+    /// effects bin.  Called from `rebuild_pipeline_at()` and slider callbacks.
+    /// Uses a signature to skip rebuilds when nothing changed.
+    /// Update the permanent adjustment layer elements with values from the
+    /// active adjustment layers at the current playhead.  Only sets GStreamer
+    /// element properties — never modifies pipeline topology (which would
+    /// deadlock during live state transitions).
+    fn rebuild_adjustment_effects_chain(&mut self) {
+        let pos = self.timeline_pos_ns;
+        let active_adj: Vec<&ProgramClip> = self.clips.iter()
+            .filter(|c| c.is_adjustment && pos >= c.timeline_start_ns && pos < c.timeline_end_ns())
+            .collect();
+
+        if active_adj.is_empty() {
+            // Reset to neutral (identity transform).
+            self.adj_videobalance.set_property("brightness", 0.0_f64);
+            self.adj_videobalance.set_property("contrast", 1.0_f64);
+            self.adj_videobalance.set_property("saturation", 1.0_f64);
+            self.adj_videobalance.set_property("hue", 0.0_f64);
+            if let Some(ref ca) = self.adj_coloradj {
+                ca.set_property("r", 0.5_f64);
+                ca.set_property("g", 0.5_f64);
+                ca.set_property("b", 0.5_f64);
+            }
+            if let Some(ref cb) = self.adj_3point {
+                cb.set_property("black-color-r", 0.5_f64);
+                cb.set_property("black-color-g", 0.5_f64);
+                cb.set_property("black-color-b", 0.5_f64);
+                cb.set_property("gray-color-r", 0.5_f64);
+                cb.set_property("gray-color-g", 0.5_f64);
+                cb.set_property("gray-color-b", 0.5_f64);
+                cb.set_property("white-color-r", 0.5_f64);
+                cb.set_property("white-color-g", 0.5_f64);
+                cb.set_property("white-color-b", 0.5_f64);
+            }
+            return;
+        }
+
+        // Use the first active adjustment layer (future: merge multiple).
+        let clip = active_adj[0];
+        let has_coloradj = self.adj_coloradj.is_some();
+        let has_3point = self.adj_3point.is_some();
+        let p = Self::compute_videobalance_params(
+            clip.brightness, clip.contrast, clip.saturation,
+            clip.temperature, clip.tint,
+            clip.shadows, clip.midtones, clip.highlights,
+            clip.exposure, clip.black_point,
+            clip.highlights_warmth, clip.highlights_tint,
+            clip.midtones_warmth, clip.midtones_tint,
+            clip.shadows_warmth, clip.shadows_tint,
+            has_coloradj, has_3point,
+        );
+        self.adj_videobalance.set_property("brightness", p.brightness);
+        self.adj_videobalance.set_property("contrast", p.contrast);
+        self.adj_videobalance.set_property("saturation", p.saturation);
+        self.adj_videobalance.set_property("hue", p.hue);
+
+        if let Some(ref ca) = self.adj_coloradj {
+            let cp = Self::compute_coloradj_params(clip.temperature, clip.tint);
+            ca.set_property("r", cp.r);
+            ca.set_property("g", cp.g);
+            ca.set_property("b", cp.b);
+        }
+
+        if let Some(ref cb) = self.adj_3point {
+            let tp = Self::compute_3point_params(
+                clip.shadows, clip.midtones, clip.highlights,
+                clip.black_point,
+                clip.highlights_warmth, clip.highlights_tint,
+                clip.midtones_warmth, clip.midtones_tint,
+                clip.shadows_warmth, clip.shadows_tint,
+            );
+            cb.set_property("black-color-r", tp.black_r);
+            cb.set_property("black-color-g", tp.black_g);
+            cb.set_property("black-color-b", tp.black_b);
+            cb.set_property("gray-color-r", tp.gray_r);
+            cb.set_property("gray-color-g", tp.gray_g);
+            cb.set_property("gray-color-b", tp.gray_b);
+            cb.set_property("white-color-r", tp.white_r);
+            cb.set_property("white-color-g", tp.white_g);
+            cb.set_property("white-color-b", tp.white_b);
+        }
+    }
+
+    /// Update the shared timeline position for the adjustment probe.
+    fn sync_adjustment_timeline_pos(&self) {
+        self.adjustment_timeline_pos.store(self.timeline_pos_ns, Ordering::Relaxed);
     }
 
     // ── Transport controls ─────────────────────────────────────────────────
@@ -3064,6 +3254,7 @@ impl ProgramPlayer {
 
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
+        self.sync_adjustment_timeline_pos();
         self.prewarm_upcoming_boundary(new_pos);
 
         // Timeline end reached after update?
@@ -3084,7 +3275,11 @@ impl ProgramPlayer {
         }
 
         // Detect clip boundary changes: have the active clips changed?
-        let desired = self.clips_active_at(new_pos);
+        // Exclude adjustment layers — they have no slots and don't affect boundaries.
+        let desired: Vec<usize> = self.clips_active_at(new_pos)
+            .into_iter()
+            .filter(|&i| i >= self.clips.len() || !self.clips[i].is_adjustment)
+            .collect();
         let current: Vec<usize> = if let Some(active) = self.prerender_active_clips.clone() {
             active
         } else {
@@ -3251,6 +3446,39 @@ impl ProgramPlayer {
         shadows_tint: f64,
         blur: f64,
     ) {
+        // For adjustment layers, update the GStreamer effects chain directly (no per-clip slot).
+        if let Some(clip_idx) = self.current_idx {
+            if clip_idx < self.clips.len() && self.clips[clip_idx].is_adjustment {
+                let clip = &mut self.clips[clip_idx];
+                clip.brightness = brightness;
+                clip.contrast = contrast;
+                clip.saturation = saturation;
+                clip.temperature = temperature;
+                clip.tint = tint;
+                clip.denoise = denoise;
+                clip.sharpness = sharpness;
+                clip.blur = blur;
+                clip.shadows = shadows;
+                clip.midtones = midtones;
+                clip.highlights = highlights;
+                clip.exposure = exposure;
+                clip.black_point = black_point;
+                clip.highlights_warmth = highlights_warmth;
+                clip.highlights_tint = highlights_tint;
+                clip.midtones_warmth = midtones_warmth;
+                clip.midtones_tint = midtones_tint;
+                clip.shadows_warmth = shadows_warmth;
+                clip.shadows_tint = shadows_tint;
+                self.rebuild_adjustment_overlays();
+                self.rebuild_adjustment_effects_chain();
+                // Flush compositor to force updated effects to take effect.
+                if self.state != PlayerState::Playing {
+                    self.reseek_slot_for_current();
+                }
+                return;
+            }
+        }
+
         // Check whether the required effect elements exist.  If the slider
         // values moved away from defaults but the slot was built without the
         // element (because values were at defaults when the slot was created),
@@ -3467,6 +3695,15 @@ impl ProgramPlayer {
             Some(i) => i,
             None => return false,
         };
+
+        // For adjustment layers, update the clip's frei0r list and rebuild the
+        // post-compositor effects chain.
+        if clip_idx < self.clips.len() && self.clips[clip_idx].is_adjustment {
+            self.clips[clip_idx].frei0r_effects = effects.to_vec();
+            // Frei0r user effects on adjustment layers are applied on export only;
+            // the preview path uses permanent videobalance/coloradj/3point elements.
+            return true; // Signal caller to reseek
+        }
 
         // Check topology: does the slot already have matching elements?
         let topology_matches = if let Some(slot) = self.slot_for_clip(clip_idx) {
@@ -3942,6 +4179,14 @@ impl ProgramPlayer {
         if let Some(idx) = self.current_idx {
             if let Some(clip) = self.clips.get_mut(idx) {
                 clip.opacity = opacity;
+                if clip.is_adjustment {
+                    self.rebuild_adjustment_overlays();
+                    self.rebuild_adjustment_effects_chain();
+                    if self.state != PlayerState::Playing {
+                        self.reseek_slot_for_current();
+                    }
+                    return;
+                }
             }
             // Update compositor pad alpha for this slot.
             if let Some(slot) = self.slot_for_clip(idx) {
@@ -6646,6 +6891,10 @@ impl ProgramPlayer {
             if current.contains(clip_idx) {
                 continue;
             }
+            // Adjustment layers have no compositor slot — skip without error.
+            if *clip_idx < self.clips.len() && self.clips[*clip_idx].is_adjustment {
+                continue;
+            }
             if let Some(mut slot) = self.build_slot_for_clip(*clip_idx, zorder_offset, true) {
                 slot.transition_enter_offset_ns = self.transition_enter_offset_for_clip(*clip_idx);
                 self.slots.push(slot);
@@ -6932,6 +7181,10 @@ impl ProgramPlayer {
             let mut added_ok = true;
             let mut added_clip_idxs: Vec<usize> = Vec::new();
             for clip_idx in &added {
+                // Adjustment layers have no compositor slot — skip without error.
+                if *clip_idx < self.clips.len() && self.clips[*clip_idx].is_adjustment {
+                    continue;
+                }
                 // Use zorder 0 temporarily; corrected in step 4.
                 if let Some(mut slot) = self.build_slot_for_clip(*clip_idx, 0, true) {
                     // Set pad offsets so post-seek buffers (running-time 0)
@@ -9300,6 +9553,13 @@ impl ProgramPlayer {
             });
         }
 
+        // Adjustment layers have no visual output in the compositor — their effects
+        // are applied post-compositor via the adjustment probe.  Skip slot creation.
+        if clip.is_adjustment {
+            log::debug!("ProgramPlayer: skipping slot for adjustment layer clip={}", clip.id);
+            return None;
+        }
+
         // Create uridecodebin for this clip.
         let decoder = match gst::ElementFactory::make("uridecodebin")
             .property("uri", &uri)
@@ -10910,6 +11170,11 @@ impl ProgramPlayer {
         self.prerender_active_clips = None;
         self.current_prerender_segment_key = None;
         for (zorder_offset, &clip_idx) in active.iter().enumerate() {
+            // Adjustment layers have no compositor slot — effects are applied
+            // by the post-compositor probe.
+            if clip_idx < self.clips.len() && self.clips[clip_idx].is_adjustment {
+                continue;
+            }
             // Compute transition-enter offset for clips entering via transition overlap.
             let trans_offset = self.transition_enter_offset_for_clip(clip_idx);
             // When experimental preview optimizations are enabled, use lightweight
@@ -10941,6 +11206,8 @@ impl ProgramPlayer {
 
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
+        self.timeline_pos_ns = timeline_pos;
+        self.sync_adjustment_timeline_pos();
         let rebuild_started = Instant::now();
         let was_playing = self.state == PlayerState::Playing;
         let had_existing_slots = !self.slots.is_empty();
@@ -11096,6 +11363,8 @@ impl ProgramPlayer {
         if !used_prerender {
             self.build_live_video_slots_for_active(&active, was_playing);
         }
+        // Rebuild the post-compositor adjustment effects chain if needed.
+        self.rebuild_adjustment_effects_chain();
         let t_build = rebuild_started.elapsed().as_millis();
 
         // Transition pipeline to Paused so decoders preroll and can accept seeks.
@@ -11855,6 +12124,7 @@ mod tests {
             shadows_tint: 0.0,
             has_audio: true,
             is_image: false,
+            is_adjustment: false,
             chroma_key_enabled: false,
             chroma_key_color: 0x00FF00,
             chroma_key_tolerance: 0.3,

@@ -5304,8 +5304,10 @@ pub fn build_window(
                             shadows_tint: c.shadows_tint as f64,
                             has_audio: !c.is_freeze_frame()
                                 && c.kind != ClipKind::Title
+                                && c.kind != ClipKind::Adjustment
                                 && !suppress_embedded_audio_ids.contains(&c.id),
                             is_image: c.kind == ClipKind::Image,
+                            is_adjustment: c.kind == ClipKind::Adjustment,
                             chroma_key_enabled: c.chroma_key_enabled,
                             chroma_key_color: c.chroma_key_color,
                             chroma_key_tolerance: c.chroma_key_tolerance,
@@ -9553,6 +9555,35 @@ fn handle_mcp_command(
                     drop(proj);
                     reply.send(json!({"error": "track_index out of range"})).ok();
                 }
+            }
+        }
+
+        McpCommand::AddAdjustmentLayer {
+            track_index,
+            timeline_start_ns,
+            duration_ns,
+            reply,
+        } => {
+            let clip = crate::model::clip::Clip::new_adjustment(timeline_start_ns, duration_ns);
+            let clip_id = clip.id.clone();
+            let proj_ref = project.borrow();
+            if track_index < proj_ref.tracks.len() {
+                let track_id = proj_ref.tracks[track_index].id.clone();
+                drop(proj_ref);
+                let cmd = crate::undo::AddAdjustmentLayerCommand {
+                    clip,
+                    track_id,
+                };
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    st.history.execute(Box::new(cmd), &mut proj);
+                }
+                on_project_changed_full();
+                reply.send(json!({"clip_id": clip_id})).ok();
+            } else {
+                drop(proj_ref);
+                reply.send(json!({"error": "track_index out of range"})).ok();
             }
         }
 

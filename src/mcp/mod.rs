@@ -398,6 +398,12 @@ pub enum McpCommand {
         title_text: Option<String>,
         reply: SyncSender<Value>,
     },
+    AddAdjustmentLayer {
+        track_index: usize,
+        timeline_start_ns: u64,
+        duration_ns: u64,
+        reply: SyncSender<Value>,
+    },
     SetClipTitleStyle {
         clip_id: String,
         title_text: Option<String>,

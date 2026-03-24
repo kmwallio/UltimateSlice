@@ -2292,7 +2292,7 @@ impl TimelineState {
 fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
     match kind {
         ClipKind::Audio => TrackKind::Audio,
-        ClipKind::Video | ClipKind::Image | ClipKind::Title => TrackKind::Video,
+        ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment => TrackKind::Video,
     }
 }
 
@@ -2753,6 +2753,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     let btn_track_height_small = gtk::Button::with_label("Track Height: Small");
     let btn_track_height_medium = gtk::Button::with_label("Track Height: Medium");
     let btn_track_height_large = gtk::Button::with_label("Track Height: Large");
+    let btn_add_adjustment_layer = gtk::Button::with_label("Add Adjustment Layer");
     for btn in [
         &btn_track_height_small,
         &btn_track_height_medium,
@@ -2761,6 +2762,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn.add_css_class("flat");
         track_context_box.append(btn);
     }
+    btn_add_adjustment_layer.add_css_class("flat");
+    track_context_box.append(&btn_add_adjustment_layer);
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
@@ -2950,6 +2953,46 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         });
     }
 
+    // Add Adjustment Layer button handler
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        btn_add_adjustment_layer.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            if let Some(idx) = track_idx {
+                let (playhead, track_id, is_video, proj_rc) = {
+                    let st = state.borrow();
+                    let proj = st.project.borrow();
+                    let valid = idx < proj.tracks.len() && proj.tracks[idx].kind == TrackKind::Video;
+                    let tid = proj.tracks.get(idx).map(|t| t.id.clone()).unwrap_or_default();
+                    (st.playhead_ns, tid, valid, st.project.clone())
+                };
+                if is_video {
+                    let clip = crate::model::clip::Clip::new_adjustment(playhead, 5_000_000_000);
+                    let cmd = crate::undo::AddAdjustmentLayerCommand {
+                        clip,
+                        track_id,
+                    };
+                    let mut st = state.borrow_mut();
+                    st.history.execute(Box::new(cmd), &mut proj_rc.borrow_mut());
+                    let proj_cb = st.on_project_changed.clone();
+                    drop(st);
+                    if let Some(cb) = proj_cb {
+                        cb();
+                    }
+                    if let Some(a) = area_weak.upgrade() {
+                        a.queue_draw();
+                    }
+                }
+            }
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+        });
+    }
+
     // Drawing
     {
         let state = state.clone();
@@ -3015,6 +3058,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let btn_track_height_small = btn_track_height_small.clone();
         let btn_track_height_medium = btn_track_height_medium.clone();
         let btn_track_height_large = btn_track_height_large.clone();
+        let btn_add_adjustment_layer = btn_add_adjustment_layer.clone();
         click.connect_pressed(move |gesture, _n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() {
@@ -3236,9 +3280,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 let proj = st.project.borrow();
                                 proj.tracks
                                     .get(track_idx)
-                                    .map(|track| (track.id.clone(), track.height_preset))
+                                    .map(|track| (track.id.clone(), track.height_preset, track.kind))
                             };
-                            if let Some((track_id, preset)) = selected {
+                            if let Some((track_id, preset, track_kind)) = selected {
                                 st.selected_track_id = Some(track_id);
                                 *track_context_track_idx.borrow_mut() = Some(track_idx);
                                 btn_track_height_small.set_sensitive(
@@ -3250,6 +3294,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 btn_track_height_large.set_sensitive(
                                     preset != crate::model::track::TrackHeightPreset::Large,
                                 );
+                                btn_add_adjustment_layer.set_visible(track_kind == TrackKind::Video);
                                 track_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                     x as i32, y as i32, 1, 1,
                                 )));
@@ -5890,8 +5935,47 @@ fn draw_clip(
         cr.restore().ok();
     }
 
+    // ── Adjustment layer hatch pattern + badge ─────────────────────────
+    if clip.kind == crate::model::clip::ClipKind::Adjustment && cw > 20.0 {
+        cr.save().ok();
+        rounded_rect(cr, cx + 1.0, cy + 1.0, (cw - 2.0).max(0.0), (ch - 2.0).max(0.0), 3.0);
+        cr.clip();
+        // Draw diagonal hatch lines
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12);
+        cr.set_line_width(1.0);
+        let spacing = 8.0;
+        let diag = cw + ch;
+        let steps = (diag / spacing).ceil() as i32;
+        for i in 0..steps {
+            let offset = i as f64 * spacing;
+            let _ = cr.move_to(cx + offset, cy);
+            let _ = cr.line_to(cx + offset - ch, cy + ch);
+        }
+        cr.stroke().ok();
+        // Draw "ADJ" badge
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
+        cr.set_font_size(9.0);
+        let _ = cr.move_to(cx + 4.0, cy + 11.0);
+        let _ = cr.show_text("ADJ");
+        // Draw label centered
+        let max_chars = ((cw - 10.0) / 7.0).max(1.0) as usize;
+        let truncated = if clip.label.len() > max_chars {
+            format!("{}…", &clip.label[..max_chars.saturating_sub(1)])
+        } else {
+            clip.label.clone()
+        };
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        cr.set_font_size((ch * 0.4).clamp(8.0, 16.0));
+        let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("X").unwrap());
+        let tx = cx + (cw - te.width()) / 2.0;
+        let ty = cy + (ch + te.height()) / 2.0;
+        let _ = cr.move_to(tx, ty);
+        let _ = cr.show_text(&truncated);
+        cr.restore().ok();
+    }
+
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && cw > 20.0 {
+    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && clip.kind != crate::model::clip::ClipKind::Adjustment && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -6123,6 +6207,7 @@ fn draw_clip(
         let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
         let has_lut_badge = !clip.lut_paths.is_empty();
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
+            && clip.kind != crate::model::clip::ClipKind::Adjustment
             && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
@@ -6472,6 +6557,9 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
         crate::model::clip::ClipColorLabel::None => {
             if clip.kind == crate::model::clip::ClipKind::Title {
                 return (0.75, 0.62, 0.22); // warm gold for title clips
+            }
+            if clip.kind == crate::model::clip::ClipKind::Adjustment {
+                return (0.55, 0.35, 0.75); // purple for adjustment layers
             }
             match track_kind {
                 TrackKind::Video => (0.17, 0.47, 0.85),

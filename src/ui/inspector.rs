@@ -979,13 +979,14 @@ impl InspectorView {
                 let is_audio = c.kind == ClipKind::Audio;
                 let is_image = c.kind == ClipKind::Image;
                 let is_title_clip = c.kind == ClipKind::Title;
-                let is_visual = is_video || is_image || is_title_clip;
-                self.color_section.set_visible(is_video || is_image);
+                let is_adjustment = c.kind == ClipKind::Adjustment;
+                let is_visual = is_video || is_image || is_title_clip || is_adjustment;
+                self.color_section.set_visible(is_video || is_image || is_adjustment);
                 self.audio_section.set_visible(is_video || is_audio);
-                self.transform_section.set_visible(is_visual);
-                self.title_section_box.set_visible(is_visual);
-                self.speed_section_box.set_visible(!is_title_clip);
-                self.lut_section_box.set_visible(is_video || is_image);
+                self.transform_section.set_visible(is_visual && !is_adjustment);
+                self.title_section_box.set_visible(is_visual && !is_adjustment);
+                self.speed_section_box.set_visible(!is_title_clip && !is_adjustment);
+                self.lut_section_box.set_visible(is_video || is_image || is_adjustment);
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
@@ -1000,11 +1001,14 @@ impl InspectorView {
                 if is_title {
                     self.path_value.set_text("(title clip — no source file)");
                     self.path_value.set_tooltip_text(None);
+                } else if is_adjustment {
+                    self.path_value.set_text("(adjustment layer — applies effects to tracks below)");
+                    self.path_value.set_tooltip_text(None);
                 } else {
                     self.path_value.set_text(&c.source_path);
                     self.path_value.set_tooltip_text(Some(&c.source_path));
                 }
-                let is_missing = !is_title
+                let is_missing = !is_title && !is_adjustment
                     && missing_media_paths
                         .map(|paths| paths.contains(&c.source_path))
                         .unwrap_or_else(|| !crate::model::media_library::source_path_exists(&c.source_path));

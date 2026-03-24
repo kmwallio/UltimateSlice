@@ -818,7 +818,7 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image | ClipKind::Title => {
+                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment => {
                     lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
                 }
             };
@@ -1107,8 +1107,10 @@ fn parse_asset_clip(
                 clip.title_secondary_text = v.clone();
             }
             if let Some(v) = attrs.get("us:clip-kind") {
-                if v == "title" {
-                    clip.kind = ClipKind::Title;
+                match v.as_str() {
+                    "title" => clip.kind = ClipKind::Title,
+                    "adjustment" => clip.kind = ClipKind::Adjustment,
+                    _ => {}
                 }
             }
             if let Some(v) = attrs.get("us:speed") {

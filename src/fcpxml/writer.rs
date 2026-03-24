@@ -804,6 +804,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     if clip.kind == crate::model::clip::ClipKind::Title {
                         asset_clip.push_attribute(("us:clip-kind", "title"));
+                    } else if clip.kind == crate::model::clip::ClipKind::Adjustment {
+                        asset_clip.push_attribute(("us:clip-kind", "adjustment"));
                     }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
@@ -2115,7 +2117,11 @@ fn patch_asset_clip_block_transform(
         ("us:title-bg-box-padding", if clip.title_bg_box { Some(clip.title_bg_box_padding.to_string()) } else { None }),
         ("us:title-clip-bg-color", if clip.title_clip_bg_color != 0 { Some(format!("{:08X}", clip.title_clip_bg_color)) } else { None }),
         ("us:title-secondary-text", if clip.title_secondary_text.is_empty() { None } else { Some(clip.title_secondary_text.clone()) }),
-        ("us:clip-kind", if clip.kind == crate::model::clip::ClipKind::Title { Some("title".to_string()) } else { None }),
+        ("us:clip-kind", match clip.kind {
+            crate::model::clip::ClipKind::Title => Some("title".to_string()),
+            crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
+            _ => None,
+        }),
     ] {
         let next = if let Some(v) = value {
             replace_or_insert_attr(&updated_start, attr, &v)?
@@ -2634,7 +2640,7 @@ fn write_resources(
         for clip in &track.clips {
             // Title clips have no source media — skip to avoid writing
             // broken asset references with empty file:// URIs.
-            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title {
+            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment {
                 continue;
             }
             let export_source_path = clip

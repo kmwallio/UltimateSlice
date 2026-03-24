@@ -1132,6 +1132,30 @@ impl EditCommand for SetTitlePropertiesCommand {
     }
 }
 
+/// Add an adjustment layer clip to a track (undo removes it).
+pub struct AddAdjustmentLayerCommand {
+    pub clip: Clip,
+    pub track_id: String,
+}
+
+impl EditCommand for AddAdjustmentLayerCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.add_clip(self.clip.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.remove_clip(&self.clip.id);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add adjustment layer"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
