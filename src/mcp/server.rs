@@ -933,6 +933,29 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "match_frame",
+            "description": "Match Frame: find a timeline clip's source in the media library, load it in the Source Monitor, and seek to the matching source timecode. Uses the selected clip or the specified clip_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Optional clip ID to match. If omitted, uses the currently selected clip." }
+                }
+            }
+        },
+        {
+            "name": "set_clip_stabilization",
+            "description": "Enable or configure video stabilization (libvidstab) on a clip. Stabilization is applied during export (two-pass analysis + transform).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip ID to stabilize." },
+                    "enabled": { "type": "boolean", "description": "Enable or disable stabilization." },
+                    "smoothing": { "type": "number", "description": "Smoothing strength: 0.0 (minimal) to 1.0 (maximum). Default 0.5." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "batch_call_tools",
             "description": "Execute multiple MCP tool calls in-order within one request. Returns per-call success/error records.",
             "inputSchema": {
@@ -1568,6 +1591,16 @@ fn dispatch_tool_payload(
         },
         "source_play" => McpCommand::SourcePlay { reply: tx },
         "source_pause" => McpCommand::SourcePause { reply: tx },
+        "match_frame" => McpCommand::MatchFrame {
+            clip_id: args.get("clip_id").and_then(|v| v.as_str()).map(str::to_string),
+            reply: tx,
+        },
+        "set_clip_stabilization" => McpCommand::SetClipStabilization {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+            smoothing: args.get("smoothing").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            reply: tx,
+        },
         "sync_clips_by_audio" => McpCommand::SyncClipsByAudio {
             clip_ids: args["clip_ids"]
                 .as_array()

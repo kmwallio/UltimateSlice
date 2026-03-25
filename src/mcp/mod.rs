@@ -341,6 +341,16 @@ pub enum McpCommand {
     SourcePause {
         reply: SyncSender<Value>,
     },
+    MatchFrame {
+        clip_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    SetClipStabilization {
+        clip_id: String,
+        enabled: bool,
+        smoothing: f64,
+        reply: SyncSender<Value>,
+    },
     SyncClipsByAudio {
         clip_ids: Vec<String>,
         reply: SyncSender<Value>,

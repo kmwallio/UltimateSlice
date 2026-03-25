@@ -64,13 +64,27 @@ impl ProxyScale {
 }
 
 /// Build the composite cache key used in `ProxyCache::proxies` and `pending`.
-/// Encodes both the source path and any assigned LUT so that a scale or LUT
-/// change produces a distinct key (and therefore a distinct proxy file).
+/// Encodes the source path, any assigned LUT, and vidstab state so that a
+/// change to any of these produces a distinct key (and therefore a distinct proxy).
 pub fn proxy_key(source_path: &str, lut_path: Option<&str>) -> String {
-    match lut_path {
+    proxy_key_with_vidstab(source_path, lut_path, false, 0.0)
+}
+
+/// Extended composite key including vidstab stabilization state.
+pub fn proxy_key_with_vidstab(
+    source_path: &str,
+    lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
+) -> String {
+    let mut key = match lut_path {
         Some(lut) if !lut.is_empty() => format!("{}|lut:{}", source_path, lut),
         _ => source_path.to_string(),
+    };
+    if vidstab_enabled && vidstab_smoothing > 0.0 {
+        key.push_str(&format!("|vs:{:.2}", vidstab_smoothing));
     }
+    key
 }
 
 /// Asynchronous proxy media cache.
@@ -95,7 +109,7 @@ pub struct ProxyCache {
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyWorkerUpdate>,
-    work_tx: Option<mpsc::Sender<(String, ProxyScale, Vec<String>, bool)>>,
+    work_tx: Option<mpsc::Sender<(String, ProxyScale, Vec<String>, bool, bool, f32)>>,
     /// Per-job estimated bytes and written bytes for byte-based status progress.
     estimated_bytes: HashMap<String, u64>,
     written_bytes: HashMap<String, u64>,
@@ -123,7 +137,8 @@ impl ProxyCache {
             );
         }
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
-        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Vec<String>, bool)>();
+        // (source_path, scale, lut_paths, sidecar_mirror, vidstab_enabled, vidstab_smoothing)
+        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
 
         // Pool of worker threads to transcode proxies in parallel.
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
@@ -138,13 +153,15 @@ impl ProxyCache {
                     lock.recv()
                 };
                 match item {
-                    Ok((source_path, scale, lut_paths, sidecar_mirror_enabled)) => {
+                    Ok((source_path, scale, lut_paths, sidecar_mirror_enabled, vidstab_enabled, vidstab_smoothing)) => {
                         let lut_composite = if lut_paths.is_empty() { None } else { Some(lut_paths.join("|")) };
-                        let key = proxy_key(&source_path, lut_composite.as_deref());
+                        let key = proxy_key_with_vidstab(&source_path, lut_composite.as_deref(), vidstab_enabled, vidstab_smoothing);
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
                             scale,
                             &lut_paths,
+                            vidstab_enabled,
+                            vidstab_smoothing,
                             &local_root,
                             &key,
                             &tx,
@@ -190,7 +207,19 @@ impl ProxyCache {
     /// Enqueue a proxy transcode for `source_path` (with optional LUT paths).
     /// No-op if already cached or pending for this exact (source, lut, scale) combination.
     pub fn request(&mut self, source_path: &str, scale: ProxyScale, lut_path: Option<&str>) {
-        let key = proxy_key(source_path, lut_path);
+        self.request_with_vidstab(source_path, scale, lut_path, false, 0.0);
+    }
+
+    /// Enqueue a proxy transcode with optional vidstab stabilization baked in.
+    pub fn request_with_vidstab(
+        &mut self,
+        source_path: &str,
+        scale: ProxyScale,
+        lut_path: Option<&str>,
+        vidstab_enabled: bool,
+        vidstab_smoothing: f32,
+    ) {
+        let key = proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing);
         if self.proxies.contains_key(&key)
             || self.pending.contains(&key)
             || self.failed.contains(&key)
@@ -211,7 +240,7 @@ impl ProxyCache {
         self.pending.insert(key);
         self.total_requested += 1;
         self.written_bytes
-            .insert(proxy_key(source_path, lut_path), 0);
+            .insert(proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing), 0);
         if let Some(ref tx) = self.work_tx {
             // Split composite key back into individual paths for the worker.
             let lut_paths: Vec<String> = match lut_path {
@@ -225,6 +254,8 @@ impl ProxyCache {
                 scale,
                 lut_paths,
                 self.sidecar_mirror_enabled,
+                vidstab_enabled,
+                vidstab_smoothing,
             ));
         }
     }
@@ -811,6 +842,8 @@ fn transcode_proxy(
     source_path: &str,
     scale: ProxyScale,
     lut_paths: &[String],
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
     local_root: &Path,
     cache_key: &str,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
@@ -831,8 +864,46 @@ fn transcode_proxy(
     let estimated_size_bytes = estimate_proxy_size_bytes(source_path, scale, lut_key, &ffmpeg);
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
 
-    // Build the -vf filter string: scale, then LUT chain.
+    // Build the -vf filter string: scale, then vidstab (if enabled), then LUT chain.
     let mut filter = scale.ffmpeg_scale_filter().to_string();
+
+    // Run vidstab two-pass analysis and add transform filter if successful.
+    let mut vidstab_trf_path: Option<String> = None;
+    if vidstab_enabled && vidstab_smoothing > 0.0 {
+        let trf = format!("/tmp/ultimateslice-proxy-vidstab-{:016x}.trf",
+            {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                source_path.hash(&mut h);
+                h.finish()
+            });
+        let shakiness = ((vidstab_smoothing * 10.0).round() as i32).clamp(1, 10);
+        log::info!("ProxyCache: running vidstab analysis for {} (shakiness={})", source_path, shakiness);
+        let analysis_ok = std::process::Command::new(&ffmpeg)
+            .arg("-y")
+            .arg("-i").arg(source_path)
+            .arg("-vf").arg(format!(
+                "{},vidstabdetect=shakiness={shakiness}:result={trf}",
+                scale.ffmpeg_scale_filter()
+            ))
+            .arg("-f").arg("null").arg("-")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if analysis_ok && Path::new(&trf).exists() {
+            let smoothing = ((vidstab_smoothing * 30.0).round() as i32).clamp(1, 30);
+            filter.push_str(&format!(
+                ",vidstabtransform=input={trf}:smoothing={smoothing}:zoom=0:optzoom=1,unsharp=5:5:0.8:3:3:0.4"
+            ));
+            vidstab_trf_path = Some(trf);
+        } else {
+            log::warn!("ProxyCache: vidstab analysis failed for {}, skipping stabilization", source_path);
+            let _ = std::fs::remove_file(&trf);
+        }
+    }
+
     for lut in lut_paths {
         if !lut.is_empty() {
             let escaped = lut.replace('\\', "\\\\").replace(':', "\\:");
@@ -884,6 +955,9 @@ fn transcode_proxy(
                     mirror_local_proxy_to_sidecar(&proxy_path, sidecar_path, &ffprobe);
                 }
             }
+            if let Some(ref trf) = vidstab_trf_path {
+                let _ = std::fs::remove_file(trf);
+            }
             return (proxy_path, true, owned_local);
         }
         let _ = std::fs::remove_file(&temp_proxy_path);
@@ -893,6 +967,10 @@ fn transcode_proxy(
                 source_path
             );
         }
+    }
+    // Clean up vidstab .trf file if it was created.
+    if let Some(ref trf) = vidstab_trf_path {
+        let _ = std::fs::remove_file(trf);
     }
     (local_proxy_path, false, false)
 }

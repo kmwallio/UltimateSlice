@@ -334,6 +334,9 @@ fn default_saturation() -> f32 {
 fn default_volume() -> f32 {
     1.0
 }
+fn default_vidstab_smoothing() -> f32 {
+    0.5
+}
 fn default_speed() -> f64 {
     1.0
 }
@@ -510,6 +513,12 @@ pub struct Clip {
     /// Optional blur keyframes over clip-local timeline.
     #[serde(default)]
     pub blur_keyframes: Vec<NumericKeyframe>,
+    /// Video stabilization enabled (export-only, two-pass via libvidstab).
+    #[serde(default)]
+    pub vidstab_enabled: bool,
+    /// Stabilization smoothing strength: 0.0 (minimal) to 1.0 (maximum).
+    #[serde(default = "default_vidstab_smoothing")]
+    pub vidstab_smoothing: f32,
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
@@ -907,6 +916,8 @@ impl Clip {
             sharpness: 0.0,
             blur: 0.0,
             blur_keyframes: Vec::new(),
+            vidstab_enabled: false,
+            vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
             volume_keyframes: Vec::new(),
             pan: 0.0,

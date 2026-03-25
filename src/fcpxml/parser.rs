@@ -960,6 +960,12 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:blur") {
                 clip.blur = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:vidstab-enabled") {
+                clip.vidstab_enabled = v == "true";
+            }
+            if let Some(v) = attrs.get("us:vidstab-smoothing") {
+                clip.vidstab_smoothing = v.parse().unwrap_or(0.5);
+            }
             if let Some(v) = attrs.get("us:blur-keyframes") {
                 let json_str = v.replace("&quot;", "\"");
                 clip.blur_keyframes = serde_json::from_str(&json_str).unwrap_or_default();
@@ -2394,6 +2400,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:denoise"
             | "us:sharpness"
             | "us:blur"
+            | "us:vidstab-enabled"
+            | "us:vidstab-smoothing"
             | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"

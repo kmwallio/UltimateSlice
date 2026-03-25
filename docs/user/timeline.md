@@ -202,6 +202,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
 | `S` | Toggle solo for selected track |
+| `F` | Match Frame — load selected clip's source in Source Monitor and seek to matching frame |
 | `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (from source monitor) |
@@ -243,6 +244,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Right-click on the ruler to remove the nearest marker.
 - Markers are exported in the FCPXML file.
 - On FCPXML import, standard markers and chapter markers are read and placed at their correct timeline positions.
+- When exporting to MP4, MOV, or MKV, markers are embedded as **chapter metadata** in the output file (see [export.md](export.md#chapter-markers)).
 
 ## Tracks
 

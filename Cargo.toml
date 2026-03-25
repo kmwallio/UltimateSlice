@@ -26,6 +26,7 @@ anyhow = "1"
 rustfft = "6"
 ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
+tempfile = "3.27.0"
 
 [features]
 default = []

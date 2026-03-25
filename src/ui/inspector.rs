@@ -65,6 +65,9 @@ pub struct InspectorView {
     pub denoise_slider: Scale,
     pub sharpness_slider: Scale,
     pub blur_slider: Scale,
+    // Video stabilization (export-only)
+    pub vidstab_check: gtk4::CheckButton,
+    pub vidstab_slider: Scale,
     // Grading sliders
     pub shadows_slider: Scale,
     pub midtones_slider: Scale,
@@ -1044,6 +1047,8 @@ impl InspectorView {
                 self.denoise_slider.set_value(c.denoise as f64);
                 self.sharpness_slider.set_value(c.sharpness as f64);
                 self.blur_slider.set_value(c.blur as f64);
+                self.vidstab_check.set_active(c.vidstab_enabled);
+                self.vidstab_slider.set_value(c.vidstab_smoothing as f64);
                 self.shadows_slider.set_value(c.shadows as f64);
                 self.midtones_slider.set_value(c.midtones as f64);
                 self.highlights_slider.set_value(c.highlights as f64);
@@ -1255,6 +1260,8 @@ impl InspectorView {
                 self.denoise_slider.set_value(0.0);
                 self.sharpness_slider.set_value(0.0);
                 self.blur_slider.set_value(0.0);
+                self.vidstab_check.set_active(false);
+                self.vidstab_slider.set_value(0.5);
                 self.shadows_slider.set_value(0.0);
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
@@ -1481,6 +1488,7 @@ pub fn build_inspector(
     on_chroma_key_changed: impl Fn() + 'static,
     on_chroma_key_slider_changed: impl Fn(f32, f32) + 'static,
     on_bg_removal_changed: impl Fn() + 'static,
+    on_vidstab_changed: impl Fn() + 'static,
     on_frei0r_changed: impl Fn() + 'static,
     on_frei0r_params_changed: impl Fn() + 'static,
     on_speed_keyframe_changed: impl Fn(&str, f64, &[NumericKeyframe]) + 'static,
@@ -1488,6 +1496,7 @@ pub fn build_inspector(
     on_seek_to: impl Fn(u64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
+    let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
     let on_frei0r_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_changed);
     let on_frei0r_params_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_params_changed);
 
@@ -1667,6 +1676,28 @@ pub fn build_inspector(
     blur_slider.set_digits(2);
     blur_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
     color_inner.append(&blur_slider);
+
+    let stab_title = Label::new(Some("Stabilization"));
+    stab_title.set_halign(gtk::Align::Start);
+    stab_title.add_css_class("browser-header");
+    color_inner.append(&stab_title);
+
+    let vidstab_row = gtk4::Box::new(Orientation::Horizontal, 6);
+    let vidstab_check = gtk4::CheckButton::with_label("Enable");
+    vidstab_check.set_active(false);
+    vidstab_row.append(&vidstab_check);
+    let vidstab_note = Label::new(Some("(applied on export)"));
+    vidstab_note.add_css_class("dim-label");
+    vidstab_row.append(&vidstab_note);
+    color_inner.append(&vidstab_row);
+
+    row_label(&color_inner, "Smoothing");
+    let vidstab_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    vidstab_slider.set_value(0.5);
+    vidstab_slider.set_draw_value(true);
+    vidstab_slider.set_digits(2);
+    vidstab_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    color_inner.append(&vidstab_slider);
 
     let grading_title = Label::new(Some("Grading"));
     grading_title.set_halign(gtk::Align::Start);
@@ -2644,6 +2675,62 @@ pub fn build_inspector(
     wire_color_slider!(denoise_slider, |clip, v| clip.denoise = v);
     wire_color_slider!(sharpness_slider, |clip, v| clip.sharpness = v);
     wire_color_slider!(blur_slider, |clip, v| clip.blur = v);
+    // Wire vidstab smoothing slider — triggers proxy re-request, no preview pipeline rebuild.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_vidstab_changed = on_vidstab_changed.clone();
+        vidstab_slider.connect_value_changed(move |slider| {
+            if *updating.borrow() {
+                return;
+            }
+            let v = slider.value() as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.vidstab_smoothing = v;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_vidstab_changed();
+            }
+        });
+    }
+
+    // Wire vidstab enable checkbox — triggers proxy re-request when proxy mode is enabled.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_vidstab_changed = on_vidstab_changed.clone();
+        vidstab_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.vidstab_enabled = enabled;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_vidstab_changed();
+            }
+        });
+    }
+
     wire_color_slider!(shadows_slider, |clip, v| clip.shadows = v);
     wire_color_slider!(midtones_slider, |clip, v| clip.midtones = v);
     wire_color_slider!(highlights_slider, |clip, v| clip.highlights = v);
@@ -5264,6 +5351,8 @@ pub fn build_inspector(
         denoise_slider,
         sharpness_slider,
         blur_slider,
+        vidstab_check,
+        vidstab_slider,
         shadows_slider,
         midtones_slider,
         highlights_slider,

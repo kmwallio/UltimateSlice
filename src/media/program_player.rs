@@ -279,6 +279,9 @@ pub struct ProgramClip {
     /// Creative blur strength: 0.0 (off) to 1.0 (heavy)
     pub blur: f64,
     pub blur_keyframes: Vec<NumericKeyframe>,
+    /// Video stabilization enabled (baked into proxy when proxy mode is on).
+    pub vidstab_enabled: bool,
+    pub vidstab_smoothing: f32,
     /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     pub volume: f64,
     pub volume_keyframes: Vec<NumericKeyframe>,
@@ -4654,14 +4657,18 @@ impl ProgramPlayer {
 
         let lut_composite = if clip.lut_paths.is_empty() { None } else { Some(clip.lut_paths.join("|")) };
         if self.proxy_enabled {
-            let key =
-                crate::media::proxy_cache::proxy_key(&clip.source_path, lut_composite.as_deref());
+            let key = crate::media::proxy_cache::proxy_key_with_vidstab(
+                &clip.source_path, lut_composite.as_deref(),
+                clip.vidstab_enabled, clip.vidstab_smoothing,
+            );
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
         } else if self.preview_luts && !clip.lut_paths.is_empty() {
-            let key =
-                crate::media::proxy_cache::proxy_key(&clip.source_path, lut_composite.as_deref());
+            let key = crate::media::proxy_cache::proxy_key_with_vidstab(
+                &clip.source_path, lut_composite.as_deref(),
+                clip.vidstab_enabled, clip.vidstab_smoothing,
+            );
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
@@ -12178,6 +12185,8 @@ mod tests {
             sharpness: 0.0,
             blur: 0.0,
             blur_keyframes: Vec::new(),
+            vidstab_enabled: false,
+            vidstab_smoothing: 0.5,
             volume: 1.0,
             volume_keyframes: Vec::new(),
             pan: 0.0,

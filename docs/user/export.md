@@ -159,6 +159,14 @@ Keyframes are evaluated in clip-local timeline time and rendered directly into f
 - Freeze-frame timing in export is aligned with Program Monitor preview so freeze durations and transition overlap timing match.
 - Embedded video-track audio is intentionally omitted for freeze-frame clips (silent hold behavior).
 
+## Chapter Markers
+
+- Timeline markers (see [timeline.md](timeline.md#chapter-markers)) are automatically embedded as **chapter metadata** in exported MP4, MOV, and MKV files.
+- Each marker creates a chapter starting at the marker's position; chapters end at the next marker or the project end.
+- Chapters appear in media players that support them (VLC chapter nav, YouTube chapter timestamps, MKV chapter menus, etc.).
+- Projects with no markers produce export output with no chapter metadata (no change in behavior).
+- Verify chapters with: `ffprobe -show_chapters output.mp4`
+
 ## Notes
 
 - Export requires **ffmpeg** to be installed and on `$PATH`.

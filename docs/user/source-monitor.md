@@ -70,6 +70,12 @@ Dragging directly from the Source Monitor video display also exports the current
 
 If an active track of the matching kind is highlighted in the timeline, that track is preferred; otherwise UltimateSlice falls back to the first matching track of that kind.
 
+## Match Frame
+
+Press **F** on the timeline to load the selected clip's source into the Source Monitor and seek to the frame matching the current playhead position. The Source Monitor's In/Out points are set to the clip's source range. This is useful for quickly reviewing original footage from the assembled timeline.
+
+Also available via the `match_frame` MCP tool.
+
 ## Insert and Overwrite Edits
 
 In addition to Append, the Source Monitor provides two 3-point editing operations:

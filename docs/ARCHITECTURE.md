@@ -241,6 +241,7 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 | `rustfft` | `6` | FFT for audio cross-correlation sync |
 | `ort` | `2.0.0-rc.12` | ONNX Runtime for AI background removal |
 | `ndarray` | `0.17` | N-dimensional array for ONNX tensor I/O |
+| `tempfile` | `3` | Temporary files for ffmpeg chapter metadata |
 
 **Do not upgrade gstreamer without also upgrading gtk4/gdk4/glib to the matching glib version.**
 
@@ -370,6 +371,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `pause` | Pause program monitor playback |
 | `stop` | Stop program monitor playback and return playhead to start |
 | `take_screenshot` | Capture a PNG screenshot of the full application window (GTK snapshot + GSK CairoRenderer); saved to CWD as `ultimateslice-screenshot-<epoch>.png` |
+| `match_frame` | Match Frame: load a timeline clip's source in the Source Monitor and seek to the matching source timecode (uses selected clip or optional `clip_id`) |
+| `set_clip_stabilization` | Enable/configure video stabilization (libvidstab) on a clip; applied during export |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`) at an absolute timeline position |

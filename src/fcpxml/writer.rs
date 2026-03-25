@@ -657,6 +657,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             asset_clip.push_attribute(("us:blur-keyframes", json.as_str()));
                         }
                     }
+                    if clip.vidstab_enabled {
+                        asset_clip.push_attribute(("us:vidstab-enabled", "true"));
+                        asset_clip.push_attribute((
+                            "us:vidstab-smoothing",
+                            clip.vidstab_smoothing.to_string().as_str(),
+                        ));
+                    }
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
                             // Don't manually escape quotes — quick_xml's

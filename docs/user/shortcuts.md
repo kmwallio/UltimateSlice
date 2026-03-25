@@ -48,6 +48,7 @@
 | `E` | Toggle Roll edit tool |
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
+| `F` | Match Frame — load selected clip's source in Source Monitor at matching timecode |
 | `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (shift subsequent clips) |

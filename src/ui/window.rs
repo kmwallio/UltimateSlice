@@ -2412,18 +2412,18 @@ pub fn build_window(
                                 }
                                 _ => crate::media::proxy_cache::ProxyScale::Half,
                             };
-                            let clips: Vec<(String, Option<String>)> = {
+                            let clips: Vec<(String, Option<String>, bool, f32)> = {
                                 let proj = project.borrow();
                                 proj.tracks
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
-                                    .map(|c| (c.source_path.clone(), c.lut_key()))
+                                    .map(|c| (c.source_path.clone(), c.lut_key(), c.vidstab_enabled, c.vidstab_smoothing))
                                     .collect()
                             };
                             {
                                 let mut cache = proxy_cache.borrow_mut();
-                                for (path, lut) in &clips {
-                                    cache.request(path, scale, lut.as_deref());
+                                for (path, lut, vs_en, vs_sm) in &clips {
+                                    cache.request_with_vidstab(path, scale, lut.as_deref(), *vs_en, *vs_sm);
                                 }
                             }
                             let paths = proxy_cache.borrow().proxies.clone();
@@ -2835,6 +2835,42 @@ pub fn build_window(
             let on_project_changed = on_project_changed.clone();
             move || {
                 on_project_changed();
+            }
+        },
+        // on_vidstab_changed: stabilization toggle/slider → project-changed + proxy re-request
+        {
+            let on_project_changed = on_project_changed.clone();
+            let proxy_cache = proxy_cache.clone();
+            let preferences_state = preferences_state.clone();
+            let project = project.clone();
+            let prog_player = prog_player.clone();
+            move || {
+                on_project_changed();
+                let prefs = preferences_state.borrow();
+                if prefs.proxy_mode.is_enabled() {
+                    let scale = match prefs.proxy_mode {
+                        crate::ui_state::ProxyMode::QuarterRes => {
+                            crate::media::proxy_cache::ProxyScale::Quarter
+                        }
+                        _ => crate::media::proxy_cache::ProxyScale::Half,
+                    };
+                    let clips: Vec<(String, Option<String>, bool, f32)> = {
+                        let proj = project.borrow();
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .map(|c| (c.source_path.clone(), c.lut_key(), c.vidstab_enabled, c.vidstab_smoothing))
+                            .collect()
+                    };
+                    {
+                        let mut cache = proxy_cache.borrow_mut();
+                        for (path, lut, vs_en, vs_sm) in &clips {
+                            cache.request_with_vidstab(path, scale, lut.as_deref(), *vs_en, *vs_sm);
+                        }
+                    }
+                    let paths = proxy_cache.borrow().proxies.clone();
+                    prog_player.borrow_mut().update_proxy_paths(paths);
+                }
             }
         },
         // on_frei0r_changed: topology change (add/remove/reorder/toggle) → full pipeline rebuild
@@ -4708,6 +4744,60 @@ pub fn build_window(
         })
     };
 
+    // Wire on_match_frame — locates the selected clip's source in the media
+    // library, loads it in the source monitor, and seeks to the matching frame.
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let player = player.clone();
+        let source_marks = source_marks.clone();
+        let on_source_selected = on_source_selected.clone();
+        let timeline_state_for_mf = timeline_state.clone();
+        timeline_state.borrow_mut().on_match_frame = Some(Rc::new(move || {
+            let (selected_id, playhead_ns) = {
+                let st = timeline_state_for_mf.borrow();
+                match st.selected_clip_id.clone() {
+                    Some(id) => (id, st.playhead_ns),
+                    None => return,
+                }
+            };
+            let clip_info = {
+                let proj = project.borrow();
+                proj.tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == selected_id)
+                    .map(|c| (c.source_path.clone(), c.source_in, c.source_out, c.timeline_start))
+            };
+            let Some((source_path, source_in, source_out, timeline_start)) = clip_info else {
+                return;
+            };
+            if source_path.is_empty() {
+                return; // Title/adjustment clips have no source
+            }
+            let duration_ns = {
+                let lib = library.borrow();
+                lib.iter()
+                    .find(|item| item.source_path == source_path)
+                    .map(|item| item.duration_ns)
+                    .unwrap_or(source_out)
+            };
+            // Load the source clip in the source monitor.
+            on_source_selected(source_path, duration_ns);
+            // Compute the source position matching the playhead.
+            let source_pos = source_in
+                + playhead_ns.saturating_sub(timeline_start);
+            let source_pos = source_pos.min(source_out).max(source_in);
+            // Seek the source player to the matching frame.
+            let _ = player.borrow().seek(source_pos);
+            // Update source marks to reflect the clip's in/out range.
+            let mut m = source_marks.borrow_mut();
+            m.in_ns = source_in;
+            m.out_ns = source_out;
+            m.display_pos_ns = source_pos;
+        }));
+    }
+
     // ── Media browser ─────────────────────────────────────────────────────
     let (browser, clear_media_selection, force_rebuild_media_browser) =
         media_browser::build_media_browser(library.clone(), on_source_selected.clone(), on_relink_media_gui.clone());
@@ -5375,6 +5465,8 @@ pub fn build_window(
                             sharpness: c.sharpness as f64,
                             blur: c.blur as f64,
                             blur_keyframes: c.blur_keyframes.clone(),
+                            vidstab_enabled: c.vidstab_enabled,
+                            vidstab_smoothing: c.vidstab_smoothing,
                             volume: c.volume as f64,
                             volume_keyframes: c.volume_keyframes.clone(),
                             pan: c.pan as f64,
@@ -9401,6 +9493,107 @@ fn handle_mcp_command(
         McpCommand::SourcePause { reply } => {
             let _ = player.borrow().pause();
             reply.send(json!({"ok": true})).ok();
+        }
+
+        McpCommand::MatchFrame { clip_id, reply } => {
+            let effective_id = clip_id.or_else(|| timeline_state.borrow().selected_clip_id.clone());
+            let playhead_ns = timeline_state.borrow().playhead_ns;
+            match effective_id {
+                None => {
+                    reply
+                        .send(json!({"ok": false, "error": "No clip selected and no clip_id provided"}))
+                        .ok();
+                }
+                Some(cid) => {
+                    let clip_info = {
+                        let proj = project.borrow();
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .find(|c| c.id == cid)
+                            .map(|c| {
+                                (
+                                    c.source_path.clone(),
+                                    c.source_in,
+                                    c.source_out,
+                                    c.timeline_start,
+                                )
+                            })
+                    };
+                    match clip_info {
+                        None => {
+                            reply
+                                .send(json!({"ok": false, "error": format!("Clip not found: {cid}")}))
+                                .ok();
+                        }
+                        Some((source_path, source_in, source_out, timeline_start)) => {
+                            if source_path.is_empty() {
+                                reply
+                                    .send(json!({"ok": false, "error": "Clip has no source media (title/adjustment)"}))
+                                    .ok();
+                            } else {
+                                let duration_ns = library
+                                    .borrow()
+                                    .iter()
+                                    .find(|item| item.source_path == source_path)
+                                    .map(|item| item.duration_ns)
+                                    .unwrap_or(source_out);
+                                on_source_selected(source_path.clone(), duration_ns);
+                                let source_pos = (source_in + playhead_ns.saturating_sub(timeline_start))
+                                    .min(source_out)
+                                    .max(source_in);
+                                let _ = player.borrow().seek(source_pos);
+                                reply
+                                    .send(json!({
+                                        "ok": true,
+                                        "source_path": source_path,
+                                        "source_pos_ns": source_pos,
+                                        "source_in_ns": source_in,
+                                        "source_out_ns": source_out,
+                                        "duration_ns": duration_ns,
+                                    }))
+                                    .ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        McpCommand::SetClipStabilization {
+            clip_id,
+            enabled,
+            smoothing,
+            reply,
+        } => {
+            let mut found = false;
+            {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        clip.vidstab_enabled = enabled;
+                        clip.vidstab_smoothing = (smoothing as f32).clamp(0.0, 1.0);
+                        proj.dirty = true;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if found {
+                on_project_changed();
+                reply
+                    .send(json!({
+                        "ok": true,
+                        "clip_id": clip_id,
+                        "vidstab_enabled": enabled,
+                        "vidstab_smoothing": smoothing,
+                    }))
+                    .ok();
+            } else {
+                reply
+                    .send(json!({"ok": false, "error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
         }
 
         McpCommand::ListFrei0rPlugins { reply } => {

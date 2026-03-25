@@ -457,7 +457,7 @@ Tracking docs:
 ### Visual Effects
 - [x] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls; GStreamer `alpha` element in preview, ffmpeg `colorkey` filter in export; Inspector panel with enable toggle, green/blue/custom color presets, tolerance and edge-softness sliders
 - [x] AI background removal — offline ONNX Runtime inference (MODNet segmentation model) produces alpha-channel VP9 WebM files; BgRemovalCache with 2-thread worker pool; preview and export use pre-processed result; Inspector toggle + threshold slider; MCP `set_clip_bg_removal` tool; FCPXML persistence
-- [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
+- [x] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow); Inspector enable/smoothing controls; export-time analysis + vidstabtransform + post-sharpening; proxy-baked preview when proxy mode enabled; FCPXML persistence; MCP `set_clip_stabilization` tool
 - [x] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
 - [x] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
   - [x] Phase 1: Full-frame adjustment layers with `ClipKind::Adjustment`. Color grading (brightness, contrast, saturation) applied to composited output via permanent GStreamer videobalance element (real-time preview). Frei0r user effects, LUTs, temperature/tint, blur applied on export via time-gated FFmpeg filter chain. Purple hatched timeline rendering, inspector visibility, FCPXML round-trip, MCP tool, undo support, right-click context menu.
@@ -540,7 +540,7 @@ Tracking docs:
 - [x] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
 - [ ] ProRes / WebM / GIF export options
 - [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
-- [ ] Chapter markers in export (embed project markers as MP4/MKV chapter metadata)
+- [x] Chapter markers in export (embed project markers as MP4/MKV chapter metadata via ffmpeg FFMETADATA)
 - [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
 - [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
 - [ ] AAF export — standard interchange for audio post-production (Pro Tools)
@@ -570,7 +570,7 @@ Tracking docs:
 - [ ] Nested Timelines / Compound Clips
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
-- [ ] Match Frame (shortcut to find timeline clip in media library)
+- [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
 - [ ] Proxy Workflow: One-click toggle between original and proxy media
 - [ ] Keyword ranges + favorite/reject ratings in browser
 - [ ] Auditions / clip versions (swap alternate takes nondestructively)

@@ -325,6 +325,8 @@ pub struct TimelineState {
     pub missing_media_paths: HashSet<String>,
     /// Callback fired when user presses the match-color shortcut (Ctrl+Alt+M).
     pub on_match_color: Option<Rc<dyn Fn()>>,
+    /// Callback fired when user presses the match-frame shortcut (F).
+    pub on_match_frame: Option<Rc<dyn Fn()>>,
 }
 
 impl TimelineState {
@@ -366,6 +368,7 @@ impl TimelineState {
             on_tool_changed: None,
             missing_media_paths: HashSet::new(),
             on_match_color: None,
+            on_match_frame: None,
         }
     }
 
@@ -5012,6 +5015,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     return glib::Propagation::Stop;
                 }
+                Key::f | Key::F if !ctrl && !shift && !alt => {
+                    let cb = st.on_match_frame.clone();
+                    drop(st);
+                    if let Some(cb) = cb {
+                        cb();
+                    }
+                    return glib::Propagation::Stop;
+                }
                 Key::b | Key::B if ctrl && shift => {
                     let changed = st.join_selected_through_edit();
                     if changed {
@@ -6838,6 +6849,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Y", "Toggle Slip edit tool"),
         ("U", "Toggle Slide edit tool"),
         ("S", "Toggle solo for selected track"),
+        ("F", "Match Frame (load source in Source Monitor)"),
         ("Shift+F", "Create freeze-frame clip from selected clip"),
         (
             "Ctrl+Shift+B",

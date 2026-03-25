@@ -55,6 +55,20 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp`/`bo
 | **Sharpness** | −1.0 → 1.0 | 0.0 | Negative = soften, positive = sharpen |
 | **Blur** | 0.0 → 1.0 | 0.0 | Creative blur (censoring, depth-of-field, background defocus). Preview via gaussianblur, export via boxblur. Supports keyframe animation. |
 
+## Stabilization
+
+Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass workflow). When **proxy mode is enabled**, stabilization is baked into the proxy transcode so the effect is visible in the Program Monitor preview. Without proxies, stabilization is applied on export only.
+
+| Control | Type | Default | Effect |
+|---|---|---|---|
+| **Enable** | Checkbox | Off | Toggle stabilization for this clip |
+| **Smoothing** | 0.0 → 1.0 | 0.5 | Higher = smoother (less shake) but may crop edges. Maps to vidstab shakiness (1–10) for analysis and smoothing (1–30) for transform |
+
+- Pass 1 (analysis): `vidstabdetect` runs during export to detect motion vectors
+- Pass 2 (transform): `vidstabtransform` applies stabilizing corrections with post-sharpening (`unsharp`) to compensate for slight softening
+- If ffmpeg lacks libvidstab, stabilization is silently skipped
+- Persists in FCPXML via `us:vidstab-enabled` and `us:vidstab-smoothing` vendor attributes
+
 ---
 
 ## Audio
