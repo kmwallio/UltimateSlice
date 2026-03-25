@@ -553,7 +553,7 @@ Tracking docs:
 - [x] GTK renderer preference (Auto / Cairo / OpenGL / Vulkan) for low-memory devices
 - [x] Launch-screen clarity polish (empty-state guidance, wider side panels, and cleaner toolbar/inspector hierarchy)
 - [ ] Accessibility: keyboard navigation in all panels
-- [ ] Welcome window for choosing recent project or new one
+- [x] Welcome window for choosing recent project or new one (Stack-based overlay with New/Open/Recent, crossfade transition to editor)
 - [ ] Help documentation and tutorials
 - [ ] Application icon and desktop integration (`.desktop` file)
 - [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)

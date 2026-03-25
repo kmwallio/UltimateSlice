@@ -543,7 +543,7 @@ fn format_backup_timestamp() -> String {
     format!("{year:04}{month:02}{day:02}_{hours:02}{minutes:02}{seconds:02}")
 }
 
-fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
+pub fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
     // Civil date from days since 1970-01-01 (Euclidean affine algorithm)
     let z = days_since_epoch as i64 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -6200,7 +6200,191 @@ pub fn build_window(
     let outer_vbox = gtk::Box::new(Orientation::Vertical, 0);
     outer_vbox.append(&root_hpaned);
     outer_vbox.append(&status_bar);
-    window.set_child(Some(&outer_vbox));
+
+    // Welcome/editor stack — show welcome on fresh launch, editor when a project is loaded.
+    let main_stack = gtk::Stack::new();
+    main_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    main_stack.set_transition_duration(200);
+
+    let welcome_panel = {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let timeline_state_for_welcome = timeline_state.clone();
+        let window_for_welcome = window.clone();
+        let stack_for_new = main_stack.clone();
+        let stack_for_open = main_stack.clone();
+        let stack_for_recent = main_stack.clone();
+
+        crate::ui::welcome::build_welcome_panel(
+            // on_new_project
+            Rc::new({
+                let stack = stack_for_new;
+                move || {
+                    stack.set_visible_child_name("editor");
+                }
+            }),
+            // on_open_project
+            Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state_for_welcome.clone();
+                let on_project_changed = on_project_changed.clone();
+                let window = window_for_welcome.clone();
+                let stack = stack_for_open;
+                move || {
+                    let dialog = gtk::FileDialog::new();
+                    dialog.set_title("Open Project XML");
+                    let filter = gtk::FileFilter::new();
+                    filter.add_pattern("*.uspxml");
+                    filter.add_pattern("*.fcpxml");
+                    filter.add_pattern("*.xml");
+                    filter.set_name(Some("Project XML Files"));
+                    let filters = gtk4::gio::ListStore::new::<gtk::FileFilter>();
+                    filters.append(&filter);
+                    dialog.set_filters(Some(&filters));
+                    let project = project.clone();
+                    let timeline_state = timeline_state.clone();
+                    let on_project_changed = on_project_changed.clone();
+
+                    let stack = stack.clone();
+                    dialog.open(
+                        Some(&window),
+                        gtk4::gio::Cancellable::NONE,
+                        move |result| {
+                            if let Ok(file) = result {
+                                if let Some(path) = file.path() {
+                                    let path_str = path.to_string_lossy().to_string();
+                                    let (tx, rx) = std::sync::mpsc::sync_channel::<
+                                        Result<crate::model::project::Project, String>,
+                                    >(1);
+                                    let path_bg = path_str.clone();
+                                    std::thread::spawn(move || {
+                                        let result = std::fs::read_to_string(&path_bg)
+                                            .map_err(|e| format!("Failed to read file: {e}"))
+                                            .and_then(|xml| {
+                                                crate::fcpxml::parser::parse_fcpxml_with_path(
+                                                    &xml,
+                                                    Some(std::path::Path::new(&path_bg)),
+                                                )
+                                                .map_err(|e| format!("FCPXML parse error: {e}"))
+                                            });
+                                        let _ = tx.send(result);
+                                    });
+                                    let project = project.clone();
+                                    let on_project_changed = on_project_changed.clone();
+                
+                                    let timeline_state = timeline_state.clone();
+                                    let stack = stack.clone();
+                                    timeline_state.borrow_mut().loading = true;
+                                    glib::timeout_add_local(
+                                        std::time::Duration::from_millis(50),
+                                        move || match rx.try_recv() {
+                                            Ok(Ok(mut new_proj)) => {
+                                                new_proj.dirty = false;
+                                                crate::recent::push(
+                                                    &new_proj
+                                                        .file_path
+                                                        .clone()
+                                                        .unwrap_or_default(),
+                                                );
+                                                *project.borrow_mut() = new_proj;
+                                                timeline_state.borrow_mut().loading = false;
+
+                                                on_project_changed();
+                                                stack.set_visible_child_name("editor");
+                                                glib::ControlFlow::Break
+                                            }
+                                            Ok(Err(e)) => {
+                                                log::error!("Failed to open project: {e}");
+                                                timeline_state.borrow_mut().loading = false;
+                                                glib::ControlFlow::Break
+                                            }
+                                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                                glib::ControlFlow::Continue
+                                            }
+                                            Err(_) => {
+                                                timeline_state.borrow_mut().loading = false;
+                                                glib::ControlFlow::Break
+                                            }
+                                        },
+                                    );
+                                }
+                            }
+                        },
+                    );
+                }
+            }),
+            // on_open_recent
+            Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state_for_welcome.clone();
+                let on_project_changed = on_project_changed.clone();
+
+                let stack = stack_for_recent;
+                move |path_str: String| {
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<
+                        Result<crate::model::project::Project, String>,
+                    >(1);
+                    let path_bg = path_str.clone();
+                    std::thread::spawn(move || {
+                        let result = std::fs::read_to_string(&path_bg)
+                            .map_err(|e| format!("Failed to open recent project: {e}"))
+                            .and_then(|xml| {
+                                crate::fcpxml::parser::parse_fcpxml_with_path(
+                                    &xml,
+                                    Some(std::path::Path::new(&path_bg)),
+                                )
+                                .map_err(|e| format!("FCPXML parse error: {e}"))
+                            });
+                        let _ = tx.send(result);
+                    });
+                    let project = project.clone();
+                    let on_project_changed = on_project_changed.clone();
+
+                    let timeline_state = timeline_state.clone();
+                    let stack = stack.clone();
+                    timeline_state.borrow_mut().loading = true;
+                    glib::timeout_add_local(
+                        std::time::Duration::from_millis(50),
+                        move || match rx.try_recv() {
+                            Ok(Ok(mut new_proj)) => {
+                                new_proj.dirty = false;
+                                crate::recent::push(
+                                    &new_proj.file_path.clone().unwrap_or_default(),
+                                );
+                                *project.borrow_mut() = new_proj;
+                                timeline_state.borrow_mut().loading = false;
+                                on_project_changed();
+                                stack.set_visible_child_name("editor");
+                                glib::ControlFlow::Break
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("Failed to open recent project: {e}");
+                                timeline_state.borrow_mut().loading = false;
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                glib::ControlFlow::Continue
+                            }
+                            Err(_) => {
+                                timeline_state.borrow_mut().loading = false;
+                                glib::ControlFlow::Break
+                            }
+                        },
+                    );
+                }
+            }),
+        )
+    };
+
+    main_stack.add_named(&welcome_panel, Some("welcome"));
+    main_stack.add_named(&outer_vbox, Some("editor"));
+    // Show welcome on fresh launch (no startup project), editor otherwise.
+    if startup_project_path.is_some() {
+        main_stack.set_visible_child_name("editor");
+    } else {
+        main_stack.set_visible_child_name("welcome");
+    }
+    window.set_child(Some(&main_stack));
 
     // ── Frei0r plugin discovery (deferred to avoid blocking startup) ─────
     glib::idle_add_local_once(move || {

@@ -15,4 +15,5 @@ pub mod title_templates;
 pub mod titles_browser;
 pub mod toolbar;
 pub mod transform_overlay;
+pub mod welcome;
 pub mod window;
