@@ -351,6 +351,9 @@ pub enum McpCommand {
         smoothing: f64,
         reply: SyncSender<Value>,
     },
+    ListBackups {
+        reply: SyncSender<Value>,
+    },
     SyncClipsByAudio {
         clip_ids: Vec<String>,
         reply: SyncSender<Value>,

@@ -1507,8 +1507,93 @@ pub fn build_toolbar(
             on_export_frame();
         });
     }
+    let btn_restore_backup = gtk::Button::with_label("Restore from Backup…");
+    btn_restore_backup.add_css_class("flat");
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let on_project_reloaded = on_project_reloaded.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_restore_backup.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Restore from Backup");
+            if let Some(dir) = crate::ui::window::backup_dir() {
+                let _ = std::fs::create_dir_all(&dir);
+                dialog.set_initial_folder(Some(&gio::File::for_path(&dir)));
+            }
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.uspxml");
+            filter.add_pattern("*.fcpxml");
+            filter.set_name(Some("Project Backups"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let on_project_reloaded = on_project_reloaded.clone();
+            dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let path_str = path.to_string_lossy().to_string();
+                        let (tx, rx) =
+                            std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+                        let path_bg = path_str.clone();
+                        std::thread::spawn(move || {
+                            let result = std::fs::read_to_string(&path_bg)
+                                .map_err(|e| format!("Failed to read backup: {e}"))
+                                .and_then(|xml| {
+                                    fcpxml::parser::parse_fcpxml_with_path(
+                                        &xml,
+                                        Some(std::path::Path::new(&path_bg)),
+                                    )
+                                    .map_err(|e| format!("Backup parse error: {e}"))
+                                });
+                            let _ = tx.send(result);
+                        });
+                        let project = project.clone();
+                        let on_project_changed = on_project_changed.clone();
+                        let on_project_reloaded = on_project_reloaded.clone();
+                        let timeline_state = timeline_state.clone();
+                        timeline_state.borrow_mut().loading = true;
+                        glib::timeout_add_local(
+                            std::time::Duration::from_millis(50),
+                            move || match rx.try_recv() {
+                                Ok(Ok(mut new_proj)) => {
+                                    new_proj.dirty = false;
+                                    *project.borrow_mut() = new_proj;
+                                    timeline_state.borrow_mut().loading = false;
+                                    on_project_reloaded();
+                                    on_project_changed();
+                                    glib::ControlFlow::Break
+                                }
+                                Ok(Err(e)) => {
+                                    log::error!("Failed to restore backup: {e}");
+                                    timeline_state.borrow_mut().loading = false;
+                                    glib::ControlFlow::Break
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    glib::ControlFlow::Continue
+                                }
+                                Err(_) => {
+                                    timeline_state.borrow_mut().loading = false;
+                                    glib::ControlFlow::Break
+                                }
+                            },
+                        );
+                    }
+                }
+            });
+        });
+    }
     export_pop_box.append(&btn_export_project_with_media);
     export_pop_box.append(&btn_export_frame);
+    export_pop_box.append(&btn_restore_backup);
     export_pop.set_child(Some(&export_pop_box));
     export_pop.set_parent(&btn_export_more);
     {

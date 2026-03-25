@@ -98,6 +98,27 @@ pub fn show_preferences_dialog(
             about.present();
         });
     }
+    // Backup settings
+    let backup_label = Label::new(Some("Backup"));
+    backup_label.set_halign(gtk::Align::Start);
+    backup_label.add_css_class("title-4");
+    general_box.append(&backup_label);
+
+    let backup_enabled_check =
+        gtk::CheckButton::with_label("Auto-backup (versioned copies every 60 s)");
+    backup_enabled_check.set_active(current.backup_enabled);
+    backup_enabled_check.set_halign(gtk::Align::Start);
+    general_box.append(&backup_enabled_check);
+
+    let max_versions_row = GBox::new(Orientation::Horizontal, 6);
+    let max_versions_label = Label::new(Some("Max backup versions per project:"));
+    max_versions_row.append(&max_versions_label);
+    let backup_max_versions_spin =
+        gtk::SpinButton::with_range(1.0, 100.0, 1.0);
+    backup_max_versions_spin.set_value(current.backup_max_versions as f64);
+    max_versions_row.append(&backup_max_versions_spin);
+    general_box.append(&max_versions_row);
+
     general_box.append(&about_btn);
     stack.add_titled(&general_box, Some("general"), "General");
 
@@ -501,6 +522,8 @@ pub fn show_preferences_dialog(
                 ),
                 crossfade_duration_ns: (crossfade_duration_ms.value().round() as u64)
                     .saturating_mul(1_000_000),
+                backup_enabled: backup_enabled_check.is_active(),
+                backup_max_versions: backup_max_versions_spin.value() as usize,
             });
         }
         d.close();

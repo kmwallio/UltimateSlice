@@ -107,3 +107,19 @@ When imported FCPXML media references start with `/Volumes/...` and are missing 
 ## Auto-Save
 
 UltimateSlice auto-saves every 60 seconds to `/tmp/ultimateslice-autosave.fcpxml` when the project has unsaved changes. This is a safety net — use **Save…** for permanent storage.
+
+## Versioned Backups
+
+In addition to auto-save, UltimateSlice creates **timestamped backup copies** of your project every 60 seconds (when dirty) in:
+
+```
+~/.local/share/ultimateslice/backups/
+```
+
+(or `$XDG_DATA_HOME/ultimateslice/backups/` if set)
+
+- Backups are named `{ProjectTitle}_{YYYYMMDD_HHMMSS}.uspxml`
+- Old backups are automatically pruned to keep the most recent N versions per project title (default 20)
+- **Restore from Backup**: Use the **Export ▼ → Restore from Backup…** menu item to browse and open a previous backup
+- Configure in **Preferences → General**: toggle "Auto-backup" on/off and set "Max backup versions"
+- MCP tool: `list_backups` lists available backup files with sizes

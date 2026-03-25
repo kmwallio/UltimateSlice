@@ -21,6 +21,15 @@ Preferences are grouped by category in a sidebar:
 - The dialog lists major third-party crates/libraries used by UltimateSlice and their license families.
 - It also includes a license notice and pointers to `Cargo.toml`, `Cargo.lock`, and the Flatpak manifest for full dependency/license details.
 
+## Auto-Backup (General)
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| **Auto-backup** | Checkbox | On | Create timestamped backup copies every 60 seconds when the project has unsaved changes |
+| **Max backup versions** | Spin (1–100) | 20 | Maximum versioned backups per project title; oldest are pruned |
+
+Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOME/ultimateslice/backups/`). See [project-settings.md](project-settings.md#versioned-backups) for restore instructions.
+
 ## Hardware Acceleration (Playback)
 
 - **Enable hardware acceleration** toggles the saved preference value and applies immediately to **source preview playback**.

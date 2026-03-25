@@ -497,6 +497,132 @@ struct SourcePlacementInfo {
     source_timecode_base_ns: Option<u64>,
 }
 
+// ── Auto-backup helpers ──────────────────────────────────────────────────
+
+pub fn backup_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        })?;
+    Some(base.join("ultimateslice").join("backups"))
+}
+
+fn sanitize_backup_filename(title: &str) -> String {
+    let s: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        "Untitled".to_string()
+    } else {
+        s
+    }
+}
+
+fn format_backup_timestamp() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Convert to local time components (UTC offset not critical for filename ordering)
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    // Approximate date from days since epoch (sufficient for unique filenames)
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}{month:02}{day:02}_{hours:02}{minutes:02}{seconds:02}")
+}
+
+fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
+    // Civil date from days since 1970-01-01 (Euclidean affine algorithm)
+    let z = days_since_epoch as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u64, m, d)
+}
+
+fn prune_old_backups(dir: &std::path::Path, title_prefix: &str, max_versions: usize) {
+    let prefix_underscore = format!("{title_prefix}_");
+    let mut backups: Vec<_> = std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.starts_with(&prefix_underscore) && s.ends_with(".uspxml")
+        })
+        .collect();
+    if backups.len() <= max_versions {
+        return;
+    }
+    backups.sort_by(|a, b| {
+        let ma = a
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let mb = b
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        mb.cmp(&ma) // newest first
+    });
+    for old in backups.iter().skip(max_versions) {
+        let _ = std::fs::remove_file(old.path());
+    }
+}
+
+/// List all backup files in the backup directory, newest first.
+pub fn list_backup_files() -> Vec<(std::path::PathBuf, String, u64)> {
+    let dir = match backup_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".uspxml"))
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            let name = e.file_name().to_string_lossy().to_string();
+            let size = meta.len();
+            Some((e.path(), name, size))
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        let ma = std::fs::metadata(&a.0)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let mb = std::fs::metadata(&b.0)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        mb.cmp(&ma)
+    });
+    entries
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+
 fn lookup_source_placement_info(
     library: &[MediaItem],
     project: &Project,
@@ -6364,9 +6490,11 @@ pub fn build_window(
     }
 
     // Auto-save: every 60 seconds, write to a temp file if the project is dirty.
+    // Also creates a versioned backup in $XDG_DATA_HOME/ultimateslice/backups/.
     {
         let project = project.clone();
         let window_weak = window.downgrade();
+        let preferences_state = preferences_state.clone();
         glib::timeout_add_local(std::time::Duration::from_secs(60), move || {
             let is_dirty = project.borrow().dirty;
             if is_dirty {
@@ -6374,7 +6502,7 @@ pub fn build_window(
                     let proj = project.borrow();
                     crate::fcpxml::writer::write_fcpxml(&proj)
                 };
-                if let Ok(xml) = xml_result {
+                if let Ok(ref xml) = xml_result {
                     let path = "/tmp/ultimateslice-autosave.fcpxml";
                     if std::fs::write(path, xml).is_ok() {
                         if let Some(win) = window_weak.upgrade() {
@@ -6394,6 +6522,24 @@ pub fn build_window(
                                         )));
                                     }
                                 },
+                            );
+                        }
+                    }
+                    // Versioned backup
+                    let prefs = preferences_state.borrow();
+                    if prefs.backup_enabled {
+                        if let Some(dir) = backup_dir() {
+                            let _ = std::fs::create_dir_all(&dir);
+                            let proj_title = project.borrow().title.clone();
+                            let title_sanitized = sanitize_backup_filename(&proj_title);
+                            let ts = format_backup_timestamp();
+                            let backup_path =
+                                dir.join(format!("{title_sanitized}_{ts}.uspxml"));
+                            let _ = std::fs::write(&backup_path, xml);
+                            prune_old_backups(
+                                &dir,
+                                &title_sanitized,
+                                prefs.backup_max_versions,
                             );
                         }
                     }
@@ -9558,6 +9704,23 @@ fn handle_mcp_command(
                     }
                 }
             }
+        }
+
+        McpCommand::ListBackups { reply } => {
+            let backups = list_backup_files();
+            let list: Vec<serde_json::Value> = backups
+                .iter()
+                .map(|(path, name, size)| {
+                    json!({
+                        "path": path.to_string_lossy(),
+                        "name": name,
+                        "size_bytes": size,
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({ "ok": true, "backups": list, "count": list.len() }))
+                .ok();
         }
 
         McpCommand::SetClipStabilization {

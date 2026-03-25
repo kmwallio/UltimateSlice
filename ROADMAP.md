@@ -514,7 +514,7 @@ Tracking docs:
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [ ] Proxy media generation and management
-- [ ] Auto-backup with versioned history (timestamped backups to dedicated directory with restore UI)
+- [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management
 - [x] Relink dialog — general-purpose UI to find and repoint all offline/missing media

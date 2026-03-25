@@ -373,6 +373,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `take_screenshot` | Capture a PNG screenshot of the full application window (GTK snapshot + GSK CairoRenderer); saved to CWD as `ultimateslice-screenshot-<epoch>.png` |
 | `match_frame` | Match Frame: load a timeline clip's source in the Source Monitor and seek to the matching source timecode (uses selected clip or optional `clip_id`) |
 | `set_clip_stabilization` | Enable/configure video stabilization (libvidstab) on a clip; applied during export |
+| `list_backups` | List available versioned backup files with timestamps and sizes |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`) at an absolute timeline position |

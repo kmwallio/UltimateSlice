@@ -943,6 +943,11 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_backups",
+            "description": "List available versioned backup files with timestamps and sizes.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "set_clip_stabilization",
             "description": "Enable or configure video stabilization (libvidstab) on a clip. Stabilization is applied during export (two-pass analysis + transform).",
             "inputSchema": {
@@ -1595,6 +1600,7 @@ fn dispatch_tool_payload(
             clip_id: args.get("clip_id").and_then(|v| v.as_str()).map(str::to_string),
             reply: tx,
         },
+        "list_backups" => McpCommand::ListBackups { reply: tx },
         "set_clip_stabilization" => McpCommand::SetClipStabilization {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             enabled: args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
