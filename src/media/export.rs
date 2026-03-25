@@ -118,16 +118,23 @@ pub fn export_project(
         .collect();
     let mut primary_clips: Vec<&crate::model::clip::Clip> = active_video_tracks
         .first()
-        .map(|t| t.clips.iter().collect())
+        .map(|t| t.clips.iter().filter(|c| c.kind != ClipKind::Adjustment).collect())
         .unwrap_or_default();
     primary_clips.sort_by_key(|c| c.timeline_start);
 
     // Remaining video tracks: each is a list of (overlay) clips
+    // Collect adjustment clips from ALL tracks before filtering them out.
+    let all_adjustment_clips: Vec<&Clip> = active_video_tracks
+        .iter()
+        .flat_map(|t| t.clips.iter())
+        .filter(|c| c.kind == ClipKind::Adjustment)
+        .collect();
+
     let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = active_video_tracks
         .into_iter()
         .skip(1)
         .map(|t| {
-            let mut clips: Vec<&Clip> = t.clips.iter().collect();
+            let mut clips: Vec<&Clip> = t.clips.iter().filter(|c| c.kind != ClipKind::Adjustment).collect();
             clips.sort_by_key(|c| c.timeline_start);
             clips
         })
@@ -198,18 +205,8 @@ pub fn export_project(
     };
 
     // Inputs: primary video clips (0..primary_clips.len())
-    // Adjustment clips are skipped — they have no source media.
+    // Adjustment clips are already filtered out of primary_clips.
     for clip in &primary_clips {
-        if clip.kind == ClipKind::Adjustment {
-            // Adjustment layers on the primary track: generate a transparent placeholder
-            // input so FFmpeg input indices stay aligned. They are applied as post-composite
-            // effects in the overlay chain below.
-            let dur_s = clip.duration() as f64 / 1_000_000_000.0;
-            cmd.arg("-f").arg("lavfi").arg("-i")
-                .arg(format!("color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={dur_s:.6},format=yuva420p",
-                    project.frame_rate.numerator, project.frame_rate.denominator));
-            continue;
-        }
         if clip.kind == ClipKind::Title {
             let dur_s = clip.duration() as f64 / 1_000_000_000.0;
             let bg = title_clip_lavfi_color(clip, out_w, out_h,
@@ -230,15 +227,8 @@ pub fn export_project(
     }
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
+    // Adjustment clips are already filtered out of secondary_track_clips.
     for clip in &secondary_clips_flat {
-        if clip.kind == ClipKind::Adjustment {
-            // Adjustment layers: transparent placeholder to keep input indices aligned.
-            let dur_s = clip.duration() as f64 / 1_000_000_000.0;
-            cmd.arg("-f").arg("lavfi").arg("-i")
-                .arg(format!("color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={dur_s:.6},format=yuva420p",
-                    project.frame_rate.numerator, project.frame_rate.denominator));
-            continue;
-        }
         if clip.kind == ClipKind::Title {
             let dur_s = clip.duration() as f64 / 1_000_000_000.0;
             let bg = title_clip_lavfi_color(clip, out_w, out_h,
@@ -277,17 +267,8 @@ pub fn export_project(
     let color_caps = detect_color_filter_capabilities(&ffmpeg);
 
     // === Primary video track: scale/correct each clip then concatenate ===
-    // Adjustment clips on the primary track are skipped here; their effects are
-    // applied as post-composite filters in the overlay chain below.
+    // Adjustment clips are already filtered out of primary_clips.
     for (i, clip) in primary_clips.iter().enumerate() {
-        if clip.kind == ClipKind::Adjustment {
-            // Emit a simple pass-through for the placeholder input to keep [pv{i}] labels valid.
-            filter.push_str(&format!(
-                "[{i}:v]fps={}/{},format=yuv420p[pv{i}];",
-                project.frame_rate.numerator, project.frame_rate.denominator
-            ));
-            continue;
-        }
         let color_filter = build_color_filter(clip);
         let temp_tint_filter = build_temperature_tint_filter_with_caps(clip, &color_caps);
         let grading_filter = build_grading_filter_with_caps(clip, &color_caps);
@@ -390,20 +371,21 @@ pub fn export_project(
             let next_label = format!("pv{}", i + 1);
             let out_label = format!("vseq{}", i + 1);
             let clip = &primary_clips[i];
+            let next_clip = &primary_clips[i + 1];
             let sep = if i == 0 { "" } else { ";" };
-            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, primary_clips[i + 1]) {
+            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, next_clip) {
                 let offset_s = (running_s - d_s).max(0.0);
                 let xfade = transition_xfade_name(&clip.transition_after);
                 filter.push_str(&format!(
                     "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
                 ));
-                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
+                running_s += next_clip.duration() as f64 / 1_000_000_000.0 - d_s;
                 total_overlap_s += d_s;
             } else {
                 filter.push_str(&format!(
                     "{sep}[{prev_label}][{next_label}]concat=n=2:v=1:a=0[{out_label}]"
                 ));
-                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0;
+                running_s += next_clip.duration() as f64 / 1_000_000_000.0;
             }
             prev_label = out_label;
         }
@@ -421,23 +403,15 @@ pub fn export_project(
         filter.push_str(&format!("concat=n={}:v=1:a=0[vbase]", primary_clips.len()));
     }
 
-    // Collect adjustment clips from ALL tracks (primary + secondary) for post-composite effects.
-    let mut adjustment_clips: Vec<&Clip> = Vec::new();
-    for clip in primary_clips.iter().chain(secondary_clips_flat.iter()) {
-        if clip.kind == ClipKind::Adjustment {
-            adjustment_clips.push(clip);
-        }
-    }
+    // Use the pre-collected adjustment clips from all tracks.
+    let mut adjustment_clips = all_adjustment_clips;
     adjustment_clips.sort_by_key(|c| c.timeline_start);
 
     // === Secondary video tracks: overlay each clip at its timeline position ===
     // Chain overlays: [vbase] → overlay clip 0 → [vcomp0] → overlay clip 1 → [vcomp1] → ...
     let mut prev_label = "vbase".to_string();
+    // Adjustment clips are already filtered out of secondary_clips_flat.
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
-        // Skip adjustment clips in the overlay chain — they are handled below.
-        if clip.kind == ClipKind::Adjustment {
-            continue;
-        }
         let in_idx = sec_base + k;
         let color_filter = build_color_filter(clip);
         let temp_tint_filter = build_temperature_tint_filter_with_caps(clip, &color_caps);
@@ -566,31 +540,19 @@ pub fn export_project(
         let next_label = format!("vadj{adj_idx}");
 
         if opacity < 1.0 - f64::EPSILON {
-            // Partial opacity: split → apply effects → blend with original at opacity level
+            // Partial opacity: split → apply effects → overlay with opacity
             let orig_label = format!("vadj{adj_idx}orig");
             let work_label = format!("vadj{adj_idx}work");
             let fx_label = format!("vadj{adj_idx}fx");
             filter.push_str(&format!(
                 ";[{prev_label}]split[{orig_label}][{work_label}];\
-                 [{work_label}]{effects_chain}[{fx_label}];\
-                 [{orig_label}][{fx_label}]blend=all_mode=normal:all_opacity={opacity:.4}:enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
+                 [{work_label}]{effects_chain},format=yuva420p,colorchannelmixer=aa={opacity:.4}[{fx_label}];\
+                 [{orig_label}][{fx_label}]overlay=enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
             ));
         } else {
-            // Full opacity: apply effects directly with time gating via enable=
-            // Wrap each filter component with enable= for time gating
-            let enable_clause = format!("enable='between(t,{start_s:.6},{end_s:.6})'");
-            // Apply the effects chain — each filter already has its comma prefix, but we
-            // need to add enable= to each filter.  Simpler: apply without enable and
-            // rely on the effect being neutral outside its range (the filters return no-op
-            // when clip values are at defaults).  However for safety, use split+blend at
-            // opacity=1.0 since the filters don't inherently support enable=.
-            let orig_label = format!("vadj{adj_idx}orig");
-            let work_label = format!("vadj{adj_idx}work");
-            let fx_label = format!("vadj{adj_idx}fx");
+            // Full opacity: apply effects directly to the stream.
             filter.push_str(&format!(
-                ";[{prev_label}]split[{orig_label}][{work_label}];\
-                 [{work_label}]{effects_chain}[{fx_label}];\
-                 [{orig_label}][{fx_label}]blend=all_mode=normal:all_opacity=1:enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
+                ";[{prev_label}]{effects_chain}[{next_label}]"
             ));
         }
         prev_label = next_label;

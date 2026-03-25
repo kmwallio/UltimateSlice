@@ -2529,25 +2529,10 @@ pub fn build_window(
             let project = project.clone();
             move |b, c, s, temp, tnt, d, sh, bl, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st| {
                 prog_player.borrow_mut().update_current_effects(
-                    b as f64,
-                    c as f64,
-                    s as f64,
-                    temp as f64,
-                    tnt as f64,
-                    d as f64,
-                    sh as f64,
-                    shd as f64,
-                    mid as f64,
-                    hil as f64,
-                    exp as f64,
-                    bp as f64,
-                    hw as f64,
-                    ht as f64,
-                    mw as f64,
-                    mt as f64,
-                    sw as f64,
-                    st as f64,
-                    bl as f64,
+                    b as f64, c as f64, s as f64, temp as f64, tnt as f64,
+                    d as f64, sh as f64, shd as f64, mid as f64, hil as f64,
+                    exp as f64, bp as f64, hw as f64, ht as f64, mw as f64, mt as f64,
+                    sw as f64, st as f64, bl as f64,
                 );
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {

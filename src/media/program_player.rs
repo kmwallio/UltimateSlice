@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_PREVIEW_AUDIO_GAIN: f64 = 3.981_071_705_5; // +12 dB
-const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 2;
+const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 3;
 
 fn frame_hash_u64(data: &[u8]) -> u64 {
     let mut h = 1469598103934665603u64;
@@ -3849,8 +3849,8 @@ impl ProgramPlayer {
 
     pub fn set_title(&self, text: &str, font: &str, color_rgba: u32, rel_x: f64, rel_y: f64) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
-            let (_, proc_h) = self.preview_processing_dimensions();
-            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, proc_h);
+            let (pw, ph) = self.preview_processing_dimensions();
+            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, self.project_height, pw, ph);
         }
     }
 
@@ -3882,8 +3882,8 @@ impl ProgramPlayer {
     ) {
         let idx = self.clips.iter().position(|c| c.id == clip_id);
         if let Some(slot) = idx.and_then(|i| self.slot_for_clip(i)) {
-            let (_, proc_h) = self.preview_processing_dimensions();
-            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, proc_h);
+            let (pw, ph) = self.preview_processing_dimensions();
+            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, self.project_height, pw, ph);
         }
     }
 
@@ -5205,7 +5205,7 @@ impl ProgramPlayer {
         );
         // Also warm the effects-bin construction path.
         let (proc_w, proc_h) = self.preview_processing_dimensions();
-        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, None);
+        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, self.project_height, None);
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
         if self.prepreroll_sidecars.len() >= MAX_PREPREROLL_SIDECARS {
@@ -5515,15 +5515,23 @@ impl ProgramPlayer {
             return;
         }
         let duration_ns = segment_end_ns.saturating_sub(segment_start_ns);
+        // Separate adjustment clips from regular inputs for prerender.
+        let adjustment_clips_for_prerender: Vec<ProgramClip> = active
+            .iter()
+            .filter_map(|&idx| self.clips.get(idx))
+            .filter(|c| c.is_adjustment)
+            .cloned()
+            .collect();
         let inputs: Vec<(ProgramClip, String, u64, bool, bool)> = active
             .iter()
             .filter_map(|&idx| {
-                self.clips.get(idx).map(|clip| {
+                self.clips.get(idx).and_then(|clip| {
+                    if clip.is_adjustment { return None; }
                     let c = clip.clone();
                     let (path, source_is_proxy, _) = self.resolve_source_path_for_clip(&c);
                     let source_ns = c.source_pos_ns(segment_start_ns);
                     let has_audio = self.has_audio_for_path_fast(&path, c.has_embedded_audio());
-                    (c, path, source_ns, has_audio, source_is_proxy)
+                    Some((c, path, source_ns, has_audio, source_is_proxy))
                 })
             })
             .collect();
@@ -5567,10 +5575,12 @@ impl ProgramPlayer {
         let out_w = (self.project_width / prerender_divisor).max(2);
         let out_h = (self.project_height / prerender_divisor).max(2);
         let transition_spec_for_job = transition_spec.clone();
+        let adj_clips_for_job = adjustment_clips_for_prerender;
         std::thread::spawn(move || {
             let success = Self::render_prerender_segment_video_file(
                 &output_path,
                 &inputs,
+                &adj_clips_for_job,
                 duration_ns,
                 out_w,
                 out_h,
@@ -6665,14 +6675,24 @@ impl ProgramPlayer {
         color_rgba: u32,
         rel_x: f64,
         rel_y: f64,
+        project_h: u32,
+        proc_w: u32,
         proc_h: u32,
     ) {
         const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
-        // GStreamer textoverlay uses Pango which renders points ~4× larger than
-        // FFmpeg drawtext pixels at the same numeric value.  Empirically at
-        // 1080p: GStreamer 12pt ≈ FFmpeg 48px.  The export formula produces
-        // `base_size * (4/3) * (out_h / 1080)` pixels.  To match, we scale
-        // the Pango size by `(4/3) / 4 = 1/3` relative to the base size.
+        // GStreamer textoverlay renders Pango text proportionally to the video
+        // frame.  Measured: 1 Pango pt ≈ 0.0037 of frame height (constant
+        // across 540p/1080p/2160p).  Since the fraction is resolution-independent,
+        // we use project_h (not proc_h) to match the export formula:
+        //   export:  fontsize_px = base_size × (4/3) × (out_h / 1080)
+        //   preview: pango_pt × 0.0037 = base_size × (4/3) / 1080
+        //            pango_pt = base_size × (4/3) / (0.0037 × 1080) ≈ base_size / 3
+        //
+        // For non-1080p projects: pango_pt = base_size × (4/3) / (0.0037 × project_h)
+        //
+        // The (project_h / 1080) factor in the formula below cancels out with
+        // the (4/3)/3.0 constant because textoverlay proportional scaling handles
+        // the resolution automatically.
         const PANGO_EXPORT_MATCH: f64 = 1.0 / 3.0;
         if let Some(ref to) = slot.textoverlay {
             let silent = text.is_empty();
@@ -6680,13 +6700,25 @@ impl ProgramPlayer {
             if !silent {
                 to.set_property("text", text);
                 let (family, base_size) = Self::parse_pango_font_desc(font);
-                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (proc_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (project_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
-                to.set_property_from_str("halignment", "position");
-                to.set_property_from_str("valignment", "position");
-                to.set_property("xpos", rel_x);
-                to.set_property("ypos", rel_y);
+                // Use center alignment + pixel deltas to match FFmpeg drawtext
+                // centering semantics: drawtext places text center at
+                // (rel_x × w, rel_y × h).  Using halignment/valignment=center
+                // with deltax/deltay avoids text-width-dependent clipping
+                // differences between preview and export resolutions.
+                //
+                // valignment=center places the text TOP edge (not center) at
+                // the vertical center.  Compensate by adding half the text
+                // height in pixels to deltay.
+                to.set_property_from_str("halignment", "center");
+                to.set_property_from_str("valignment", "center");
+                let text_h_px = (scaled_size * 0.0037 * proc_h as f64).round();
+                let dx = ((rel_x - 0.5) * proc_w as f64).round() as i32;
+                let dy = ((rel_y - 0.5) * proc_h as f64 + text_h_px * 0.35).round() as i32;
+                to.set_property("deltax", dx);
+                to.set_property("deltay", dy);
                 let r = (color_rgba >> 24) & 0xFF;
                 let g = (color_rgba >> 16) & 0xFF;
                 let b = (color_rgba >> 8) & 0xFF;
@@ -6714,8 +6746,11 @@ impl ProgramPlayer {
                 let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
                 to.set_property("outline-color", argb);
             }
-            // Shadow
-            to.set_property("draw-shadow", clip.title_shadow);
+            // Shadow: GStreamer textoverlay only supports a fixed ~1px shadow
+            // with no configurable offset/color.  Disable it to avoid visual
+            // mismatch with the export's fully customizable drawtext shadow.
+            // The shadow is rendered correctly on export.
+            to.set_property("draw-shadow", false);
             // Background box (shaded background)
             to.set_property("shaded-background", clip.title_bg_box);
         }
@@ -7446,6 +7481,7 @@ impl ProgramPlayer {
         clip: &ProgramClip,
         target_width: u32,
         target_height: u32,
+        project_height: u32,
         lut: Option<Arc<CubeLut>>,
     ) -> (
         gst::Bin,
@@ -7640,6 +7676,13 @@ impl ProgramPlayer {
         } else {
             None
         };
+        // Shadow textoverlay: rendered BEFORE the main textoverlay so the shadow
+        // appears behind the foreground text.  Only created when shadow is enabled.
+        let shadow_textoverlay = if need_title && clip.title_shadow {
+            gst::ElementFactory::make("textoverlay").build().ok()
+        } else {
+            None
+        };
         let imagefreeze = if clip.is_freeze_frame() || clip.is_image {
             gst::ElementFactory::make("imagefreeze").build().ok()
         } else {
@@ -7762,9 +7805,7 @@ impl ProgramPlayer {
         }
         if let Some(ref to) = textoverlay {
             const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
-            // Match export sizing: GStreamer Pango renders ~4× larger per
-            // numeric point value than FFmpeg drawtext pixels.  See
-            // apply_title_to_slot for the full derivation.
+            // See apply_title_to_slot for derivation.
             const PANGO_EXPORT_MATCH: f64 = 1.0 / 3.0;
             if clip.title_text.is_empty() {
                 to.set_property("silent", true);
@@ -7773,13 +7814,41 @@ impl ProgramPlayer {
                 to.set_property("silent", false);
                 to.set_property("text", &clip.title_text);
                 let (family, base_size) = Self::parse_pango_font_desc(&clip.title_font);
-                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (target_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (project_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
-                to.set_property_from_str("halignment", "position");
-                to.set_property_from_str("valignment", "position");
-                to.set_property("xpos", clip.title_x);
-                to.set_property("ypos", clip.title_y);
+                to.set_property_from_str("halignment", "center");
+                to.set_property_from_str("valignment", "center");
+                let text_h_px = (scaled_size * 0.0037 * target_height as f64).round();
+                let dx = ((clip.title_x - 0.5) * target_width as f64).round() as i32;
+                let dy = ((clip.title_y - 0.5) * target_height as f64 + text_h_px * 0.35).round() as i32;
+                to.set_property("deltax", dx);
+                to.set_property("deltay", dy);
+
+                // Configure shadow textoverlay with same text/font but
+                // shadow color and pixel offset.
+                if let Some(ref st) = shadow_textoverlay {
+                    st.set_property("silent", false);
+                    st.set_property("text", &clip.title_text);
+                    st.set_property("font-desc", &adjusted_font);
+                    st.set_property_from_str("halignment", "center");
+                    st.set_property_from_str("valignment", "center");
+                    st.set_property("draw-shadow", false);
+                    st.set_property("draw-outline", false);
+                    let scale_factor = project_height as f64 / TITLE_REFERENCE_HEIGHT;
+                    let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
+                    let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
+                    st.set_property("deltax", dx + sx);
+                    st.set_property("deltay", dy + sy);
+                    // Shadow color (RRGGBBAA → AARRGGBB for GStreamer)
+                    let sc = clip.title_shadow_color;
+                    let sr = (sc >> 24) & 0xFF;
+                    let sg = (sc >> 16) & 0xFF;
+                    let sb = (sc >> 8) & 0xFF;
+                    let sa = sc & 0xFF;
+                    let s_argb: u32 = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+                    st.set_property("color", s_argb);
+                }
             }
         }
 
@@ -7937,6 +8006,10 @@ impl ProgramPlayer {
             chain.push(e.clone());
         }
         if let Some(ref e) = videoflip_flip {
+            chain.push(e.clone());
+        }
+        // Shadow textoverlay goes BEFORE the main text so it renders behind.
+        if let Some(ref e) = shadow_textoverlay {
             chain.push(e.clone());
         }
         if let Some(ref e) = textoverlay {
@@ -8559,6 +8632,7 @@ impl ProgramPlayer {
     fn render_prerender_segment_video_file(
         output_path: &str,
         inputs: &[(ProgramClip, String, u64, bool, bool)],
+        adjustment_clips: &[ProgramClip],
         duration_ns: u64,
         out_w: u32,
         out_h: u32,
@@ -8727,6 +8801,38 @@ impl ProgramPlayer {
                 last_label = next;
             }
         }
+        // Apply adjustment layer effects to the composited output.
+        for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
+            let adj_color = Self::prerender_build_color_filter(adj_clip);
+            let adj_temp_tint = Self::prerender_build_temperature_tint_filter(adj_clip, &color_caps);
+            let adj_grading = Self::prerender_build_grading_filter(adj_clip);
+            let adj_denoise = Self::prerender_build_denoise_filter(adj_clip);
+            let adj_sharpen = Self::prerender_build_sharpen_filter(adj_clip);
+            let adj_blur = if adj_clip.blur > f64::EPSILON {
+                let radius = (adj_clip.blur * 10.0).clamp(0.0, 10.0);
+                format!(",boxblur={radius:.0}:{radius:.0}")
+            } else {
+                String::new()
+            };
+            let adj_frei0r = Self::prerender_build_frei0r_effects_filter(adj_clip);
+
+            let mut effects = String::new();
+            effects.push_str(&adj_color);
+            effects.push_str(&adj_temp_tint);
+            effects.push_str(&adj_grading);
+            effects.push_str(&adj_denoise);
+            effects.push_str(&adj_sharpen);
+            effects.push_str(&adj_blur);
+            effects.push_str(&adj_frei0r);
+
+            let effects = effects.trim_matches(',').to_string();
+            if !effects.is_empty() {
+                let next = format!("vadj{adj_idx}");
+                nodes.push(format!("[{last_label}]{effects}[{next}]"));
+                last_label = next;
+            }
+        }
+
         let mut audio_labels: Vec<String> = Vec::new();
         for (i, (clip, _, _, has_audio, _)) in inputs.iter().enumerate() {
             if !*has_audio {
@@ -9356,7 +9462,7 @@ impl ProgramPlayer {
             capsfilter_zoom,
             videobox_zoom,
             frei0r_user_effects,
-        ) = Self::build_effects_bin(&clip, proc_w, proc_h, realtime_lut);
+        ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_height, realtime_lut);
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
         if clip.is_title {
@@ -9498,7 +9604,7 @@ impl ProgramPlayer {
             );
             Self::apply_title_to_slot(
                 &slot_ref_for_transform, &clip.title_text, &clip.title_font,
-                clip.title_color, clip.title_x, clip.title_y, proc_h,
+                clip.title_color, clip.title_x, clip.title_y, self.project_height, proc_w, proc_h,
             );
             Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
             Self::apply_zoom_to_slot(
@@ -9896,6 +10002,7 @@ impl ProgramPlayer {
             clip.flip_h,
             clip.flip_v,
         );
+        let (pw, ph) = self.preview_processing_dimensions();
         Self::apply_title_to_slot(
             &slot_ref_for_transform,
             &clip.title_text,
@@ -9903,7 +10010,8 @@ impl ProgramPlayer {
             clip.title_color,
             clip.title_x,
             clip.title_y,
-            proc_h,
+            self.project_height,
+            pw, ph,
         );
         Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
         Self::apply_zoom_to_slot(
@@ -10798,7 +10906,7 @@ impl ProgramPlayer {
 
         // Title overlay
         {
-            let (_, proc_h) = self.preview_processing_dimensions();
+            let (pw, ph) = self.preview_processing_dimensions();
             Self::apply_title_to_slot(
                 slot,
                 &clip.title_text,
@@ -10806,7 +10914,8 @@ impl ProgramPlayer {
                 clip.title_color,
                 clip.title_x,
                 clip.title_y,
-                proc_h,
+                self.project_height,
+                pw, ph,
             );
             Self::apply_title_style_to_slot(slot, clip);
         }
