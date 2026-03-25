@@ -3322,6 +3322,159 @@ pub fn build_window(
         ));
     }
 
+    // Wire on_drop_external_files — handles file manager drops onto the timeline.
+    // Imports each file into the library (synchronous probe) and places clips sequentially.
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let on_project_changed = on_project_changed.clone();
+        let timeline_state_for_ext = timeline_state.clone();
+        timeline_state.borrow_mut().on_drop_external_files = Some(Rc::new(
+            move |file_paths: Vec<String>, track_idx: usize, timeline_start_ns: u64| {
+                let magnetic_mode = timeline_state_for_ext.borrow().magnetic_mode;
+                let mut cursor_ns = timeline_start_ns;
+                let mut track_changes: Vec<crate::undo::TrackClipsChange> = Vec::new();
+
+                for path in &file_paths {
+                    let is_image = crate::model::clip::is_image_file(path);
+
+                    // Import into library if not already present (synchronous probe).
+                    let already_in_library = library.borrow().iter().any(|item| item.source_path == *path);
+                    if !already_in_library {
+                        let uri = format!("file://{path}");
+                        let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
+                        let duration_ns = if is_image {
+                            4_000_000_000u64
+                        } else {
+                            metadata.duration_ns.unwrap_or(10_000_000_000)
+                        };
+                        let mut item = MediaItem::new(path.clone(), duration_ns);
+                        item.is_audio_only = metadata.is_audio_only;
+                        item.has_audio = metadata.has_audio;
+                        item.is_image = is_image;
+                        item.source_timecode_base_ns = lookup_source_timecode_base_ns(
+                            &library.borrow(),
+                            &project.borrow(),
+                            path,
+                        );
+                        library.borrow_mut().push(item);
+                    }
+
+                    // Look up placement info (may re-probe if needed).
+                    let source_info = {
+                        let lib = library.borrow();
+                        let proj = project.borrow();
+                        lookup_source_placement_info(&lib, &proj, path)
+                    };
+
+                    let duration_ns = {
+                        let lib = library.borrow();
+                        lib.iter()
+                            .find(|item| item.source_path == *path)
+                            .map(|item| item.duration_ns)
+                            .unwrap_or(if is_image { 4_000_000_000 } else { 10_000_000_000 })
+                    };
+
+                    let src_in = 0u64;
+                    let src_out = duration_ns;
+
+                    let mut proj = project.borrow_mut();
+
+                    let auto_link_pair =
+                        !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
+                    let video_track_idx =
+                        find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Video);
+                    let audio_track_idx =
+                        find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Audio);
+
+                    if auto_link_pair && video_track_idx.is_some() && audio_track_idx.is_some() {
+                        let link_group_id = uuid::Uuid::new_v4().to_string();
+                        if let Some(video_idx) = video_track_idx {
+                            let video_clip = build_source_clip(
+                                path,
+                                src_in,
+                                src_out,
+                                cursor_ns,
+                                ClipKind::Video,
+                                source_info.source_timecode_base_ns,
+                                Some(link_group_id.as_str()),
+                                Some(duration_ns),
+                            );
+                            track_changes.push(add_clip_to_track(
+                                &mut proj.tracks[video_idx],
+                                video_clip,
+                                magnetic_mode,
+                            ));
+                        }
+                        if let Some(audio_idx) = audio_track_idx {
+                            let audio_clip = build_source_clip(
+                                path,
+                                src_in,
+                                src_out,
+                                cursor_ns,
+                                ClipKind::Audio,
+                                source_info.source_timecode_base_ns,
+                                Some(link_group_id.as_str()),
+                                Some(duration_ns),
+                            );
+                            track_changes.push(add_clip_to_track(
+                                &mut proj.tracks[audio_idx],
+                                audio_clip,
+                                magnetic_mode,
+                            ));
+                        }
+                    } else if let Some(track) = proj.tracks.get_mut(track_idx) {
+                        let kind = if source_info.is_image {
+                            ClipKind::Image
+                        } else {
+                            match track.kind {
+                                TrackKind::Video => ClipKind::Video,
+                                TrackKind::Audio => ClipKind::Audio,
+                            }
+                        };
+                        let media_dur = if source_info.is_image { None } else { Some(duration_ns) };
+                        let clip = build_source_clip(
+                            path,
+                            src_in,
+                            src_out,
+                            cursor_ns,
+                            kind,
+                            source_info.source_timecode_base_ns,
+                            None,
+                            media_dur,
+                        );
+                        track_changes.push(add_clip_to_track(track, clip, magnetic_mode));
+                    }
+
+                    proj.dirty = true;
+                    drop(proj);
+                    cursor_ns += src_out.saturating_sub(src_in);
+                }
+
+                // Single undo entry for the entire multi-file drop.
+                if !track_changes.is_empty() {
+                    let cmd: Box<dyn crate::undo::EditCommand> = if track_changes.len() == 1 {
+                        let change = track_changes.pop().unwrap();
+                        Box::new(crate::undo::SetTrackClipsCommand {
+                            track_id: change.track_id,
+                            old_clips: change.old_clips,
+                            new_clips: change.new_clips,
+                            label: "Drop files from file manager".to_string(),
+                        })
+                    } else {
+                        Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                            changes: track_changes,
+                            label: "Drop files from file manager".to_string(),
+                        })
+                    };
+                    timeline_state_for_ext.borrow_mut().history.undo_stack.push(cmd);
+                    timeline_state_for_ext.borrow_mut().history.redo_stack.clear();
+                    on_project_changed();
+                }
+            },
+        ));
+    }
+
     // Shared flag: true while audio sync is running (read by status bar timer).
     let audio_sync_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 

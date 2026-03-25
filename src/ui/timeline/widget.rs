@@ -282,6 +282,8 @@ pub struct TimelineState {
     pub on_extraction_pause: Option<Rc<dyn Fn(bool)>>,
     /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
     pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
+    /// Called when files are dropped from an external file manager: (file_paths, track_idx, timeline_start_ns)
+    pub on_drop_external_files: Option<Rc<dyn Fn(Vec<String>, usize, u64)>>,
     /// Lightweight callback fired immediately when clip selection changes (no pipeline rebuild).
     /// Called with the new selected_clip_id (or None if deselected).
     pub on_clip_selected: Option<Rc<dyn Fn(Option<String>)>>,
@@ -343,6 +345,7 @@ impl TimelineState {
             on_play_pause: None,
             on_extraction_pause: None,
             on_drop_clip: None,
+            on_drop_external_files: None,
             on_clip_selected: None,
             on_sync_audio: None,
             on_remove_silent_parts: None,
@@ -5267,26 +5270,43 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     drop(st);
                 }
             } else {
-                // Payload format: "{source_path}|{duration_ns}"
-                let mut parts = payload.splitn(2, '|');
-                let source_path = match parts.next() {
-                    Some(p) => p.to_string(),
-                    None => return false,
-                };
-                let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                // Check for external file manager drop (file:// URIs) before
+                // attempting to parse as an internal "{source_path}|{duration_ns}" payload.
+                let external_paths = crate::ui::media_browser::parse_external_drop_paths(&payload);
+                if !external_paths.is_empty() {
+                    let (track_idx, timeline_start_ns) = {
+                        let st = state.borrow();
+                        let track_row_idx = st.track_index_at_y(y).unwrap_or(0);
+                        let tns = st.x_to_ns(x);
+                        (track_row_idx, tns)
+                    };
+                    let cb = state.borrow().on_drop_external_files.clone();
+                    if let Some(cb) = cb {
+                        cb(external_paths, track_idx, timeline_start_ns);
+                    }
+                    state.borrow_mut().hover_transition_pair = None;
+                } else {
+                    // Internal payload format: "{source_path}|{duration_ns}"
+                    let mut parts = payload.splitn(2, '|');
+                    let source_path = match parts.next() {
+                        Some(p) => p.to_string(),
+                        None => return false,
+                    };
+                    let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
-                let (track_idx, timeline_start_ns) = {
-                    let st = state.borrow();
-                    let track_row_idx = st.track_index_at_y(y).unwrap_or(0);
-                    let tns = st.x_to_ns(x);
-                    (track_row_idx, tns)
-                };
+                    let (track_idx, timeline_start_ns) = {
+                        let st = state.borrow();
+                        let track_row_idx = st.track_index_at_y(y).unwrap_or(0);
+                        let tns = st.x_to_ns(x);
+                        (track_row_idx, tns)
+                    };
 
-                let cb = state.borrow().on_drop_clip.clone();
-                if let Some(cb) = cb {
-                    cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                    let cb = state.borrow().on_drop_clip.clone();
+                    if let Some(cb) = cb {
+                        cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                    }
+                    state.borrow_mut().hover_transition_pair = None;
                 }
-                state.borrow_mut().hover_transition_pair = None;
             }
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();

@@ -20,6 +20,16 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 | Pan left/right | Scroll the mouse wheel horizontally |
 | Pan ruler view | Middle/right-drag in the ruler |
 
+## Adding Clips to the Timeline
+
+There are several ways to get clips onto the timeline:
+
+- **Drag from Media Browser** — drag a clip from the media library panel and drop it onto a track at the desired position.
+- **Drag from File Manager** — drag files directly from Nautilus, Thunar, or any file manager onto the timeline. Files are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially. Video files with audio create linked A/V clip pairs when auto-link is applicable.
+- **Append to Timeline** — use the "Append to Timeline" button in the media browser to place the selected clip at the end of the first matching track.
+- **Insert / Overwrite** — use Insert (`,`) or Overwrite (`.`) to place the source monitor selection at the playhead position.
+- **Source Monitor drag** — drag from the source monitor preview directly onto a timeline track.
+
 ## Tools
 
 ### Select Tool (`Escape`)
