@@ -2513,6 +2513,7 @@ pub(crate) fn analyze_loudness_lufs(
             &format!("{duration_sec}"),
             "-i",
             source_path,
+            "-vn", // skip video decode — audio-only analysis
             "-af",
             "ebur128",
             "-f",
@@ -2525,16 +2526,22 @@ pub(crate) fn analyze_loudness_lufs(
         .map_err(|e| anyhow!("Failed to run ffmpeg ebur128: {e}"))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Parse the summary block — look for "I:" line after "Summary:" in ebur128 output.
+    // Parse the summary block. The ebur128 filter outputs lines like:
+    //   [Parsed_ebur128_0 @ 0x...] Summary:
+    //
+    //     Integrated loudness:
+    //       I:         -25.9 LUFS
+    // The "Summary:" line has a filter tag prefix; the "I:" line does not.
     let mut in_summary = false;
     for line in stderr.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("Summary:") {
+        // "Summary:" may be prefixed by "[Parsed_ebur128_0 @ 0x...]"
+        if trimmed.contains("Summary:") {
             in_summary = true;
             continue;
         }
         if in_summary {
-            // e.g. "  I:         -18.3 LUFS"
+            // e.g. "    I:         -25.9 LUFS"
             if trimmed.starts_with("I:") {
                 let rest = trimmed["I:".len()..].trim();
                 if let Some(val) = rest
@@ -2578,6 +2585,7 @@ pub(crate) fn analyze_peak_db(
             &format!("{duration_sec}"),
             "-i",
             source_path,
+            "-vn", // skip video decode — audio-only analysis
             "-af",
             "volumedetect",
             "-f",

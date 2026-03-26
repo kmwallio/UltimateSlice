@@ -3179,8 +3179,9 @@ pub fn build_window(
         // on_normalize_audio: analyze clip loudness and adjust volume
         {
             // Channel-based background analysis (same pattern as silence detection).
-            // Result: (clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs)
-            type NormResult = (String, String, f32, Option<f64>, f64, f64);
+            // Result: Ok((clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs))
+            //         Err(error_message)
+            type NormResult = Result<(String, String, f32, Option<f64>, f64, f64), String>;
             let norm_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<NormResult>>>> =
                 Rc::new(RefCell::new(None));
 
@@ -3195,35 +3196,47 @@ pub fn build_window(
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                     let rx_opt = norm_rx.borrow();
                     if let Some(ref rx) = *rx_opt {
-                        if let Ok((clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs)) = rx.try_recv() {
+                        if let Ok(result) = rx.try_recv() {
                             drop(rx_opt);
                             norm_rx.borrow_mut().take();
                             norm_in_progress.set(false);
-                            let gain = crate::media::export::compute_lufs_gain(measured_lufs, target_lufs);
-                            let new_volume = (old_volume as f64 * gain).clamp(0.0, 4.0) as f32;
-                            {
-                                let mut proj = project.borrow_mut();
-                                let cmd = crate::undo::NormalizeClipAudioCommand {
-                                    clip_id: clip_id.clone(),
-                                    track_id,
-                                    old_volume,
-                                    new_volume,
-                                    old_measured_loudness: old_measured,
-                                    new_measured_loudness: Some(measured_lufs),
-                                };
-                                let mut ts = timeline_state.borrow_mut();
-                                ts.history.execute(Box::new(cmd), &mut proj);
+                            match result {
+                                Ok((clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs)) => {
+                                    let gain = crate::media::export::compute_lufs_gain(measured_lufs, target_lufs);
+                                    let new_volume = (old_volume as f64 * gain).clamp(0.0, 4.0) as f32;
+                                    {
+                                        let mut proj = project.borrow_mut();
+                                        let cmd = crate::undo::NormalizeClipAudioCommand {
+                                            clip_id: clip_id.clone(),
+                                            track_id,
+                                            old_volume,
+                                            new_volume,
+                                            old_measured_loudness: old_measured,
+                                            new_measured_loudness: Some(measured_lufs),
+                                        };
+                                        let mut ts = timeline_state.borrow_mut();
+                                        ts.history.execute(Box::new(cmd), &mut proj);
+                                    }
+                                    on_project_changed();
+                                    if let Some(win) = window_weak.upgrade() {
+                                        let proj = project.borrow();
+                                        let title = format!("UltimateSlice \u{2014} {} \u{2022}", proj.title);
+                                        win.set_title(Some(&title));
+                                    }
+                                    log::info!(
+                                        "Normalize: clip={} measured={:.1} LUFS target={:.1} gain={:.3} vol {:.3} -> {:.3}",
+                                        clip_id, measured_lufs, target_lufs, gain, old_volume, new_volume
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!("Normalize analysis failed: {e}");
+                                    if let Some(win) = window_weak.upgrade() {
+                                        let proj = project.borrow();
+                                        let title = format!("UltimateSlice \u{2014} {}", proj.title);
+                                        win.set_title(Some(&title));
+                                    }
+                                }
                             }
-                            on_project_changed();
-                            if let Some(win) = window_weak.upgrade() {
-                                let proj = project.borrow();
-                                let title = format!("UltimateSlice \u{2014} {} \u{2022}", proj.title);
-                                win.set_title(Some(&title));
-                            }
-                            log::info!(
-                                "Normalize: clip={} measured={:.1} LUFS target={:.1} gain={:.3} vol {:.3} -> {:.3}",
-                                clip_id, measured_lufs, target_lufs, gain, old_volume, new_volume
-                            );
                         }
                     }
                     glib::ControlFlow::Continue
@@ -3274,27 +3287,20 @@ pub fn build_window(
                 let (tx, rx) = std::sync::mpsc::channel();
                 *norm_rx.borrow_mut() = Some(rx);
                 std::thread::spawn(move || {
-                    match crate::media::export::analyze_loudness_lufs(
+                    let result = crate::media::export::analyze_loudness_lufs(
                         &source_path, source_in, source_out,
-                    ) {
-                        Ok(measured_lufs) => {
-                            let _ = tx.send((
-                                clip_id_owned,
-                                track_id,
-                                old_volume,
-                                old_measured,
-                                measured_lufs,
-                                target_lufs,
-                            ));
-                        }
-                        Err(e) => {
-                            log::warn!("Normalize analysis failed: {e}");
-                            // Signal completion even on failure so the poll timer can clean up.
-                            // We send a sentinel with gain=1.0 (no change) which the timer
-                            // will apply as a no-op volume update. Alternatively we could use
-                            // a Result channel, but this keeps the type simple.
-                        }
-                    }
+                    );
+                    let _ = tx.send(match result {
+                        Ok(measured_lufs) => Ok((
+                            clip_id_owned,
+                            track_id,
+                            old_volume,
+                            old_measured,
+                            measured_lufs,
+                            target_lufs,
+                        )),
+                        Err(e) => Err(e.to_string()),
+                    });
                 });
             }
         },
