@@ -376,6 +376,7 @@ pub enum McpCommand {
     },
     SyncClipsByAudio {
         clip_ids: Vec<String>,
+        replace_audio: bool,
         reply: SyncSender<Value>,
     },
     CopyClipColorGrade {

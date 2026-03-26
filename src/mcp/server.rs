@@ -1026,14 +1026,18 @@ fn tools_list() -> Value {
         },
         {
             "name": "sync_clips_by_audio",
-            "description": "Synchronize two or more timeline clips by audio cross-correlation. The first clip is used as the anchor; other clips are repositioned based on matching audio content. Returns offset and confidence for each non-anchor clip.",
+            "description": "Synchronize two or more timeline clips by audio cross-correlation. The first clip is used as the anchor; other clips are repositioned based on matching audio content. When replace_audio is true (default false), the anchor's embedded audio is muted and all clips are linked so the external audio replaces the camera audio.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Two or more clip ids to sync. First clip is the anchor."
+                        "description": "Two or more clip ids to sync. First clip is the anchor (typically the camera clip)."
+                    },
+                    "replace_audio": {
+                        "type": "boolean",
+                        "description": "When true, link all synced clips and mute the anchor clip's embedded audio so external audio replaces it. Default false."
                     }
                 },
                 "required": ["clip_ids"]
@@ -1670,6 +1674,7 @@ fn dispatch_tool_payload(
                         .collect()
                 })
                 .unwrap_or_default(),
+            replace_audio: args.get("replace_audio").and_then(|v| v.as_bool()).unwrap_or(false),
             reply: tx,
         },
         "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {

@@ -289,6 +289,8 @@ pub struct TimelineState {
     pub on_clip_selected: Option<Rc<dyn Fn(Option<String>)>>,
     /// Callback fired when user requests audio sync: Vec<(clip_id, source_path, source_in, source_out, timeline_start, track_id)>
     pub on_sync_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
+    /// Callback fired when user requests sync & replace audio (same args as on_sync_audio).
+    pub on_sync_replace_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
     /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
     pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
@@ -350,6 +352,7 @@ impl TimelineState {
             on_drop_external_files: None,
             on_clip_selected: None,
             on_sync_audio: None,
+            on_sync_replace_audio: None,
             on_remove_silent_parts: None,
             magnetic_mode: false,
             hover_transition_pair: None,
@@ -953,6 +956,7 @@ impl TimelineState {
             unlink_selected: self.can_unlink_selected_clips(),
             align_grouped: self.can_align_selected_groups_by_timecode(),
             sync_audio: self.can_sync_selected_clips_by_audio(),
+            sync_replace_audio: self.can_sync_selected_clips_by_audio(),
             remove_silent_parts: self.can_remove_silent_parts(),
         }
     }
@@ -1203,11 +1207,13 @@ impl TimelineState {
         true
     }
 
-    /// Collect clip info for audio sync and fire the callback.
-    fn sync_selected_clips_by_audio(&self) {
+    /// Collect selected clip info for audio sync (2+ clips required).
+    pub fn collect_selected_clips_for_sync(
+        &self,
+    ) -> Option<Vec<(String, String, u64, u64, u64, String)>> {
         let ids = self.selected_ids_or_primary();
         if ids.len() < 2 {
-            return;
+            return None;
         }
         let proj = self.project.borrow();
         let clip_infos: Vec<(String, String, u64, u64, u64, String)> = proj
@@ -1228,10 +1234,18 @@ impl TimelineState {
             .collect();
         drop(proj);
         if clip_infos.len() < 2 {
-            return;
+            None
+        } else {
+            Some(clip_infos)
         }
-        if let Some(ref cb) = self.on_sync_audio {
-            cb(clip_infos);
+    }
+
+    /// Collect clip info for audio sync and fire the callback.
+    fn sync_selected_clips_by_audio(&self) {
+        if let Some(clip_infos) = self.collect_selected_clips_for_sync() {
+            if let Some(ref cb) = self.on_sync_audio {
+                cb(clip_infos);
+            }
         }
     }
 
@@ -2626,6 +2640,7 @@ struct ClipContextMenuActionability {
     unlink_selected: bool,
     align_grouped: bool,
     sync_audio: bool,
+    sync_replace_audio: bool,
     remove_silent_parts: bool,
 }
 
@@ -2637,6 +2652,7 @@ impl ClipContextMenuActionability {
             || self.unlink_selected
             || self.align_grouped
             || self.sync_audio
+            || self.sync_replace_audio
             || self.remove_silent_parts
     }
 }
@@ -2648,6 +2664,7 @@ fn apply_clip_context_menu_actionability(
     btn_unlink_selected: &gtk::Button,
     btn_align_grouped: &gtk::Button,
     btn_sync_audio: &gtk::Button,
+    btn_sync_replace_audio: &gtk::Button,
     btn_remove_silent_parts: &gtk::Button,
     actionability: ClipContextMenuActionability,
 ) -> bool {
@@ -2661,6 +2678,7 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_unlink_selected, actionability.unlink_selected);
     set_state(btn_align_grouped, actionability.align_grouped);
     set_state(btn_sync_audio, actionability.sync_audio);
+    set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
     actionability.any()
 }
@@ -2734,6 +2752,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     btn_sync_audio.set_tooltip_text(Some(
         "Align selected clips using audio cross-correlation (requires 2+ clips with audio)",
     ));
+    let btn_sync_replace_audio = gtk::Button::with_label("Sync & Replace Audio");
+    btn_sync_replace_audio.add_css_class("flat");
+    btn_sync_replace_audio.set_tooltip_text(Some(
+        "Sync by audio, then link clips and mute camera audio so external audio replaces it",
+    ));
     let btn_remove_silent_parts = gtk::Button::with_label("Remove Silent Parts\u{2026}");
     btn_remove_silent_parts.add_css_class("flat");
     btn_remove_silent_parts.set_tooltip_text(Some(
@@ -2745,6 +2768,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     clip_context_box.append(&btn_unlink_selected);
     clip_context_box.append(&btn_align_grouped);
     clip_context_box.append(&btn_sync_audio);
+    clip_context_box.append(&btn_sync_replace_audio);
     clip_context_box.append(&btn_remove_silent_parts);
     clip_context_pop.set_child(Some(&clip_context_box));
 
@@ -2900,6 +2924,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_sync_replace_audio.connect_clicked(move |_| {
+            let st = state.borrow();
+            // Collect the same clip data as sync_selected_clips_by_audio,
+            // but fire the replace callback instead.
+            let cb = st.on_sync_replace_audio.clone();
+            let data = st.collect_selected_clips_for_sync();
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if let (Some(cb), Some(data)) = (cb, data) {
+                cb(data);
             }
         });
     }
@@ -3321,6 +3364,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_unlink_selected,
                                 &btn_align_grouped,
                                 &btn_sync_audio,
+                                &btn_sync_replace_audio,
                                 &btn_remove_silent_parts,
                                 actionability,
                             ) {

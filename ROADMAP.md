@@ -589,7 +589,7 @@ Tracking docs:
 - [ ] Automatic Ducking (music volume lowers during dialogue)
 - [x] Audio normalization and peak-matching (LUFS + peak modes via FFmpeg `ebur128`/`volumedetect`; Inspector button, MCP `normalize_clip_audio` tool, undo, measured loudness display + FCPXML persistence)
 - [x] Built-in parametric EQ (3-band: Low/Mid/High with freq/gain/Q per band; GStreamer `equalizer-nbands` preview, FFmpeg `equalizer` export, gain keyframes, Inspector UI, FCPXML persistence, MCP `set_clip_eq` tool, undo)
-- [ ] Waveform sync (align external audio to camera reference audio by waveform analysis)
+- [x] Waveform sync (align external audio to camera reference audio by waveform analysis; "Sync & Replace Audio" context menu action links clips and mutes camera embedded audio; MCP `sync_clips_by_audio` with `replace_audio` flag)
 
 ### AI & Automation
 - [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency

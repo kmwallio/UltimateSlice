@@ -13,6 +13,11 @@ pub struct AudioSyncResult {
     /// Confidence score: peak / mean of cross-correlation magnitudes.
     /// Higher = more confident. Values below ~3.0 are likely noise.
     pub confidence: f32,
+    /// Speed correction factor to compensate for clock drift between devices.
+    /// 1.0 = no drift. Values like 1.00005 indicate the clip runs very slightly
+    /// fast relative to the anchor. Applied as `clip.speed *= drift_speed`.
+    /// `None` if drift could not be measured (clip too short for two-point correlation).
+    pub drift_speed: Option<f64>,
 }
 
 const SAMPLE_RATE: i32 = 22050;
@@ -22,6 +27,14 @@ const NS_PER_SAMPLE: f64 = 1_000_000_000.0 / SAMPLE_RATE as f64;
 /// 15 seconds provides enough data for reliable sync while keeping
 /// FFT sizes manageable even when clips differ greatly in length.
 const MAX_EXTRACT_SECONDS: f64 = 15.0;
+
+/// Window duration (seconds) for each point in drift measurement.
+const DRIFT_WINDOW_SECONDS: f64 = 5.0;
+
+/// Minimum overlap duration (seconds) required for drift correction.
+/// Two-point correlation needs enough separation between start and end
+/// windows for the drift to be measurable.
+const MIN_DRIFT_OVERLAP_SECONDS: f64 = 20.0;
 
 /// Sync multiple clips by audio cross-correlation against the first (anchor) clip.
 ///
@@ -66,6 +79,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
                     clip_id: clip.0.clone(),
                     offset_ns: 0,
                     confidence: 0.0,
+                    drift_speed: None,
                 });
                 continue;
             }
@@ -78,14 +92,116 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
             clip.0, sample_offset, offset_ns, confidence
         );
 
+        // Attempt two-point drift measurement if clips are long enough.
+        let drift_speed = if confidence >= 3.0 {
+            measure_drift(
+                &anchor.1,
+                anchor.2,
+                anchor.3,
+                &clip.1,
+                clip.2,
+                clip.3,
+            )
+        } else {
+            None
+        };
+
+        if let Some(drift) = drift_speed {
+            eprintln!(
+                "audio_sync: clip '{}' drift_speed={:.8} ({:+.4} ppm)",
+                clip.0,
+                drift,
+                (drift - 1.0) * 1_000_000.0
+            );
+        }
+
         results.push(AudioSyncResult {
             clip_id: clip.0.clone(),
             offset_ns,
             confidence,
+            drift_speed,
         });
     }
 
     results
+}
+
+/// Measure clock drift between two sources by correlating at two points
+/// (near the start and near the end of the shared overlap).
+///
+/// Returns the speed ratio that should be applied to the clip to match
+/// the anchor's clock: `clip.speed *= drift_speed`. Returns `None` if the
+/// overlap is too short or correlation fails.
+fn measure_drift(
+    anchor_path: &str,
+    anchor_in: u64,
+    anchor_out: u64,
+    clip_path: &str,
+    clip_in: u64,
+    clip_out: u64,
+) -> Option<f64> {
+    let anchor_dur_s = (anchor_out.saturating_sub(anchor_in)) as f64 / 1e9;
+    let clip_dur_s = (clip_out.saturating_sub(clip_in)) as f64 / 1e9;
+    let overlap_s = anchor_dur_s.min(clip_dur_s);
+
+    if overlap_s < MIN_DRIFT_OVERLAP_SECONDS {
+        return None; // Too short for reliable two-point measurement
+    }
+
+    let window_ns = (DRIFT_WINDOW_SECONDS * 1e9) as u64;
+
+    // Window 1: near the start of each clip
+    let a_start_in = anchor_in;
+    let a_start_out = anchor_in + window_ns;
+    let c_start_in = clip_in;
+    let c_start_out = clip_in + window_ns;
+
+    // Window 2: near the end of each clip (use the shorter clip's end)
+    let end_offset_ns = (overlap_s * 1e9) as u64;
+    let a_end_out = anchor_in + end_offset_ns;
+    let a_end_in = a_end_out.saturating_sub(window_ns);
+    let c_end_out = clip_in + end_offset_ns;
+    let c_end_in = c_end_out.saturating_sub(window_ns);
+
+    // Correlate at start window
+    let a_start = extract_and_prepare(anchor_path, a_start_in, a_start_out)?;
+    let c_start = extract_and_prepare(clip_path, c_start_in, c_start_out)?;
+    let (start_offset, start_conf) = gcc_phat(&a_start, &c_start);
+    if start_conf < 3.0 {
+        return None;
+    }
+
+    // Correlate at end window
+    let a_end = extract_and_prepare(anchor_path, a_end_in, a_end_out)?;
+    let c_end = extract_and_prepare(clip_path, c_end_in, c_end_out)?;
+    let (end_offset, end_conf) = gcc_phat(&a_end, &c_end);
+    if end_conf < 3.0 {
+        return None;
+    }
+
+    // The drift is the difference between end and start offsets over the
+    // elapsed time. If the clip runs slightly fast, its audio will arrive
+    // earlier at the end → negative drift in samples.
+    let drift_samples = end_offset - start_offset;
+    let separation_s = overlap_s - DRIFT_WINDOW_SECONDS; // center-to-center distance
+    if separation_s < 5.0 {
+        return None;
+    }
+
+    let drift_seconds = drift_samples as f64 / SAMPLE_RATE as f64;
+    let speed_ratio = 1.0 + drift_seconds / separation_s;
+
+    // Sanity check: reject implausible corrections (> 0.5% drift is almost
+    // certainly a misdetection, not real clock drift).
+    if (speed_ratio - 1.0).abs() > 0.005 {
+        eprintln!(
+            "audio_sync: drift {:.6} rejected (> 0.5%): start_off={} end_off={} conf={:.1}/{:.1}",
+            speed_ratio, start_offset, end_offset, start_conf, end_conf
+        );
+        return None;
+    }
+
+    Some(speed_ratio)
 }
 
 /// Extract raw audio, then apply bandpass filter for correlation.

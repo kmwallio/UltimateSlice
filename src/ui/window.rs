@@ -1678,18 +1678,19 @@ fn align_grouped_clips_by_timecode_in_project(
 /// Apply audio sync results to the project: reposition non-anchor clips
 /// relative to the anchor clip's timeline_start using the computed offsets.
 fn apply_audio_sync_results(
-    results: &[(String, i64, f32)],
+    results: &[(String, i64, f32, Option<f64>)],
     project: &Rc<RefCell<Project>>,
     timeline_state: &Rc<RefCell<crate::ui::timeline::TimelineState>>,
     on_project_changed: &Rc<dyn Fn()>,
     window: Option<&gtk::ApplicationWindow>,
+    replace_audio: bool,
 ) {
     use crate::undo::SetTrackClipsCommand;
 
     const MIN_CONFIDENCE: f32 = 3.0;
 
     // Detect "no change" when all offsets are 0
-    if results.iter().all(|(_, offset, _)| *offset == 0) {
+    if results.iter().all(|(_, offset, _, _)| *offset == 0) {
         if let Some(win) = window {
             flash_window_status_title(
                 win,
@@ -1701,7 +1702,7 @@ fn apply_audio_sync_results(
     }
 
     // Check all results for minimum confidence
-    let low_confidence = results.iter().any(|(_, _, c)| *c < MIN_CONFIDENCE);
+    let low_confidence = results.iter().any(|(_, _, c, _)| *c < MIN_CONFIDENCE);
     if low_confidence {
         if let Some(win) = window {
             flash_window_status_title(
@@ -1711,7 +1712,7 @@ fn apply_audio_sync_results(
                     "Audio sync failed — confidence too low ({:.1})",
                     results
                         .iter()
-                        .map(|(_, _, c)| *c)
+                        .map(|(_, _, c, _)| *c)
                         .fold(f32::INFINITY, f32::min)
                 ),
             );
@@ -1720,7 +1721,7 @@ fn apply_audio_sync_results(
     }
 
     // Find the anchor clip's timeline_start (first selected clip that wasn't synced)
-    let synced_ids: HashSet<&str> = results.iter().map(|(id, _, _)| id.as_str()).collect();
+    let synced_ids: HashSet<&str> = results.iter().map(|(id, _, _, _)| id.as_str()).collect();
     let anchor_timeline_start = {
         let proj = project.borrow();
         let st = timeline_state.borrow();
@@ -1733,11 +1734,15 @@ fn apply_audio_sync_results(
             .unwrap_or(0)
     };
 
-    // Build new clip positions
+    // Build new clip positions and collect drift corrections.
     let mut assignments: HashMap<String, u64> = HashMap::new();
-    for (clip_id, offset_ns, _) in results {
+    let mut drift_corrections: HashMap<String, f64> = HashMap::new();
+    for (clip_id, offset_ns, _, drift_speed) in results {
         let new_start = (anchor_timeline_start as i64 + offset_ns).max(0) as u64;
         assignments.insert(clip_id.clone(), new_start);
+        if let Some(drift) = drift_speed {
+            drift_corrections.insert(clip_id.clone(), *drift);
+        }
     }
 
     if assignments.is_empty() {
@@ -1765,6 +1770,13 @@ fn apply_audio_sync_results(
                                 changed = true;
                             }
                         }
+                        // Apply drift correction (speed adjustment).
+                        if let Some(&drift) = drift_corrections.get(&clip.id) {
+                            if (drift - 1.0).abs() > 1e-9 {
+                                clip.speed *= drift;
+                                changed = true;
+                            }
+                        }
                     }
                     if changed {
                         Some((track.id.clone(), old_clips, new_clips))
@@ -1776,22 +1788,58 @@ fn apply_audio_sync_results(
         };
 
         let mut proj = proj_rc.borrow_mut();
+        let label = if replace_audio {
+            "Sync & replace audio"
+        } else {
+            "Sync clips by audio"
+        };
         for (track_id, old_clips, new_clips) in track_updates {
             let cmd = SetTrackClipsCommand {
                 track_id,
                 old_clips,
                 new_clips,
-                label: "Sync clips by audio".to_string(),
+                label: label.to_string(),
             };
             st.history.execute(Box::new(cmd), &mut proj);
         }
+
+        // When replace_audio is set, link all involved clips and mute the
+        // anchor's embedded audio so the external audio replaces it.
+        if replace_audio {
+            let link_id = uuid::Uuid::new_v4().to_string();
+            let all_ids = st.selected_ids_or_primary();
+            // Find the anchor clip ID (the selected clip NOT in the sync results).
+            let anchor_id = all_ids
+                .iter()
+                .find(|id| !synced_ids.contains(id.as_str()))
+                .cloned();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    if all_ids.contains(&clip.id) {
+                        clip.link_group_id = Some(link_id.clone());
+                    }
+                    // Mute the anchor (camera) clip's embedded audio.
+                    if Some(&clip.id) == anchor_id.as_ref()
+                        && clip.kind == crate::model::clip::ClipKind::Video
+                    {
+                        clip.volume = 0.0;
+                    }
+                }
+            }
+        }
+
         proj.dirty = true;
     }
 
     on_project_changed();
 
+    let status = if replace_audio {
+        "Sync & replace audio complete"
+    } else {
+        "Audio sync complete"
+    };
     if let Some(win) = window {
-        flash_window_status_title(win, project, "Audio sync complete");
+        flash_window_status_title(win, project, status);
     }
 }
 
@@ -3873,13 +3921,15 @@ pub fn build_window(
 
     // Shared flag: true while audio sync is running (read by status bar timer).
     let audio_sync_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // Whether the current sync operation should also replace audio (link + mute anchor).
+    let sync_replace_mode: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     // Wire on_sync_audio — spawns a background thread for FFT cross-correlation.
     {
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
         let window_weak = window.downgrade();
-        let sync_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<Vec<(String, i64, f32)>>>>> =
+        let sync_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<Vec<(String, i64, f32, Option<f64>)>>>>> =
             Rc::new(RefCell::new(None));
         let sync_rx_for_timer = sync_rx.clone();
         let audio_sync_in_progress_timer = audio_sync_in_progress.clone();
@@ -3889,6 +3939,7 @@ pub fn build_window(
             let on_project_changed = on_project_changed.clone();
             let timeline_state = timeline_state.clone();
             let window_weak = window_weak.clone();
+            let sync_replace_mode_timer = sync_replace_mode.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                 let rx_opt = sync_rx_for_timer.borrow();
                 if let Some(ref rx) = *rx_opt {
@@ -3896,12 +3947,15 @@ pub fn build_window(
                         drop(rx_opt);
                         sync_rx_for_timer.borrow_mut().take();
                         audio_sync_in_progress_timer.set(false);
+                        let replace = sync_replace_mode_timer.get();
+                        sync_replace_mode_timer.set(false);
                         apply_audio_sync_results(
                             &results,
                             &project,
                             &timeline_state,
                             &on_project_changed,
                             window_weak.upgrade().as_ref(),
+                            replace,
                         );
                     }
                 }
@@ -3909,6 +3963,9 @@ pub fn build_window(
             });
         }
         let audio_sync_in_progress_cb = audio_sync_in_progress.clone();
+        let sync_rx_for_replace = sync_rx.clone();
+        let project_for_replace = project.clone();
+        let window_weak_for_replace = window_weak.clone();
         timeline_state.borrow_mut().on_sync_audio = Some(Rc::new(
             move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
                 if sync_rx.borrow().is_some() {
@@ -3935,14 +3992,56 @@ pub fn build_window(
                         })
                         .collect();
                     let sync_results = crate::media::audio_sync::sync_clips_by_audio(&clips);
-                    let results: Vec<(String, i64, f32)> = sync_results
+                    let results: Vec<(String, i64, f32, Option<f64>)> = sync_results
                         .into_iter()
-                        .map(|r| (r.clip_id, r.offset_ns, r.confidence))
+                        .map(|r| (r.clip_id, r.offset_ns, r.confidence, r.drift_speed))
                         .collect();
                     let _ = tx.send(results);
                 });
             },
         ));
+
+        // Wire on_sync_replace_audio — same sync flow but sets replace_audio flag.
+        {
+            let sync_rx2 = sync_rx_for_replace;
+            let audio_sync_in_progress_cb2 = audio_sync_in_progress.clone();
+            let sync_replace_mode_cb = sync_replace_mode.clone();
+            let project = project_for_replace;
+            let window_weak = window_weak_for_replace;
+            timeline_state.borrow_mut().on_sync_replace_audio = Some(Rc::new(
+                move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
+                    if sync_rx2.borrow().is_some() {
+                        return; // Sync already in progress
+                    }
+                    audio_sync_in_progress_cb2.set(true);
+                    sync_replace_mode_cb.set(true);
+                    if let Some(win) = window_weak.upgrade() {
+                        let proj = project.borrow();
+                        win.set_title(Some(&format!(
+                            "UltimateSlice \u{2014} {} (Syncing & replacing audio\u{2026})",
+                            proj.title
+                        )));
+                    }
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    *sync_rx2.borrow_mut() = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = gstreamer::init();
+                        let clips: Vec<(String, String, u64, u64)> = clip_infos
+                            .iter()
+                            .map(|(id, path, src_in, src_out, _tl_start, _track_id)| {
+                                (id.clone(), path.clone(), *src_in, *src_out)
+                            })
+                            .collect();
+                        let sync_results = crate::media::audio_sync::sync_clips_by_audio(&clips);
+                        let results: Vec<(String, i64, f32, Option<f64>)> = sync_results
+                            .into_iter()
+                            .map(|r| (r.clip_id, r.offset_ns, r.confidence, r.drift_speed))
+                            .collect();
+                        let _ = tx.send(results);
+                    });
+                },
+            ));
+        }
     }
 
     // Shared flag: true while silence detection is running (read by status bar timer).
@@ -8264,7 +8363,7 @@ fn handle_mcp_command(
             }
         }
 
-        McpCommand::SyncClipsByAudio { clip_ids, reply } => {
+        McpCommand::SyncClipsByAudio { clip_ids, replace_audio, reply } => {
             if clip_ids.len() < 2 {
                 reply
                     .send(json!({"success": false, "error": "Need at least 2 clip ids"}))
@@ -8308,6 +8407,7 @@ fn handle_mcp_command(
                     let sync_results = crate::media::audio_sync::sync_clips_by_audio(&clips);
                     let mut result_json = Vec::new();
                     let mut assignments: HashMap<String, u64> = HashMap::new();
+                    let mut drift_corrections: HashMap<String, f64> = HashMap::new();
                     let mut all_confident = true;
                     for r in &sync_results {
                         let new_start = (anchor_timeline_start as i64 + r.offset_ns).max(0) as u64;
@@ -8316,19 +8416,47 @@ fn handle_mcp_command(
                             "offset_ns": r.offset_ns,
                             "confidence": r.confidence,
                             "new_timeline_start_ns": new_start,
+                            "drift_speed": r.drift_speed,
                         }));
                         if r.confidence < 3.0 {
                             all_confident = false;
                         } else {
                             assignments.insert(r.clip_id.clone(), new_start);
+                            if let Some(drift) = r.drift_speed {
+                                drift_corrections.insert(r.clip_id.clone(), drift);
+                            }
                         }
                     }
                     if all_confident && !assignments.is_empty() {
                         let mut proj = project.borrow_mut();
+                        // Apply timeline position assignments and drift speed corrections.
                         for track in &mut proj.tracks {
                             for clip in &mut track.clips {
                                 if let Some(&new_start) = assignments.get(&clip.id) {
                                     clip.timeline_start = new_start;
+                                }
+                                if let Some(&drift) = drift_corrections.get(&clip.id) {
+                                    if (drift - 1.0).abs() > 1e-9 {
+                                        clip.speed *= drift;
+                                    }
+                                }
+                            }
+                        }
+                        // When replace_audio is set, link all clips and mute anchor's embedded audio.
+                        if replace_audio && clip_ids.len() >= 2 {
+                            let link_id = uuid::Uuid::new_v4().to_string();
+                            let anchor_id = &clip_ids[0];
+                            for track in &mut proj.tracks {
+                                for clip in &mut track.clips {
+                                    if clip_ids.contains(&clip.id) {
+                                        clip.link_group_id = Some(link_id.clone());
+                                    }
+                                    // Mute anchor clip's embedded audio so external audio replaces it.
+                                    if &clip.id == anchor_id
+                                        && clip.kind == crate::model::clip::ClipKind::Video
+                                    {
+                                        clip.volume = 0.0;
+                                    }
                                 }
                             }
                         }
@@ -8339,6 +8467,7 @@ fn handle_mcp_command(
                     reply
                         .send(json!({
                             "success": all_confident,
+                            "replace_audio_applied": replace_audio && all_confident,
                             "results": result_json,
                         }))
                         .ok();
