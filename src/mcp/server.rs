@@ -675,7 +675,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_transform",
-            "description": "Set scale, position, and optional rotation offset for a clip. scale > 1.0 zooms in (crops), scale < 1.0 zooms out (letterbox). position_x/y shift the frame from -1.0 (full left/top) to 1.0 (full right/bottom). rotate is in degrees (-180 to 180 typical).",
+            "description": "Set scale, position, and optional rotation/anamorphic offset for a clip. scale > 1.0 zooms in (crops), scale < 1.0 zooms out (letterbox). position_x/y shift the frame from -1.0 (full left/top) to 1.0 (full right/bottom). rotate is in degrees (-180 to 180 typical). anamorphic_desqueeze applies lens expansion (e.g. 1.33, 2.0).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -683,7 +683,8 @@ fn tools_list() -> Value {
                     "scale":      { "type": "number", "description": "Zoom scale factor: 1.0 = normal, 2.0 = 2× zoom in, 0.5 = half size. Range 0.1–4.0." },
                     "position_x": { "type": "number", "description": "Horizontal offset: -1.0 (left) to 1.0 (right). Default 0.0 (center)." },
                     "position_y": { "type": "number", "description": "Vertical offset: -1.0 (top) to 1.0 (bottom). Default 0.0 (center)." },
-                    "rotate":     { "type": "integer", "description": "Rotation in degrees. Optional; omit to keep existing value." }
+                    "rotate":     { "type": "integer", "description": "Rotation in degrees. Optional; omit to keep existing value." },
+                    "anamorphic_desqueeze": { "type": "number", "description": "Anamorphic desqueeze factor (1.0 = none, 1.33, 1.5, 1.8, 2.0). Optional." }
                 },
                 "required": ["clip_id"]
             }
@@ -1500,6 +1501,7 @@ fn dispatch_tool_payload(
             position_x: args["position_x"].as_f64().unwrap_or(0.0),
             position_y: args["position_y"].as_f64().unwrap_or(0.0),
             rotate: args["rotate"].as_i64().map(|v| v as i32),
+            anamorphic_desqueeze: args["anamorphic_desqueeze"].as_f64(),
             reply: tx,
         },
         "set_clip_opacity" => McpCommand::SetClipOpacity {

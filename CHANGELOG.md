@@ -2,9 +2,14 @@
 
 All notable project changes and progress should be recorded here.
 
-## Unreleased
+## [Unreleased]
 
 ### Added
+- **Anamorphic Desqueeze**: Support for lens desqueeze (1.33x, 1.5x, 1.8x, 2.0x) controllable via the Inspector and MCP.
+  - Preview: Dynamic `pixel-aspect-ratio` override in GStreamer compositor slots via `capssetter`.
+  - Export: FFmpeg `setsar` injection for parity.
+  - FCPXML: Round-trip persistence via `us:anamorphic-desqueeze` vendor attribute.
+  - MCP: `anamorphic_desqueeze` parameter in `set_clip_transform` and property in `list_clips`.
 - **3-band parametric EQ per clip**: Built-in Low/Mid/High parametric equalizer with per-band frequency (20–20000 Hz), gain (−24 to +24 dB), and Q factor (0.1–10.0) controls. Real-time preview via GStreamer `equalizer-nbands` element; export parity via chained FFmpeg `equalizer` filters (including keyframed gain expressions). Inspector UI with 9 sliders in a collapsible "Equalizer" section under Audio. Gain-only keyframe animation per band. FCPXML persistence via `us:eq-bands` / `us:eq-*-gain-keyframes` vendor attributes. MCP tool: `set_clip_eq` (partial update with 9 optional parameters). Undo support via `SetClipEqCommand`.
 - **Drag-and-drop from file manager to timeline**: Files dragged from Nautilus, Thunar, or any file manager directly onto the timeline are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially. Video files with audio create linked A/V clip pairs (when auto-link is applicable). Images get a default 4-second duration. The entire multi-file drop is a single undo entry. The existing media browser file-manager drop (import only) continues to work as before.
 - **Chapter markers in export**: Timeline markers are now embedded as chapter metadata in exported MP4, MOV, and MKV files. Each marker starts a chapter that ends at the next marker (or the project end for the last marker). Chapters are injected via ffmpeg's FFMETADATA input format with nanosecond precision. Projects with no markers produce unchanged export output. Special characters in marker labels are escaped per the FFMETADATA spec.

@@ -770,6 +770,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:rotate", clip.rotate.to_string().as_str()));
                     asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
                     asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
+                    if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
+                        asset_clip.push_attribute(("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string().as_str()));
+                    }
                     asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
                     let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
                         None
@@ -1972,6 +1975,7 @@ fn patch_asset_clip_block_transform(
         ("us:saturation", clip.saturation.to_string()),
         ("us:temperature", clip.temperature.to_string()),
         ("us:tint", clip.tint.to_string()),
+        ("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string()),
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
@@ -3412,6 +3416,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:rotate"
             | "us:flip-h"
             | "us:flip-v"
+            | "us:anamorphic-desqueeze"
             | "us:scale"
             | "us:scale-keyframes"
             | "us:opacity"
@@ -3427,6 +3432,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:speed-keyframes"
+            | "us:slow-motion-interp"
             | "us:reverse"
             | "us:freeze-frame"
             | "us:freeze-source-ns"
@@ -3441,6 +3447,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:chroma-key-color"
             | "us:chroma-key-tolerance"
             | "us:chroma-key-softness"
+            | "us:lut-paths"
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
@@ -3769,6 +3776,39 @@ mod tests {
         project.dirty = true;
         let written = write_fcpxml(&project).expect("write should succeed");
         assert_eq!(written.match_indices("<timeMap").count(), 1);
+    }
+
+    #[test]
+    fn test_write_fcpxml_does_not_duplicate_lut_paths_attribute() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+    <resources>
+        <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+        <asset id="a1" src="file:///tmp/clip.mov" name="clip" duration="240/24s"/>
+    </resources>
+    <library>
+        <event>
+            <project name="LutDupGuard">
+                <sequence duration="240/24s" format="r1">
+                    <spine>
+                        <asset-clip
+                            ref="a1"
+                            offset="0s"
+                            start="0s"
+                            duration="120/24s"
+                            us:lut-paths="[&quot;/tmp/look.cube&quot;]"
+                            us:lut-path="/tmp/look.cube"/>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </library>
+</fcpxml>"#;
+
+        let mut project = parse_fcpxml(xml).expect("parse should succeed");
+        project.dirty = true;
+        let written = write_fcpxml(&project).expect("write should succeed");
+        assert_eq!(written.match_indices("us:lut-paths=").count(), 1);
     }
 
     #[test]

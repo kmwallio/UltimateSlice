@@ -818,6 +818,13 @@ pub struct Clip {
     /// Unsupported FCPXML child tags under asset preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_asset_children: Vec<String>,
+    /// Anamorphic desqueeze factor: 1.0 (none), 1.33, 1.5, 1.8, 2.0.
+    #[serde(default = "default_anamorphic_desqueeze")]
+    pub anamorphic_desqueeze: f64,
+}
+
+fn default_anamorphic_desqueeze() -> f64 {
+    1.0
 }
 
 impl Clip {
@@ -1064,6 +1071,7 @@ impl Clip {
             fcpxml_asset_ref: None,
             fcpxml_unknown_asset_attrs: Vec::new(),
             fcpxml_unknown_asset_children: Vec::new(),
+            anamorphic_desqueeze: 1.0,
         }
     }
 

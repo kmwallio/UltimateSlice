@@ -109,6 +109,20 @@ Useful playback-tuning toggles:
 
 `set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
 
+## Transform MCP examples
+
+Set scale, position, and optional rotation/anamorphic offset for a clip:
+
+```bash
+python3 tools/mcp_call.py set_clip_transform '{"clip_id":"<clip-id>","scale":1.5,"position_x":0.2,"anamorphic_desqueeze":1.33}'
+```
+
+Set a clip's opacity:
+
+```bash
+python3 tools/mcp_call.py set_clip_opacity '{"clip_id":"<clip-id>","opacity":0.5}'
+```
+
 ## Keyframe MCP examples
 
 Set a scale keyframe on a clip at an absolute timeline time:

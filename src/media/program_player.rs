@@ -385,6 +385,7 @@ pub struct ProgramClip {
     /// True for clips that have no video (audio-track clips). They are routed
     /// to a dedicated audio-only pipeline instead of the video player.
     pub is_audio_only: bool,
+    pub anamorphic_desqueeze: f64,
     /// Track index — higher index clips (B-roll, overlays) take priority in preview.
     pub track_index: usize,
     /// Transition to next clip on same track (e.g. "cross_dissolve").
@@ -8070,6 +8071,24 @@ impl ProgramPlayer {
         if let Some(ref e) = imagefreeze {
             chain.push(e.clone());
         }
+        // 0a. Override pixel-aspect-ratio for anamorphic desqueeze
+        if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
+            if let Ok(cs) = gst::ElementFactory::make("capssetter")
+                .property("join", true)
+                .property(
+                    "caps",
+                    &gst::Caps::builder("video/x-raw")
+                        .field(
+                            "pixel-aspect-ratio",
+                            gst::Fraction::new((clip.anamorphic_desqueeze * 1000.0).round() as i32, 1000),
+                        )
+                        .build(),
+                )
+                .build()
+            {
+                chain.push(cs);
+            }
+        }
         // 0b. When a real-time LUT is active, override the source colorimetry
         //    to BT.709 full-range.  Many camera files (S-Log3 HEVC, etc.) carry
         //    unknown/unset colorimetry; GStreamer's default YUV→RGB conversion
@@ -8910,8 +8929,9 @@ impl ProgramPlayer {
                 // Apply LUT at source resolution (before downscale) so it
                 // processes the same pixel values as the export path.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{}{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
+                    Self::prerender_build_anamorphic_filter(clip),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                     Self::prerender_build_rotation_filter(clip, false),
@@ -8935,8 +8955,9 @@ impl ProgramPlayer {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{}{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{}{}{},fps={}{}{}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
+                        Self::prerender_build_anamorphic_filter(clip),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
@@ -8954,7 +8975,7 @@ impl ProgramPlayer {
                 } else {
                     // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8974,8 +8995,9 @@ impl ProgramPlayer {
                 // Overlay tracks: convert to yuva420p early so pad fills transparent.
                 // Apply LUT at source resolution before format/scale for parity.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{}{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{}{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
+                    Self::prerender_build_anamorphic_filter(clip),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
                     Self::prerender_build_rotation_filter(clip, true),
@@ -9255,6 +9277,15 @@ impl ProgramPlayer {
         if clip.sharpness != 0.0 {
             let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
             format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
+        } else {
+            String::new()
+        }
+    }
+
+    fn prerender_build_anamorphic_filter(clip: &ProgramClip) -> String {
+        if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
+            // Physically desqueeze the source pixels horizontally and reset SAR to 1.
+            format!(",scale=iw*{}:ih,setsar=1", clip.anamorphic_desqueeze)
         } else {
             String::new()
         }

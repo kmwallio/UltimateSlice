@@ -62,6 +62,7 @@ struct ActiveClipContext {
     has_us_position: bool,
     has_us_scale: bool,
     has_us_rotate: bool,
+    has_us_anamorphic_desqueeze: bool,
     has_us_position_keyframes: bool,
     has_us_scale_keyframes: bool,
     has_us_rotate_keyframes: bool,
@@ -1056,6 +1057,9 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:flip-v") {
                 clip.flip_v = v.parse().unwrap_or(false);
             }
+            if let Some(v) = attrs.get("us:anamorphic-desqueeze") {
+                clip.anamorphic_desqueeze = v.parse().unwrap_or(1.0);
+            }
             if let Some(v) = attrs.get("us:scale") {
                 clip.scale = v.parse().unwrap_or(1.0);
             }
@@ -1280,6 +1284,7 @@ fn parse_asset_clip(
                     || attrs.contains_key("us:position-y"),
                 has_us_scale: attrs.contains_key("us:scale"),
                 has_us_rotate: attrs.contains_key("us:rotate"),
+                has_us_anamorphic_desqueeze: attrs.contains_key("us:anamorphic-desqueeze"),
                 has_us_position_keyframes: attrs.contains_key("us:position-x-keyframes")
                     || attrs.contains_key("us:position-y-keyframes"),
                 has_us_scale_keyframes: attrs.contains_key("us:scale-keyframes"),
@@ -2443,6 +2448,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:rotate"
             | "us:flip-h"
             | "us:flip-v"
+            | "us:anamorphic-desqueeze"
             | "us:scale"
             | "us:scale-keyframes"
             | "us:opacity"
@@ -2458,6 +2464,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:speed-keyframes"
+            | "us:slow-motion-interp"
             | "us:reverse"
             | "us:freeze-frame"
             | "us:freeze-source-ns"
@@ -2482,6 +2489,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:chroma-key-softness"
             | "us:bg-removal-enabled"
             | "us:bg-removal-threshold"
+            | "us:lut-paths"
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"

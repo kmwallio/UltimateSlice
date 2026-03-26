@@ -99,6 +99,7 @@ pub struct InspectorView {
     pub scale_slider: Scale,
     pub opacity_slider: Scale,
     pub blend_mode_dropdown: gtk4::DropDown,
+    pub anamorphic_desqueeze_dropdown: gtk4::DropDown,
     pub position_x_slider: Scale,
     pub position_y_slider: Scale,
     // Title / text overlay
@@ -1039,6 +1040,14 @@ impl InspectorView {
                         .position(|m| *m == c.blend_mode)
                         .unwrap_or(0) as u32,
                 );
+                let anamorphic_idx = match c.anamorphic_desqueeze {
+                    x if (x - 1.33).abs() < 0.01 => 1,
+                    x if (x - 1.5).abs() < 0.01 => 2,
+                    x if (x - 1.8).abs() < 0.01 => 3,
+                    x if (x - 2.0).abs() < 0.01 => 4,
+                    _ => 0,
+                };
+                self.anamorphic_desqueeze_dropdown.set_selected(anamorphic_idx);
                 self.in_value.set_text(&ns_to_timecode(c.source_in));
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
@@ -1297,6 +1306,7 @@ impl InspectorView {
                 self.scale_slider.set_value(1.0);
                 self.opacity_slider.set_value(1.0);
                 self.blend_mode_dropdown.set_selected(0);
+                self.anamorphic_desqueeze_dropdown.set_selected(0);
                 self.position_x_slider.set_value(0.0);
                 self.position_y_slider.set_value(0.0);
                 self.title_entry.set_text("");
@@ -1500,6 +1510,7 @@ pub fn build_inspector(
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_eq_changed: impl Fn(&str, [crate::model::clip::EqBand; 3]) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
+    on_anamorphic_changed: impl Fn(f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
     on_title_style_changed: impl Fn() + 'static,
     on_speed_changed: impl Fn(f64) + 'static,
@@ -2161,6 +2172,16 @@ pub fn build_inspector(
     blend_mode_dropdown.set_hexpand(true);
     blend_mode_dropdown.set_tooltip_text(Some("Compositing blend mode"));
     transform_inner.append(&blend_mode_dropdown);
+
+    row_label(&transform_inner, "Anamorphic Desqueeze");
+    let anamorphic_desqueeze_dropdown = gtk4::DropDown::from_strings(&[
+        "None (1.0x)", "1.33x", "1.5x", "1.8x", "2.0x",
+    ]);
+    anamorphic_desqueeze_dropdown.set_selected(0);
+    anamorphic_desqueeze_dropdown.set_halign(gtk4::Align::Start);
+    anamorphic_desqueeze_dropdown.set_hexpand(true);
+    anamorphic_desqueeze_dropdown.set_tooltip_text(Some("Anamorphic lens desqueeze factor"));
+    transform_inner.append(&anamorphic_desqueeze_dropdown);
 
     row_label(&transform_inner, "Scale");
     let scale_slider = Scale::with_range(Orientation::Horizontal, 0.1, 4.0, 0.05);
@@ -2876,6 +2897,27 @@ pub fn build_inspector(
                     }
                 }
                 on_clip_changed();
+            }
+        });
+    }
+
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_anamorphic_changed = Rc::new(on_anamorphic_changed);
+        anamorphic_desqueeze_dropdown.connect_selected_notify(move |combo| {
+            if *updating.borrow() {
+                return;
+            }
+            if selected_clip_id.borrow().is_some() {
+                let factor = match combo.selected() {
+                    1 => 1.33,
+                    2 => 1.5,
+                    3 => 1.8,
+                    4 => 2.0,
+                    _ => 1.0,
+                };
+                on_anamorphic_changed(factor);
             }
         });
     }
@@ -5530,6 +5572,7 @@ pub fn build_inspector(
         scale_slider,
         opacity_slider,
         blend_mode_dropdown,
+        anamorphic_desqueeze_dropdown,
         position_x_slider,
         position_y_slider,
         title_entry,

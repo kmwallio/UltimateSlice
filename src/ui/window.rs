@@ -2806,6 +2806,33 @@ pub fn build_window(
                 }
             }
         },
+        // on_anamorphic_changed: changes pixel aspect ratio -> requires pipeline reload
+        {
+            let on_project_changed = on_project_changed.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            move |factor| {
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    let mut changed = false;
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if (clip.anamorphic_desqueeze - factor).abs() > 0.001 {
+                                clip.anamorphic_desqueeze = factor;
+                                proj.dirty = true;
+                                changed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if changed {
+                        drop(proj);
+                        on_project_changed();
+                    }
+                }
+            }
+        },
         // on_title_changed: text/position → instant property set + debounced flush
         {
             let prog_player = prog_player.clone();
@@ -5690,6 +5717,7 @@ pub fn build_window(
                             freeze_frame_source_ns: c.freeze_frame_source_ns,
                             freeze_frame_hold_duration_ns: c.freeze_frame_hold_duration_ns,
                             is_audio_only: audio_only,
+                            anamorphic_desqueeze: c.anamorphic_desqueeze,
                             track_index: t_idx,
                             transition_after: c.transition_after.clone(),
                             transition_after_ns: c.transition_after_ns,
@@ -7260,6 +7288,7 @@ fn handle_mcp_command(
                                 "volume":           c.volume,
                                 "pan":              c.pan,
                                 "scale":            c.scale,
+                                "anamorphic_desqueeze": c.anamorphic_desqueeze,
                                 "opacity":          c.opacity,
                                 "blend_mode":       c.blend_mode.label(),
                                 "position_x":       c.position_x,
@@ -8714,6 +8743,7 @@ fn handle_mcp_command(
             position_x,
             position_y,
             rotate,
+            anamorphic_desqueeze,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -8726,6 +8756,9 @@ fn handle_mcp_command(
                         clip.position_y = position_y.clamp(-1.0, 1.0);
                         if let Some(rot) = rotate {
                             clip.rotate = rot.clamp(-180, 180);
+                        }
+                        if let Some(a) = anamorphic_desqueeze {
+                            clip.anamorphic_desqueeze = a;
                         }
                         proj.dirty = true;
                         found = true;

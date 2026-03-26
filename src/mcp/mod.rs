@@ -228,6 +228,7 @@ pub enum McpCommand {
         position_x: f64,
         position_y: f64,
         rotate: Option<i32>,
+        anamorphic_desqueeze: Option<f64>,
         reply: SyncSender<Value>,
     },
     SetClipOpacity {
