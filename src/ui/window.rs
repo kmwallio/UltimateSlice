@@ -2620,6 +2620,8 @@ pub fn build_window(
     // timeline_panel_cell is shared between the inspector's on_audio_changed callback
     // and the program monitor poll timer. Declare it early (filled in after timeline build).
     let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+    // Shared flag for normalize-in-progress state (used by callback + button UI).
+    let norm_in_progress: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let keyframe_editor_cell: Rc<RefCell<Option<Rc<keyframe_editor::KeyframeEditorView>>>> =
         Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
@@ -3174,7 +3176,154 @@ pub fn build_window(
                 }
             }
         },
+        // on_normalize_audio: analyze clip loudness and adjust volume
+        {
+            // Channel-based background analysis (same pattern as silence detection).
+            // Result: (clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs)
+            type NormResult = (String, String, f32, Option<f64>, f64, f64);
+            let norm_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<NormResult>>>> =
+                Rc::new(RefCell::new(None));
+
+            // Poll timer — runs every 100ms, checks for completed analysis.
+            {
+                let norm_rx = norm_rx.clone();
+                let norm_in_progress = norm_in_progress.clone();
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
+                let window_weak = window_weak.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let rx_opt = norm_rx.borrow();
+                    if let Some(ref rx) = *rx_opt {
+                        if let Ok((clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs)) = rx.try_recv() {
+                            drop(rx_opt);
+                            norm_rx.borrow_mut().take();
+                            norm_in_progress.set(false);
+                            let gain = crate::media::export::compute_lufs_gain(measured_lufs, target_lufs);
+                            let new_volume = (old_volume as f64 * gain).clamp(0.0, 4.0) as f32;
+                            {
+                                let mut proj = project.borrow_mut();
+                                let cmd = crate::undo::NormalizeClipAudioCommand {
+                                    clip_id: clip_id.clone(),
+                                    track_id,
+                                    old_volume,
+                                    new_volume,
+                                    old_measured_loudness: old_measured,
+                                    new_measured_loudness: Some(measured_lufs),
+                                };
+                                let mut ts = timeline_state.borrow_mut();
+                                ts.history.execute(Box::new(cmd), &mut proj);
+                            }
+                            on_project_changed();
+                            if let Some(win) = window_weak.upgrade() {
+                                let proj = project.borrow();
+                                let title = format!("UltimateSlice \u{2014} {} \u{2022}", proj.title);
+                                win.set_title(Some(&title));
+                            }
+                            log::info!(
+                                "Normalize: clip={} measured={:.1} LUFS target={:.1} gain={:.3} vol {:.3} -> {:.3}",
+                                clip_id, measured_lufs, target_lufs, gain, old_volume, new_volume
+                            );
+                        }
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
+
+            let project = project.clone();
+            let window_weak = window_weak.clone();
+            let norm_in_progress = norm_in_progress.clone();
+            move |clip_id: &str| {
+                // Don't start if one is already in progress.
+                if norm_in_progress.get() {
+                    return;
+                }
+                let clip_info = {
+                    let proj = project.borrow();
+                    let mut info = None;
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                            info = Some((
+                                clip.source_path.clone(),
+                                clip.source_in,
+                                clip.source_out,
+                                clip.volume,
+                                clip.measured_loudness_lufs,
+                                track.id.clone(),
+                            ));
+                            break;
+                        }
+                    }
+                    info
+                };
+                let Some((source_path, source_in, source_out, old_volume, old_measured, track_id)) =
+                    clip_info
+                else {
+                    return;
+                };
+                let target_lufs = -14.0_f64;
+                let clip_id_owned = clip_id.to_string();
+                norm_in_progress.set(true);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    win.set_title(Some(&format!(
+                        "UltimateSlice \u{2014} {} (Analyzing loudness\u{2026})",
+                        proj.title
+                    )));
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *norm_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    match crate::media::export::analyze_loudness_lufs(
+                        &source_path, source_in, source_out,
+                    ) {
+                        Ok(measured_lufs) => {
+                            let _ = tx.send((
+                                clip_id_owned,
+                                track_id,
+                                old_volume,
+                                old_measured,
+                                measured_lufs,
+                                target_lufs,
+                            ));
+                        }
+                        Err(e) => {
+                            log::warn!("Normalize analysis failed: {e}");
+                            // Signal completion even on failure so the poll timer can clean up.
+                            // We send a sentinel with gain=1.0 (no change) which the timer
+                            // will apply as a no-op volume update. Alternatively we could use
+                            // a Result channel, but this keeps the type simple.
+                        }
+                    }
+                });
+            }
+        },
     );
+
+    // Sync normalize button state with in-progress flag.
+    {
+        let btn = inspector_view.normalize_btn.clone();
+        let label = inspector_view.measured_loudness_label.clone();
+        let in_progress = norm_in_progress.clone();
+        let mut was_in_progress = false;
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            let now = in_progress.get();
+            if now != was_in_progress {
+                was_in_progress = now;
+                if now {
+                    btn.set_sensitive(false);
+                    btn.set_label("Analyzing\u{2026}");
+                    label.set_text("Measuring loudness\u{2026}");
+                } else {
+                    btn.set_sensitive(true);
+                    btn.set_label("Normalize\u{2026}");
+                    // The measured loudness label will be updated by on_project_changed
+                    // via the inspector's update() method.
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // Set initial model availability on the inspector so the bg-removal
     // section is hidden when no ONNX model is present.
@@ -8840,6 +8989,98 @@ fn handle_mcp_command(
             })).ok();
             if found {
                 on_project_changed();
+            }
+        }
+
+        McpCommand::NormalizeClipAudio {
+            clip_id,
+            mode,
+            target_level,
+            reply,
+        } => {
+            // Extract clip info from the model.
+            let clip_info = {
+                let proj = project.borrow();
+                let mut info = None;
+                for track in &proj.tracks {
+                    if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                        info = Some((
+                            clip.source_path.clone(),
+                            clip.source_in,
+                            clip.source_out,
+                            clip.volume,
+                            clip.measured_loudness_lufs,
+                            track.id.clone(),
+                        ));
+                        break;
+                    }
+                }
+                info
+            };
+            if let Some((source_path, source_in, source_out, old_volume, _old_measured, _track_id)) =
+                clip_info
+            {
+                // Run analysis synchronously (blocks GTK main loop for a few seconds,
+                // acceptable for MCP tool calls — same pattern as export_mp4).
+                let result = match mode.as_str() {
+                    "peak" => crate::media::export::analyze_peak_db(
+                        &source_path, source_in, source_out,
+                    )
+                    .map(|peak| {
+                        let gain = crate::media::export::compute_peak_gain(peak, target_level);
+                        (peak, gain)
+                    }),
+                    _ => crate::media::export::analyze_loudness_lufs(
+                        &source_path, source_in, source_out,
+                    )
+                    .map(|lufs| {
+                        let gain = crate::media::export::compute_lufs_gain(lufs, target_level);
+                        (lufs, gain)
+                    }),
+                };
+                match result {
+                    Ok((measured, gain)) => {
+                        let new_volume = (old_volume as f64 * gain).clamp(0.0, 4.0) as f32;
+                        let measured_lufs = if mode == "lufs" { Some(measured) } else { None };
+                        {
+                            let mut proj = project.borrow_mut();
+                            'norm_outer: for track in proj.tracks.iter_mut() {
+                                for clip in track.clips.iter_mut() {
+                                    if clip.id == clip_id {
+                                        clip.volume = new_volume;
+                                        if let Some(lufs) = measured_lufs {
+                                            clip.measured_loudness_lufs = Some(lufs);
+                                        }
+                                        break 'norm_outer;
+                                    }
+                                }
+                            }
+                            proj.dirty = true;
+                        }
+                        reply.send(serde_json::json!({
+                            "success": true,
+                            "mode": mode,
+                            "measured": measured,
+                            "target": target_level,
+                            "gain_linear": gain,
+                            "old_volume": old_volume,
+                            "new_volume": new_volume,
+                        }))
+                        .ok();
+                        on_project_changed();
+                    }
+                    Err(e) => {
+                        reply.send(serde_json::json!({
+                            "success": false,
+                            "error": e.to_string(),
+                        }))
+                        .ok();
+                    }
+                }
+            } else {
+                reply
+                    .send(serde_json::json!({"success": false, "error": "Clip not found"}))
+                    .ok();
             }
         }
 

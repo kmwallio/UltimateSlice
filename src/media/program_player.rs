@@ -12589,6 +12589,7 @@ mod tests {
             title_clip_bg_color: 0,
             title_secondary_text: String::new(),
             is_title: false,
+            anamorphic_desqueeze: 1.0,
         }
     }
 

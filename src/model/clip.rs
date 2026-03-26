@@ -561,6 +561,9 @@ pub struct Clip {
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Last measured integrated loudness in LUFS (informational, from normalization analysis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_loudness_lufs: Option<f64>,
     /// Optional volume keyframes over clip-local timeline.
     #[serde(default)]
     pub volume_keyframes: Vec<NumericKeyframe>,
@@ -988,6 +991,7 @@ impl Clip {
             vidstab_enabled: false,
             vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
+            measured_loudness_lufs: None,
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),

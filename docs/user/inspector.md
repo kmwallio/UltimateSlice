@@ -78,6 +78,12 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
 
+### Normalize Audio
+
+The **Normalize...** button (next to the volume slider) analyzes the clip's loudness using FFmpeg's EBU R128 measurement and adjusts the volume to hit **-14 LUFS** (YouTube/streaming standard). After analysis, the measured loudness is displayed (e.g., "−18.3 LUFS") and the volume slider updates to the normalized value. Fully undo-able.
+
+MCP tool: `normalize_clip_audio` supports `mode` (`lufs` or `peak`) and `target_level` (e.g., `-14.0` for LUFS, `0.0` for peak dBFS).
+
 ### Audio keyframes (phase 1)
 
 - Use **Set Volume Keyframe** / **Remove Volume Keyframe** for the volume lane.

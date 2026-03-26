@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## [Unreleased]
 
 ### Added
+- **Audio normalization**: Per-clip loudness normalization via FFmpeg analysis. Inspector "Normalize..." button analyzes integrated loudness (EBU R128 via `ebur128` filter) and adjusts clip volume to -14 LUFS (YouTube/streaming standard). Measured loudness displayed in the inspector. MCP tool `normalize_clip_audio` supports both LUFS and peak normalization modes with configurable target level. Full undo support. Measured loudness persisted via FCPXML `us:measured-loudness-lufs` vendor attribute.
 - **Anamorphic Desqueeze**: Support for lens desqueeze (1.33x, 1.5x, 1.8x, 2.0x) controllable via the Inspector and MCP.
   - Preview: Dynamic `pixel-aspect-ratio` override in GStreamer compositor slots via `capssetter`.
   - Export: FFmpeg `setsar` injection for parity.

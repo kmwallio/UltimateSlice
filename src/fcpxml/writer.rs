@@ -720,6 +720,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 .push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
                         }
                     }
+                    if let Some(lufs) = clip.measured_loudness_lufs {
+                        asset_clip.push_attribute((
+                            "us:measured-loudness-lufs",
+                            format!("{lufs:.2}").as_str(),
+                        ));
+                    }
                     let rotate_keyframes_json = if clip.rotate_keyframes.is_empty() {
                         None
                     } else {
@@ -3479,6 +3485,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
             | "us:eq-high-gain-keyframes"
+            | "us:measured-loudness-lufs"
     )
 }
 

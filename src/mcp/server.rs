@@ -722,6 +722,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "normalize_clip_audio",
+            "description": "Analyze clip loudness and normalize volume. Measures integrated loudness (LUFS) or peak amplitude via ffmpeg, then adjusts clip volume to reach target level. Blocks while ffmpeg analyzes audio (typically 1–5 seconds).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":      { "type": "string", "description": "Clip id (from list_clips)." },
+                    "mode":         { "type": "string", "enum": ["peak", "lufs"], "description": "Normalization mode: 'peak' for peak amplitude, 'lufs' for EBU R128 integrated loudness. Default 'lufs'." },
+                    "target_level": { "type": "number", "description": "Target level in dB. For 'lufs': -14.0 (YouTube), -23.0 (broadcast). For 'peak': 0.0 or -1.0. Default -14.0." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_clip_blend_mode",
             "description": "Set compositing blend mode for a clip by id.",
             "inputSchema": {
@@ -1520,6 +1533,12 @@ fn dispatch_tool_payload(
             high_freq: args.get("high_freq").and_then(|v| v.as_f64()),
             high_gain: args.get("high_gain").and_then(|v| v.as_f64()),
             high_q: args.get("high_q").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+        "normalize_clip_audio" => McpCommand::NormalizeClipAudio {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            mode: args.get("mode").and_then(|v| v.as_str()).unwrap_or("lufs").to_string(),
+            target_level: args.get("target_level").and_then(|v| v.as_f64()).unwrap_or(-14.0),
             reply: tx,
         },
         "set_clip_blend_mode" => McpCommand::SetClipBlendMode {

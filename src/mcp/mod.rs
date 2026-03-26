@@ -249,6 +249,12 @@ pub enum McpCommand {
         high_q: Option<f64>,
         reply: SyncSender<Value>,
     },
+    NormalizeClipAudio {
+        clip_id: String,
+        mode: String,
+        target_level: f64,
+        reply: SyncSender<Value>,
+    },
     SetClipBlendMode {
         clip_id: String,
         blend_mode: String,

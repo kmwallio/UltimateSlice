@@ -594,6 +594,41 @@ impl EditCommand for SetClipColorCommand {
     }
 }
 
+/// Normalize clip audio volume (stores old/new volume + measured loudness).
+#[allow(dead_code)]
+pub struct NormalizeClipAudioCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_volume: f32,
+    pub new_volume: f32,
+    pub old_measured_loudness: Option<f64>,
+    pub new_measured_loudness: Option<f64>,
+}
+
+impl EditCommand for NormalizeClipAudioCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.new_volume;
+                clip.measured_loudness_lufs = self.new_measured_loudness;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.old_volume;
+                clip.measured_loudness_lufs = self.old_measured_loudness;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Normalize clip audio"
+    }
+}
+
 /// Set 3-band parametric EQ on a clip.
 #[allow(dead_code)]
 pub struct SetClipEqCommand {

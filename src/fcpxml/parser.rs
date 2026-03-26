@@ -1016,6 +1016,9 @@ fn parse_asset_clip(
                 clip.eq_high_gain_keyframes =
                     serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
             }
+            if let Some(v) = attrs.get("us:measured-loudness-lufs") {
+                clip.measured_loudness_lufs = v.parse().ok();
+            }
             if let Some(v) = attrs.get("us:rotate-keyframes") {
                 clip.rotate_keyframes =
                     serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
@@ -2511,6 +2514,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
             | "us:eq-high-gain-keyframes"
+            | "us:measured-loudness-lufs"
     )
 }
 

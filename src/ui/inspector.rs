@@ -84,6 +84,8 @@ pub struct InspectorView {
     // Audio sliders
     pub volume_slider: Scale,
     pub pan_slider: Scale,
+    pub normalize_btn: Button,
+    pub measured_loudness_label: Label,
     // EQ sliders (3 bands × 3 params)
     pub eq_freq_sliders: Vec<Scale>,
     pub eq_gain_sliders: Vec<Scale>,
@@ -1088,6 +1090,13 @@ impl InspectorView {
                         Phase1KeyframeProperty::Pan,
                         playhead_ns,
                     ));
+                // Measured loudness
+                if let Some(lufs) = c.measured_loudness_lufs {
+                    self.measured_loudness_label
+                        .set_text(&format!("{lufs:.1} LUFS"));
+                } else {
+                    self.measured_loudness_label.set_text("");
+                }
                 // EQ sliders
                 for (i, band) in c.eq_bands.iter().enumerate() {
                     if i < self.eq_freq_sliders.len() {
@@ -1288,6 +1297,7 @@ impl InspectorView {
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
                 self.pan_slider.set_value(0.0);
+                self.measured_loudness_label.set_text("");
                 let eq_defaults = crate::model::clip::default_eq_bands();
                 for (i, band) in eq_defaults.iter().enumerate() {
                     if i < self.eq_freq_sliders.len() {
@@ -1526,8 +1536,10 @@ pub fn build_inspector(
     on_speed_keyframe_changed: impl Fn(&str, f64, &[NumericKeyframe]) + 'static,
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
+    on_normalize_audio: impl Fn(&str) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
+    let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
     let on_frei0r_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_changed);
     let on_frei0r_params_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_params_changed);
@@ -2023,6 +2035,19 @@ pub fn build_inspector(
     volume_keyframe_row.append(&volume_set_keyframe_btn);
     volume_keyframe_row.append(&volume_remove_keyframe_btn);
     audio_inner.append(&volume_keyframe_row);
+
+    let normalize_row = GBox::new(Orientation::Horizontal, 6);
+    let normalize_btn = Button::with_label("Normalize\u{2026}");
+    normalize_btn.set_tooltip_text(Some(
+        "Analyze clip loudness and adjust volume to a target level",
+    ));
+    let measured_loudness_label = Label::new(None);
+    measured_loudness_label.add_css_class("dim-label");
+    measured_loudness_label.set_halign(gtk4::Align::Start);
+    measured_loudness_label.set_hexpand(true);
+    normalize_row.append(&normalize_btn);
+    normalize_row.append(&measured_loudness_label);
+    audio_inner.append(&normalize_row);
 
     // ── Audio keyframe navigation + animation mode ──
     let audio_keyframe_nav_row = GBox::new(Orientation::Horizontal, 4);
@@ -3009,6 +3034,18 @@ pub fn build_inspector(
                     db_to_linear_volume(volume_slider_cb.value()) as f32,
                     pan_slider_cb.value() as f32,
                 );
+            }
+        });
+    }
+
+    // Wire Normalize button
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let on_normalize_audio = on_normalize_audio.clone();
+        normalize_btn.connect_clicked(move |_| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                on_normalize_audio(clip_id);
             }
         });
     }
@@ -5559,6 +5596,8 @@ pub fn build_inspector(
         shadows_tint_slider,
         volume_slider,
         pan_slider,
+        normalize_btn,
+        measured_loudness_label,
         eq_freq_sliders,
         eq_gain_sliders,
         eq_q_sliders,

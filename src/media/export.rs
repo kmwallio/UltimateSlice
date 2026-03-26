@@ -2489,6 +2489,136 @@ pub(crate) fn detect_silence(
     Ok(intervals)
 }
 
+/// Measure integrated loudness (LUFS) of a clip's audio via FFmpeg `ebur128` filter.
+/// Returns the integrated loudness value in LUFS (e.g. -18.3).
+pub(crate) fn analyze_loudness_lufs(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f64> {
+    let ffmpeg = find_ffmpeg()?;
+    if !probe_has_audio(&ffmpeg, source_path) {
+        return Err(anyhow!("Clip has no audio stream"));
+    }
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Err(anyhow!("Clip has zero duration"));
+    }
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-af",
+            "ebur128",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg ebur128: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Parse the summary block — look for "I:" line after "Summary:" in ebur128 output.
+    let mut in_summary = false;
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Summary:") {
+            in_summary = true;
+            continue;
+        }
+        if in_summary {
+            // e.g. "  I:         -18.3 LUFS"
+            if trimmed.starts_with("I:") {
+                let rest = trimmed["I:".len()..].trim();
+                if let Some(val) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    if val.is_finite() {
+                        return Ok(val);
+                    }
+                }
+            }
+        }
+    }
+    Err(anyhow!(
+        "Could not parse integrated loudness from ffmpeg ebur128 output"
+    ))
+}
+
+/// Measure peak amplitude (dB) of a clip's audio via FFmpeg `volumedetect` filter.
+/// Returns the max volume in dBFS (e.g. -3.5, where 0.0 = full scale).
+pub(crate) fn analyze_peak_db(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f64> {
+    let ffmpeg = find_ffmpeg()?;
+    if !probe_has_audio(&ffmpeg, source_path) {
+        return Err(anyhow!("Clip has no audio stream"));
+    }
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Err(anyhow!("Clip has zero duration"));
+    }
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg volumedetect: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Parse "max_volume: -X.X dB" from volumedetect output.
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("max_volume:") {
+            let rest = &line[pos + "max_volume:".len()..];
+            if let Some(val) = rest
+                .trim()
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                return Ok(val);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Could not parse max_volume from ffmpeg volumedetect output"
+    ))
+}
+
+/// Compute the linear gain multiplier needed to shift measured LUFS to a target LUFS.
+pub(crate) fn compute_lufs_gain(measured_lufs: f64, target_lufs: f64) -> f64 {
+    10.0_f64.powf((target_lufs - measured_lufs) / 20.0)
+}
+
+/// Compute the linear gain multiplier needed to shift measured peak dB to a target dB.
+pub(crate) fn compute_peak_gain(measured_peak_db: f64, target_peak_db: f64) -> f64 {
+    10.0_f64.powf((target_peak_db - measured_peak_db) / 20.0)
+}
+
 /// Find the ffmpeg binary, checking PATH and common install locations.
 pub(crate) fn find_ffmpeg() -> Result<String> {
     // First try the name directly (respects the process PATH)
