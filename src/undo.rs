@@ -594,6 +594,37 @@ impl EditCommand for SetClipColorCommand {
     }
 }
 
+/// Set 3-band parametric EQ on a clip.
+#[allow(dead_code)]
+pub struct SetClipEqCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_eq_bands: [crate::model::clip::EqBand; 3],
+    pub new_eq_bands: [crate::model::clip::EqBand; 3],
+}
+
+impl EditCommand for SetClipEqCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.eq_bands = self.new_eq_bands;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.eq_bands = self.old_eq_bands;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip EQ"
+    }
+}
+
 /// Match one clip's color to another — stores all color parameters before/after.
 pub struct MatchColorCommand {
     pub clip_id: String,

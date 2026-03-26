@@ -274,6 +274,9 @@ pub enum Phase1KeyframeProperty {
     CropTop,
     CropBottom,
     Blur,
+    EqLowGain,
+    EqMidGain,
+    EqHighGain,
 }
 
 impl Phase1KeyframeProperty {
@@ -297,6 +300,9 @@ impl Phase1KeyframeProperty {
             Self::CropTop => "crop_top",
             Self::CropBottom => "crop_bottom",
             Self::Blur => "blur",
+            Self::EqLowGain => "eq_low_gain",
+            Self::EqMidGain => "eq_mid_gain",
+            Self::EqHighGain => "eq_high_gain",
         }
     }
 
@@ -320,6 +326,9 @@ impl Phase1KeyframeProperty {
             "crop_top" | "crop-top" => Some(Self::CropTop),
             "crop_bottom" | "crop-bottom" => Some(Self::CropBottom),
             "blur" => Some(Self::Blur),
+            "eq_low_gain" | "eq-low-gain" => Some(Self::EqLowGain),
+            "eq_mid_gain" | "eq-mid-gain" => Some(Self::EqMidGain),
+            "eq_high_gain" | "eq-high-gain" => Some(Self::EqHighGain),
             _ => None,
         }
     }
@@ -387,6 +396,36 @@ fn default_bg_removal_threshold() -> f64 {
 }
 fn default_temperature() -> f32 {
     6500.0
+}
+
+/// A single band of a 3-band parametric equalizer.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EqBand {
+    /// Center frequency in Hz (20–20000).
+    pub freq: f64,
+    /// Gain in dB (−24.0 to +24.0). Default 0.0 (flat).
+    pub gain: f64,
+    /// Quality factor / bandwidth (0.1–10.0). Default 1.0.
+    pub q: f64,
+}
+
+impl Default for EqBand {
+    fn default() -> Self {
+        Self {
+            freq: 1000.0,
+            gain: 0.0,
+            q: 1.0,
+        }
+    }
+}
+
+/// Default EQ band settings: Low 200 Hz, Mid 1 kHz, High 5 kHz — all flat.
+pub fn default_eq_bands() -> [EqBand; 3] {
+    [
+        EqBand { freq: 200.0, gain: 0.0, q: 1.0 },
+        EqBand { freq: 1000.0, gain: 0.0, q: 1.0 },
+        EqBand { freq: 5000.0, gain: 0.0, q: 1.0 },
+    ]
 }
 
 /// An instance of a frei0r filter effect applied to a clip.
@@ -531,6 +570,18 @@ pub struct Clip {
     /// Optional pan keyframes over clip-local timeline.
     #[serde(default)]
     pub pan_keyframes: Vec<NumericKeyframe>,
+    /// 3-band parametric EQ: [Low, Mid, High]. Each band has freq/gain/Q.
+    #[serde(default = "default_eq_bands")]
+    pub eq_bands: [EqBand; 3],
+    /// Optional EQ low-band gain keyframes over clip-local timeline.
+    #[serde(default)]
+    pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
+    /// Optional EQ mid-band gain keyframes over clip-local timeline.
+    #[serde(default)]
+    pub eq_mid_gain_keyframes: Vec<NumericKeyframe>,
+    /// Optional EQ high-band gain keyframes over clip-local timeline.
+    #[serde(default)]
+    pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
     /// Optional rotation keyframes over clip-local timeline.
     #[serde(default)]
     pub rotate_keyframes: Vec<NumericKeyframe>,
@@ -772,6 +823,14 @@ pub struct Clip {
 impl Clip {
     /// Compute composite cache key for all assigned LUTs.
     /// Returns `None` if no LUTs are assigned.
+    /// Returns `true` when any EQ band has non-zero gain or gain keyframes.
+    pub fn has_eq(&self) -> bool {
+        self.eq_bands.iter().any(|b| b.gain.abs() > 0.001)
+            || !self.eq_low_gain_keyframes.is_empty()
+            || !self.eq_mid_gain_keyframes.is_empty()
+            || !self.eq_high_gain_keyframes.is_empty()
+    }
+
     pub fn lut_key(&self) -> Option<String> {
         if self.lut_paths.is_empty() {
             None
@@ -868,6 +927,9 @@ impl Clip {
         Self::retain_and_rebase_keyframes(&mut self.tint_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.volume_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.pan_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.eq_low_gain_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.eq_mid_gain_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.eq_high_gain_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.rotate_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_left_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_right_keyframes, start_ns, end_ns);
@@ -922,6 +984,10 @@ impl Clip {
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
+            eq_bands: default_eq_bands(),
+            eq_low_gain_keyframes: Vec::new(),
+            eq_mid_gain_keyframes: Vec::new(),
+            eq_high_gain_keyframes: Vec::new(),
             rotate_keyframes: Vec::new(),
             crop_left_keyframes: Vec::new(),
             crop_right_keyframes: Vec::new(),
@@ -1124,6 +1190,9 @@ impl Clip {
             Phase1KeyframeProperty::Tint => &self.tint_keyframes,
             Phase1KeyframeProperty::Volume => &self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &self.pan_keyframes,
+            Phase1KeyframeProperty::EqLowGain => &self.eq_low_gain_keyframes,
+            Phase1KeyframeProperty::EqMidGain => &self.eq_mid_gain_keyframes,
+            Phase1KeyframeProperty::EqHighGain => &self.eq_high_gain_keyframes,
             Phase1KeyframeProperty::Speed => &self.speed_keyframes,
             Phase1KeyframeProperty::Rotate => &self.rotate_keyframes,
             Phase1KeyframeProperty::CropLeft => &self.crop_left_keyframes,
@@ -1150,6 +1219,9 @@ impl Clip {
             Phase1KeyframeProperty::Tint => &mut self.tint_keyframes,
             Phase1KeyframeProperty::Volume => &mut self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &mut self.pan_keyframes,
+            Phase1KeyframeProperty::EqLowGain => &mut self.eq_low_gain_keyframes,
+            Phase1KeyframeProperty::EqMidGain => &mut self.eq_mid_gain_keyframes,
+            Phase1KeyframeProperty::EqHighGain => &mut self.eq_high_gain_keyframes,
             Phase1KeyframeProperty::Speed => &mut self.speed_keyframes,
             Phase1KeyframeProperty::Rotate => &mut self.rotate_keyframes,
             Phase1KeyframeProperty::CropLeft => &mut self.crop_left_keyframes,
@@ -1173,6 +1245,9 @@ impl Clip {
             Phase1KeyframeProperty::Tint => self.tint as f64,
             Phase1KeyframeProperty::Volume => self.volume as f64,
             Phase1KeyframeProperty::Pan => self.pan as f64,
+            Phase1KeyframeProperty::EqLowGain => self.eq_bands[0].gain,
+            Phase1KeyframeProperty::EqMidGain => self.eq_bands[1].gain,
+            Phase1KeyframeProperty::EqHighGain => self.eq_bands[2].gain,
             Phase1KeyframeProperty::Speed => self.speed,
             Phase1KeyframeProperty::Rotate => self.rotate as f64,
             Phase1KeyframeProperty::CropLeft => self.crop_left as f64,
@@ -1204,6 +1279,9 @@ impl Clip {
             | Phase1KeyframeProperty::CropTop
             | Phase1KeyframeProperty::CropBottom => value.clamp(0.0, 500.0),
             Phase1KeyframeProperty::Blur => value.clamp(0.0, 1.0),
+            Phase1KeyframeProperty::EqLowGain
+            | Phase1KeyframeProperty::EqMidGain
+            | Phase1KeyframeProperty::EqHighGain => value.clamp(-24.0, 12.0),
         }
     }
 
@@ -1339,6 +1417,12 @@ impl Clip {
             Self::remove_keyframes_at_local_time(&mut self.position_y_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.volume_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.pan_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.eq_low_gain_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.eq_mid_gain_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.eq_high_gain_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.speed_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.rotate_keyframes, local_time_ns);
         removed +=
@@ -1414,6 +1498,21 @@ impl Clip {
             interpolation,
         );
         updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.eq_low_gain_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.eq_mid_gain_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.eq_high_gain_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
             &mut self.speed_keyframes,
             local_time_ns,
             interpolation,
@@ -1459,6 +1558,9 @@ impl Clip {
         changed += Self::move_keyframes_by_time_map(&mut self.position_y_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.volume_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.pan_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.eq_low_gain_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.eq_mid_gain_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.eq_high_gain_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.speed_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.rotate_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.crop_left_keyframes, move_map);
@@ -1483,6 +1585,9 @@ impl Clip {
             .chain(&self.position_y_keyframes)
             .chain(&self.volume_keyframes)
             .chain(&self.pan_keyframes)
+            .chain(&self.eq_low_gain_keyframes)
+            .chain(&self.eq_mid_gain_keyframes)
+            .chain(&self.eq_high_gain_keyframes)
             .chain(&self.speed_keyframes)
             .chain(&self.rotate_keyframes)
             .chain(&self.crop_left_keyframes)

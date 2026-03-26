@@ -90,6 +90,21 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 - **◆ Aud KF** indicator shows when the playhead is on an audio keyframe.
 - **⏺ Record Keyframes** toggle in the audio section is synced with the transform section toggle — activating either enables animation mode for both sections. When active, volume and pan slider changes auto-create keyframes at the playhead position.
 
+### Equalizer (3-band parametric)
+
+Collapsible section inside Audio with three bands: **Low**, **Mid**, **High**.
+
+| Parameter | Range | Defaults (Low / Mid / High) |
+|---|---|---|
+| **Freq (Hz)** | 20–1000 / 200–8000 / 1000–20000 | 200 / 1000 / 5000 |
+| **Gain (dB)** | −24 → +24 | 0 (flat) |
+| **Q** | 0.1 → 10.0 | 1.0 |
+
+- Preview: GStreamer `equalizer-nbands` element (real-time parameter updates).
+- Export: chained FFmpeg `equalizer` filters with per-band frequency, bandwidth, and gain.
+- Gain per band supports keyframe animation via `eq_low_gain`, `eq_mid_gain`, `eq_high_gain` keyframe properties.
+- MCP tool: `set_clip_eq` with 9 optional parameters.
+
 ---
 
 ## Video Transform

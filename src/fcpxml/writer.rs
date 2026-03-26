@@ -689,6 +689,37 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     if let Some(value) = pan_keyframes_json.as_deref() {
                         asset_clip.push_attribute(("us:pan-keyframes", value));
                     }
+                    // EQ bands — only emit when non-default.
+                    if clip.has_eq()
+                        || clip.eq_bands.iter().any(|b| {
+                            (b.freq - 200.0).abs() > 0.01
+                                || (b.freq - 1000.0).abs() > 0.01
+                                || (b.freq - 5000.0).abs() > 0.01
+                                || b.q != 1.0
+                        })
+                    {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_bands) {
+                            asset_clip.push_attribute(("us:eq-bands", json.as_str()));
+                        }
+                    }
+                    if !clip.eq_low_gain_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_low_gain_keyframes) {
+                            asset_clip
+                                .push_attribute(("us:eq-low-gain-keyframes", json.as_str()));
+                        }
+                    }
+                    if !clip.eq_mid_gain_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_mid_gain_keyframes) {
+                            asset_clip
+                                .push_attribute(("us:eq-mid-gain-keyframes", json.as_str()));
+                        }
+                    }
+                    if !clip.eq_high_gain_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_high_gain_keyframes) {
+                            asset_clip
+                                .push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
+                        }
+                    }
                     let rotate_keyframes_json = if clip.rotate_keyframes.is_empty() {
                         None
                     } else {
@@ -3437,6 +3468,10 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:eq-bands"
+            | "us:eq-low-gain-keyframes"
+            | "us:eq-mid-gain-keyframes"
+            | "us:eq-high-gain-keyframes"
     )
 }
 

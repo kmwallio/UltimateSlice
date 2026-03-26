@@ -645,12 +645,18 @@ pub fn export_project(
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_audio_speed_filter(clip);
             let volume_filter = build_volume_filter(clip);
+            let eq_filter = build_eq_filter(clip);
+            let eq_part = if eq_filter.is_empty() {
+                String::new()
+            } else {
+                format!(",{eq_filter}")
+            };
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{volume_filter}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -672,12 +678,18 @@ pub fn export_project(
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_audio_speed_filter(clip);
             let volume_filter = build_volume_filter(clip);
+            let eq_filter = build_eq_filter(clip);
+            let eq_part = if eq_filter.is_empty() {
+                String::new()
+            } else {
+                format!(",{eq_filter}")
+            };
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -692,12 +704,18 @@ pub fn export_project(
         let areverse = if clip.reverse { "areverse," } else { "" };
         let atempo = build_audio_speed_filter(clip);
         let volume_filter = build_volume_filter(clip);
+        let eq_filter = build_eq_filter(clip);
+        let eq_part = if eq_filter.is_empty() {
+            String::new()
+        } else {
+            format!(",{eq_filter}")
+        };
         let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
         let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
         let pre_pan = format!("{label}_prepan");
         let post_pan = format!("{label}_panned");
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
         append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
@@ -1115,6 +1133,46 @@ fn build_volume_filter(clip: &Clip) -> String {
     );
     // Keyframed volume expressions depend on `t`, so force per-frame evaluation.
     format!("volume='{expr}':eval=frame")
+}
+
+/// Build FFmpeg `equalizer` filter chain for the clip's 3-band parametric EQ.
+/// Returns an empty string when EQ is flat (all gains 0 and no keyframes).
+fn build_eq_filter(clip: &Clip) -> String {
+    if !clip.has_eq() {
+        return String::new();
+    }
+    let band_kfs: [&[NumericKeyframe]; 3] = [
+        &clip.eq_low_gain_keyframes,
+        &clip.eq_mid_gain_keyframes,
+        &clip.eq_high_gain_keyframes,
+    ];
+    let mut parts = Vec::new();
+    for (i, band) in clip.eq_bands.iter().enumerate() {
+        let has_kfs = !band_kfs[i].is_empty();
+        if band.gain.abs() < 0.001 && !has_kfs {
+            continue;
+        }
+        let bw = band.freq / band.q.max(0.1);
+        if has_kfs {
+            let gain_expr = build_keyframed_property_expression(
+                band_kfs[i],
+                band.gain,
+                -24.0,
+                24.0,
+                "t",
+            );
+            parts.push(format!(
+                "equalizer=f={:.1}:t=h:w={:.1}:g='{gain_expr}'",
+                band.freq, bw
+            ));
+        } else {
+            parts.push(format!(
+                "equalizer=f={:.1}:t=h:w={:.1}:g={:.2}",
+                band.freq, bw, band.gain
+            ));
+        }
+    }
+    parts.join(",")
 }
 
 fn build_pan_expression(clip: &Clip) -> String {

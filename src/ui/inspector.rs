@@ -84,6 +84,10 @@ pub struct InspectorView {
     // Audio sliders
     pub volume_slider: Scale,
     pub pan_slider: Scale,
+    // EQ sliders (3 bands × 3 params)
+    pub eq_freq_sliders: Vec<Scale>,
+    pub eq_gain_sliders: Vec<Scale>,
+    pub eq_q_sliders: Vec<Scale>,
     // Transform sliders/controls
     pub crop_left_slider: Scale,
     pub crop_right_slider: Scale,
@@ -1075,6 +1079,14 @@ impl InspectorView {
                         Phase1KeyframeProperty::Pan,
                         playhead_ns,
                     ));
+                // EQ sliders
+                for (i, band) in c.eq_bands.iter().enumerate() {
+                    if i < self.eq_freq_sliders.len() {
+                        self.eq_freq_sliders[i].set_value(band.freq);
+                        self.eq_gain_sliders[i].set_value(band.gain);
+                        self.eq_q_sliders[i].set_value(band.q);
+                    }
+                }
                 self.crop_left_slider
                     .set_value(c.value_for_phase1_property_at_timeline_ns(
                         Phase1KeyframeProperty::CropLeft,
@@ -1267,6 +1279,14 @@ impl InspectorView {
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
                 self.pan_slider.set_value(0.0);
+                let eq_defaults = crate::model::clip::default_eq_bands();
+                for (i, band) in eq_defaults.iter().enumerate() {
+                    if i < self.eq_freq_sliders.len() {
+                        self.eq_freq_sliders[i].set_value(band.freq);
+                        self.eq_gain_sliders[i].set_value(band.gain);
+                        self.eq_q_sliders[i].set_value(band.q);
+                    }
+                }
                 self.crop_left_slider.set_value(0.0);
                 self.crop_right_slider.set_value(0.0);
                 self.crop_top_slider.set_value(0.0);
@@ -1478,6 +1498,7 @@ pub fn build_inspector(
     on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)
         + 'static,
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
+    on_eq_changed: impl Fn(&str, [crate::model::clip::EqBand; 3]) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_title_changed: impl Fn(String, f64, f64) + 'static,
     on_title_style_changed: impl Fn() + 'static,
@@ -2028,6 +2049,61 @@ pub fn build_inspector(
     pan_keyframe_row.append(&pan_remove_keyframe_btn);
     audio_inner.append(&pan_keyframe_row);
 
+    // ── Equalizer sub-section (inside Audio) ───────────────────────────────
+    let eq_expander = Expander::new(Some("Equalizer"));
+    eq_expander.set_expanded(false);
+    audio_inner.append(&eq_expander);
+    let eq_inner = GBox::new(Orientation::Vertical, 4);
+    eq_expander.set_child(Some(&eq_inner));
+
+    let eq_band_labels = ["Low Band", "Mid Band", "High Band"];
+    let eq_freq_ranges: [(f64, f64, f64); 3] = [
+        (20.0, 1000.0, 200.0),
+        (200.0, 8000.0, 1000.0),
+        (1000.0, 20000.0, 5000.0),
+    ];
+    let mut eq_freq_sliders: Vec<Scale> = Vec::new();
+    let mut eq_gain_sliders: Vec<Scale> = Vec::new();
+    let mut eq_q_sliders: Vec<Scale> = Vec::new();
+    for i in 0..3 {
+        let band_label = Label::new(Some(eq_band_labels[i]));
+        band_label.set_halign(gtk4::Align::Start);
+        band_label.add_css_class("dim-label");
+        eq_inner.append(&band_label);
+
+        row_label(&eq_inner, "Freq (Hz)");
+        let freq_slider = Scale::with_range(
+            Orientation::Horizontal,
+            eq_freq_ranges[i].0,
+            eq_freq_ranges[i].1,
+            1.0,
+        );
+        freq_slider.set_value(eq_freq_ranges[i].2);
+        freq_slider.set_draw_value(true);
+        freq_slider.set_digits(0);
+        freq_slider.add_mark(eq_freq_ranges[i].2, gtk4::PositionType::Bottom, None);
+        eq_inner.append(&freq_slider);
+        eq_freq_sliders.push(freq_slider);
+
+        row_label(&eq_inner, "Gain (dB)");
+        let gain_slider = Scale::with_range(Orientation::Horizontal, -24.0, 12.0, 0.1);
+        gain_slider.set_value(0.0);
+        gain_slider.set_draw_value(true);
+        gain_slider.set_digits(1);
+        gain_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+        eq_inner.append(&gain_slider);
+        eq_gain_sliders.push(gain_slider);
+
+        row_label(&eq_inner, "Q");
+        let q_slider = Scale::with_range(Orientation::Horizontal, 0.1, 10.0, 0.1);
+        q_slider.set_value(1.0);
+        q_slider.set_draw_value(true);
+        q_slider.set_digits(1);
+        q_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
+        eq_inner.append(&q_slider);
+        eq_q_sliders.push(q_slider);
+    }
+
     // ── Transform section (Video + Image only) ───────────────────────────────
     let transform_section = GBox::new(Orientation::Vertical, 8);
     content_box.append(&transform_section);
@@ -2496,6 +2572,8 @@ pub fn build_inspector(
         ),
     > = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
+    let on_eq_changed: Rc<dyn Fn(&str, [crate::model::clip::EqBand; 3])> =
+        Rc::new(on_eq_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
@@ -2891,6 +2969,79 @@ pub fn build_inspector(
                 );
             }
         });
+    }
+
+    // Wire EQ sliders — one handler per slider, reads all 9 values and fires on_eq_changed.
+    for bi in 0..3usize {
+        // Wire freq slider
+        {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let updating = updating.clone();
+            let on_eq_changed = on_eq_changed.clone();
+            let fs: Vec<Scale> = eq_freq_sliders.iter().cloned().collect();
+            let gs: Vec<Scale> = eq_gain_sliders.iter().cloned().collect();
+            let qs: Vec<Scale> = eq_q_sliders.iter().cloned().collect();
+            eq_freq_sliders[bi].connect_value_changed(move |_| {
+                if *updating.borrow() { return; }
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    let bands = [
+                        crate::model::clip::EqBand { freq: fs[0].value(), gain: gs[0].value(), q: qs[0].value() },
+                        crate::model::clip::EqBand { freq: fs[1].value(), gain: gs[1].value(), q: qs[1].value() },
+                        crate::model::clip::EqBand { freq: fs[2].value(), gain: gs[2].value(), q: qs[2].value() },
+                    ];
+                    { let mut proj = project.borrow_mut(); for track in &mut proj.tracks { if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) { clip.eq_bands = bands; proj.dirty = true; break; } } }
+                    on_eq_changed(clip_id, bands);
+                }
+            });
+        }
+        // Wire gain slider
+        {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let updating = updating.clone();
+            let on_eq_changed = on_eq_changed.clone();
+            let fs: Vec<Scale> = eq_freq_sliders.iter().cloned().collect();
+            let gs: Vec<Scale> = eq_gain_sliders.iter().cloned().collect();
+            let qs: Vec<Scale> = eq_q_sliders.iter().cloned().collect();
+            eq_gain_sliders[bi].connect_value_changed(move |_| {
+                if *updating.borrow() { return; }
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    let bands = [
+                        crate::model::clip::EqBand { freq: fs[0].value(), gain: gs[0].value(), q: qs[0].value() },
+                        crate::model::clip::EqBand { freq: fs[1].value(), gain: gs[1].value(), q: qs[1].value() },
+                        crate::model::clip::EqBand { freq: fs[2].value(), gain: gs[2].value(), q: qs[2].value() },
+                    ];
+                    { let mut proj = project.borrow_mut(); for track in &mut proj.tracks { if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) { clip.eq_bands = bands; proj.dirty = true; break; } } }
+                    on_eq_changed(clip_id, bands);
+                }
+            });
+        }
+        // Wire Q slider
+        {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let updating = updating.clone();
+            let on_eq_changed = on_eq_changed.clone();
+            let fs: Vec<Scale> = eq_freq_sliders.iter().cloned().collect();
+            let gs: Vec<Scale> = eq_gain_sliders.iter().cloned().collect();
+            let qs: Vec<Scale> = eq_q_sliders.iter().cloned().collect();
+            eq_q_sliders[bi].connect_value_changed(move |_| {
+                if *updating.borrow() { return; }
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    let bands = [
+                        crate::model::clip::EqBand { freq: fs[0].value(), gain: gs[0].value(), q: qs[0].value() },
+                        crate::model::clip::EqBand { freq: fs[1].value(), gain: gs[1].value(), q: qs[1].value() },
+                        crate::model::clip::EqBand { freq: fs[2].value(), gain: gs[2].value(), q: qs[2].value() },
+                    ];
+                    { let mut proj = project.borrow_mut(); for track in &mut proj.tracks { if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) { clip.eq_bands = bands; proj.dirty = true; break; } } }
+                    on_eq_changed(clip_id, bands);
+                }
+            });
+        }
     }
 
     // Wire transform sliders and buttons
@@ -5366,6 +5517,9 @@ pub fn build_inspector(
         shadows_tint_slider,
         volume_slider,
         pan_slider,
+        eq_freq_sliders,
+        eq_gain_sliders,
+        eq_q_sliders,
         crop_left_slider,
         crop_right_slider,
         crop_top_slider,

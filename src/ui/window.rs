@@ -2724,6 +2724,58 @@ pub fn build_window(
                 }
             }
         },
+        // on_eq_changed: EQ slider → direct update, no pipeline reload
+        {
+            let prog_player = prog_player.clone();
+            let window_weak = window_weak.clone();
+            let project = project.clone();
+            move |clip_id: &str, eq_bands: [crate::model::clip::EqBand; 3]| {
+                {
+                    let mut proj = project.borrow_mut();
+                    proj.dirty = true;
+                }
+                {
+                    let mut pp = prog_player.borrow_mut();
+                    // Sync EQ keyframes from model to player
+                    {
+                        let proj = project.borrow();
+                        for track in &proj.tracks {
+                            if let Some(model_clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                                if let Some(player_clip) =
+                                    pp.clips.iter_mut().find(|c| c.id == clip_id)
+                                {
+                                    player_clip.eq_bands = model_clip.eq_bands;
+                                    player_clip.eq_low_gain_keyframes =
+                                        model_clip.eq_low_gain_keyframes.clone();
+                                    player_clip.eq_mid_gain_keyframes =
+                                        model_clip.eq_mid_gain_keyframes.clone();
+                                    player_clip.eq_high_gain_keyframes =
+                                        model_clip.eq_high_gain_keyframes.clone();
+                                }
+                                if let Some(audio_clip) =
+                                    pp.audio_clips.iter_mut().find(|c| c.id == clip_id)
+                                {
+                                    audio_clip.eq_bands = model_clip.eq_bands;
+                                    audio_clip.eq_low_gain_keyframes =
+                                        model_clip.eq_low_gain_keyframes.clone();
+                                    audio_clip.eq_mid_gain_keyframes =
+                                        model_clip.eq_mid_gain_keyframes.clone();
+                                    audio_clip.eq_high_gain_keyframes =
+                                        model_clip.eq_high_gain_keyframes.clone();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    pp.update_eq_for_clip(clip_id, eq_bands);
+                }
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = format!("UltimateSlice — {} •", proj.title);
+                    win.set_title(Some(&title));
+                }
+            }
+        },
         // on_transform_changed: crop/rotate/flip/scale/position → direct update, no pipeline reload
         {
             let player = player.clone();
@@ -5597,6 +5649,10 @@ pub fn build_window(
                             volume_keyframes: c.volume_keyframes.clone(),
                             pan: c.pan as f64,
                             pan_keyframes: c.pan_keyframes.clone(),
+                            eq_bands: c.eq_bands,
+                            eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
+                            eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),
+                            eq_high_gain_keyframes: c.eq_high_gain_keyframes.clone(),
                             crop_left: c.crop_left,
                             crop_left_keyframes: c.crop_left_keyframes.clone(),
                             crop_right: c.crop_right,
@@ -8703,6 +8759,52 @@ fn handle_mcp_command(
             }
             drop(proj);
             reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipEq {
+            clip_id,
+            low_freq, low_gain, low_q,
+            mid_freq, mid_gain, mid_q,
+            high_freq, high_gain, high_q,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            let mut result_bands = crate::model::clip::default_eq_bands();
+            'eq_outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        if let Some(v) = low_freq { clip.eq_bands[0].freq = v.clamp(20.0, 20000.0); }
+                        if let Some(v) = low_gain { clip.eq_bands[0].gain = v.clamp(-24.0, 12.0); }
+                        if let Some(v) = low_q { clip.eq_bands[0].q = v.clamp(0.1, 10.0); }
+                        if let Some(v) = mid_freq { clip.eq_bands[1].freq = v.clamp(20.0, 20000.0); }
+                        if let Some(v) = mid_gain { clip.eq_bands[1].gain = v.clamp(-24.0, 12.0); }
+                        if let Some(v) = mid_q { clip.eq_bands[1].q = v.clamp(0.1, 10.0); }
+                        if let Some(v) = high_freq { clip.eq_bands[2].freq = v.clamp(20.0, 20000.0); }
+                        if let Some(v) = high_gain { clip.eq_bands[2].gain = v.clamp(-24.0, 12.0); }
+                        if let Some(v) = high_q { clip.eq_bands[2].q = v.clamp(0.1, 10.0); }
+                        result_bands = clip.eq_bands;
+                        proj.dirty = true;
+                        found = true;
+                        break 'eq_outer;
+                    }
+                }
+            }
+            drop(proj);
+            if found {
+                prog_player.borrow_mut().update_eq_for_clip(&clip_id, result_bands);
+            }
+            reply.send(json!({
+                "success": found,
+                "eq_bands": {
+                    "low": { "freq": result_bands[0].freq, "gain": result_bands[0].gain, "q": result_bands[0].q },
+                    "mid": { "freq": result_bands[1].freq, "gain": result_bands[1].gain, "q": result_bands[1].q },
+                    "high": { "freq": result_bands[2].freq, "gain": result_bands[2].gain, "q": result_bands[2].q }
+                }
+            })).ok();
             if found {
                 on_project_changed();
             }

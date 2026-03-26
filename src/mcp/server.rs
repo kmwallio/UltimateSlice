@@ -701,6 +701,26 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_eq",
+            "description": "Set 3-band parametric EQ on a clip. Each band has freq (Hz), gain (dB), and Q (bandwidth). All parameters optional — omitted fields keep their current value.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":   { "type": "string", "description": "Clip id (from list_clips)." },
+                    "low_freq":  { "type": "number", "description": "Low band center frequency (20–20000 Hz, default 200)." },
+                    "low_gain":  { "type": "number", "description": "Low band gain in dB (−24 to +24, default 0)." },
+                    "low_q":     { "type": "number", "description": "Low band Q factor (0.1–10.0, default 1.0)." },
+                    "mid_freq":  { "type": "number", "description": "Mid band center frequency (20–20000 Hz, default 1000)." },
+                    "mid_gain":  { "type": "number", "description": "Mid band gain in dB (−24 to +24, default 0)." },
+                    "mid_q":     { "type": "number", "description": "Mid band Q factor (0.1–10.0, default 1.0)." },
+                    "high_freq": { "type": "number", "description": "High band center frequency (20–20000 Hz, default 5000)." },
+                    "high_gain": { "type": "number", "description": "High band gain in dB (−24 to +24, default 0)." },
+                    "high_q":    { "type": "number", "description": "High band Q factor (0.1–10.0, default 1.0)." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_clip_blend_mode",
             "description": "Set compositing blend mode for a clip by id.",
             "inputSchema": {
@@ -1485,6 +1505,19 @@ fn dispatch_tool_payload(
         "set_clip_opacity" => McpCommand::SetClipOpacity {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             opacity: args["opacity"].as_f64().unwrap_or(1.0),
+            reply: tx,
+        },
+        "set_clip_eq" => McpCommand::SetClipEq {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            low_freq: args.get("low_freq").and_then(|v| v.as_f64()),
+            low_gain: args.get("low_gain").and_then(|v| v.as_f64()),
+            low_q: args.get("low_q").and_then(|v| v.as_f64()),
+            mid_freq: args.get("mid_freq").and_then(|v| v.as_f64()),
+            mid_gain: args.get("mid_gain").and_then(|v| v.as_f64()),
+            mid_q: args.get("mid_q").and_then(|v| v.as_f64()),
+            high_freq: args.get("high_freq").and_then(|v| v.as_f64()),
+            high_gain: args.get("high_gain").and_then(|v| v.as_f64()),
+            high_q: args.get("high_q").and_then(|v| v.as_f64()),
             reply: tx,
         },
         "set_clip_blend_mode" => McpCommand::SetClipBlendMode {

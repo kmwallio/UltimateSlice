@@ -992,6 +992,29 @@ fn parse_asset_clip(
                 clip.pan_keyframes =
                     serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
             }
+            if let Some(v) = attrs.get("us:eq-bands") {
+                let json_str = v.replace("&quot;", "\"");
+                if let Ok(bands) =
+                    serde_json::from_str::<[crate::model::clip::EqBand; 3]>(&json_str)
+                {
+                    clip.eq_bands = bands;
+                }
+            }
+            if let Some(v) = attrs.get("us:eq-low-gain-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.eq_low_gain_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:eq-mid-gain-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.eq_mid_gain_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:eq-high-gain-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.eq_high_gain_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:rotate-keyframes") {
                 clip.rotate_keyframes =
                     serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
@@ -2476,6 +2499,10 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:eq-bands"
+            | "us:eq-low-gain-keyframes"
+            | "us:eq-mid-gain-keyframes"
+            | "us:eq-high-gain-keyframes"
     )
 }
 

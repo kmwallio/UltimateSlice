@@ -14,6 +14,47 @@ use glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
+
+/// Access a child of a GStreamer ChildProxy element by index.
+/// Uses FFI because `gst::Element` doesn't statically implement `IsA<ChildProxy>`,
+/// so `dynamic_cast_ref::<gst::ChildProxy>()` often fails even when the element
+/// does implement the ChildProxy interface at the GObject level.
+fn child_proxy_get_child(element: &gst::Element, index: u32) -> Option<glib::Object> {
+    unsafe {
+        let ptr = gstreamer::ffi::gst_child_proxy_get_child_by_index(
+            element.as_ptr() as *mut gstreamer::ffi::GstChildProxy,
+            index,
+        );
+        if ptr.is_null() {
+            None
+        } else {
+            Some(glib::translate::from_glib_full(ptr))
+        }
+    }
+}
+
+/// Set freq/gain/bandwidth on a single EQ band child element.
+fn eq_set_band(element: &gst::Element, band_idx: u32, freq: f64, gain: f64, q: f64) {
+    if let Some(band) = child_proxy_get_child(element, band_idx) {
+        let gain_clamped = gain.clamp(-24.0, 12.0);
+        band.set_property("freq", freq);
+        band.set_property("gain", gain_clamped);
+        band.set_property("bandwidth", freq / q.max(0.1));
+        log::debug!(
+            "eq_set_band: band={} freq={:.0} gain={:.1} bw={:.0}",
+            band_idx, freq, gain_clamped, freq / q.max(0.1)
+        );
+    } else {
+        log::warn!("eq_set_band: child_proxy returned None for band={}", band_idx);
+    }
+}
+
+/// Set only the gain on a single EQ band child element (for keyframe updates).
+fn eq_set_band_gain(element: &gst::Element, band_idx: u32, gain: f64) {
+    if let Some(band) = child_proxy_get_child(element, band_idx) {
+        band.set_property("gain", gain.clamp(-24.0, 12.0));
+    }
+}
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -288,6 +329,11 @@ pub struct ProgramClip {
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     pub pan: f64,
     pub pan_keyframes: Vec<NumericKeyframe>,
+    /// 3-band parametric EQ settings.
+    pub eq_bands: [crate::model::clip::EqBand; 3],
+    pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
+    pub eq_mid_gain_keyframes: Vec<NumericKeyframe>,
+    pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
     pub rotate_keyframes: Vec<NumericKeyframe>,
     pub crop_left_keyframes: Vec<NumericKeyframe>,
     pub crop_right_keyframes: Vec<NumericKeyframe>,
@@ -517,6 +563,21 @@ impl ProgramClip {
             self.pan,
         )
         .clamp(-1.0, 1.0)
+    }
+
+    /// Evaluate keyframed EQ gain (dB) for band `idx` at a given timeline position.
+    pub fn eq_gain_at_timeline_ns(&self, band_idx: usize, timeline_pos_ns: u64) -> f64 {
+        let kfs = match band_idx {
+            0 => &self.eq_low_gain_keyframes,
+            1 => &self.eq_mid_gain_keyframes,
+            _ => &self.eq_high_gain_keyframes,
+        };
+        ModelClip::evaluate_keyframed_value(
+            kfs,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.eq_bands[band_idx.min(2)].gain,
+        )
+        .clamp(-24.0, 24.0)
     }
 
     pub fn rotate_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
@@ -788,6 +849,8 @@ struct VideoSlot {
     audio_mixer_pad: Option<gst::Pad>,
     /// `audioconvert` element between decoder audio and audiomixer (must be cleaned up).
     audio_conv: Option<gst::Element>,
+    /// Optional per-slot `equalizer-nbands` element for 3-band parametric EQ.
+    audio_equalizer: Option<gst::Element>,
     /// Optional per-slot `audiopanorama` element for pan automation.
     audio_panorama: Option<gst::Element>,
     /// Optional per-slot `level` element for per-track metering.
@@ -1053,6 +1116,8 @@ pub struct ProgramPlayer {
     /// with PulseAudio/PipeWire flat-volume behaviour and inadvertently change
     /// the main pipeline's audio level.
     audio_volume_element: Option<gst::Element>,
+    /// GStreamer `equalizer-nbands` element on the audio-only pipeline for EQ.
+    audio_eq_element: Option<gst::Element>,
     /// GStreamer `audiopanorama` element on the audio-only pipeline for panning.
     audio_panorama_element: Option<gst::Element>,
     pub audio_peak_db: [f64; 2],
@@ -1682,9 +1747,23 @@ impl ProgramPlayer {
         if let Some(ref pan) = audio_panorama_element {
             pan.set_property("panorama", 0.0_f32);
         }
+        let audio_eq_element = gst::ElementFactory::make("equalizer-nbands")
+            .property("num-bands", 3u32)
+            .build()
+            .ok();
+        if let Some(ref eq) = audio_eq_element {
+            // Set default band frequencies.
+            let defaults = crate::model::clip::default_eq_bands();
+            for (i, b) in defaults.iter().enumerate() {
+                eq_set_band(eq, i as u32, b.freq, b.gain, b.q);
+            }
+        }
         let mut audio_filters: Vec<gst::Element> = Vec::new();
         if let Some(ref vol) = audio_volume_element {
             audio_filters.push(vol.clone());
+        }
+        if let Some(ref eq) = audio_eq_element {
+            audio_filters.push(eq.clone());
         }
         if let Some(ref pan) = audio_panorama_element {
             audio_filters.push(pan.clone());
@@ -1768,6 +1847,7 @@ impl ProgramPlayer {
                 level_element,
                 level_element_audio,
                 audio_volume_element,
+                audio_eq_element,
                 audio_panorama_element,
                 audio_peak_db: [-60.0, -60.0],
                 audio_track_peak_db: Vec::new(),
@@ -3160,6 +3240,32 @@ impl ProgramPlayer {
         }
     }
 
+    fn set_audio_pipeline_eq(&self, eq_bands: &[crate::model::clip::EqBand; 3]) {
+        if let Some(ref eq_elem) = self.audio_eq_element {
+            for (i, b) in eq_bands.iter().enumerate() {
+                eq_set_band(eq_elem, i as u32, b.freq, b.gain, b.q);
+            }
+        }
+    }
+
+    /// Sync EQ band gains (with keyframe evaluation) for the current audio-only clip.
+    fn sync_audio_pipeline_eq(&self, timeline_pos_ns: u64) {
+        if let Some(ref eq_elem) = self.audio_eq_element {
+            if let Some(source) = self.audio_current_source {
+                let clip = match source {
+                    AudioCurrentSource::AudioClip(idx) => self.audio_clips.get(idx),
+                    AudioCurrentSource::ReverseVideoClip(idx) => self.clips.get(idx),
+                };
+                if let Some(clip) = clip {
+                    for i in 0..3u32 {
+                        let b = &clip.eq_bands[i as usize];
+                        eq_set_band(eq_elem, i, b.freq, b.gain, b.q);
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_main_audio_slot_volumes(&self, timeline_pos_ns: u64) {
         for slot in &self.slots {
             if slot.is_prerender_slot {
@@ -3181,6 +3287,17 @@ impl ProgramPlayer {
                 };
                 pan_elem.set_property("panorama", pan as f32);
             }
+            // Sync EQ band gains (including keyframe evaluation).
+            if let Some(ref eq_elem) = slot.audio_equalizer {
+                if !slot.hidden {
+                    if let Some(clip) = self.clips.get(slot.clip_idx) {
+                        for i in 0..3u32 {
+                            let gain = clip.eq_gain_at_timeline_ns(i as usize, timeline_pos_ns);
+                            eq_set_band_gain(eq_elem, i, gain);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3192,6 +3309,7 @@ impl ProgramPlayer {
             let pan = self.effective_audio_source_pan(source, timeline_pos_ns);
             self.set_audio_pipeline_pan(pan);
         }
+        self.sync_audio_pipeline_eq(timeline_pos_ns);
     }
 
     pub fn poll(&mut self) -> bool {
@@ -3816,6 +3934,55 @@ impl ProgramPlayer {
                 );
                 self.set_audio_pipeline_pan(effective_pan);
             }
+        }
+    }
+
+    /// Update EQ band parameters for a specific clip (called from Inspector/MCP).
+    pub fn update_eq_for_clip(
+        &mut self,
+        clip_id: &str,
+        eq_bands: [crate::model::clip::EqBand; 3],
+    ) {
+        // Update stored data on ProgramClip.
+        if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
+            self.clips[i].eq_bands = eq_bands;
+            // Sync live GStreamer element.
+            let slot_found = self.slots.iter().any(|s| s.clip_idx == i && !s.is_prerender_slot);
+            if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == i && !s.is_prerender_slot)
+            {
+                if let Some(ref eq_elem) = slot.audio_equalizer {
+                    for bi in 0..3u32 {
+                        let b = &eq_bands[bi as usize];
+                        eq_set_band(eq_elem, bi, b.freq, b.gain, b.q);
+                    }
+                    log::info!(
+                        "update_eq_for_clip: set EQ on clip={} gains=[{:.1}, {:.1}, {:.1}]",
+                        clip_id, eq_bands[0].gain, eq_bands[1].gain, eq_bands[2].gain,
+                    );
+                } else {
+                    log::warn!(
+                        "update_eq_for_clip: slot found for clip={} but audio_equalizer is None",
+                        clip_id,
+                    );
+                }
+            } else {
+                log::warn!(
+                    "update_eq_for_clip: no slot found for clip={} (clip_idx={}, slots={}, slot_found={})",
+                    clip_id, i, self.slots.len(), slot_found,
+                );
+            }
+            return;
+        }
+        // Audio-only clips use the separate audio pipeline.
+        if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
+            self.audio_clips[i].eq_bands = eq_bands;
+            // If this audio clip is the currently playing source, update the pipeline EQ live.
+            if self.audio_current_source == Some(AudioCurrentSource::AudioClip(i)) {
+                self.set_audio_pipeline_eq(&eq_bands);
+            }
+            log::info!("update_eq_for_clip: stored EQ for audio-only clip={}", clip_id);
+        } else {
+            log::warn!("update_eq_for_clip: clip={} not found in clips or audio_clips", clip_id);
         }
     }
 
@@ -7360,6 +7527,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             self.pipeline.remove(ac).ok();
         }
+        if let Some(ref eq_elem) = slot.audio_equalizer {
+            self.pipeline.remove(eq_elem).ok();
+        }
         if let Some(ref ap) = slot.audio_panorama {
             self.pipeline.remove(ap).ok();
         }
@@ -7378,6 +7548,10 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             let _ = ac.set_state(gst::State::Null);
             let _ = ac.state(gst::ClockTime::from_mseconds(100));
+        }
+        if let Some(ref eq_elem) = slot.audio_equalizer {
+            let _ = eq_elem.set_state(gst::State::Null);
+            let _ = eq_elem.state(gst::ClockTime::from_mseconds(100));
         }
         if let Some(ref ap) = slot.audio_panorama {
             let _ = ap.set_state(gst::State::Null);
@@ -8214,9 +8388,13 @@ impl ProgramPlayer {
             return None;
         }
 
-        // Audio path: audioconvert → [audiopanorama] → [level] → audiomixer pad.
-        let (audio_conv, audio_panorama, audio_level, amix_pad) = {
+        // Audio path: audioconvert → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
+        let (audio_conv, audio_equalizer, audio_panorama, audio_level, amix_pad) = {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let mut eq = gst::ElementFactory::make("equalizer-nbands")
+                .property("num-bands", 3u32)
+                .build()
+                .ok();
             let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
             let mut lv = gst::ElementFactory::make("level")
                 .property("post-messages", true)
@@ -8226,16 +8404,42 @@ impl ProgramPlayer {
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
                     let mut link_src = ac.static_pad("src");
+                    // Insert equalizer between audioconvert and audiopanorama.
+                    if let Some(ref equalizer) = eq {
+                        if self.pipeline.add(equalizer).is_ok() {
+                            // Set initial EQ band params from clip.
+                            for i in 0..3u32 {
+                                let b = &clip.eq_bands[i as usize];
+                                eq_set_band(equalizer, i, b.freq, b.gain, b.q);
+                            }
+                            if let (Some(ac_src), Some(eq_sink)) =
+                                (link_src.clone(), equalizer.static_pad("sink"))
+                            {
+                                let _ = ac_src.link(&eq_sink);
+                                link_src = equalizer.static_pad("src");
+                                log::info!("build_audio_only_slot: equalizer-nbands linked OK");
+                            } else {
+                                log::warn!("build_audio_only_slot: equalizer pad link failed, removing");
+                                self.pipeline.remove(equalizer).ok();
+                                eq = None;
+                            }
+                        } else {
+                            log::warn!("build_audio_only_slot: failed to add equalizer to pipeline");
+                            eq = None;
+                        }
+                    } else {
+                        log::warn!("build_audio_only_slot: equalizer-nbands element not available");
+                    }
                     if let Some(ref pano) = ap {
                         if self.pipeline.add(pano).is_ok() {
                             pano.set_property(
                                 "panorama",
                                 self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns) as f32,
                             );
-                            if let (Some(ac_src), Some(pano_sink)) =
-                                (ac.static_pad("src"), pano.static_pad("sink"))
+                            if let (Some(prev_src), Some(pano_sink)) =
+                                (link_src.clone(), pano.static_pad("sink"))
                             {
-                                let _ = ac_src.link(&pano_sink);
+                                let _ = prev_src.link(&pano_sink);
                                 link_src = pano.static_pad("src");
                             } else {
                                 self.pipeline.remove(pano).ok();
@@ -8282,11 +8486,12 @@ impl ProgramPlayer {
                     None
                 }
             } else {
+                eq = None;
                 ap = None;
                 lv = None;
                 None
             };
-            (ac, ap, lv, pad)
+            (ac, eq, ap, lv, pad)
         };
 
         // Dynamic pad-added: only link audio pads (no video sink available).
@@ -8318,6 +8523,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref eq_elem) = audio_equalizer {
+            let _ = eq_elem.sync_state_with_parent();
+        }
         if let Some(ref ap) = audio_panorama {
             let _ = ap.sync_state_with_parent();
         }
@@ -8338,6 +8546,7 @@ impl ProgramPlayer {
             compositor_pad: None,
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_equalizer,
             audio_panorama,
             audio_level,
             videobalance: None,
@@ -8607,6 +8816,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad),
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_equalizer: None,
             audio_panorama,
             audio_level,
             videobalance: None,
@@ -9578,6 +9788,7 @@ impl ProgramPlayer {
                 compositor_pad: Some(comp_pad.clone()),
                 audio_mixer_pad: None,
                 audio_conv: None,
+                audio_equalizer: None,
                 audio_panorama: None,
                 audio_level: None,
                 videobalance: videobalance.clone(),
@@ -9637,6 +9848,7 @@ impl ProgramPlayer {
                 compositor_pad: Some(comp_pad),
                 audio_mixer_pad: None,
                 audio_conv: None,
+                audio_equalizer: None,
                 audio_panorama: None,
                 audio_level: None,
                 videobalance,
@@ -9790,9 +10002,13 @@ impl ProgramPlayer {
             });
         }
 
-        // Create audio path: audioconvert → [audiopanorama] → [level] → audiomixer pad.
-        let (audio_conv, audio_panorama, audio_level, amix_pad) = if clip_has_audio {
+        // Create audio path: audioconvert → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
+        let (audio_conv, audio_equalizer, audio_panorama, audio_level, amix_pad) = if clip_has_audio {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let mut eq = gst::ElementFactory::make("equalizer-nbands")
+                .property("num-bands", 3u32)
+                .build()
+                .ok();
             let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
             let mut lv = gst::ElementFactory::make("level")
                 .property("post-messages", true)
@@ -9802,16 +10018,47 @@ impl ProgramPlayer {
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
                     let mut link_src = ac.static_pad("src");
+                    // Insert equalizer between audioconvert and audiopanorama.
+                    if let Some(ref equalizer) = eq {
+                        if self.pipeline.add(equalizer).is_ok() {
+                            for i in 0..3u32 {
+                                let b = &clip.eq_bands[i as usize];
+                                eq_set_band(equalizer, i, b.freq, b.gain, b.q);
+                            }
+                            if let (Some(prev_src), Some(eq_sink)) =
+                                (link_src.clone(), equalizer.static_pad("sink"))
+                            {
+                                let link_result = prev_src.link(&eq_sink);
+                                if link_result.is_ok() {
+                                    link_src = equalizer.static_pad("src");
+                                    log::info!("build_slot_for_clip: equalizer-nbands linked OK for clip_idx={}", clip_idx);
+                                } else {
+                                    log::warn!("build_slot_for_clip: equalizer pad link FAILED: {:?}", link_result);
+                                    self.pipeline.remove(equalizer).ok();
+                                    eq = None;
+                                }
+                            } else {
+                                log::warn!("build_slot_for_clip: equalizer static pads not available");
+                                self.pipeline.remove(equalizer).ok();
+                                eq = None;
+                            }
+                        } else {
+                            log::warn!("build_slot_for_clip: failed to add equalizer to pipeline");
+                            eq = None;
+                        }
+                    } else {
+                        log::warn!("build_slot_for_clip: equalizer-nbands element not available");
+                    }
                     if let Some(ref pano) = ap {
                         if self.pipeline.add(pano).is_ok() {
                             pano.set_property(
                                 "panorama",
                                 self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns) as f32,
                             );
-                            if let (Some(ac_src), Some(pano_sink)) =
-                                (ac.static_pad("src"), pano.static_pad("sink"))
+                            if let (Some(prev_src), Some(pano_sink)) =
+                                (link_src.clone(), pano.static_pad("sink"))
                             {
-                                let _ = ac_src.link(&pano_sink);
+                                let _ = prev_src.link(&pano_sink);
                                 link_src = pano.static_pad("src");
                             } else {
                                 self.pipeline.remove(pano).ok();
@@ -9853,22 +10100,24 @@ impl ProgramPlayer {
                         None
                     }
                 } else {
+                    eq = None;
                     ap = None;
                     lv = None;
                     None
                 }
             } else {
+                eq = None;
                 ap = None;
                 lv = None;
                 None
             };
-            (ac, ap, lv, pad)
+            (ac, eq, ap, lv, pad)
         } else {
             log::info!(
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -9954,6 +10203,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref eq_elem) = audio_equalizer {
+            let _ = eq_elem.sync_state_with_parent();
+        }
         if let Some(ref ap) = audio_panorama {
             let _ = ap.sync_state_with_parent();
         }
@@ -9972,6 +10224,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad.clone()),
             audio_mixer_pad: amix_pad.clone(),
             audio_conv: audio_conv.clone(),
+            audio_equalizer: audio_equalizer.clone(),
             audio_panorama: audio_panorama.clone(),
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
@@ -10040,6 +10293,7 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad),
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_equalizer,
             audio_panorama,
             audio_level,
             videobalance,
@@ -12164,6 +12418,44 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
     use std::sync::Mutex;
+
+    #[test]
+    fn test_equalizer_nbands_child_proxy_ffi() {
+        use gst::prelude::*;
+        gst::init().unwrap();
+        let eq = gst::ElementFactory::make("equalizer-nbands")
+            .property("num-bands", 3u32)
+            .build()
+            .expect("equalizer-nbands element should be available");
+        assert_eq!(eq.property::<u32>("num-bands"), 3);
+        // Verify child_proxy_get_child works
+        for i in 0..3u32 {
+            let band = super::child_proxy_get_child(&eq, i)
+                .unwrap_or_else(|| panic!("child_proxy band {i} should not be null"));
+            band.set_property("freq", 1000.0_f64);
+            band.set_property("gain", 6.0_f64);
+            band.set_property("bandwidth", 500.0_f64);
+            let gain: f64 = band.property("gain");
+            assert!((gain - 6.0).abs() < 0.001, "gain should be 6.0, got {gain}");
+        }
+        // Verify eq_set_band helper
+        let bands = crate::model::clip::default_eq_bands();
+        for (i, b) in bands.iter().enumerate() {
+            super::eq_set_band(&eq, i as u32, b.freq, b.gain, b.q);
+        }
+        // Set a non-zero gain via helper and read it back
+        super::eq_set_band(&eq, 0, 200.0, 10.0, 1.0);
+        let band0 = super::child_proxy_get_child(&eq, 0).unwrap();
+        let g: f64 = band0.property("gain");
+        let f: f64 = band0.property("freq");
+        assert!((g - 10.0).abs() < 0.001, "band0 gain should be 10.0, got {g}");
+        assert!((f - 200.0).abs() < 0.001, "band0 freq should be 200.0, got {f}");
+        // Test eq_set_band_gain
+        super::eq_set_band_gain(&eq, 0, -12.0);
+        let g2: f64 = band0.property("gain");
+        assert!((g2 - (-12.0)).abs() < 0.001, "band0 gain should be -12.0, got {g2}");
+    }
+
     fn make_clip() -> ProgramClip {
         ProgramClip {
             id: "c1".to_string(),
@@ -12191,6 +12483,10 @@ mod tests {
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
+            eq_bands: crate::model::clip::default_eq_bands(),
+            eq_low_gain_keyframes: Vec::new(),
+            eq_mid_gain_keyframes: Vec::new(),
+            eq_high_gain_keyframes: Vec::new(),
             rotate_keyframes: Vec::new(),
             crop_left_keyframes: Vec::new(),
             crop_right_keyframes: Vec::new(),
@@ -12897,6 +13193,7 @@ mod tests {
             compositor_pad: None,
             audio_mixer_pad: None,
             audio_conv: None,
+            audio_equalizer: None,
             audio_panorama: None,
             audio_level: None,
             videobalance: if has_videobalance { identity() } else { None },
