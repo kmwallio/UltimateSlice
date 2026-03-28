@@ -12353,13 +12353,43 @@ impl ProgramPlayer {
             return;
         }
 
-        for &aidx in active {
-            let clip = &self.audio_clips[aidx];
-            let source_path = &clip.source_path;
-            if !std::path::Path::new(source_path).exists() {
-                continue;
-            }
-            let uri = format!("file://{source_path}");
+        // Collect per-clip info before building (to avoid borrow issues).
+        struct AudioBranch {
+            source_path: String,
+            source_in_ns: u64,
+            source_out_ns: u64,
+            timeline_start_ns: u64,
+            volume: f64,
+            track_index: usize,
+        }
+        let branches: Vec<AudioBranch> = active
+            .iter()
+            .filter_map(|&aidx| {
+                let clip = self.audio_clips.get(aidx)?;
+                if !std::path::Path::new(&clip.source_path).exists() {
+                    return None;
+                }
+                // Compute the source seek position for the current timeline position.
+                let vol = if self.master_muted {
+                    0.0
+                } else {
+                    clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
+                };
+                Some(AudioBranch {
+                    source_path: clip.source_path.clone(),
+                    source_in_ns: clip.source_in_ns,
+                    source_out_ns: clip.source_out_ns,
+                    timeline_start_ns: clip.timeline_start_ns,
+                    volume: vol,
+                    track_index: clip.track_index,
+                })
+            })
+            .collect();
+
+        let mut decoders: Vec<(gst::Element, AudioBranch)> = Vec::new();
+
+        for branch in branches {
+            let uri = format!("file://{}", branch.source_path);
             let audio_caps = gst::Caps::builder("audio/x-raw").build();
             let decoder = match gst::ElementFactory::make("uridecodebin")
                 .property("uri", &uri)
@@ -12374,7 +12404,6 @@ impl ProgramPlayer {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            // Level element for per-track metering.
             let lv = gst::ElementFactory::make("level")
                 .property("post-messages", true)
                 .property("interval", 50_000_000u64)
@@ -12387,9 +12416,9 @@ impl ProgramPlayer {
             if pipeline.add_many(elems.iter().copied()).is_err() {
                 continue;
             }
-            // Link audioconvert → level (if present).
             let link_src_pad = if let Some(ref l) = lv {
-                if let (Some(ac_src), Some(lv_sink)) = (ac.static_pad("src"), l.static_pad("sink"))
+                if let (Some(ac_src), Some(lv_sink)) =
+                    (ac.static_pad("src"), l.static_pad("sink"))
                 {
                     let _ = ac_src.link(&lv_sink);
                     l.static_pad("src")
@@ -12400,20 +12429,13 @@ impl ProgramPlayer {
                 ac.static_pad("src")
             };
 
-            // Request audiomixer pad and set volume.
-            let vol = if self.master_muted {
-                0.0
-            } else {
-                clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
-            };
             if let Some(pad) = mixer.request_pad_simple("sink_%u") {
-                pad.set_property("volume", vol);
+                pad.set_property("volume", branch.volume);
                 if let Some(src) = link_src_pad {
                     let _ = src.link(&pad);
                 }
             }
 
-            // Dynamic pad linking for uridecodebin.
             let ac_for_cb = ac.clone();
             decoder.connect_pad_added(move |_, pad| {
                 let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
@@ -12431,17 +12453,40 @@ impl ProgramPlayer {
             });
 
             let _ = ac.sync_state_with_parent();
+            if let Some(ref l) = lv {
+                let _ = l.sync_state_with_parent();
+            }
             let _ = decoder.sync_state_with_parent();
+            decoders.push((decoder, branch));
         }
 
-        // Start the pipeline and seek to the correct position.
+        // Preroll the pipeline, then seek each decoder to its correct source position.
         let _ = pipeline.set_state(gst::State::Paused);
         let _ = pipeline.state(Some(gst::ClockTime::from_seconds(2)));
-        let _ = pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-            gst::ClockTime::from_nseconds(timeline_pos_ns),
-        );
-        let _ = pipeline.set_state(gst::State::Playing);
+
+        for (decoder, branch) in &decoders {
+            // Compute the source position this clip should play from.
+            let source_pos_ns = if timeline_pos_ns >= branch.timeline_start_ns {
+                branch.source_in_ns
+                    + (timeline_pos_ns - branch.timeline_start_ns)
+                        .min(branch.source_out_ns.saturating_sub(branch.source_in_ns))
+            } else {
+                branch.source_in_ns
+            };
+            let _ = decoder.seek(
+                1.0,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(source_pos_ns),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(branch.source_out_ns),
+            );
+        }
+
+        // Only start playing if the program player is actually in playback mode.
+        if self.state == PlayerState::Playing {
+            let _ = pipeline.set_state(gst::State::Playing);
+        }
 
         log::info!(
             "audio_multi_pipeline: built with {} sources at pos={:.2}s",
@@ -12589,14 +12634,11 @@ impl ProgramPlayer {
             self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
         } else {
             let active = self.audio_clips_active_at(timeline_pos_ns);
-            if active.len() > 1 {
-                // Multiple audio clips overlap — use dedicated multi-clip mixer.
+            if !active.is_empty() {
+                // Use the multi-clip mixer for all audio-track playback (1 or more clips).
                 let _ = self.audio_pipeline.set_state(gst::State::Ready);
                 self.audio_current_source = None;
                 self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
-            } else if let Some(&idx) = active.first() {
-                self.teardown_audio_multi_pipeline();
-                self.load_audio_clip_idx(idx, timeline_pos_ns);
             } else {
                 self.teardown_audio_multi_pipeline();
                 let _ = self.audio_pipeline.set_state(gst::State::Ready);
@@ -12607,47 +12649,50 @@ impl ProgramPlayer {
     }
 
     fn poll_audio(&mut self, timeline_pos_ns: u64) {
-        // Check for multi-clip audio overlap.
+        // Check for reverse-video audio first (special case using the playbin).
+        let reverse_idx = self.reverse_video_clip_at_for_audio(timeline_pos_ns);
+        self.apply_reverse_video_main_audio_ducking(reverse_idx);
+        if let Some(idx) = reverse_idx {
+            // Reverse video audio uses the playbin path.
+            if self.audio_multi_pipeline.is_some() {
+                self.teardown_audio_multi_pipeline();
+            }
+            let wanted = AudioCurrentSource::ReverseVideoClip(idx);
+            if self.audio_current_source != Some(wanted) {
+                self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
+                let _ = self.audio_pipeline.set_state(gst::State::Playing);
+            }
+            self.sync_preview_audio_levels(timeline_pos_ns);
+            return;
+        }
+
+        // All audio-track clips use the multi-clip mixer pipeline.
         let active = self.audio_clips_active_at(timeline_pos_ns);
-        if active.len() > 1 {
-            // Multi-clip path: dedicated mixer pipeline handles all active audio clips.
-            if active != self.audio_multi_active {
+        if !active.is_empty() {
+            // Ensure the playbin isn't playing stale audio.
+            if self.audio_current_source.is_some() {
                 let _ = self.audio_pipeline.set_state(gst::State::Ready);
                 self.audio_current_source = None;
+            }
+            if active != self.audio_multi_active {
                 self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
             }
             self.sync_preview_audio_levels(timeline_pos_ns);
             return;
         }
-        // Single-clip or no-clip path: use the existing playbin pipeline.
+
+        // No audio clips active — tear down multi pipeline if present.
         if self.audio_multi_pipeline.is_some() {
             self.teardown_audio_multi_pipeline();
         }
-        let wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(timeline_pos_ns) {
-            Some(AudioCurrentSource::ReverseVideoClip(idx))
-        } else {
-            active.first().map(|&i| AudioCurrentSource::AudioClip(i))
-        };
-        self.apply_reverse_video_main_audio_ducking(match wanted {
-            Some(AudioCurrentSource::ReverseVideoClip(idx)) => Some(idx),
-            _ => None,
-        });
-        if wanted != self.audio_current_source {
-            match wanted {
-                Some(AudioCurrentSource::AudioClip(idx)) => {
-                    self.load_audio_clip_idx(idx, timeline_pos_ns);
-                    let _ = self.audio_pipeline.set_state(gst::State::Playing);
-                }
-                Some(AudioCurrentSource::ReverseVideoClip(idx)) => {
-                    self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
-                    let _ = self.audio_pipeline.set_state(gst::State::Playing);
-                }
-                None => {
-                    let _ = self.audio_pipeline.set_state(gst::State::Ready);
-                    self.audio_current_source = None;
-                }
-            }
-        } else if let Some(source) = self.audio_current_source {
+        if self.audio_current_source.is_some() {
+            let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.audio_current_source = None;
+        }
+        self.sync_preview_audio_levels(timeline_pos_ns);
+
+        // Legacy: keep the volume sync for any leftover audio state.
+        if let Some(source) = self.audio_current_source {
             if self.master_muted {
                 self.set_audio_pipeline_volume(0.0);
             } else {
