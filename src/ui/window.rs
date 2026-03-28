@@ -3737,6 +3737,10 @@ pub fn build_window(
                 mute_check.set_active(true);
                 body.append(&mute_check);
 
+                let mono_check = gtk4::CheckButton::with_label("Record as mono (recommended for single mic)");
+                mono_check.set_active(true);
+                body.append(&mono_check);
+
                 // Target track info
                 let track_hint = {
                     let ts = timeline_state.borrow();
@@ -3808,6 +3812,7 @@ pub fn build_window(
                     #[allow(deprecated)]
                     let mic_id = mic_dropdown.active_id().map(|s| s.to_string());
                     let mute_playback = mute_check.is_active();
+                    let record_mono = mono_check.is_active();
 
                     // Find selected device
                     let selected_device: Option<gstreamer::Device> = mic_id
@@ -3840,6 +3845,7 @@ pub fn build_window(
                     let window_weak = window_weak.clone();
                     let project = project.clone();
                     let mute_after_play = mute_playback;
+                    let record_mono = record_mono;
                     let vo_countdown = voiceover_countdown_cb.clone();
                     glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
                         if !recording.get() {
@@ -3855,6 +3861,7 @@ pub fn build_window(
                             match recorder.borrow_mut().start_recording(
                                 playhead_ns,
                                 selected_device.as_ref(),
+                                record_mono,
                             ) {
                                 Ok(_) => {
                                     {
@@ -6385,6 +6392,8 @@ pub fn build_window(
                             is_audio_only: audio_only,
                             duck: t.duck,
                             duck_amount_db: t.duck_amount_db,
+                            pitch_shift_semitones: c.pitch_shift_semitones,
+                            pitch_preserve: c.pitch_preserve,
                             anamorphic_desqueeze: c.anamorphic_desqueeze,
                             track_index: t_idx,
                             transition_after: c.transition_after.clone(),
@@ -9725,7 +9734,7 @@ fn handle_mcp_command(
                 let track_id = track_id.unwrap();
                 // Record synchronously (blocks MCP thread for duration_ns).
                 let mut rec = crate::media::voiceover::VoiceoverRecorder::new();
-                match rec.start_recording(playhead_ns, None) {
+                match rec.start_recording(playhead_ns, None, true) {
                     Ok(file_path) => {
                         let dur_ms = duration_ns / 1_000_000;
                         std::thread::sleep(std::time::Duration::from_millis(dur_ms));

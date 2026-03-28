@@ -86,6 +86,11 @@ pub struct InspectorView {
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub measured_loudness_label: Label,
+    // Channel mode
+    pub channel_mode_dropdown: gtk4::ComboBoxText,
+    // Pitch controls
+    pub pitch_shift_slider: Scale,
+    pub pitch_preserve_check: gtk4::CheckButton,
     // Track audio controls
     pub role_dropdown: gtk4::ComboBoxText,
     pub duck_check: gtk4::CheckButton,
@@ -1101,6 +1106,14 @@ impl InspectorView {
                 } else {
                     self.measured_loudness_label.set_text("");
                 }
+                // Channel mode
+                #[allow(deprecated)]
+                self.channel_mode_dropdown
+                    .set_active_id(Some(c.audio_channel_mode.as_str()));
+                // Pitch controls
+                self.pitch_shift_slider
+                    .set_value(c.pitch_shift_semitones);
+                self.pitch_preserve_check.set_active(c.pitch_preserve);
                 // Track audio controls — read from the clip's track.
                 if let Some(track) = project.tracks.iter().find(|t| t.clips.iter().any(|tc| tc.id == c.id)) {
                     #[allow(deprecated)]
@@ -2155,6 +2168,47 @@ pub fn build_inspector(
         eq_q_sliders.push(q_slider);
     }
 
+    // ── Channels sub-section (inside Audio) ────────────────────────────────
+    row_label(&audio_inner, "Channels");
+    #[allow(deprecated)]
+    let channel_mode_dropdown = gtk4::ComboBoxText::new();
+    for mode in crate::model::clip::AudioChannelMode::ALL {
+        #[allow(deprecated)]
+        channel_mode_dropdown.append(Some(mode.as_str()), mode.label());
+    }
+    #[allow(deprecated)]
+    channel_mode_dropdown.set_active_id(Some("stereo"));
+    audio_inner.append(&channel_mode_dropdown);
+
+    // ── Pitch sub-section (inside Audio) ───────────────────────────────────
+    let pitch_expander = Expander::new(Some("Pitch"));
+    pitch_expander.set_expanded(false);
+    audio_inner.append(&pitch_expander);
+    let pitch_inner = GBox::new(Orientation::Vertical, 4);
+    pitch_expander.set_child(Some(&pitch_inner));
+
+    row_label(&pitch_inner, "Pitch Shift (semitones)");
+    let pitch_shift_slider = Scale::with_range(Orientation::Horizontal, -12.0, 12.0, 0.5);
+    pitch_shift_slider.set_value(0.0);
+    pitch_shift_slider.set_draw_value(true);
+    pitch_shift_slider.set_digits(1);
+    pitch_shift_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0"));
+    pitch_shift_slider.add_mark(-12.0, gtk4::PositionType::Bottom, Some("-12"));
+    pitch_shift_slider.add_mark(12.0, gtk4::PositionType::Bottom, Some("+12"));
+    pitch_inner.append(&pitch_shift_slider);
+
+    let pitch_preserve_check =
+        gtk4::CheckButton::with_label("Preserve pitch during speed changes");
+    pitch_preserve_check.set_tooltip_text(Some(
+        "Use Rubberband time-stretch to keep audio pitch constant when clip speed is changed",
+    ));
+    pitch_inner.append(&pitch_preserve_check);
+
+    let pitch_hint = Label::new(Some("Pitch shift via Rubberband.\n0 = original pitch, \u{00b1}12 = \u{00b1}1 octave."));
+    pitch_hint.set_halign(gtk4::Align::Start);
+    pitch_hint.add_css_class("dim-label");
+    pitch_inner.append(&pitch_hint);
+
     // ── Track Audio sub-section (Role + Ducking) ──────────────────────────
     let duck_expander = Expander::new(Some("Track Audio"));
     duck_expander.set_expanded(false);
@@ -3098,6 +3152,84 @@ pub fn build_inspector(
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 on_normalize_audio(clip_id);
+            }
+        });
+    }
+
+    // Wire Channel mode dropdown
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        #[allow(deprecated)]
+        channel_mode_dropdown.connect_changed(move |combo| {
+            if *updating.borrow() { return; }
+            let id = selected_clip_id.borrow().clone();
+            #[allow(deprecated)]
+            if let (Some(ref clip_id), Some(mode_id)) = (id, combo.active_id()) {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.audio_channel_mode =
+                                crate::model::clip::AudioChannelMode::from_str(&mode_id);
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_clip_changed();
+            }
+        });
+    }
+
+    // Wire Pitch controls
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let pitch_preserve_check_cb = pitch_preserve_check.clone();
+        pitch_shift_slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.pitch_shift_semitones = s.value();
+                            clip.pitch_preserve = pitch_preserve_check_cb.is_active();
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_clip_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        pitch_preserve_check.connect_toggled(move |btn| {
+            if *updating.borrow() { return; }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.pitch_preserve = btn.is_active();
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_clip_changed();
             }
         });
     }
@@ -5694,6 +5826,9 @@ pub fn build_inspector(
         pan_slider,
         normalize_btn,
         measured_loudness_label,
+        channel_mode_dropdown,
+        pitch_shift_slider,
+        pitch_preserve_check,
         role_dropdown,
         duck_check,
         duck_amount_slider,

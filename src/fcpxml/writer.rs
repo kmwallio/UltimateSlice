@@ -733,6 +733,21 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 .push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
                         }
                     }
+                    if clip.pitch_shift_semitones.abs() > 0.001 {
+                        asset_clip.push_attribute((
+                            "us:pitch-shift-semitones",
+                            clip.pitch_shift_semitones.to_string().as_str(),
+                        ));
+                    }
+                    if clip.pitch_preserve {
+                        asset_clip.push_attribute(("us:pitch-preserve", "true"));
+                    }
+                    if clip.audio_channel_mode != crate::model::clip::AudioChannelMode::Stereo {
+                        asset_clip.push_attribute((
+                            "us:audio-channel-mode",
+                            clip.audio_channel_mode.as_str(),
+                        ));
+                    }
                     if let Some(lufs) = clip.measured_loudness_lufs {
                         asset_clip.push_attribute((
                             "us:measured-loudness-lufs",
@@ -3501,6 +3516,9 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
             | "us:eq-high-gain-keyframes"
+            | "us:pitch-shift-semitones"
+            | "us:pitch-preserve"
+            | "us:audio-channel-mode"
             | "us:measured-loudness-lufs"
     )
 }

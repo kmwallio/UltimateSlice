@@ -78,6 +78,7 @@ impl VoiceoverRecorder {
         &mut self,
         start_position_ns: u64,
         device: Option<&gst::Device>,
+        mono: bool,
     ) -> Result<String> {
         if self.is_recording() {
             return Err(anyhow!("Already recording"));
@@ -116,8 +117,9 @@ impl VoiceoverRecorder {
         };
 
         let escaped_path = file_path.replace('\\', "\\\\").replace('"', "\\\"");
+        let channels = if mono { 1 } else { 2 };
         let launch_str = format!(
-            "{src_name} ! audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! wavenc ! filesink location=\"{escaped_path}\""
+            "{src_name} ! audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels={channels} ! wavenc ! filesink location=\"{escaped_path}\""
         );
         log::info!("Voiceover: launching pipeline: {}", launch_str);
 

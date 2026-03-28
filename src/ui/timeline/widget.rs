@@ -990,6 +990,10 @@ impl TimelineState {
             sync_audio: self.can_sync_selected_clips_by_audio(),
             sync_replace_audio: self.can_sync_selected_clips_by_audio(),
             remove_silent_parts: self.can_remove_silent_parts(),
+            split_stereo: {
+                let ids = self.selected_ids_or_primary();
+                ids.len() == 1
+            },
         }
     }
 
@@ -2674,6 +2678,7 @@ struct ClipContextMenuActionability {
     sync_audio: bool,
     sync_replace_audio: bool,
     remove_silent_parts: bool,
+    split_stereo: bool,
 }
 
 impl ClipContextMenuActionability {
@@ -2686,6 +2691,7 @@ impl ClipContextMenuActionability {
             || self.sync_audio
             || self.sync_replace_audio
             || self.remove_silent_parts
+            || self.split_stereo
     }
 }
 
@@ -2698,6 +2704,7 @@ fn apply_clip_context_menu_actionability(
     btn_sync_audio: &gtk::Button,
     btn_sync_replace_audio: &gtk::Button,
     btn_remove_silent_parts: &gtk::Button,
+    btn_split_stereo: &gtk::Button,
     actionability: ClipContextMenuActionability,
 ) -> bool {
     let set_state = |button: &gtk::Button, actionable: bool| {
@@ -2712,6 +2719,7 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_sync_audio, actionability.sync_audio);
     set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
+    set_state(btn_split_stereo, actionability.split_stereo);
     actionability.any()
 }
 
@@ -2802,6 +2810,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     clip_context_box.append(&btn_sync_audio);
     clip_context_box.append(&btn_sync_replace_audio);
     clip_context_box.append(&btn_remove_silent_parts);
+    let btn_split_stereo = gtk::Button::with_label("Split Stereo to Mono Tracks");
+    btn_split_stereo.add_css_class("flat");
+    btn_split_stereo.set_tooltip_text(Some(
+        "Create left and right mono clips from selected stereo audio on separate tracks",
+    ));
+    clip_context_box.append(&btn_split_stereo);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -2987,6 +3001,72 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 pop.popdown();
             }
             open_remove_silent_parts_dialog(state.clone());
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_split_stereo.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let mut st = state.borrow_mut();
+            let ids = st.selected_ids_or_primary();
+            let clip_id = match ids.into_iter().next() {
+                Some(id) => id,
+                None => return,
+            };
+            let changed = {
+                let mut proj = st.project.borrow_mut();
+                // Find the clip and its track.
+                let clip_data = proj
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(ti, t)| t.clips.iter().map(move |c| (ti, c)))
+                    .find(|(_, c)| c.id == clip_id)
+                    .map(|(ti, c)| (ti, c.clone()));
+                if let Some((track_idx, original)) = clip_data {
+                    let track_label = proj.tracks[track_idx].label.clone();
+                    // Set original to Left channel.
+                    if let Some(clip) = proj.tracks[track_idx]
+                        .clips
+                        .iter_mut()
+                        .find(|c| c.id == clip_id)
+                    {
+                        clip.audio_channel_mode =
+                            crate::model::clip::AudioChannelMode::Left;
+                    }
+                    // Create a clone for Right channel on a new audio track.
+                    let mut right_clip = original.clone();
+                    right_clip.id = uuid::Uuid::new_v4().to_string();
+                    right_clip.audio_channel_mode =
+                        crate::model::clip::AudioChannelMode::Right;
+                    let mut new_track = crate::model::track::Track::new_audio(
+                        format!("{track_label} (R)"),
+                    );
+                    new_track.add_clip(right_clip);
+                    // Rename original track to indicate Left.
+                    proj.tracks[track_idx].label = format!("{track_label} (L)");
+                    proj.tracks.push(new_track);
+                    proj.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            };
+            let proj_cb = st.on_project_changed.clone();
+            drop(st);
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
         });
     }
 
@@ -3417,6 +3497,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_sync_audio,
                                 &btn_sync_replace_audio,
                                 &btn_remove_silent_parts,
+                                &btn_split_stereo,
                                 actionability,
                             ) {
                                 clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(

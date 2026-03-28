@@ -59,6 +59,52 @@ pub enum SlowMotionInterp {
     OpticalFlow,
 }
 
+/// Audio channel routing mode for a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioChannelMode {
+    /// Both channels unchanged (stereo passthrough, mono upmixed).
+    #[default]
+    Stereo,
+    /// Extract left channel only (output as mono on both speakers).
+    Left,
+    /// Extract right channel only (output as mono on both speakers).
+    Right,
+    /// Average L+R to mono (output on both speakers).
+    MonoMix,
+}
+
+impl AudioChannelMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Left => "Left Only",
+            Self::Right => "Right Only",
+            Self::MonoMix => "Mono Mix",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stereo => "stereo",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::MonoMix => "mono_mix",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "left" => Self::Left,
+            "right" => Self::Right,
+            "mono_mix" => Self::MonoMix,
+            _ => Self::Stereo,
+        }
+    }
+
+    pub const ALL: [AudioChannelMode; 4] = [Self::Stereo, Self::Left, Self::Right, Self::MonoMix];
+}
+
 /// Compositing blend mode for a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -585,6 +631,18 @@ pub struct Clip {
     /// Optional EQ high-band gain keyframes over clip-local timeline.
     #[serde(default)]
     pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
+    /// Pitch shift in semitones: −12.0 (one octave down) to +12.0 (one octave up).
+    /// Applied via Rubberband (LADSPA in preview, FFmpeg rubberband filter in export).
+    /// 0.0 = no shift.
+    #[serde(default)]
+    pub pitch_shift_semitones: f64,
+    /// When true, preserve pitch during speed changes (use Rubberband time-stretch
+    /// instead of naive rate-seek which shifts pitch proportionally).
+    #[serde(default)]
+    pub pitch_preserve: bool,
+    /// Audio channel routing: Stereo (default), Left Only, Right Only, or Mono Mix.
+    #[serde(default)]
+    pub audio_channel_mode: AudioChannelMode,
     /// Optional rotation keyframes over clip-local timeline.
     #[serde(default)]
     pub rotate_keyframes: Vec<NumericKeyframe>,
@@ -999,6 +1057,9 @@ impl Clip {
             eq_low_gain_keyframes: Vec::new(),
             eq_mid_gain_keyframes: Vec::new(),
             eq_high_gain_keyframes: Vec::new(),
+            pitch_shift_semitones: 0.0,
+            pitch_preserve: false,
+            audio_channel_mode: AudioChannelMode::default(),
             rotate_keyframes: Vec::new(),
             crop_left_keyframes: Vec::new(),
             crop_right_keyframes: Vec::new(),

@@ -578,11 +578,12 @@ Tracking docs:
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 
 ### Advanced Audio
-- [ ] Pitch-corrected audio time-stretching via Rubberband
-  - [ ] Rubberband C library integration (FFI bindings or GStreamer `rubberband` element)
-  - [ ] Pitch-preserved playback at variable speeds (J/K/L shuttle, constant speed changes)
-  - [ ] Independent audio clip time-stretch without pitch shift (fit audio to duration)
-  - [ ] Pitch-shift effect per clip (transpose audio without changing duration)
+- [x] Pitch-corrected audio time-stretching via Rubberband
+  - [x] GStreamer LADSPA Rubberband element for preview pitch shift
+  - [x] FFmpeg rubberband filter for export (pitch + tempo with formant preservation)
+  - [x] Pitch-preserved speed changes (clip.pitch_preserve flag bypasses atempo, uses rubberband tempo=)
+  - [x] Pitch-shift effect per clip (±12 semitones via inspector slider)
+  - [ ] Pitch-preserved J/K/L shuttle (apply Rubberband to main pipeline during shuttle)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
 - [ ] Support for LV2 / LADSPA audio plugins
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)

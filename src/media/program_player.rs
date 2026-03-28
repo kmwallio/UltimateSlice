@@ -389,6 +389,10 @@ pub struct ProgramClip {
     pub duck: bool,
     /// Per-track ducking amount in dB (negative, e.g. -6.0).
     pub duck_amount_db: f64,
+    /// Pitch shift in semitones (−12 to +12). 0 = no shift.
+    pub pitch_shift_semitones: f64,
+    /// When true, preserve pitch during speed changes via Rubberband.
+    pub pitch_preserve: bool,
     pub anamorphic_desqueeze: f64,
     /// Track index — higher index clips (B-roll, overlays) take priority in preview.
     pub track_index: usize,
@@ -12519,6 +12523,35 @@ impl ProgramPlayer {
                     eq_set_band(eq, i, b.freq, b.gain, b.q);
                 }
             }
+            // Optional Rubberband pitch shifter (LADSPA).
+            let needs_pitch = clip_ref
+                .map(|c| c.pitch_shift_semitones.abs() > 0.001)
+                .unwrap_or(false);
+            let rb_elem = if needs_pitch {
+                gst::ElementFactory::make(
+                    "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-stereo",
+                )
+                .build()
+                .ok()
+                .or_else(|| {
+                    // Fallback: try mono variant if stereo isn't available.
+                    gst::ElementFactory::make(
+                        "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-mono",
+                    )
+                    .build()
+                    .ok()
+                })
+            } else {
+                None
+            };
+            if let (Some(ref rb), Some(clip)) = (&rb_elem, clip_ref) {
+                let semitones = clip.pitch_shift_semitones.clamp(-12.0, 12.0);
+                let whole = semitones.trunc() as i32;
+                let cents = ((semitones - semitones.trunc()) * 100.0) as f32;
+                rb.set_property("semitones", whole);
+                rb.set_property("cents", cents);
+            }
+
             // Name the level element with the track index so bus messages
             // can be routed to the correct per-track meter.
             let lv = gst::ElementFactory::make("level")
@@ -12530,6 +12563,9 @@ impl ProgramPlayer {
             let mut elems: Vec<&gst::Element> = vec![&decoder, &ac];
             if let Some(ref eq) = eq_elem {
                 elems.push(eq);
+            }
+            if let Some(ref rb) = rb_elem {
+                elems.push(rb);
             }
             if let Some(ref l) = lv {
                 elems.push(l);
@@ -12549,12 +12585,18 @@ impl ProgramPlayer {
                 let _ = pipeline.add(p);
             }
 
-            // Link: audioconvert → [equalizer] → [audiopanorama] → [level] → audiomixer pad.
+            // Link: audioconvert → [equalizer] → [rubberband] → [audiopanorama] → [level] → audiomixer pad.
             let mut link_src_pad = ac.static_pad("src");
             if let Some(ref eq) = eq_elem {
                 if let (Some(prev), Some(eq_sink)) = (link_src_pad.clone(), eq.static_pad("sink")) {
                     let _ = prev.link(&eq_sink);
                     link_src_pad = eq.static_pad("src");
+                }
+            }
+            if let Some(ref rb) = rb_elem {
+                if let (Some(prev), Some(rb_sink)) = (link_src_pad.clone(), rb.static_pad("sink")) {
+                    let _ = prev.link(&rb_sink);
+                    link_src_pad = rb.static_pad("src");
                 }
             }
             if let Some(ref p) = pan_elem {
@@ -12603,6 +12645,9 @@ impl ProgramPlayer {
             let _ = ac.sync_state_with_parent();
             if let Some(ref eq) = eq_elem {
                 let _ = eq.sync_state_with_parent();
+            }
+            if let Some(ref rb) = rb_elem {
+                let _ = rb.sync_state_with_parent();
             }
             if let Some(ref p) = pan_elem {
                 let _ = p.sync_state_with_parent();
@@ -13078,6 +13123,8 @@ mod tests {
             is_audio_only: false,
             duck: false,
             duck_amount_db: -6.0,
+            pitch_shift_semitones: 0.0,
+            pitch_preserve: false,
             track_index: 0,
             transition_after: String::new(),
             transition_after_ns: 0,

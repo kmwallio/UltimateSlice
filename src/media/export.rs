@@ -649,19 +649,19 @@ pub fn export_project(
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_audio_speed_filter(clip);
+            let ch_filter = build_channel_filter(clip);
+            let ch_part = if ch_filter.is_empty() { String::new() } else { format!(",{ch_filter}") };
             let volume_filter = build_volume_filter(clip);
+            let pitch_filter = build_pitch_filter(clip);
+            let pitch_part = if pitch_filter.is_empty() { String::new() } else { format!(",{pitch_filter}") };
             let eq_filter = build_eq_filter(clip);
-            let eq_part = if eq_filter.is_empty() {
-                String::new()
-            } else {
-                format!(",{eq_filter}")
-            };
+            let eq_part = if eq_filter.is_empty() { String::new() } else { format!(",{eq_filter}") };
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{volume_filter}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -687,19 +687,19 @@ pub fn export_project(
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_audio_speed_filter(clip);
+            let ch_filter = build_channel_filter(clip);
+            let ch_part = if ch_filter.is_empty() { String::new() } else { format!(",{ch_filter}") };
             let volume_filter = build_volume_filter(clip);
+            let pitch_filter = build_pitch_filter(clip);
+            let pitch_part = if pitch_filter.is_empty() { String::new() } else { format!(",{pitch_filter}") };
             let eq_filter = build_eq_filter(clip);
-            let eq_part = if eq_filter.is_empty() {
-                String::new()
-            } else {
-                format!(",{eq_filter}")
-            };
+            let eq_part = if eq_filter.is_empty() { String::new() } else { format!(",{eq_filter}") };
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -718,7 +718,11 @@ pub fn export_project(
         let label = format!("aa{j}");
         let areverse = if clip.reverse { "areverse," } else { "" };
         let atempo = build_audio_speed_filter(clip);
+        let ch_filter = build_channel_filter(clip);
+        let ch_part = if ch_filter.is_empty() { String::new() } else { format!(",{ch_filter}") };
         let volume_filter = build_volume_filter(clip);
+        let pitch_filter = build_pitch_filter(clip);
+        let pitch_part = if pitch_filter.is_empty() { String::new() } else { format!(",{pitch_filter}") };
         let eq_filter = build_eq_filter(clip);
         let eq_part = if eq_filter.is_empty() {
             String::new()
@@ -742,7 +746,7 @@ pub fn export_project(
         let pre_pan = format!("{label}_prepan");
         let post_pan = format!("{label}_panned");
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
         append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
@@ -2276,7 +2280,61 @@ fn build_atempo(speed: f64) -> String {
 /// uses the mean speed as an atempo approximation (atempo and asetrate do not
 /// support time-varying expressions). True variable-speed audio requires
 /// Rubberband, which is a separate roadmap item.
+/// Build an FFmpeg filter for pitch shifting and/or pitch-preserved speed change
+/// using the `rubberband` filter. Returns empty string if no pitch processing needed.
+fn build_pitch_filter(clip: &crate::model::clip::Clip) -> String {
+    let has_pitch_shift = clip.pitch_shift_semitones.abs() > 0.001;
+    let has_pitch_preserve = clip.pitch_preserve && (clip.speed - 1.0).abs() > 0.001;
+
+    if !has_pitch_shift && !has_pitch_preserve {
+        return String::new();
+    }
+
+    // FFmpeg rubberband filter: pitch= is a ratio (2^(semitones/12)),
+    // tempo= is the speed factor (only used for pitch-preserved speed changes).
+    let pitch_ratio = if has_pitch_shift {
+        2.0_f64.powf(clip.pitch_shift_semitones / 12.0)
+    } else {
+        1.0
+    };
+
+    let tempo = if has_pitch_preserve {
+        clip.speed.clamp(0.05, 16.0)
+    } else {
+        1.0
+    };
+
+    let mut params = Vec::new();
+    if (pitch_ratio - 1.0).abs() > 0.0001 {
+        params.push(format!("pitch={pitch_ratio:.6}"));
+    }
+    if (tempo - 1.0).abs() > 0.0001 {
+        params.push(format!("tempo={tempo:.6}"));
+    }
+    // Preserve formants for voice content.
+    params.push("formant=preserved".to_string());
+
+    format!("rubberband={}", params.join(":"))
+}
+
+/// Build an FFmpeg filter for audio channel routing (Left/Right/MonoMix).
+/// Returns empty string for Stereo (default passthrough).
+fn build_channel_filter(clip: &crate::model::clip::Clip) -> String {
+    use crate::model::clip::AudioChannelMode;
+    match clip.audio_channel_mode {
+        AudioChannelMode::Stereo => String::new(),
+        AudioChannelMode::Left => "pan=stereo|c0=c0|c1=c0".to_string(),
+        AudioChannelMode::Right => "pan=stereo|c0=c1|c1=c1".to_string(),
+        AudioChannelMode::MonoMix => "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string(),
+    }
+}
+
 fn build_audio_speed_filter(clip: &crate::model::clip::Clip) -> String {
+    // When pitch_preserve is true, the rubberband filter handles the tempo change,
+    // so skip atempo to avoid double speed-change.
+    if clip.pitch_preserve && (clip.speed - 1.0).abs() > 0.001 {
+        return String::new();
+    }
     if !clip.speed_keyframes.is_empty() {
         // Compute mean speed over the clip's timeline duration.
         let dur = clip.duration();
