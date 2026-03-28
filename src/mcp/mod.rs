@@ -37,6 +37,11 @@ pub enum McpCommand {
         solo: bool,
         reply: SyncSender<Value>,
     },
+    SetTrackRole {
+        track_id: String,
+        role: String,
+        reply: SyncSender<Value>,
+    },
     SetTrackDuck {
         track_id: String,
         duck: bool,

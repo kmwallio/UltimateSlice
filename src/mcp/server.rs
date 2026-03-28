@@ -239,6 +239,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_track_role",
+            "description": "Set audio role for a track. Roles categorize audio for submix routing and FCPXML metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "role": { "type": "string", "enum": ["none", "dialogue", "effects", "music"], "description": "Audio role for the track." }
+                },
+                "required": ["track_id", "role"]
+            }
+        },
+        {
             "name": "set_track_duck",
             "description": "Enable or disable automatic ducking on a track. When enabled, the track's volume is reduced when dialogue (video-embedded audio or non-ducked audio tracks) is present.",
             "inputSchema": {
@@ -1288,6 +1300,11 @@ fn dispatch_tool_payload(
         "set_track_solo" => McpCommand::SetTrackSolo {
             track_id: args["track_id"].as_str().unwrap_or("").to_string(),
             solo: args["solo"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "set_track_role" => McpCommand::SetTrackRole {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            role: args["role"].as_str().unwrap_or("none").to_string(),
             reply: tx,
         },
         "set_track_duck" => McpCommand::SetTrackDuck {

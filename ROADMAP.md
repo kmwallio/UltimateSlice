@@ -583,7 +583,7 @@ Tracking docs:
   - [ ] Pitch-preserved playback at variable speeds (J/K/L shuttle, constant speed changes)
   - [ ] Independent audio clip time-stretch without pitch shift (fit audio to duration)
   - [ ] Pitch-shift effect per clip (transpose audio without changing duration)
-- [ ] Audio Roles (Dialogue, Effects, Music) with submixing
+- [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
 - [ ] Support for LV2 / LADSPA audio plugins
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
 - [x] Automatic Ducking (per-track `duck` toggle, volume reduced when dialogue/non-ducked audio is active; configurable amount in Preferences; real-time preview; MCP `set_track_duck` tool; FCPXML persistence)

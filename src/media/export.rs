@@ -589,7 +589,7 @@ pub fn export_project(
     let vout_label = prev_label;
 
     // === Audio pipeline ===
-    let mut audio_labels: Vec<String> = Vec::new();
+    let mut audio_labels: Vec<(String, crate::model::track::AudioRole)> = Vec::new();
     let clip_audio_fades: HashMap<String, ClipAudioFade> =
         if crossfade_enabled && crossfade_duration_ns > 0 {
             let mut crossfade_tracks: Vec<Vec<&Clip>> = Vec::new();
@@ -665,7 +665,12 @@ pub fn export_project(
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            audio_labels.push(label);
+            // Primary video clips — find track role from project.
+            let role = project.tracks.iter()
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+                .map(|t| t.audio_role)
+                .unwrap_or_default();
+            audio_labels.push((label, role));
         }
     }
 
@@ -698,7 +703,12 @@ pub fn export_project(
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            audio_labels.push(label);
+            // Find the track for this secondary clip to get its role.
+            let role = project.tracks.iter()
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+                .map(|t| t.audio_role)
+                .unwrap_or_default();
+            audio_labels.push((label, role));
         }
     }
 
@@ -737,7 +747,11 @@ pub fn export_project(
         ));
         append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
         filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-        audio_labels.push(label);
+        let role = project.tracks.iter()
+            .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+            .map(|t| t.audio_role)
+            .unwrap_or_default();
+        audio_labels.push((label, role));
     }
 
     // Mix all audio streams.
@@ -749,15 +763,71 @@ pub fn export_project(
     // don't contribute audio.
     let has_audio = !audio_labels.is_empty();
     if has_audio {
-        let n = audio_labels.len();
+        use crate::model::track::AudioRole;
         let project_dur_s = project.duration() as f64 / 1_000_000_000.0;
-        filter.push(';');
-        for label in &audio_labels {
-            filter.push_str(&format!("[{label}]"));
+
+        // Group audio labels by role for submix routing.
+        let roles_in_use: Vec<AudioRole> = {
+            let mut roles: Vec<AudioRole> = audio_labels.iter().map(|(_, r)| *r).collect();
+            roles.sort_by_key(|r| *r as u8);
+            roles.dedup();
+            roles
+        };
+
+        if roles_in_use.len() <= 1 {
+            // Single role (or all None) — no submix needed, mix directly.
+            let n = audio_labels.len();
+            filter.push(';');
+            for (label, _) in &audio_labels {
+                filter.push_str(&format!("[{label}]"));
+            }
+            filter.push_str(&format!(
+                "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+            ));
+        } else {
+            // Multiple roles — create per-role submixes, then master mix.
+            let mut submix_labels: Vec<String> = Vec::new();
+            for role in &roles_in_use {
+                let role_labels: Vec<&str> = audio_labels
+                    .iter()
+                    .filter(|(_, r)| r == role)
+                    .map(|(l, _)| l.as_str())
+                    .collect();
+                if role_labels.is_empty() {
+                    continue;
+                }
+                let submix_name = format!("submix_{}", role.as_str());
+                let n = role_labels.len();
+                filter.push(';');
+                for l in &role_labels {
+                    filter.push_str(&format!("[{l}]"));
+                }
+                if n == 1 {
+                    // Single input — just rename, no amix needed.
+                    filter.push_str(&format!("anull[{submix_name}]"));
+                } else {
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0[{submix_name}]"
+                    ));
+                }
+                submix_labels.push(submix_name);
+            }
+            // Master mix from submixes.
+            let n = submix_labels.len();
+            filter.push(';');
+            for l in &submix_labels {
+                filter.push_str(&format!("[{l}]"));
+            }
+            if n == 1 {
+                filter.push_str(&format!(
+                    "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                ));
+            } else {
+                filter.push_str(&format!(
+                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                ));
+            }
         }
-        filter.push_str(&format!(
-            "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-        ));
     }
 
     cmd.arg("-filter_complex")

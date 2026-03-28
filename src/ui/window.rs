@@ -3366,11 +3366,27 @@ pub fn build_window(
             let on_project_changed = on_project_changed.clone();
             move |clip_id: &str, duck: bool, amount_db: f64| {
                 let mut proj = project.borrow_mut();
-                // Find the track containing this clip and update its duck settings.
                 for track in &mut proj.tracks {
                     if track.clips.iter().any(|c| c.id == clip_id) {
                         track.duck = duck;
                         track.duck_amount_db = amount_db.clamp(-24.0, 0.0);
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        },
+        // on_role_changed: update track audio role from inspector
+        {
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            move |clip_id: &str, role_str: &str| {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if track.clips.iter().any(|c| c.id == clip_id) {
+                        track.audio_role = crate::model::track::AudioRole::from_str(role_str);
                         proj.dirty = true;
                         break;
                     }
@@ -8067,6 +8083,37 @@ fn handle_mcp_command(
                 }
                 Err(message) => {
                     reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetTrackRole {
+            track_id,
+            role,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    let new_role = crate::model::track::AudioRole::from_str(&role);
+                    track.audio_role = new_role;
+                    let role_str = new_role.as_str().to_string();
+                    drop(track);
+                    proj.dirty = true;
+                    Ok(role_str)
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(applied_role) => {
+                    reply
+                        .send(serde_json::json!({"success": true, "track_id": track_id, "role": applied_role}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(serde_json::json!({"success": false, "error": message})).ok();
                 }
             }
         }

@@ -5830,6 +5830,21 @@ fn draw_track_row(
     let _ = cr.move_to(6.0, y + track_height / 2.0 + 4.0);
     let _ = cr.show_text(&track.label);
 
+    // Audio role label (below track name, dimmed).
+    if track.kind == TrackKind::Audio && track.audio_role != crate::model::track::AudioRole::None {
+        let role_label = track.audio_role.short_label();
+        let (role_r, role_g, role_b) = match track.audio_role {
+            crate::model::track::AudioRole::Dialogue => (0.9, 0.7, 0.3),
+            crate::model::track::AudioRole::Effects => (0.3, 0.8, 0.9),
+            crate::model::track::AudioRole::Music => (0.4, 0.9, 0.5),
+            _ => (0.5, 0.5, 0.5),
+        };
+        cr.set_source_rgb(role_r, role_g, role_b);
+        cr.set_font_size(9.0);
+        let _ = cr.move_to(6.0, y + track_height / 2.0 + 15.0);
+        let _ = cr.show_text(role_label);
+    }
+
     let solo_x = track_label_solo_badge_x(st.show_track_audio_levels);
     let solo_y = y + 6.0;
     if track.soloed {

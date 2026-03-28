@@ -872,6 +872,9 @@ fn parse_asset_clip(
             if attrs.contains_key("us:track-soloed") {
                 track.soloed = track_soloed;
             }
+            if let Some(v) = attrs.get("us:track-audio-role") {
+                track.audio_role = crate::model::track::AudioRole::from_str(v);
+            }
             if let Some(v) = attrs.get("us:track-duck") {
                 track.duck = v == "true";
             }
@@ -2422,6 +2425,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-muted"
             | "us:track-locked"
             | "us:track-soloed"
+            | "us:track-audio-role"
             | "us:track-duck"
             | "us:track-duck-amount-db"
             | "us:track-height"

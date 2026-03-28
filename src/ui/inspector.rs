@@ -86,7 +86,8 @@ pub struct InspectorView {
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub measured_loudness_label: Label,
-    // Ducking controls
+    // Track audio controls
+    pub role_dropdown: gtk4::ComboBoxText,
     pub duck_check: gtk4::CheckButton,
     pub duck_amount_slider: Scale,
     // EQ sliders (3 bands × 3 params)
@@ -1100,8 +1101,10 @@ impl InspectorView {
                 } else {
                     self.measured_loudness_label.set_text("");
                 }
-                // Ducking controls — read from the clip's track.
+                // Track audio controls — read from the clip's track.
                 if let Some(track) = project.tracks.iter().find(|t| t.clips.iter().any(|tc| tc.id == c.id)) {
+                    #[allow(deprecated)]
+                    self.role_dropdown.set_active_id(Some(track.audio_role.as_str()));
                     self.duck_check.set_active(track.duck);
                     self.duck_amount_slider.set_value(track.duck_amount_db);
                 }
@@ -1546,10 +1549,12 @@ pub fn build_inspector(
     on_seek_to: impl Fn(u64) + 'static,
     on_normalize_audio: impl Fn(&str) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
+    on_role_changed: impl Fn(&str, &str) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
+    let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
     let on_frei0r_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_changed);
     let on_frei0r_params_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_params_changed);
@@ -2150,12 +2155,24 @@ pub fn build_inspector(
         eq_q_sliders.push(q_slider);
     }
 
-    // ── Ducking sub-section (inside Audio) ─────────────────────────────────
-    let duck_expander = Expander::new(Some("Ducking"));
+    // ── Track Audio sub-section (Role + Ducking) ──────────────────────────
+    let duck_expander = Expander::new(Some("Track Audio"));
     duck_expander.set_expanded(false);
     audio_inner.append(&duck_expander);
     let duck_inner = GBox::new(Orientation::Vertical, 4);
     duck_expander.set_child(Some(&duck_inner));
+
+    // Audio Role dropdown
+    row_label(&duck_inner, "Audio Role");
+    #[allow(deprecated)]
+    let role_dropdown = gtk4::ComboBoxText::new();
+    for role in crate::model::track::AudioRole::ALL {
+        #[allow(deprecated)]
+        role_dropdown.append(Some(role.as_str()), role.label());
+    }
+    #[allow(deprecated)]
+    role_dropdown.set_active_id(Some("none"));
+    duck_inner.append(&role_dropdown);
 
     let duck_check = gtk4::CheckButton::with_label("Duck this track when dialogue is present");
     duck_check.set_active(false);
@@ -3081,6 +3098,22 @@ pub fn build_inspector(
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 on_normalize_audio(clip_id);
+            }
+        });
+    }
+
+    // Wire Role dropdown
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_role_changed = on_role_changed.clone();
+        #[allow(deprecated)]
+        role_dropdown.connect_changed(move |combo| {
+            if *updating.borrow() { return; }
+            let id = selected_clip_id.borrow().clone();
+            #[allow(deprecated)]
+            if let (Some(ref clip_id), Some(role_id)) = (id, combo.active_id()) {
+                on_role_changed(clip_id, &role_id);
             }
         });
     }
@@ -5661,6 +5694,7 @@ pub fn build_inspector(
         pan_slider,
         normalize_btn,
         measured_loudness_label,
+        role_dropdown,
         duck_check,
         duck_amount_slider,
         eq_freq_sliders,
