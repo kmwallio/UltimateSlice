@@ -1077,6 +1077,11 @@ pub struct ProgramPlayer {
     /// Separate pipeline for mixing multiple simultaneous audio-track clips.
     /// Built on demand when >1 audio clip is active; torn down when ≤1 remain.
     audio_multi_pipeline: Option<gst::Pipeline>,
+    /// Audiomixer pads in the multi pipeline, keyed by audio_clip index.
+    /// Used for live volume updates during playback.
+    audio_multi_pads: HashMap<usize, gst::Pad>,
+    /// Audiopanorama elements in the multi pipeline, keyed by audio_clip index.
+    audio_multi_pan_elems: HashMap<usize, gst::Element>,
     /// Clip index whose audiomixer pad is temporarily forced to 0.0 while
     /// reverse audio for that clip is routed through `audio_pipeline`.
     reverse_video_ducked_clip_idx: Option<usize>,
@@ -1834,6 +1839,8 @@ impl ProgramPlayer {
                 audio_current_source: None,
                 audio_multi_active: Vec::new(),
                 audio_multi_pipeline: None,
+                audio_multi_pads: HashMap::new(),
+                audio_multi_pan_elems: HashMap::new(),
                 reverse_video_ducked_clip_idx: None,
                 slots: Vec::new(),
                 timeline_pos_ns: 0,
@@ -2908,6 +2915,10 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
         if let Some(ref mp) = self.audio_multi_pipeline {
+            // Re-sync clock before resuming.
+            if let Some(base) = self.pipeline.base_time() {
+                mp.set_base_time(base);
+            }
             let _ = mp.set_state(gst::State::Playing);
         }
         self.state = PlayerState::Playing;
@@ -3379,6 +3390,23 @@ impl ProgramPlayer {
         }
         if !self.master_muted {
             self.sync_audio_pipeline_eq(timeline_pos_ns);
+        }
+        // Sync multi-audio pipeline volumes (for keyframe animation during playback).
+        for (&aidx, pad) in &self.audio_multi_pads {
+            if let Some(clip) = self.audio_clips.get(aidx) {
+                let vol = if self.master_muted {
+                    0.0
+                } else {
+                    clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
+                };
+                pad.set_property("volume", vol);
+            }
+        }
+        for (&aidx, pan_elem) in &self.audio_multi_pan_elems {
+            if let Some(clip) = self.audio_clips.get(aidx) {
+                let pan = clip.pan_at_timeline_ns(timeline_pos_ns);
+                pan_elem.set_property("panorama", pan as f32);
+            }
         }
     }
 
@@ -4004,6 +4032,18 @@ impl ProgramPlayer {
                 );
                 self.set_audio_pipeline_pan(effective_pan);
             }
+            // Live-update multi-audio pipeline mixer pads if active.
+            if let Some(pad) = self.audio_multi_pads.get(&i) {
+                let effective_vol = if self.master_muted {
+                    0.0
+                } else {
+                    volume.clamp(0.0, 4.0)
+                };
+                pad.set_property("volume", effective_vol);
+            }
+            if let Some(pan_elem) = self.audio_multi_pan_elems.get(&i) {
+                pan_elem.set_property("panorama", pan.clamp(-1.0, 1.0) as f32);
+            }
         }
     }
 
@@ -4043,12 +4083,20 @@ impl ProgramPlayer {
             }
             return;
         }
-        // Audio-only clips use the separate audio pipeline.
+        // Audio-only clips use the multi-audio pipeline.
         if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
             self.audio_clips[i].eq_bands = eq_bands;
-            // If this audio clip is the currently playing source, update the pipeline EQ live.
+            // If this audio clip is the currently playing source via playbin, update live.
             if self.audio_current_source == Some(AudioCurrentSource::AudioClip(i)) {
                 self.set_audio_pipeline_eq(&eq_bands);
+            }
+            // If playing via multi pipeline, rebuild it to pick up new EQ settings.
+            if self.audio_multi_pipeline.is_some() && self.audio_multi_active.contains(&i) {
+                let active = self.audio_multi_active.clone();
+                let pos = self.timeline_pos_ns;
+                // Force rebuild by clearing the active list.
+                self.audio_multi_active.clear();
+                self.rebuild_audio_multi_pipeline(&active, pos);
             }
             log::info!("update_eq_for_clip: stored EQ for audio-only clip={}", clip_id);
         } else {
@@ -12297,16 +12345,15 @@ impl ProgramPlayer {
                                     let r =
                                         vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
                                     self.push_master_peak(l, r);
-                                    // Route level to all active audio tracks.
-                                    let active_copy = self.audio_multi_active.clone();
-                                    let track_indices: Vec<usize> = active_copy
-                                        .iter()
-                                        .filter_map(|&aidx| {
-                                            self.audio_clips.get(aidx).map(|c| c.track_index)
-                                        })
-                                        .collect();
-                                    for ti in track_indices {
-                                        self.push_track_peak(ti, l, r);
+                                    // Route level to the specific track using the
+                                    // element name (e.g. "audiolevel_track3" → track 3).
+                                    if let Some(src) = msg.src() {
+                                        let name = src.name().to_string();
+                                        if let Some(idx_str) = name.strip_prefix("audiolevel_track") {
+                                            if let Ok(ti) = idx_str.parse::<usize>() {
+                                                self.push_track_peak(ti, l, r);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -12360,7 +12407,9 @@ impl ProgramPlayer {
             source_out_ns: u64,
             timeline_start_ns: u64,
             volume: f64,
+            pan: f64,
             track_index: usize,
+            audio_clip_idx: usize,
         }
         let branches: Vec<AudioBranch> = active
             .iter()
@@ -12369,19 +12418,21 @@ impl ProgramPlayer {
                 if !std::path::Path::new(&clip.source_path).exists() {
                     return None;
                 }
-                // Compute the source seek position for the current timeline position.
                 let vol = if self.master_muted {
                     0.0
                 } else {
                     clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
                 };
+                let pan = clip.pan_at_timeline_ns(timeline_pos_ns);
                 Some(AudioBranch {
                     source_path: clip.source_path.clone(),
                     source_in_ns: clip.source_in_ns,
                     source_out_ns: clip.source_out_ns,
                     timeline_start_ns: clip.timeline_start_ns,
                     volume: vol,
+                    pan,
                     track_index: clip.track_index,
+                    audio_clip_idx: aidx,
                 })
             })
             .collect();
@@ -12404,36 +12455,86 @@ impl ProgramPlayer {
                 Ok(c) => c,
                 Err(_) => continue,
             };
+            // Optional EQ for this branch (skip when flat).
+            let clip_ref = self.audio_clips.get(active[decoders.len()]);
+            let needs_eq = clip_ref.map(|c| c.eq_bands.iter().any(|b| b.gain.abs() > 0.001)).unwrap_or(false);
+            let eq_elem = if needs_eq {
+                gst::ElementFactory::make("equalizer-nbands")
+                    .property("num-bands", 3u32)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
+            if let (Some(ref eq), Some(clip)) = (&eq_elem, clip_ref) {
+                for i in 0..3u32 {
+                    let b = &clip.eq_bands[i as usize];
+                    eq_set_band(eq, i, b.freq, b.gain, b.q);
+                }
+            }
+            // Name the level element with the track index so bus messages
+            // can be routed to the correct per-track meter.
             let lv = gst::ElementFactory::make("level")
+                .name(&format!("audiolevel_track{}", branch.track_index))
                 .property("post-messages", true)
                 .property("interval", 50_000_000u64)
                 .build()
                 .ok();
             let mut elems: Vec<&gst::Element> = vec![&decoder, &ac];
+            if let Some(ref eq) = eq_elem {
+                elems.push(eq);
+            }
             if let Some(ref l) = lv {
                 elems.push(l);
             }
             if pipeline.add_many(elems.iter().copied()).is_err() {
                 continue;
             }
-            let link_src_pad = if let Some(ref l) = lv {
-                if let (Some(ac_src), Some(lv_sink)) =
-                    (ac.static_pad("src"), l.static_pad("sink"))
-                {
-                    let _ = ac_src.link(&lv_sink);
-                    l.static_pad("src")
-                } else {
-                    ac.static_pad("src")
-                }
+            // Audiopanorama for pan control (skip when centered).
+            let pan_elem = if branch.pan.abs() > 0.001 {
+                gst::ElementFactory::make("audiopanorama").build().ok()
             } else {
-                ac.static_pad("src")
+                None
             };
+            if let Some(ref p) = pan_elem {
+                elems.push(p);
+                // Re-add to pipeline (elems already added above won't duplicate).
+                let _ = pipeline.add(p);
+            }
+
+            // Link: audioconvert → [equalizer] → [audiopanorama] → [level] → audiomixer pad.
+            let mut link_src_pad = ac.static_pad("src");
+            if let Some(ref eq) = eq_elem {
+                if let (Some(prev), Some(eq_sink)) = (link_src_pad.clone(), eq.static_pad("sink")) {
+                    let _ = prev.link(&eq_sink);
+                    link_src_pad = eq.static_pad("src");
+                }
+            }
+            if let Some(ref p) = pan_elem {
+                p.set_property("panorama", branch.pan as f32);
+                if let (Some(prev), Some(p_sink)) = (link_src_pad.clone(), p.static_pad("sink")) {
+                    let _ = prev.link(&p_sink);
+                    link_src_pad = p.static_pad("src");
+                }
+            }
+            if let Some(ref l) = lv {
+                if let (Some(prev), Some(lv_sink)) = (link_src_pad.clone(), l.static_pad("sink")) {
+                    let _ = prev.link(&lv_sink);
+                    link_src_pad = l.static_pad("src");
+                }
+            }
 
             if let Some(pad) = mixer.request_pad_simple("sink_%u") {
                 pad.set_property("volume", branch.volume);
                 if let Some(src) = link_src_pad {
                     let _ = src.link(&pad);
                 }
+                // Store pad for live volume updates during playback.
+                self.audio_multi_pads.insert(branch.audio_clip_idx, pad);
+            }
+            // Store pan element for live pan updates.
+            if let Some(p) = pan_elem.clone() {
+                self.audio_multi_pan_elems.insert(branch.audio_clip_idx, p);
             }
 
             let ac_for_cb = ac.clone();
@@ -12453,6 +12554,12 @@ impl ProgramPlayer {
             });
 
             let _ = ac.sync_state_with_parent();
+            if let Some(ref eq) = eq_elem {
+                let _ = eq.sync_state_with_parent();
+            }
+            if let Some(ref p) = pan_elem {
+                let _ = p.sync_state_with_parent();
+            }
             if let Some(ref l) = lv {
                 let _ = l.sync_state_with_parent();
             }
@@ -12461,6 +12568,15 @@ impl ProgramPlayer {
         }
 
         // Preroll the pipeline, then seek each decoder to its correct source position.
+        // Slave the multi-audio pipeline to the main pipeline's clock so
+        // audio and video stay in sync over long playback sessions.
+        if let Some(clock) = self.pipeline.clock() {
+            pipeline.use_clock(Some(&clock));
+        }
+        if let Some(base) = self.pipeline.base_time() {
+            pipeline.set_base_time(base);
+        }
+
         let _ = pipeline.set_state(gst::State::Paused);
         let _ = pipeline.state(Some(gst::ClockTime::from_seconds(2)));
 
@@ -12505,6 +12621,8 @@ impl ProgramPlayer {
         }
         self.audio_multi_pipeline = None;
         self.audio_multi_active.clear();
+        self.audio_multi_pads.clear();
+        self.audio_multi_pan_elems.clear();
     }
 
     fn audio_clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
