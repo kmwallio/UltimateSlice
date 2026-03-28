@@ -2,6 +2,10 @@ use super::clip::Clip;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn default_duck_amount_db() -> f64 {
+    -6.0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TrackKind {
     Video,
@@ -35,6 +39,15 @@ pub struct Track {
     pub soloed: bool,
     #[serde(default)]
     pub height_preset: TrackHeightPreset,
+    /// When true, this track's volume is automatically reduced (ducked) when
+    /// audio is present on any non-ducked track at the same timeline position.
+    /// Typically enabled on music/effects tracks so dialogue comes through clearly.
+    #[serde(default)]
+    pub duck: bool,
+    /// Ducking volume reduction in dB (negative). Default −6.0.
+    /// Only applied when `duck` is true.
+    #[serde(default = "default_duck_amount_db")]
+    pub duck_amount_db: f64,
 }
 
 impl Track {
@@ -48,6 +61,8 @@ impl Track {
             locked: false,
             soloed: false,
             height_preset: TrackHeightPreset::Medium,
+            duck: false,
+            duck_amount_db: default_duck_amount_db(),
         }
     }
 
@@ -61,6 +76,8 @@ impl Track {
             locked: false,
             soloed: false,
             height_preset: TrackHeightPreset::Medium,
+            duck: false,
+            duck_amount_db: default_duck_amount_db(),
         }
     }
 

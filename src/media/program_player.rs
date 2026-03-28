@@ -385,6 +385,10 @@ pub struct ProgramClip {
     /// True for clips that have no video (audio-track clips). They are routed
     /// to a dedicated audio-only pipeline instead of the video player.
     pub is_audio_only: bool,
+    /// Whether this clip's track has ducking enabled (volume reduces when dialogue is present).
+    pub duck: bool,
+    /// Per-track ducking amount in dB (negative, e.g. -6.0).
+    pub duck_amount_db: f64,
     pub anamorphic_desqueeze: f64,
     /// Track index — higher index clips (B-roll, overlays) take priority in preview.
     pub track_index: usize,
@@ -1109,6 +1113,10 @@ pub struct ProgramPlayer {
     crossfade_enabled: bool,
     crossfade_curve: CrossfadeCurve,
     crossfade_duration_ns: u64,
+    /// Automatic ducking: reduce volume on duck-flagged tracks when dialogue is active.
+    duck_enabled: bool,
+    /// Ducking gain (linear multiplier, e.g., 0.5 for -6dB).
+    duck_gain: f64,
     /// When true, all audio output is suppressed (voiceover recording mode).
     master_muted: bool,
     proxy_paths: HashMap<String, String>,
@@ -1858,6 +1866,8 @@ impl ProgramPlayer {
                 crossfade_enabled: false,
                 crossfade_curve: CrossfadeCurve::default(),
                 crossfade_duration_ns: 200_000_000,
+                duck_enabled: false,
+                duck_gain: 1.0,
                 master_muted: false,
                 proxy_paths: HashMap::new(),
                 proxy_fallback_warned_keys: HashSet::new(),
@@ -1997,6 +2007,15 @@ impl ProgramPlayer {
         self.crossfade_curve = curve;
         self.crossfade_duration_ns = duration_ns;
         self.sync_preview_audio_levels(self.timeline_pos_ns);
+    }
+
+    pub fn set_duck_settings(&mut self, enabled: bool, amount_db: f64) {
+        self.duck_enabled = enabled;
+        self.duck_gain = if enabled {
+            10.0_f64.powf(amount_db.min(0.0) / 20.0)
+        } else {
+            1.0
+        };
     }
 
     fn cleanup_background_prerender_cache(&mut self) {
@@ -2970,6 +2989,7 @@ impl ProgramPlayer {
         self.teardown_prepreroll_sidecars();
         let _ = self.pipeline.set_state(gst::State::Ready);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
+        self.teardown_audio_multi_pipeline();
         self.apply_reverse_video_main_audio_ducking(None);
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
@@ -3391,14 +3411,41 @@ impl ProgramPlayer {
         if !self.master_muted {
             self.sync_audio_pipeline_eq(timeline_pos_ns);
         }
-        // Sync multi-audio pipeline volumes (for keyframe animation during playback).
+        // Sync multi-audio pipeline volumes (for keyframe animation + ducking).
+        // Determine if any non-ducked audio is present at this position (triggers ducking).
+        // Ducking is active when any track has duck=true AND non-ducked audio
+        // (dialogue) is present at the current position. No global preference gate
+        // needed — the per-track duck toggle is sufficient.
+        let any_track_ducks = self.audio_clips.iter().any(|c| c.duck);
+        let should_duck = any_track_ducks && {
+            // Check if any video clip with embedded audio is active (dialogue source).
+            let has_video_audio = self.clips.iter().any(|c| {
+                c.has_embedded_audio()
+                    && !c.is_audio_only
+                    && timeline_pos_ns >= c.timeline_start_ns
+                    && timeline_pos_ns < c.timeline_end_ns()
+            });
+            // Check if any non-ducked audio-only clip is active.
+            let has_non_ducked_audio = self.audio_clips.iter().enumerate().any(|(i, c)| {
+                !c.duck
+                    && timeline_pos_ns >= c.timeline_start_ns
+                    && timeline_pos_ns < c.timeline_end_ns()
+                    && self.audio_multi_active.contains(&i)
+            });
+            has_video_audio || has_non_ducked_audio
+        };
         for (&aidx, pad) in &self.audio_multi_pads {
             if let Some(clip) = self.audio_clips.get(aidx) {
-                let vol = if self.master_muted {
+                let mut vol = if self.master_muted {
                     0.0
                 } else {
                     clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
                 };
+                // Apply ducking reduction to tracks marked as duck targets.
+                if should_duck && clip.duck {
+                    let gain = 10.0_f64.powf(clip.duck_amount_db.min(0.0) / 20.0);
+                    vol *= gain;
+                }
                 pad.set_property("volume", vol);
             }
         }
@@ -13029,6 +13076,8 @@ mod tests {
             freeze_frame_source_ns: None,
             freeze_frame_hold_duration_ns: None,
             is_audio_only: false,
+            duck: false,
+            duck_amount_db: -6.0,
             track_index: 0,
             transition_after: String::new(),
             transition_after_ns: 0,

@@ -86,6 +86,9 @@ pub struct InspectorView {
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub measured_loudness_label: Label,
+    // Ducking controls
+    pub duck_check: gtk4::CheckButton,
+    pub duck_amount_slider: Scale,
     // EQ sliders (3 bands × 3 params)
     pub eq_freq_sliders: Vec<Scale>,
     pub eq_gain_sliders: Vec<Scale>,
@@ -1097,6 +1100,11 @@ impl InspectorView {
                 } else {
                     self.measured_loudness_label.set_text("");
                 }
+                // Ducking controls — read from the clip's track.
+                if let Some(track) = project.tracks.iter().find(|t| t.clips.iter().any(|tc| tc.id == c.id)) {
+                    self.duck_check.set_active(track.duck);
+                    self.duck_amount_slider.set_value(track.duck_amount_db);
+                }
                 // EQ sliders
                 for (i, band) in c.eq_bands.iter().enumerate() {
                     if i < self.eq_freq_sliders.len() {
@@ -1537,9 +1545,11 @@ pub fn build_inspector(
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
     on_normalize_audio: impl Fn(&str) + 'static,
+    on_duck_changed: impl Fn(&str, bool, f64) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
+    let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
     let on_frei0r_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_changed);
     let on_frei0r_params_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_params_changed);
@@ -2139,6 +2149,31 @@ pub fn build_inspector(
         eq_inner.append(&q_slider);
         eq_q_sliders.push(q_slider);
     }
+
+    // ── Ducking sub-section (inside Audio) ─────────────────────────────────
+    let duck_expander = Expander::new(Some("Ducking"));
+    duck_expander.set_expanded(false);
+    audio_inner.append(&duck_expander);
+    let duck_inner = GBox::new(Orientation::Vertical, 4);
+    duck_expander.set_child(Some(&duck_inner));
+
+    let duck_check = gtk4::CheckButton::with_label("Duck this track when dialogue is present");
+    duck_check.set_active(false);
+    duck_inner.append(&duck_check);
+
+    row_label(&duck_inner, "Duck Amount (dB)");
+    let duck_amount_slider = Scale::with_range(Orientation::Horizontal, -24.0, 0.0, 0.5);
+    duck_amount_slider.set_value(-6.0);
+    duck_amount_slider.set_draw_value(true);
+    duck_amount_slider.set_digits(1);
+    duck_amount_slider.add_mark(-6.0, gtk4::PositionType::Bottom, Some("-6 dB"));
+    duck_amount_slider.add_mark(-12.0, gtk4::PositionType::Bottom, Some("-12 dB"));
+    duck_inner.append(&duck_amount_slider);
+
+    let duck_hint = Label::new(Some("Lowers this track\u{2019}s volume when audio from\nnon-ducked tracks (e.g. dialogue) is playing"));
+    duck_hint.set_halign(gtk4::Align::Start);
+    duck_hint.add_css_class("dim-label");
+    duck_inner.append(&duck_hint);
 
     // ── Transform section (Video + Image only) ───────────────────────────────
     let transform_section = GBox::new(Orientation::Vertical, 8);
@@ -3046,6 +3081,34 @@ pub fn build_inspector(
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 on_normalize_audio(clip_id);
+            }
+        });
+    }
+
+    // Wire Duck controls
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_duck_changed = on_duck_changed.clone();
+        let duck_amount_slider_cb = duck_amount_slider.clone();
+        duck_check.connect_toggled(move |btn| {
+            if *updating.borrow() { return; }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                on_duck_changed(clip_id, btn.is_active(), duck_amount_slider_cb.value());
+            }
+        });
+    }
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_duck_changed = on_duck_changed.clone();
+        let duck_check_cb = duck_check.clone();
+        duck_amount_slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                on_duck_changed(clip_id, duck_check_cb.is_active(), s.value());
             }
         });
     }
@@ -5598,6 +5661,8 @@ pub fn build_inspector(
         pan_slider,
         normalize_btn,
         measured_loudness_label,
+        duck_check,
+        duck_amount_slider,
         eq_freq_sliders,
         eq_gain_sliders,
         eq_q_sliders,

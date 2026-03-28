@@ -37,6 +37,11 @@ pub enum McpCommand {
         solo: bool,
         reply: SyncSender<Value>,
     },
+    SetTrackDuck {
+        track_id: String,
+        duck: bool,
+        reply: SyncSender<Value>,
+    },
     SetTrackHeightPreset {
         track_id: String,
         height_preset: String,

@@ -522,6 +522,8 @@ pub fn show_preferences_dialog(
                 ),
                 crossfade_duration_ns: (crossfade_duration_ms.value().round() as u64)
                     .saturating_mul(1_000_000),
+                duck_enabled: current.duck_enabled,
+                duck_amount_db: current.duck_amount_db,
                 backup_enabled: backup_enabled_check.is_active(),
                 backup_max_versions: backup_max_versions_spin.value() as usize,
             });

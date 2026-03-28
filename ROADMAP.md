@@ -586,7 +586,7 @@ Tracking docs:
 - [ ] Audio Roles (Dialogue, Effects, Music) with submixing
 - [ ] Support for LV2 / LADSPA audio plugins
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
-- [ ] Automatic Ducking (music volume lowers during dialogue)
+- [x] Automatic Ducking (per-track `duck` toggle, volume reduced when dialogue/non-ducked audio is active; configurable amount in Preferences; real-time preview; MCP `set_track_duck` tool; FCPXML persistence)
 - [x] Audio normalization and peak-matching (LUFS + peak modes via FFmpeg `ebur128`/`volumedetect`; Inspector button, MCP `normalize_clip_audio` tool, undo, measured loudness display + FCPXML persistence)
 - [x] Built-in parametric EQ (3-band: Low/Mid/High with freq/gain/Q per band; GStreamer `equalizer-nbands` preview, FFmpeg `equalizer` export, gain keyframes, Inspector UI, FCPXML persistence, MCP `set_clip_eq` tool, undo)
 - [x] Waveform sync (align external audio to camera reference audio by waveform analysis; "Sync & Replace Audio" context menu action links clips and mutes camera embedded audio; MCP `sync_clips_by_audio` with `replace_audio` flag)

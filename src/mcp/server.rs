@@ -239,6 +239,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_track_duck",
+            "description": "Enable or disable automatic ducking on a track. When enabled, the track's volume is reduced when dialogue (video-embedded audio or non-ducked audio tracks) is present.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "duck": { "type": "boolean", "description": "Whether the track should be ducked when dialogue is present." }
+                },
+                "required": ["track_id", "duck"]
+            }
+        },
+        {
             "name": "set_track_height_preset",
             "description": "Set timeline display height preset for a track by id ('small', 'medium', or 'large').",
             "inputSchema": {
@@ -1276,6 +1288,11 @@ fn dispatch_tool_payload(
         "set_track_solo" => McpCommand::SetTrackSolo {
             track_id: args["track_id"].as_str().unwrap_or("").to_string(),
             solo: args["solo"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "set_track_duck" => McpCommand::SetTrackDuck {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            duck: args["duck"].as_bool().unwrap_or(false),
             reply: tx,
         },
         "set_track_height_preset" => McpCommand::SetTrackHeightPreset {

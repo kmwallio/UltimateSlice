@@ -715,12 +715,24 @@ pub fn export_project(
         } else {
             format!(",{eq_filter}")
         };
+        // Ducking filter: reduce volume when non-ducked audio overlaps.
+        let duck_filter = project
+            .tracks
+            .iter()
+            .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+            .map(|track| build_duck_filter(clip, track, &project.tracks))
+            .unwrap_or_default();
+        let duck_part = if duck_filter.is_empty() {
+            String::new()
+        } else {
+            format!(",{duck_filter}")
+        };
         let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
         let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
         let pre_pan = format!("{label}_prepan");
         let post_pan = format!("{label}_panned");
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter}{eq_part},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
         append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
@@ -1123,6 +1135,81 @@ fn build_keyframed_property_expression(
     let (first_ns, first_value, _, _) = deduped[0];
     let first_s = first_ns as f64 / 1_000_000_000.0;
     format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
+}
+
+/// Build an FFmpeg volume filter that applies ducking to a clip.
+/// Returns empty string if the clip's track doesn't have ducking enabled or
+/// there are no overlapping non-ducked audio sources.
+///
+/// The filter uses `between(t, start, end)` to detect time ranges where
+/// non-ducked audio overlaps, and applies the duck gain during those ranges.
+fn build_duck_filter(
+    clip: &Clip,
+    track: &crate::model::track::Track,
+    all_tracks: &[crate::model::track::Track],
+) -> String {
+    if !track.duck {
+        return String::new();
+    }
+
+    let clip_start = clip.timeline_start;
+    let clip_end = clip.timeline_start + clip.duration();
+    let duck_gain = 10.0_f64.powf(track.duck_amount_db.min(0.0) / 20.0);
+
+    // Find all time ranges where non-ducked audio overlaps this clip.
+    // Non-ducked audio sources: video clips with embedded audio + audio-only
+    // clips on non-ducked tracks.
+    let mut overlap_ranges: Vec<(f64, f64)> = Vec::new();
+
+    for t in all_tracks {
+        if t.id == track.id {
+            continue; // Skip the ducked track itself.
+        }
+        if t.duck {
+            continue; // Skip other ducked tracks.
+        }
+        for c in &t.clips {
+            let c_start = c.timeline_start;
+            let c_end = c.timeline_start + c.duration();
+            // Check overlap with the ducked clip.
+            if c_start < clip_end && c_end > clip_start {
+                // Convert to source-relative time for the ducked clip.
+                let overlap_start = c_start.max(clip_start).saturating_sub(clip_start);
+                let overlap_end = c_end.min(clip_end).saturating_sub(clip_start);
+                let start_s = overlap_start as f64 / 1e9;
+                let end_s = overlap_end as f64 / 1e9;
+                overlap_ranges.push((start_s, end_s));
+            }
+        }
+    }
+
+    if overlap_ranges.is_empty() {
+        return String::new();
+    }
+
+    // Merge overlapping ranges.
+    overlap_ranges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (s, e) in &overlap_ranges {
+        if let Some(last) = merged.last_mut() {
+            if *s <= last.1 {
+                last.1 = last.1.max(*e);
+                continue;
+            }
+        }
+        merged.push((*s, *e));
+    }
+
+    // Build the FFmpeg expression: duck during overlap ranges, normal otherwise.
+    // volume='if(between(t,S1,E1)+between(t,S2,E2)+..., DUCK_GAIN, 1.0)':eval=frame
+    let conditions: Vec<String> = merged
+        .iter()
+        .map(|(s, e)| format!("between(t,{s:.4},{e:.4})"))
+        .collect();
+    let cond_expr = conditions.join("+");
+    format!(
+        "volume='if({cond_expr},{duck_gain:.6},1.0)':eval=frame"
+    )
 }
 
 fn build_volume_filter(clip: &Clip) -> String {

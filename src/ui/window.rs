@@ -2448,6 +2448,10 @@ pub fn build_window(
         preferences_state.borrow().crossfade_curve.clone(),
         preferences_state.borrow().crossfade_duration_ns,
     );
+    prog_player_raw.set_duck_settings(
+        preferences_state.borrow().duck_enabled,
+        preferences_state.borrow().duck_amount_db,
+    );
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
@@ -2571,6 +2575,10 @@ pub fn build_window(
                             new_state.crossfade_enabled,
                             new_state.crossfade_curve.clone(),
                             new_state.crossfade_duration_ns,
+                        );
+                        prog_player.borrow_mut().set_duck_settings(
+                            new_state.duck_enabled,
+                            new_state.duck_amount_db,
                         );
                         if new_state.proxy_mode.is_enabled() {
                             // If the proxy scale changed, invalidate old entries so clips are
@@ -3350,6 +3358,25 @@ pub fn build_window(
                         Err(e) => Err(e.to_string()),
                     });
                 });
+            }
+        },
+        // on_duck_changed: update track duck settings from inspector
+        {
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            move |clip_id: &str, duck: bool, amount_db: f64| {
+                let mut proj = project.borrow_mut();
+                // Find the track containing this clip and update its duck settings.
+                for track in &mut proj.tracks {
+                    if track.clips.iter().any(|c| c.id == clip_id) {
+                        track.duck = duck;
+                        track.duck_amount_db = amount_db.clamp(-24.0, 0.0);
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
             }
         },
     );
@@ -6340,6 +6367,8 @@ pub fn build_window(
                             freeze_frame_source_ns: c.freeze_frame_source_ns,
                             freeze_frame_hold_duration_ns: c.freeze_frame_hold_duration_ns,
                             is_audio_only: audio_only,
+                            duck: t.duck,
+                            duck_amount_db: t.duck_amount_db,
                             anamorphic_desqueeze: c.anamorphic_desqueeze,
                             track_index: t_idx,
                             transition_after: c.transition_after.clone(),
@@ -8038,6 +8067,34 @@ fn handle_mcp_command(
                 }
                 Err(message) => {
                     reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetTrackDuck {
+            track_id,
+            duck,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    track.duck = duck;
+                    proj.dirty = true;
+                    Ok(())
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(serde_json::json!({"success": true, "track_id": track_id, "duck": duck}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(serde_json::json!({"success": false, "error": message})).ok();
                 }
             }
         }

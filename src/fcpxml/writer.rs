@@ -561,6 +561,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         .push_attribute(("us:track-locked", track.locked.to_string().as_str()));
                     asset_clip
                         .push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
+                    if track.duck {
+                        asset_clip.push_attribute(("us:track-duck", "true"));
+                        asset_clip.push_attribute((
+                            "us:track-duck-amount-db",
+                            track.duck_amount_db.to_string().as_str(),
+                        ));
+                    }
                     asset_clip.push_attribute((
                         "us:track-height",
                         match track.height_preset {
@@ -3389,6 +3396,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:track-muted"
             | "us:track-locked"
             | "us:track-soloed"
+            | "us:track-duck"
+            | "us:track-duck-amount-db"
             | "us:track-height"
             | "us:color-label"
             | "us:brightness"

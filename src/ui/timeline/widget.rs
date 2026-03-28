@@ -411,6 +411,38 @@ impl TimelineState {
         }
     }
 
+    fn duck_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        let track_idx = self.track_index_at_y(y)?;
+        let project = self.project.borrow();
+        let track = project.tracks.get(track_idx)?;
+        if track.kind != TrackKind::Audio {
+            return None;
+        }
+        let row_y = track_row_top(&project, track_idx);
+        let solo_x = track_label_solo_badge_x(self.show_track_audio_levels);
+        let badge_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
+        let badge_y = row_y + 6.0;
+        if x >= badge_x
+            && x <= badge_x + TRACK_LABEL_SOLO_BADGE_WIDTH
+            && y >= badge_y
+            && y <= badge_y + TRACK_LABEL_SOLO_BADGE_HEIGHT
+        {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn toggle_track_duck_by_index(&mut self, track_idx: usize) -> bool {
+        let mut proj = self.project.borrow_mut();
+        let Some(track) = proj.tracks.get_mut(track_idx) else {
+            return false;
+        };
+        track.duck = !track.duck;
+        proj.dirty = true;
+        true
+    }
+
     fn toggle_track_solo_by_index(&mut self, track_idx: usize) -> bool {
         let mut proj = self.project.borrow_mut();
         let Some(track) = proj.tracks.get_mut(track_idx) else {
@@ -3195,6 +3227,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                             return;
                         }
+                        if st.duck_badge_hit_track_index(x, y).is_some() {
+                            let changed = st
+                                .duck_badge_hit_track_index(x, y)
+                                .map(|track_idx| st.toggle_track_duck_by_index(track_idx))
+                                .unwrap_or(false);
+                            let proj_cb = if changed {
+                                st.on_project_changed.clone()
+                            } else {
+                                None
+                            };
+                            drop(st);
+                            if let Some(cb) = proj_cb {
+                                cb();
+                            }
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return;
+                        }
                         let mods = gesture.current_event_state();
                         let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
                         let ctrl_or_meta = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
@@ -3323,7 +3374,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let mut sel_cb: Option<Rc<dyn Fn(Option<String>)>> = None;
                     let mut new_sel: Option<String> = None;
 
-                    if x < TRACK_LABEL_WIDTH && st.solo_badge_hit_track_index(x, y).is_none() {
+                    if x < TRACK_LABEL_WIDTH && st.solo_badge_hit_track_index(x, y).is_none() && st.duck_badge_hit_track_index(x, y).is_none() {
                         if let Some(track_idx) = st.track_index_at_y(y) {
                             let selected = {
                                 let proj = st.project.borrow();
@@ -3651,6 +3702,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 } else if x < TRACK_LABEL_WIDTH
                     && y > RULER_HEIGHT
                     && st.solo_badge_hit_track_index(x, y).is_none()
+                    && st.duck_badge_hit_track_index(x, y).is_none()
                 {
                     // Drag started in track label area → track reorder
                     if let Some(track_idx) = st.track_index_at_y(y) {
@@ -5796,6 +5848,28 @@ fn draw_track_row(
     cr.set_font_size(10.0);
     let _ = cr.move_to(solo_x + 4.5, solo_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
     let _ = cr.show_text("S");
+
+    // Duck badge (only for audio tracks).
+    if track.kind == TrackKind::Audio {
+        let duck_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
+        let duck_y = solo_y;
+        if track.duck {
+            cr.set_source_rgb(0.2, 0.7, 0.9);
+        } else {
+            cr.set_source_rgb(0.35, 0.35, 0.4);
+        }
+        cr.rectangle(
+            duck_x,
+            duck_y,
+            TRACK_LABEL_SOLO_BADGE_WIDTH,
+            TRACK_LABEL_SOLO_BADGE_HEIGHT,
+        );
+        cr.fill().ok();
+        cr.set_source_rgb(0.1, 0.1, 0.12);
+        cr.set_font_size(10.0);
+        let _ = cr.move_to(duck_x + 4.5, duck_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
+        let _ = cr.show_text("D");
+    }
 
     if st.show_track_audio_levels {
         let meter_x = TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - 6.0;

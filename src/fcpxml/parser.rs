@@ -872,6 +872,12 @@ fn parse_asset_clip(
             if attrs.contains_key("us:track-soloed") {
                 track.soloed = track_soloed;
             }
+            if let Some(v) = attrs.get("us:track-duck") {
+                track.duck = v == "true";
+            }
+            if let Some(v) = attrs.get("us:track-duck-amount-db") {
+                track.duck_amount_db = v.parse().unwrap_or(-6.0);
+            }
             if attrs.contains_key("us:track-height") {
                 track.height_preset = track_height_preset;
             }
@@ -2416,6 +2422,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-muted"
             | "us:track-locked"
             | "us:track-soloed"
+            | "us:track-duck"
+            | "us:track-duck-amount-db"
             | "us:track-height"
             | "us:color-label"
             | "us:brightness"
