@@ -3538,6 +3538,8 @@ pub fn build_window(
     // ── Voiceover recorder ────────────────────────────────────────────────
     let voiceover_recorder: Rc<RefCell<crate::media::voiceover::VoiceoverRecorder>> =
         Rc::new(RefCell::new(crate::media::voiceover::VoiceoverRecorder::new()));
+    // Shared countdown counter for the program monitor overlay (0 = hidden).
+    let voiceover_countdown: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let voiceover_recording: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
 
     let (header, btn_record) = toolbar::build_toolbar(
@@ -3570,6 +3572,7 @@ pub fn build_window(
             let prog_player = prog_player.clone();
             let on_project_changed = on_project_changed.clone();
             let window_weak = window.downgrade();
+            let voiceover_countdown = voiceover_countdown.clone();
             move || {
                 // If already recording, stop.
                 if recording.get() {
@@ -3749,6 +3752,7 @@ pub fn build_window(
                 let prog_player = prog_player.clone();
                 let window_weak = window_weak.clone();
                 let project = project.clone();
+                let voiceover_countdown_cb = voiceover_countdown.clone();
                 #[allow(deprecated)]
                 dialog.connect_response(move |d, resp| {
                     if resp != gtk4::ResponseType::Accept {
@@ -3783,38 +3787,8 @@ pub fn build_window(
                     // NOTE: mute is applied AFTER play() inside the countdown timer,
                     // because play() rebuilds the pipeline and resets the audio sink.
 
-                    // Build a non-interactive countdown dialog.
-                    let countdown_win = if let Some(win) = window_weak.upgrade() {
-                        #[allow(deprecated)]
-                        let cw = gtk4::Window::builder()
-                            .title("Recording")
-                            .transient_for(&win)
-                            .modal(true)
-                            .resizable(false)
-                            .default_width(260)
-                            .default_height(120)
-                            .decorated(true)
-                            .deletable(false)
-                            .build();
-                        let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
-                        body.set_margin_start(24);
-                        body.set_margin_end(24);
-                        body.set_margin_top(24);
-                        body.set_margin_bottom(24);
-                        body.set_halign(gtk4::Align::Center);
-                        body.set_valign(gtk4::Align::Center);
-                        let number_label = gtk4::Label::new(Some("3"));
-                        number_label.set_css_classes(&["title-1"]);
-                        body.append(&number_label);
-                        let hint_label = gtk4::Label::new(Some("Recording starts in\u{2026}"));
-                        hint_label.add_css_class("dim-label");
-                        body.append(&hint_label);
-                        cw.set_child(Some(&body));
-                        cw.present();
-                        Some((cw, number_label))
-                    } else {
-                        None
-                    };
+                    // Show countdown overlay on the program monitor.
+                    voiceover_countdown_cb.set(3);
 
                     let countdown: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(3));
                     let recorder = recorder.clone();
@@ -3823,25 +3797,18 @@ pub fn build_window(
                     let window_weak = window_weak.clone();
                     let project = project.clone();
                     let mute_after_play = mute_playback;
+                    let vo_countdown = voiceover_countdown_cb.clone();
                     glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
                         if !recording.get() {
-                            if let Some((ref cw, _)) = countdown_win {
-                                cw.close();
-                            }
+                            vo_countdown.set(0);
                             return glib::ControlFlow::Break;
                         }
                         let remaining = countdown.get().saturating_sub(1);
                         countdown.set(remaining);
+                        vo_countdown.set(remaining);
                         if remaining > 0 {
-                            if let Some((_, ref label)) = countdown_win {
-                                label.set_text(&remaining.to_string());
-                            }
                             glib::ControlFlow::Continue
                         } else {
-                            // Close countdown dialog.
-                            if let Some((ref cw, _)) = countdown_win {
-                                cw.close();
-                            }
                             match recorder.borrow_mut().start_recording(
                                 playhead_ns,
                                 selected_device.as_ref(),
@@ -4812,6 +4779,68 @@ pub fn build_window(
         )
     };
 
+    // ── Voiceover countdown overlay on the program monitor ────────────────
+    let countdown_overlay_da = gtk4::DrawingArea::new();
+    countdown_overlay_da.set_hexpand(true);
+    countdown_overlay_da.set_vexpand(true);
+    countdown_overlay_da.set_halign(gtk4::Align::Fill);
+    countdown_overlay_da.set_valign(gtk4::Align::Fill);
+    countdown_overlay_da.set_can_target(false);
+    {
+        let cv = voiceover_countdown.clone();
+        countdown_overlay_da.set_draw_func(move |_da, cr, width, height| {
+            let val = cv.get();
+            if val == 0 || width <= 0 || height <= 0 {
+                return;
+            }
+            let w = width as f64;
+            let h = height as f64;
+            // Semi-transparent dark background.
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+            cr.rectangle(0.0, 0.0, w, h);
+            let _ = cr.fill();
+            // Large white countdown number.
+            let text = val.to_string();
+            let font_size = h * 0.35;
+            cr.set_font_size(font_size);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            if let Ok(extents) = cr.text_extents(&text) {
+                let x = (w - extents.width()) * 0.5 - extents.x_bearing();
+                let y = (h - extents.height()) * 0.5 - extents.y_bearing();
+                cr.move_to(x, y);
+                let _ = cr.show_text(&text);
+                // Hint text below.
+                cr.set_font_size(font_size * 0.18);
+                let hint = "Recording starts in\u{2026}";
+                if let Ok(hint_ext) = cr.text_extents(hint) {
+                    cr.move_to(
+                        (w - hint_ext.width()) * 0.5 - hint_ext.x_bearing(),
+                        y + font_size * 0.3,
+                    );
+                    let _ = cr.show_text(hint);
+                }
+            }
+        });
+    }
+    // Wrap the program monitor widget in an overlay so the countdown draws on top.
+    let prog_monitor_overlay = gtk4::Overlay::new();
+    prog_monitor_overlay.set_child(Some(&prog_monitor_widget));
+    prog_monitor_overlay.add_overlay(&countdown_overlay_da);
+    // Poll to redraw the countdown overlay when active.
+    {
+        let cv = voiceover_countdown.clone();
+        let da = countdown_overlay_da.clone();
+        let mut last_val = 0u32;
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            let v = cv.get();
+            if v != last_val {
+                last_val = v;
+                da.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     // Give the transform overlay access to picture_a so it can query the actual
     // paintable intrinsic dimensions for pixel-perfect frame rect alignment.
     // Also give it the canvas AspectFrame so canvas_video_rect() can use
@@ -4833,7 +4862,7 @@ pub fn build_window(
     docked_scopes_paned.set_resize_start_child(true);
     docked_scopes_paned.set_resize_end_child(true);
     docked_scopes_paned.set_shrink_end_child(true);
-    docked_scopes_paned.set_start_child(Some(&prog_monitor_widget));
+    docked_scopes_paned.set_start_child(Some(&prog_monitor_overlay));
     docked_scopes_paned.set_end_child(Option::<&gtk::Widget>::None);
     {
         let state = monitor_state.borrow().clone();
@@ -5138,7 +5167,7 @@ pub fn build_window(
     *on_toggle_popout_impl.borrow_mut() = Some({
         let app = app.clone();
         let docked_paned = docked_scopes_paned.clone();
-        let monitor = prog_monitor_widget.clone();
+        let monitor = prog_monitor_overlay.clone();
         let pop_cell = popout_window_cell.clone();
         let popped = monitor_popped.clone();
         let monitor_state = monitor_state.clone();
