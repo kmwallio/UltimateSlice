@@ -281,7 +281,8 @@ pub fn build_toolbar(
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
-) -> HeaderBar {
+    on_record_voiceover: impl Fn() + 'static + Clone,
+) -> (HeaderBar, Button) {
     let header = HeaderBar::new();
 
     let title = Label::new(Some("UltimateSlice"));
@@ -1614,6 +1615,16 @@ pub fn build_toolbar(
     export_group.append(&btn_export_more);
     header.pack_end(&export_group);
 
+    // ── Record Voiceover ────────────────────────────────────────────────────
+    let btn_record = Button::with_label("Record");
+    btn_record.set_tooltip_text(Some("Record voiceover from microphone at playhead position"));
+    btn_record.add_css_class("small-btn");
+    {
+        let on_record_voiceover = on_record_voiceover.clone();
+        btn_record.connect_clicked(move |_| on_record_voiceover());
+    }
+    header.pack_end(&btn_record);
+
     let sep_history = Separator::new(gtk::Orientation::Vertical);
     sep_history.add_css_class("toolbar-separator");
     header.pack_start(&sep_history);
@@ -1759,5 +1770,5 @@ pub fn build_toolbar(
             }));
     }
 
-    header
+    (header, btn_record)
 }

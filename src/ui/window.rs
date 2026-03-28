@@ -3535,7 +3535,12 @@ pub fn build_window(
             present_go_to_timecode_dialog(&win, &project, &timeline_state, &timeline_panel_cell);
         })
     };
-    let header = toolbar::build_toolbar(
+    // ── Voiceover recorder ────────────────────────────────────────────────
+    let voiceover_recorder: Rc<RefCell<crate::media::voiceover::VoiceoverRecorder>> =
+        Rc::new(RefCell::new(crate::media::voiceover::VoiceoverRecorder::new()));
+    let voiceover_recording: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+
+    let (header, btn_record) = toolbar::build_toolbar(
         project.clone(),
         library.clone(),
         timeline_state.clone(),
@@ -3556,8 +3561,343 @@ pub fn build_window(
             let cb = on_export_frame_gui.clone();
             move || cb()
         },
+        // on_record_voiceover — opens the voiceover recording dialog.
+        {
+            let recorder = voiceover_recorder.clone();
+            let recording = voiceover_recording.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let prog_player = prog_player.clone();
+            let on_project_changed = on_project_changed.clone();
+            let window_weak = window.downgrade();
+            move || {
+                // If already recording, stop.
+                if recording.get() {
+                    recording.set(false);
+                    prog_player.borrow_mut().pause();
+                    // Unmute playback audio.
+                    prog_player.borrow_mut().set_master_mute(false);
+                    let result = recorder.borrow_mut().stop_recording();
+                    if let Ok((file_path, duration_ns, start_position_ns)) = result {
+                        // Find target audio track (selected or first audio track).
+                        let track_id = {
+                            let proj = project.borrow();
+                            let ts = timeline_state.borrow();
+                            let selected_tid = ts.selected_track_id.clone();
+                            // Use selected track if it's an audio track.
+                            selected_tid
+                                .and_then(|tid| {
+                                    proj.tracks
+                                        .iter()
+                                        .find(|t| t.id == tid && t.kind == crate::model::track::TrackKind::Audio)
+                                        .map(|t| t.id.clone())
+                                })
+                                .or_else(|| {
+                                    proj.tracks
+                                        .iter()
+                                        .find(|t| t.kind == crate::model::track::TrackKind::Audio)
+                                        .map(|t| t.id.clone())
+                                })
+                        };
+                        let track_id = track_id.unwrap_or_else(|| {
+                            let mut proj = project.borrow_mut();
+                            let new_track = crate::model::track::Track::new_audio("Audio 1");
+                            let id = new_track.id.clone();
+                            proj.tracks.push(new_track);
+                            id
+                        });
+                        // Resolve non-overlapping start position.
+                        let placement_ns = {
+                            let proj = project.borrow();
+                            if let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) {
+                                crate::media::voiceover::find_non_overlapping_start(
+                                    &track.clips,
+                                    start_position_ns,
+                                    duration_ns,
+                                )
+                            } else {
+                                start_position_ns
+                            }
+                        };
+                        let clip = crate::model::clip::Clip::new(
+                            &file_path,
+                            duration_ns,
+                            placement_ns,
+                            crate::model::clip::ClipKind::Audio,
+                        );
+                        {
+                            let mut proj = project.borrow_mut();
+                            let mut ts = timeline_state.borrow_mut();
+                            if let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) {
+                                let old_clips = track.clips.clone();
+                                let mut new_clips = old_clips.clone();
+                                new_clips.push(clip);
+                                new_clips.sort_by_key(|c| c.timeline_start);
+                                let cmd = crate::undo::SetTrackClipsCommand {
+                                    track_id,
+                                    old_clips,
+                                    new_clips,
+                                    label: "Record voiceover".to_string(),
+                                };
+                                ts.history.execute(Box::new(cmd), &mut proj);
+                            }
+                        }
+                        on_project_changed();
+                    }
+                    recorder.borrow_mut().reset();
+                    if let Some(win) = window_weak.upgrade() {
+                        let proj = project.borrow();
+                        let title = format!("UltimateSlice \u{2014} {} \u{2022}", proj.title);
+                        win.set_title(Some(&title));
+                    }
+                    return;
+                }
+
+                // ── Open voiceover recording dialog ──────────────
+                let Some(win) = window_weak.upgrade() else { return };
+
+                #[allow(deprecated)]
+                let dialog = gtk4::Dialog::builder()
+                    .title("Record Voiceover")
+                    .transient_for(&win)
+                    .modal(true)
+                    .default_width(380)
+                    .build();
+
+                let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+                body.set_margin_start(16);
+                body.set_margin_end(16);
+                body.set_margin_top(16);
+                body.set_margin_bottom(16);
+
+                // Microphone selector
+                let mic_label = gtk4::Label::new(Some("Microphone"));
+                mic_label.set_halign(gtk4::Align::Start);
+                body.append(&mic_label);
+                let mic_dropdown = gtk4::ComboBoxText::new();
+                #[allow(deprecated)]
+                mic_dropdown.append(Some("default"), "System Default");
+                let devices = crate::media::voiceover::list_audio_input_devices();
+                for (i, dev) in devices.iter().enumerate() {
+                    #[allow(deprecated)]
+                    mic_dropdown.append(Some(&format!("dev_{i}")), &dev.display_name);
+                }
+                #[allow(deprecated)]
+                mic_dropdown.set_active_id(Some("default"));
+                body.append(&mic_dropdown);
+
+                // Mute playback checkbox
+                let mute_check = gtk4::CheckButton::with_label("Mute playback audio during recording");
+                mute_check.set_active(true);
+                body.append(&mute_check);
+
+                // Target track info
+                let track_hint = {
+                    let ts = timeline_state.borrow();
+                    let proj = project.borrow();
+                    let selected_tid = ts.selected_track_id.clone();
+                    let target = selected_tid
+                        .and_then(|tid| {
+                            proj.tracks.iter().find(|t| {
+                                t.id == tid
+                                    && t.kind == crate::model::track::TrackKind::Audio
+                            })
+                        })
+                        .or_else(|| {
+                            proj.tracks
+                                .iter()
+                                .find(|t| t.kind == crate::model::track::TrackKind::Audio)
+                        });
+                    if let Some(t) = target {
+                        format!("Target track: {}", t.label)
+                    } else {
+                        "A new audio track will be created".to_string()
+                    }
+                };
+                let track_label = gtk4::Label::new(Some(&track_hint));
+                track_label.set_halign(gtk4::Align::Start);
+                track_label.add_css_class("dim-label");
+                body.append(&track_label);
+
+                // Playhead position
+                let playhead_ns = timeline_state.borrow().playhead_ns;
+                let pos_label = gtk4::Label::new(Some(&format!(
+                    "Recording starts at: {:.2}s",
+                    playhead_ns as f64 / 1e9
+                )));
+                pos_label.set_halign(gtk4::Align::Start);
+                pos_label.add_css_class("dim-label");
+                body.append(&pos_label);
+
+                // Countdown info
+                let countdown_label = gtk4::Label::new(Some("3-second countdown before recording begins"));
+                countdown_label.set_halign(gtk4::Align::Start);
+                countdown_label.add_css_class("dim-label");
+                body.append(&countdown_label);
+
+                #[allow(deprecated)]
+                dialog.content_area().append(&body);
+
+                #[allow(deprecated)]
+                dialog.add_button("Cancel", gtk4::ResponseType::Cancel);
+                #[allow(deprecated)]
+                dialog.add_button("Start Recording", gtk4::ResponseType::Accept);
+
+                // Wire dialog response
+                let recorder = recorder.clone();
+                let recording = recording.clone();
+                let prog_player = prog_player.clone();
+                let window_weak = window_weak.clone();
+                let project = project.clone();
+                #[allow(deprecated)]
+                dialog.connect_response(move |d, resp| {
+                    if resp != gtk4::ResponseType::Accept {
+                        d.close();
+                        return;
+                    }
+                    d.close();
+
+                    // Read settings from dialog
+                    #[allow(deprecated)]
+                    let mic_id = mic_dropdown.active_id().map(|s| s.to_string());
+                    let mute_playback = mute_check.is_active();
+
+                    // Find selected device
+                    let selected_device: Option<gstreamer::Device> = mic_id
+                        .as_deref()
+                        .and_then(|id| {
+                            if id == "default" {
+                                None
+                            } else if let Some(idx_str) = id.strip_prefix("dev_") {
+                                idx_str
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|idx| devices.get(idx).map(|d| d.device.clone()))
+                            } else {
+                                None
+                            }
+                        });
+
+                    // Start countdown with a visible dialog.
+                    recording.set(true);
+                    // NOTE: mute is applied AFTER play() inside the countdown timer,
+                    // because play() rebuilds the pipeline and resets the audio sink.
+
+                    // Build a non-interactive countdown dialog.
+                    let countdown_win = if let Some(win) = window_weak.upgrade() {
+                        #[allow(deprecated)]
+                        let cw = gtk4::Window::builder()
+                            .title("Recording")
+                            .transient_for(&win)
+                            .modal(true)
+                            .resizable(false)
+                            .default_width(260)
+                            .default_height(120)
+                            .decorated(true)
+                            .deletable(false)
+                            .build();
+                        let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+                        body.set_margin_start(24);
+                        body.set_margin_end(24);
+                        body.set_margin_top(24);
+                        body.set_margin_bottom(24);
+                        body.set_halign(gtk4::Align::Center);
+                        body.set_valign(gtk4::Align::Center);
+                        let number_label = gtk4::Label::new(Some("3"));
+                        number_label.set_css_classes(&["title-1"]);
+                        body.append(&number_label);
+                        let hint_label = gtk4::Label::new(Some("Recording starts in\u{2026}"));
+                        hint_label.add_css_class("dim-label");
+                        body.append(&hint_label);
+                        cw.set_child(Some(&body));
+                        cw.present();
+                        Some((cw, number_label))
+                    } else {
+                        None
+                    };
+
+                    let countdown: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(3));
+                    let recorder = recorder.clone();
+                    let recording = recording.clone();
+                    let prog_player = prog_player.clone();
+                    let window_weak = window_weak.clone();
+                    let project = project.clone();
+                    let mute_after_play = mute_playback;
+                    glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+                        if !recording.get() {
+                            if let Some((ref cw, _)) = countdown_win {
+                                cw.close();
+                            }
+                            return glib::ControlFlow::Break;
+                        }
+                        let remaining = countdown.get().saturating_sub(1);
+                        countdown.set(remaining);
+                        if remaining > 0 {
+                            if let Some((_, ref label)) = countdown_win {
+                                label.set_text(&remaining.to_string());
+                            }
+                            glib::ControlFlow::Continue
+                        } else {
+                            // Close countdown dialog.
+                            if let Some((ref cw, _)) = countdown_win {
+                                cw.close();
+                            }
+                            match recorder.borrow_mut().start_recording(
+                                playhead_ns,
+                                selected_device.as_ref(),
+                            ) {
+                                Ok(_) => {
+                                    {
+                                        let mut pp = prog_player.borrow_mut();
+                                        pp.play();
+                                        if mute_after_play {
+                                            pp.set_master_mute(true);
+                                        }
+                                    }
+                                    if let Some(win) = window_weak.upgrade() {
+                                        let proj = project.borrow();
+                                        win.set_title(Some(&format!(
+                                            "UltimateSlice \u{2014} {} (Recording\u{2026})",
+                                            proj.title
+                                        )));
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("Voiceover start failed: {e}");
+                                    recording.set(false);
+                                }
+                            }
+                            glib::ControlFlow::Break
+                        }
+                    });
+                });
+
+                dialog.present();
+            }
+        },
     );
     window.set_titlebar(Some(&header));
+
+    // Sync Record button state with voiceover_recording flag.
+    {
+        let recording = voiceover_recording.clone();
+        let btn = btn_record.clone();
+        let mut was_recording = false;
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            let now = recording.get();
+            if now != was_recording {
+                was_recording = now;
+                if now {
+                    btn.set_label("Stop Recording");
+                    btn.add_css_class("destructive-action");
+                } else {
+                    btn.set_label("Record");
+                    btn.remove_css_class("destructive-action");
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // ── Root layout: horizontal paned (content | inspector) ──────────────
     let root_hpaned = Paned::new(Orientation::Horizontal);
@@ -9216,6 +9556,83 @@ fn handle_mcp_command(
                 reply
                     .send(serde_json::json!({"success": false, "error": "Clip not found"}))
                     .ok();
+            }
+        }
+
+        McpCommand::RecordVoiceover {
+            duration_ns,
+            track_index,
+            reply,
+        } => {
+            if duration_ns == 0 {
+                reply.send(serde_json::json!({"success": false, "error": "duration_ns must be > 0"})).ok();
+            } else {
+                let playhead_ns = timeline_state.borrow().playhead_ns;
+                // Find or create target audio track.
+                let track_id = {
+                    let mut proj = project.borrow_mut();
+                    if let Some(idx) = track_index {
+                        proj.tracks.get(idx).map(|t| t.id.clone())
+                    } else {
+                        proj.tracks
+                            .iter()
+                            .find(|t| t.kind == crate::model::track::TrackKind::Audio)
+                            .map(|t| t.id.clone())
+                            .or_else(|| {
+                                let new_track = crate::model::track::Track::new_audio("Audio 1");
+                                let id = new_track.id.clone();
+                                proj.tracks.push(new_track);
+                                Some(id)
+                            })
+                    }
+                };
+                if track_id.is_none() {
+                    reply.send(serde_json::json!({"success": false, "error": "Invalid track_index"})).ok();
+                } else {
+                let track_id = track_id.unwrap();
+                // Record synchronously (blocks MCP thread for duration_ns).
+                let mut rec = crate::media::voiceover::VoiceoverRecorder::new();
+                match rec.start_recording(playhead_ns, None) {
+                    Ok(file_path) => {
+                        let dur_ms = duration_ns / 1_000_000;
+                        std::thread::sleep(std::time::Duration::from_millis(dur_ms));
+                        match rec.stop_recording() {
+                            Ok((path, actual_dur_ns, start_ns)) => {
+                                let clip = crate::model::clip::Clip::new(
+                                    &path,
+                                    actual_dur_ns,
+                                    start_ns,
+                                    crate::model::clip::ClipKind::Audio,
+                                );
+                                let clip_id = clip.id.clone();
+                                {
+                                    let mut proj = project.borrow_mut();
+                                    if let Some(track) =
+                                        proj.tracks.iter_mut().find(|t| t.id == track_id)
+                                    {
+                                        track.add_clip(clip);
+                                    }
+                                    proj.dirty = true;
+                                }
+                                on_project_changed();
+                                reply.send(serde_json::json!({
+                                    "success": true,
+                                    "clip_id": clip_id,
+                                    "file_path": path,
+                                    "duration_ns": actual_dur_ns,
+                                    "timeline_start_ns": start_ns,
+                                })).ok();
+                            }
+                            Err(e) => {
+                                reply.send(serde_json::json!({"success": false, "error": e.to_string()})).ok();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        reply.send(serde_json::json!({"success": false, "error": e.to_string()})).ok();
+                    }
+                }
+            } // else (track_id found)
             }
         }
 

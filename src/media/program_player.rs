@@ -1072,6 +1072,11 @@ pub struct ProgramPlayer {
     /// Separate playbin for audio-only clips (music tracks etc.).
     audio_pipeline: gst::Element,
     audio_current_source: Option<AudioCurrentSource>,
+    /// Indices of audio clips currently playing in the multi-clip audio mixer.
+    audio_multi_active: Vec<usize>,
+    /// Separate pipeline for mixing multiple simultaneous audio-track clips.
+    /// Built on demand when >1 audio clip is active; torn down when ≤1 remain.
+    audio_multi_pipeline: Option<gst::Pipeline>,
     /// Clip index whose audiomixer pad is temporarily forced to 0.0 while
     /// reverse audio for that clip is routed through `audio_pipeline`.
     reverse_video_ducked_clip_idx: Option<usize>,
@@ -1099,6 +1104,8 @@ pub struct ProgramPlayer {
     crossfade_enabled: bool,
     crossfade_curve: CrossfadeCurve,
     crossfade_duration_ns: u64,
+    /// When true, all audio output is suppressed (voiceover recording mode).
+    master_muted: bool,
     proxy_paths: HashMap<String, String>,
     /// Proxy cache keys already reported as fallback-to-original in this session.
     /// Prevents warning spam while proxies are still being generated.
@@ -1492,6 +1499,7 @@ impl ProgramPlayer {
 
         // -- Audio mixer --------------------------------------------------------
         let audiomixer = gst::ElementFactory::make("audiomixer")
+            .property("ignore-inactive-pads", true)
             .build()
             .map_err(|_| anyhow!("audiomixer element not available"))?;
 
@@ -1824,6 +1832,8 @@ impl ProgramPlayer {
                 audio_clips: Vec::new(),
                 audio_pipeline,
                 audio_current_source: None,
+                audio_multi_active: Vec::new(),
+                audio_multi_pipeline: None,
                 reverse_video_ducked_clip_idx: None,
                 slots: Vec::new(),
                 timeline_pos_ns: 0,
@@ -1841,6 +1851,7 @@ impl ProgramPlayer {
                 crossfade_enabled: false,
                 crossfade_curve: CrossfadeCurve::default(),
                 crossfade_duration_ns: 200_000_000,
+                master_muted: false,
                 proxy_paths: HashMap::new(),
                 proxy_fallback_warned_keys: HashSet::new(),
                 bg_removal_paths: HashMap::new(),
@@ -2558,6 +2569,7 @@ impl ProgramPlayer {
         let _ = self.audio_pipeline.set_state(gst::State::Null);
         self.audio_pipeline.set_property("uri", "");
         let _ = self.audio_pipeline.set_state(gst::State::Ready);
+        self.teardown_audio_multi_pipeline();
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
         self.base_timeline_ns = 0;
@@ -2852,7 +2864,7 @@ impl ProgramPlayer {
         // Ensure playback starts with playback-rate seeks (including reverse)
         // even when slots were already loaded by paused-seek paths.
         for slot in &self.slots {
-            let clip = &self.clips[slot.clip_idx];
+            let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
             let _ = Self::seek_slot_decoder_with_retry(
                 slot,
                 clip,
@@ -2895,6 +2907,9 @@ impl ProgramPlayer {
         if self.audio_current_source.is_some() {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            let _ = mp.set_state(gst::State::Playing);
+        }
         self.state = PlayerState::Playing;
         self.base_timeline_ns = pos;
         self.play_start = Some(Instant::now());
@@ -2902,6 +2917,10 @@ impl ProgramPlayer {
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
         self.update_slot_queue_policy();
+        // Re-apply master mute if active (voiceover recording mode).
+        if self.master_muted {
+            self.set_master_mute(true);
+        }
     }
 
     pub fn pause(&mut self) {
@@ -2918,6 +2937,9 @@ impl ProgramPlayer {
         }
         let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            let _ = mp.set_state(gst::State::Paused);
+        }
         self.state = PlayerState::Paused;
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
@@ -3227,6 +3249,46 @@ impl ProgramPlayer {
         }
     }
 
+    /// Mute/unmute the main audio output (for voiceover recording).
+    pub fn set_master_mute(&mut self, mute: bool) {
+        self.master_muted = mute;
+        // Mute the main pipeline's audio sink.
+        if self.audio_sink.find_property("mute").is_some() {
+            self.audio_sink.set_property("mute", mute);
+        }
+        // Also set volume to 0 on the audio sink for backends that don't support mute.
+        if self.audio_sink.find_property("volume").is_some() {
+            self.audio_sink.set_property(
+                "volume",
+                if mute { 0.0_f64 } else { 1.0_f64 },
+            );
+        }
+        // Mute audiomixer pads (the actual per-clip mix volumes).
+        if mute {
+            for slot in &self.slots {
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    pad.set_property("volume", 0.0_f64);
+                }
+            }
+        }
+        // Also mute the audio-only pipeline.
+        if let Some(ref vol) = self.audio_volume_element {
+            vol.set_property("volume", if mute { 0.0 } else { 1.0 });
+        }
+        // Mute the multi-clip audio pipeline if active.
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            if let Some(sink) = mp.by_name("autoaudiosink0") {
+                if sink.find_property("mute").is_some() {
+                    sink.set_property("mute", mute);
+                }
+            }
+            // Also just set the pipeline to Ready when muted for a clean stop.
+            if mute {
+                let _ = mp.set_state(gst::State::Paused);
+            }
+        }
+    }
+
     fn set_audio_pipeline_volume(&self, volume: f64) {
         if let Some(ref vol_elem) = self.audio_volume_element {
             vol_elem.set_property("volume", volume);
@@ -3269,11 +3331,12 @@ impl ProgramPlayer {
 
     fn apply_main_audio_slot_volumes(&self, timeline_pos_ns: u64) {
         for slot in &self.slots {
-            if slot.is_prerender_slot {
+            // When master-muted, we still need to zero prerender slot pads.
+            if slot.is_prerender_slot && !self.master_muted {
                 continue;
             }
             if let Some(ref pad) = slot.audio_mixer_pad {
-                let volume = if slot.hidden {
+                let volume = if self.master_muted || slot.hidden {
                     0.0
                 } else {
                     self.effective_main_clip_volume(slot.clip_idx, timeline_pos_ns)
@@ -3305,12 +3368,18 @@ impl ProgramPlayer {
     fn sync_preview_audio_levels(&self, timeline_pos_ns: u64) {
         self.apply_main_audio_slot_volumes(timeline_pos_ns);
         if let Some(source) = self.audio_current_source {
-            let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
-            self.set_audio_pipeline_volume(volume);
-            let pan = self.effective_audio_source_pan(source, timeline_pos_ns);
-            self.set_audio_pipeline_pan(pan);
+            if self.master_muted {
+                self.set_audio_pipeline_volume(0.0);
+            } else {
+                let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
+                self.set_audio_pipeline_volume(volume);
+                let pan = self.effective_audio_source_pan(source, timeline_pos_ns);
+                self.set_audio_pipeline_pan(pan);
+            }
         }
-        self.sync_audio_pipeline_eq(timeline_pos_ns);
+        if !self.master_muted {
+            self.sync_audio_pipeline_eq(timeline_pos_ns);
+        }
     }
 
     pub fn poll(&mut self) -> bool {
@@ -6101,6 +6170,7 @@ impl ProgramPlayer {
         self.slots.iter().any(|slot| {
             !slot.hidden
                 && !slot.is_prerender_slot
+                
                 && self
                     .compute_transition_state(slot.clip_idx, timeline_pos_ns)
                     .is_some()
@@ -8346,7 +8416,13 @@ impl ProgramPlayer {
     /// decode, effects, and compositor pad entirely.
     fn build_audio_only_slot_for_clip(&mut self, clip_idx: usize) -> Option<VideoSlot> {
         let clip = self.clips[clip_idx].clone();
-        let (effective_path, using_proxy, proxy_key) = self.resolve_source_path_for_clip(&clip);
+        // For audio-only clips, always use the original source — proxy transcodes
+        // are video-optimized and add unnecessary decode overhead for pure audio.
+        let (effective_path, using_proxy, proxy_key) = if clip.is_audio_only {
+            (clip.source_path.clone(), false, clip.source_path.clone())
+        } else {
+            self.resolve_source_path_for_clip(&clip)
+        };
         let uri = format!("file://{}", effective_path);
 
         let clip_has_audio =
@@ -8397,29 +8473,50 @@ impl ProgramPlayer {
 
         // Create decoder with audio-only caps to skip video decode.
         let audio_caps = gst::Caps::builder("audio/x-raw").build();
-        let decoder = gst::ElementFactory::make("uridecodebin")
+        let mut builder = gst::ElementFactory::make("uridecodebin")
             .property("uri", &uri)
-            .property("caps", &audio_caps)
-            .build()
-            .ok()?;
+            .property("caps", &audio_caps);
+        // For audio-only clips, reduce buffering overhead.
+        if clip.is_audio_only {
+            builder = builder.property("use-buffering", false);
+        }
+        let decoder = builder.build().ok()?;
 
         if self.pipeline.add(&decoder).is_err() {
             return None;
         }
 
-        // Audio path: audioconvert → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
+        // Audio path: audioconvert → [equalizer-nbands?] → [audiopanorama?] → [level?] → audiomixer pad.
+        // For audio-only track clips, skip EQ/pan/level when they're at defaults to reduce overhead.
+        let needs_eq = clip.eq_bands.iter().any(|b| b.gain.abs() > 0.001);
+        let needs_pan = clip.pan.abs() > 0.001 || !clip.pan_keyframes.is_empty();
+        // Skip level metering for audio-only track clips to reduce CPU — the per-track
+        // meters will use the main pipeline's level elements for video-embedded audio.
+        let needs_level = !clip.is_audio_only;
         let (audio_conv, audio_equalizer, audio_panorama, audio_level, amix_pad) = {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
-            let mut eq = gst::ElementFactory::make("equalizer-nbands")
-                .property("num-bands", 3u32)
-                .build()
-                .ok();
-            let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
-            let mut lv = gst::ElementFactory::make("level")
-                .property("post-messages", true)
-                .property("interval", 50_000_000u64)
-                .build()
-                .ok();
+            let mut eq = if needs_eq {
+                gst::ElementFactory::make("equalizer-nbands")
+                    .property("num-bands", 3u32)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
+            let mut ap = if needs_pan {
+                gst::ElementFactory::make("audiopanorama").build().ok()
+            } else {
+                None
+            };
+            let mut lv = if needs_level {
+                gst::ElementFactory::make("level")
+                    .property("post-messages", true)
+                    .property("interval", 50_000_000u64)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
                     let mut link_src = ac.static_pad("src");
@@ -8446,8 +8543,6 @@ impl ProgramPlayer {
                             log::warn!("build_audio_only_slot: failed to add equalizer to pipeline");
                             eq = None;
                         }
-                    } else {
-                        log::warn!("build_audio_only_slot: equalizer-nbands element not available");
                     }
                     if let Some(ref pano) = ap {
                         if self.pipeline.add(pano).is_ok() {
@@ -11566,7 +11661,6 @@ impl ProgramPlayer {
         }
         true
     }
-
     fn build_live_video_slots_for_active(&mut self, active: &[usize], was_playing: bool) {
         self.prerender_active_clips = None;
         self.current_prerender_segment_key = None;
@@ -11576,6 +11670,8 @@ impl ProgramPlayer {
             if clip_idx < self.clips.len() && self.clips[clip_idx].is_adjustment {
                 continue;
             }
+            // Audio-only clips are handled by the separate audio pipeline,
+            // not the main compositor pipeline (to avoid clock interference).
             // Compute transition-enter offset for clips entering via transition overlap.
             let trans_offset = self.transition_enter_offset_for_clip(clip_idx);
             // When experimental preview optimizations are enabled, use lightweight
@@ -11885,7 +11981,7 @@ impl ProgramPlayer {
             self.clip_seek_flags()
         };
         for slot in &self.slots {
-            let clip = &self.clips[slot.clip_idx];
+            let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
             if was_playing {
                 let ok = Self::seek_slot_decoder_with_retry(
                     slot,
@@ -12185,15 +12281,210 @@ impl ProgramPlayer {
                 }
             }
         }
+        // Poll multi-audio pipeline bus for level messages.
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            if let Some(bus) = mp.bus() {
+                while let Some(msg) = bus.pop() {
+                    if let gstreamer::MessageView::Element(e) = msg.view() {
+                        if let Some(s) = e.structure() {
+                            if s.name() == "level" {
+                                if let Ok(peak) = s.get::<glib::ValueArray>("peak") {
+                                    let vals = peak.as_slice();
+                                    let l = vals
+                                        .first()
+                                        .and_then(|v| v.get::<f64>().ok())
+                                        .unwrap_or(-60.0);
+                                    let r =
+                                        vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
+                                    self.push_master_peak(l, r);
+                                    // Route level to all active audio tracks.
+                                    let active_copy = self.audio_multi_active.clone();
+                                    let track_indices: Vec<usize> = active_copy
+                                        .iter()
+                                        .filter_map(|&aidx| {
+                                            self.audio_clips.get(aidx).map(|c| c.track_index)
+                                        })
+                                        .collect();
+                                    for ti in track_indices {
+                                        self.push_track_peak(ti, l, r);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         eos
     }
 
     // ── Audio-only pipeline ────────────────────────────────────────────────
 
+    /// Build a separate pipeline that mixes multiple audio-track clips.
+    /// This pipeline is independent from the main compositor pipeline to
+    /// avoid clock interference that causes video stuttering.
+    fn rebuild_audio_multi_pipeline(&mut self, active: &[usize], timeline_pos_ns: u64) {
+        if active == self.audio_multi_active && self.audio_multi_pipeline.is_some() {
+            return; // No change needed.
+        }
+        self.teardown_audio_multi_pipeline();
+
+        // Build pipeline string: multiple uridecodebin sources → audiomixer → autoaudiosink
+        let pipeline = gst::Pipeline::builder().name("audio-multi").build();
+        let mixer = match gst::ElementFactory::make("audiomixer")
+            .property("ignore-inactive-pads", true)
+            .build()
+        {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let conv_out = match gst::ElementFactory::make("audioconvert").build() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let sink = match gst::ElementFactory::make("autoaudiosink").build() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if pipeline.add_many([&mixer, &conv_out, &sink]).is_err() {
+            return;
+        }
+        if gst::Element::link_many([&mixer, &conv_out, &sink]).is_err() {
+            return;
+        }
+
+        for &aidx in active {
+            let clip = &self.audio_clips[aidx];
+            let source_path = &clip.source_path;
+            if !std::path::Path::new(source_path).exists() {
+                continue;
+            }
+            let uri = format!("file://{source_path}");
+            let audio_caps = gst::Caps::builder("audio/x-raw").build();
+            let decoder = match gst::ElementFactory::make("uridecodebin")
+                .property("uri", &uri)
+                .property("caps", &audio_caps)
+                .property("use-buffering", false)
+                .build()
+            {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let ac = match gst::ElementFactory::make("audioconvert").build() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // Level element for per-track metering.
+            let lv = gst::ElementFactory::make("level")
+                .property("post-messages", true)
+                .property("interval", 50_000_000u64)
+                .build()
+                .ok();
+            let mut elems: Vec<&gst::Element> = vec![&decoder, &ac];
+            if let Some(ref l) = lv {
+                elems.push(l);
+            }
+            if pipeline.add_many(elems.iter().copied()).is_err() {
+                continue;
+            }
+            // Link audioconvert → level (if present).
+            let link_src_pad = if let Some(ref l) = lv {
+                if let (Some(ac_src), Some(lv_sink)) = (ac.static_pad("src"), l.static_pad("sink"))
+                {
+                    let _ = ac_src.link(&lv_sink);
+                    l.static_pad("src")
+                } else {
+                    ac.static_pad("src")
+                }
+            } else {
+                ac.static_pad("src")
+            };
+
+            // Request audiomixer pad and set volume.
+            let vol = if self.master_muted {
+                0.0
+            } else {
+                clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
+            };
+            if let Some(pad) = mixer.request_pad_simple("sink_%u") {
+                pad.set_property("volume", vol);
+                if let Some(src) = link_src_pad {
+                    let _ = src.link(&pad);
+                }
+            }
+
+            // Dynamic pad linking for uridecodebin.
+            let ac_for_cb = ac.clone();
+            decoder.connect_pad_added(move |_, pad| {
+                let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
+                if let Some(caps) = caps {
+                    if let Some(s) = caps.structure(0) {
+                        if s.name().starts_with("audio/") {
+                            if let Some(sink) = ac_for_cb.static_pad("sink") {
+                                if !sink.is_linked() {
+                                    let _ = pad.link(&sink);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            let _ = ac.sync_state_with_parent();
+            let _ = decoder.sync_state_with_parent();
+        }
+
+        // Start the pipeline and seek to the correct position.
+        let _ = pipeline.set_state(gst::State::Paused);
+        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(2)));
+        let _ = pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            gst::ClockTime::from_nseconds(timeline_pos_ns),
+        );
+        let _ = pipeline.set_state(gst::State::Playing);
+
+        log::info!(
+            "audio_multi_pipeline: built with {} sources at pos={:.2}s",
+            active.len(),
+            timeline_pos_ns as f64 / 1e9
+        );
+
+        self.audio_multi_active = active.to_vec();
+        self.audio_multi_pipeline = Some(pipeline);
+    }
+
+    fn teardown_audio_multi_pipeline(&mut self) {
+        if let Some(ref pipeline) = self.audio_multi_pipeline {
+            let _ = pipeline.set_state(gst::State::Null);
+            let _ = pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+        }
+        self.audio_multi_pipeline = None;
+        self.audio_multi_active.clear();
+    }
+
     fn audio_clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
-        self.audio_clips.iter().position(|c| {
-            timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
-        })
+        // Return the highest-track-index active clip (topmost audio track wins
+        // when the single-playbin pipeline can only play one source at a time).
+        self.audio_clips
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+            })
+            .max_by_key(|(_, c)| c.track_index)
+            .map(|(i, _)| i)
+    }
+
+    /// Return all audio clip indices active at the given position.
+    fn audio_clips_active_at(&self, timeline_pos_ns: u64) -> Vec<usize> {
+        self.audio_clips
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn load_audio_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
@@ -12219,6 +12510,8 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
             self.audio_pipeline.set_property("uri", &uri);
             let _ = self.audio_pipeline.set_state(gst::State::Paused);
+            // Wait for Paused so pads are linked before seeking.
+            let _ = self.audio_pipeline.state(Some(gst::ClockTime::from_seconds(2)));
             let _ = self.audio_pipeline.seek(
                 clip.seek_rate(),
                 clip.audio_seek_flags(),
@@ -12292,22 +12585,48 @@ impl ProgramPlayer {
         let reverse_video_audio = self.reverse_video_clip_at_for_audio(timeline_pos_ns);
         self.apply_reverse_video_main_audio_ducking(reverse_video_audio);
         if let Some(idx) = reverse_video_audio {
+            self.teardown_audio_multi_pipeline();
             self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
-        } else if let Some(idx) = self.audio_clip_at(timeline_pos_ns) {
-            self.load_audio_clip_idx(idx, timeline_pos_ns);
         } else {
-            let _ = self.audio_pipeline.set_state(gst::State::Ready);
-            self.audio_current_source = None;
+            let active = self.audio_clips_active_at(timeline_pos_ns);
+            if active.len() > 1 {
+                // Multiple audio clips overlap — use dedicated multi-clip mixer.
+                let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                self.audio_current_source = None;
+                self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
+            } else if let Some(&idx) = active.first() {
+                self.teardown_audio_multi_pipeline();
+                self.load_audio_clip_idx(idx, timeline_pos_ns);
+            } else {
+                self.teardown_audio_multi_pipeline();
+                let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                self.audio_current_source = None;
+            }
         }
         self.sync_preview_audio_levels(timeline_pos_ns);
     }
 
     fn poll_audio(&mut self, timeline_pos_ns: u64) {
+        // Check for multi-clip audio overlap.
+        let active = self.audio_clips_active_at(timeline_pos_ns);
+        if active.len() > 1 {
+            // Multi-clip path: dedicated mixer pipeline handles all active audio clips.
+            if active != self.audio_multi_active {
+                let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                self.audio_current_source = None;
+                self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
+            }
+            self.sync_preview_audio_levels(timeline_pos_ns);
+            return;
+        }
+        // Single-clip or no-clip path: use the existing playbin pipeline.
+        if self.audio_multi_pipeline.is_some() {
+            self.teardown_audio_multi_pipeline();
+        }
         let wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(timeline_pos_ns) {
             Some(AudioCurrentSource::ReverseVideoClip(idx))
         } else {
-            self.audio_clip_at(timeline_pos_ns)
-                .map(AudioCurrentSource::AudioClip)
+            active.first().map(|&i| AudioCurrentSource::AudioClip(i))
         };
         self.apply_reverse_video_main_audio_ducking(match wanted {
             Some(AudioCurrentSource::ReverseVideoClip(idx)) => Some(idx),
@@ -12329,8 +12648,12 @@ impl ProgramPlayer {
                 }
             }
         } else if let Some(source) = self.audio_current_source {
-            let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
-            self.set_audio_pipeline_volume(volume);
+            if self.master_muted {
+                self.set_audio_pipeline_volume(0.0);
+            } else {
+                let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
+                self.set_audio_pipeline_volume(volume);
+            }
         }
         self.sync_preview_audio_levels(timeline_pos_ns);
     }

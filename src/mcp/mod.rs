@@ -255,6 +255,11 @@ pub enum McpCommand {
         target_level: f64,
         reply: SyncSender<Value>,
     },
+    RecordVoiceover {
+        duration_ns: u64,
+        track_index: Option<usize>,
+        reply: SyncSender<Value>,
+    },
     SetClipBlendMode {
         clip_id: String,
         blend_mode: String,

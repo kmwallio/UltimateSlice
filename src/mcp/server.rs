@@ -735,6 +735,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "record_voiceover",
+            "description": "Record audio from the default microphone for a fixed duration and place it as a clip on an audio track at the current playhead position. Blocks while recording.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "duration_ns": { "type": "integer", "description": "Recording duration in nanoseconds." },
+                    "track_index": { "type": "integer", "description": "Target audio track index (default: first audio track)." }
+                },
+                "required": ["duration_ns"]
+            }
+        },
+        {
             "name": "set_clip_blend_mode",
             "description": "Set compositing blend mode for a clip by id.",
             "inputSchema": {
@@ -1543,6 +1555,11 @@ fn dispatch_tool_payload(
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             mode: args.get("mode").and_then(|v| v.as_str()).unwrap_or("lufs").to_string(),
             target_level: args.get("target_level").and_then(|v| v.as_f64()).unwrap_or(-14.0),
+            reply: tx,
+        },
+        "record_voiceover" => McpCommand::RecordVoiceover {
+            duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
+            track_index: args.get("track_index").and_then(|v| v.as_u64()).map(|v| v as usize),
             reply: tx,
         },
         "set_clip_blend_mode" => McpCommand::SetClipBlendMode {

@@ -585,7 +585,7 @@ Tracking docs:
   - [ ] Pitch-shift effect per clip (transpose audio without changing duration)
 - [ ] Audio Roles (Dialogue, Effects, Music) with submixing
 - [ ] Support for LV2 / LADSPA audio plugins
-- [ ] Voiceover recording tool with countdown and punch-in
+- [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
 - [ ] Automatic Ducking (music volume lowers during dialogue)
 - [x] Audio normalization and peak-matching (LUFS + peak modes via FFmpeg `ebur128`/`volumedetect`; Inspector button, MCP `normalize_clip_audio` tool, undo, measured loudness display + FCPXML persistence)
 - [x] Built-in parametric EQ (3-band: Low/Mid/High with freq/gain/Q per band; GStreamer `equalizer-nbands` preview, FFmpeg `equalizer` export, gain keyframes, Inspector UI, FCPXML persistence, MCP `set_clip_eq` tool, undo)
