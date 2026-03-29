@@ -4,7 +4,7 @@ use glib;
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label,
-    Orientation, Picture, Separator, Stack,
+    Orientation, Picture, Popover, Separator, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -440,22 +440,62 @@ pub fn build_preview(
     let btn_set_in = Button::with_label("Set In (I)");
     let btn_set_out = Button::with_label("Set Out (O)");
     let btn_prev_frame = Button::with_label("◀▮");
+    btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     let btn_stop = Button::with_label("⏹");
     let btn_play_pause = Button::with_label("▶");
     let btn_next_frame = Button::with_label("▮▶");
-    let btn_append = Button::with_label("⬇ Append");
-    let btn_insert = Button::with_label("⤵ Insert");
-    let btn_overwrite = Button::with_label("⏺ Overwrite");
-    btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     btn_next_frame.set_tooltip_text(Some("Step forward one frame (→)"));
-    btn_append.set_tooltip_text(Some("Append selection to timeline"));
-    btn_insert.set_tooltip_text(Some("Insert at playhead, shifting subsequent clips (,)"));
-    btn_overwrite.set_tooltip_text(Some(
+    // "Add to Timeline" split button — primary action (Append) + ▼ dropdown.
+    let btn_add = Button::with_label("⬇ Add");
+    btn_add.set_tooltip_text(Some("Append clip selection to the timeline"));
+    btn_add.set_sensitive(false);
+
+    let btn_add_more = Button::with_label("▼");
+    btn_add_more.set_tooltip_text(Some("More add options: Append, Insert, Overwrite"));
+    btn_add_more.set_sensitive(false);
+
+    // Popover for the ▼ side of the split button.
+    let add_pop = Popover::new();
+    let add_pop_box = GBox::new(Orientation::Vertical, 2);
+    add_pop_box.set_margin_start(4);
+    add_pop_box.set_margin_end(4);
+    add_pop_box.set_margin_top(4);
+    add_pop_box.set_margin_bottom(4);
+
+    let btn_pop_append = Button::with_label("⬇ Append");
+    btn_pop_append.add_css_class("flat");
+    btn_pop_append.set_tooltip_text(Some("Append selection to end of timeline"));
+
+    let btn_pop_insert = Button::with_label("⤵ Insert");
+    btn_pop_insert.add_css_class("flat");
+    btn_pop_insert.set_tooltip_text(Some("Insert at playhead, shifting subsequent clips (,)"));
+
+    let btn_pop_overwrite = Button::with_label("⏺ Overwrite");
+    btn_pop_overwrite.add_css_class("flat");
+    btn_pop_overwrite.set_tooltip_text(Some(
         "Overwrite at playhead, replacing existing material (.)",
     ));
-    btn_append.set_sensitive(false); // enabled once a source is loaded
-    btn_insert.set_sensitive(false);
-    btn_overwrite.set_sensitive(false);
+
+    add_pop_box.append(&btn_pop_append);
+    add_pop_box.append(&btn_pop_insert);
+    add_pop_box.append(&btn_pop_overwrite);
+    add_pop.set_child(Some(&add_pop_box));
+    add_pop.set_parent(&btn_add_more);
+    {
+        let add_pop = add_pop.clone();
+        btn_add_more.connect_clicked(move |_| {
+            if add_pop.is_visible() {
+                add_pop.popdown();
+            } else {
+                add_pop.popup();
+            }
+        });
+    }
+
+    let add_group = GBox::new(Orientation::Horizontal, 0);
+    add_group.add_css_class("linked");
+    add_group.append(&btn_add);
+    add_group.append(&btn_add_more);
 
     controls.append(&btn_set_in);
     controls.append(&btn_prev_frame);
@@ -463,9 +503,7 @@ pub fn build_preview(
     controls.append(&btn_play_pause);
     controls.append(&btn_next_frame);
     controls.append(&btn_set_out);
-    controls.append(&btn_append);
-    controls.append(&btn_insert);
-    controls.append(&btn_overwrite);
+    controls.append(&add_group);
     vbox.append(&controls);
 
     // Shuttle speed state for J/K/L: negative = reverse, 0 = paused, positive = forward.
@@ -523,23 +561,40 @@ pub fn build_preview(
         });
     }
 
-    // Append
+    // Primary "Add" button defaults to Append.
     {
-        btn_append.connect_clicked(move |_| {
+        let on_append = on_append.clone();
+        btn_add.connect_clicked(move |_| {
             on_append();
         });
     }
 
-    // Insert at playhead
+    // Popover: Append
     {
-        btn_insert.connect_clicked(move |_| {
+        let on_append = on_append.clone();
+        let add_pop = add_pop.clone();
+        btn_pop_append.connect_clicked(move |_| {
+            add_pop.popdown();
+            on_append();
+        });
+    }
+
+    // Popover: Insert at playhead
+    {
+        let on_insert = on_insert.clone();
+        let add_pop = add_pop.clone();
+        btn_pop_insert.connect_clicked(move |_| {
+            add_pop.popdown();
             on_insert();
         });
     }
 
-    // Overwrite at playhead
+    // Popover: Overwrite at playhead
     {
-        btn_overwrite.connect_clicked(move |_| {
+        let on_overwrite = on_overwrite.clone();
+        let add_pop = add_pop.clone();
+        btn_pop_overwrite.connect_clicked(move |_| {
+            add_pop.popdown();
             on_overwrite();
         });
     }
@@ -745,9 +800,8 @@ pub fn build_preview(
         let shuttle_speed = shuttle_speed.clone();
         let frame_ns = frame_ns.clone();
         let update_marks_bar = update_marks_bar.clone();
-        let btn_append = btn_append.clone();
-        let btn_insert = btn_insert.clone();
-        let btn_overwrite = btn_overwrite.clone();
+        let btn_add = btn_add.clone();
+        let btn_add_more = btn_add_more.clone();
         let btn_close_preview = btn_close_preview.clone();
         let picture_weak = picture.downgrade();
         // Track last prescale size to avoid redundant updates
@@ -841,9 +895,8 @@ pub fn build_preview(
             {
                 let m = source_marks.borrow();
                 // Enable append once a source is loaded
-                btn_append.set_sensitive(!m.path.is_empty());
-                btn_insert.set_sensitive(!m.path.is_empty());
-                btn_overwrite.set_sensitive(!m.path.is_empty());
+                btn_add.set_sensitive(!m.path.is_empty());
+                btn_add_more.set_sensitive(!m.path.is_empty());
                 btn_close_preview.set_sensitive(!m.path.is_empty());
                 update_marks_bar(&m);
             }
