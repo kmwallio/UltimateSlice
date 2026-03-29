@@ -255,8 +255,9 @@ pub fn export_project(
 
     let sec_base = primary_clips.len();
 
-    // Audio-only clip inputs
+    // Audio-only clip inputs (skipped for GIF — no audio in output)
     let audio_base = sec_base + secondary_clips_flat.len();
+    if options.container != Container::Gif {
     for clip in &audio_clips {
         let in_s = clip.source_in as f64 / 1_000_000_000.0;
         let src_dur_s = clip.source_duration() as f64 / 1_000_000_000.0;
@@ -266,6 +267,7 @@ pub fn export_project(
             .arg(format!("{src_dur_s:.6}"))
             .arg("-i")
             .arg(&clip.source_path);
+    }
     }
 
     // Chapter metadata input (FFMETADATA file from project markers).
@@ -642,6 +644,9 @@ pub fn export_project(
             HashMap::new()
         };
 
+    // Skip all audio filter construction for GIF — no audio output is needed.
+    if options.container != Container::Gif {
+
     // Embedded audio from primary video clips, with per-clip volume scaling
     for (i, clip) in primary_clips.iter().enumerate() {
         if clip.kind == ClipKind::Video
@@ -768,6 +773,8 @@ pub fn export_project(
             .unwrap_or_default();
         audio_labels.push((label, role));
     }
+
+    } // end `if options.container != Container::Gif` for per-clip audio filters
 
     // Mix all audio streams.
     // Use `duration=longest` (default) but trim the amix output to the
