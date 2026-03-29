@@ -2345,10 +2345,26 @@ pub fn build_window(
                 let player_for_bus = player.clone();
                 let source_original_uri_for_proxy_fallback =
                     source_original_uri_for_proxy_fallback.clone();
+                // Debounce: ignore repeated errors within 2 s of the last
+                // handled error.  VA-API dmabuf errors can flood in at 30 fps;
+                // without a cooldown the proxy-fallback code runs on every
+                // already-queued error message after the first reload, causing
+                // an infinite HW→SW→HW→… loop.
+                let last_error_handled =
+                    std::rc::Rc::new(std::cell::Cell::new(std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(10))
+                        .unwrap_or(std::time::Instant::now())));
                 let _watch = bus.add_watch_local(move |_bus, msg: &gstreamer::Message| {
                     use gstreamer::MessageView;
                     match msg.view() {
                         MessageView::Error(err) => {
+                            // Debounce: only act on errors that are >2s apart.
+                            let now = std::time::Instant::now();
+                            let elapsed = now.duration_since(last_error_handled.get());
+                            if elapsed < std::time::Duration::from_secs(2) {
+                                return glib::ControlFlow::Continue;
+                            }
+                            last_error_handled.set(now);
                             log::error!(
                                 "Source preview pipeline error: {} (debug: {:?})",
                                 err.error(),

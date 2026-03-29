@@ -604,20 +604,26 @@ impl Player {
         if current == mode {
             return;
         }
+        // Always keep the software_video_filter active regardless of decode mode.
+        // In HardwareFast mode, VA-API outputs DMA-buf frames; without the filter
+        // playsink's internal videoconvertscale can produce odd-height output
+        // (e.g. 1156×495) that is invalid for YU12 DMA-buf format, causing a
+        // torrent of per-frame "not valid for dmabuf" errors and a black display.
+        // The prescale filter (≤640×360, I420) enforces even dimensions and keeps
+        // CPU load low, so removing it in HW mode offers no practical benefit for
+        // a source-preview widget.
         match mode {
             SourceDecodeMode::SoftwareFiltered => {
                 self.set_va_decoder_rank_policy(false);
                 self.set_apple_decoder_rank_policy(false);
-                if let Some(ref filter) = self.software_video_filter {
-                    self.pipeline.set_property("video-filter", filter);
-                }
             }
             SourceDecodeMode::HardwareFast => {
                 self.set_va_decoder_rank_policy(true);
                 self.set_apple_decoder_rank_policy(true);
-                self.pipeline
-                    .set_property("video-filter", Option::<&gst::Element>::None);
             }
+        }
+        if let Some(ref filter) = self.software_video_filter {
+            self.pipeline.set_property("video-filter", filter);
         }
         *self.decode_mode.lock().unwrap() = mode;
     }
