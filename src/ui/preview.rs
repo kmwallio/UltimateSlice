@@ -4,7 +4,7 @@ use glib;
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label,
-    Orientation, Picture, Separator,
+    Orientation, Picture, Separator, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,11 +13,8 @@ const NS_PER_SECOND: f64 = 1_000_000_000.0;
 /// Default frame duration at 24 fps (nanoseconds)
 const DEFAULT_FRAME_NS: u64 = 41_666_667;
 
-/// Builds the source-preview panel: video display + in/out scrubber + transport.
-///
-/// Returns `(widget, source_marks)` — callers read `source_marks` to get the
-/// current in/out selection when appending to the timeline.
-/// Returns `(widget, source_marks, clip_name_label)`.
+/// Returns `(widget, source_marks, clip_name_label, set_audio_only)`.
+/// `set_audio_only(true)` shows the audio-only banner in place of the video display.
 pub fn build_preview(
     player: Rc<RefCell<Player>>,
     paintable: gdk4::Paintable,
@@ -25,7 +22,7 @@ pub fn build_preview(
     on_insert: Rc<dyn Fn()>,
     on_overwrite: Rc<dyn Fn()>,
     on_close_preview: Rc<dyn Fn()>,
-) -> (GBox, Rc<RefCell<SourceMarks>>, Label) {
+) -> (GBox, Rc<RefCell<SourceMarks>>, Label, Rc<dyn Fn(bool)>) {
     let source_marks = Rc::new(RefCell::new(SourceMarks::default()));
 
     let vbox = GBox::new(Orientation::Vertical, 0);
@@ -67,7 +64,30 @@ pub fn build_preview(
     picture.set_hexpand(true);
     picture.set_content_fit(gtk::ContentFit::Contain);
     picture.add_css_class("preview-picture");
-    vbox.append(&picture);
+
+    // Audio-only banner page: shown when selected clip has no video stream.
+    let audio_banner = GBox::new(Orientation::Vertical, 8);
+    audio_banner.set_vexpand(true);
+    audio_banner.set_hexpand(true);
+    audio_banner.set_valign(gtk::Align::Center);
+    audio_banner.set_halign(gtk::Align::Center);
+    audio_banner.add_css_class("audio-only-banner");
+    let note_label = Label::new(Some("♪"));
+    note_label.add_css_class("audio-only-note");
+    audio_banner.append(&note_label);
+    let audio_label = Label::new(Some("Audio only"));
+    audio_label.add_css_class("audio-only-subtitle");
+    audio_banner.append(&audio_label);
+
+    // Stack: "video" page is the Picture; "audio" page is the banner.
+    let preview_stack = Stack::new();
+    preview_stack.set_vexpand(true);
+    preview_stack.set_hexpand(true);
+    preview_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    preview_stack.add_named(&picture, Some("video"));
+    preview_stack.add_named(&audio_banner, Some("audio"));
+    preview_stack.set_visible_child_name("video");
+    vbox.append(&preview_stack);
 
     // DragSource on the video display so users can drag the current
     // clip selection (in/out range) directly to the timeline.
@@ -835,7 +855,15 @@ pub fn build_preview(
         });
     }
 
-    (vbox, source_marks, clip_name_label)
+    // set_audio_only: switches between the video picture and the audio-only banner.
+    let set_audio_only: Rc<dyn Fn(bool)> = {
+        let stack = preview_stack.clone();
+        Rc::new(move |audio_only: bool| {
+            stack.set_visible_child_name(if audio_only { "audio" } else { "video" });
+        })
+    };
+
+    (vbox, source_marks, clip_name_label, set_audio_only)
 }
 
 fn draw_scrubber(cr: &gtk::cairo::Context, width: f64, marks: &SourceMarks) {

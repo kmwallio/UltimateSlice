@@ -1,4 +1,4 @@
-use crate::media::program_player::ProgramPlayer;
+use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::model::project::FrameRate;
 use crate::ui::timecode;
 use gtk4::prelude::*;
@@ -24,15 +24,11 @@ pub struct ClipTransform {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter)`.
-/// `picture_a` displays the primary (outgoing) clip; `picture_b` displays the incoming
-/// transition clip. The caller controls cross-dissolve by setting widget opacity on
-/// each picture each poll tick via `Widget::set_opacity()`.
-/// `peak_cell` is updated by the caller with `[left_db, right_db]` each poll tick;
-/// `vu_meter.queue_draw()` triggers a repaint.
-/// `speed_label` shows the current J/K/L shuttle rate ("◀◀ 2×", "▶▶ 4×") or is hidden.
-/// `canvas_frame` is an `AspectFrame` locked to the canvas ratio — update its ratio
-/// via `canvas_frame.set_ratio(w as f32 / h as f32)` when project settings change.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, frame_updater)`.
+/// - `safe_area_setter(enabled)` — toggle safe-area guide overlay.
+/// - `false_color_setter(enabled)` — toggle false-color luminance overlay.
+/// - `zebra_setter(enabled, threshold)` — toggle zebra overexposure overlay; threshold is 0.0–1.0.
+/// - `frame_updater(frame)` — push a new 320×180 RGBA scope frame; triggers overlay redraw.
 pub fn build_program_monitor(
     _program_player: Rc<RefCell<ProgramPlayer>>,
     paintable_a: gdk4::Paintable,
@@ -46,6 +42,11 @@ pub fn build_program_monitor(
     transform_overlay_da: Option<DrawingArea>,
     initial_show_safe_areas: bool,
     on_safe_area_changed: impl Fn(bool) + 'static,
+    initial_show_false_color: bool,
+    on_false_color_changed: impl Fn(bool) + 'static,
+    initial_show_zebra: bool,
+    initial_zebra_threshold: f64,
+    on_zebra_changed: impl Fn(bool, f64) + 'static,
 ) -> (
     GBox,
     Label,
@@ -56,6 +57,9 @@ pub fn build_program_monitor(
     Rc<Cell<[f64; 2]>>,
     AspectFrame,
     Rc<dyn Fn(bool)>,
+    Rc<dyn Fn(bool)>,
+    Rc<dyn Fn(bool, f64)>,
+    Rc<dyn Fn(ScopeFrame)>,
 ) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -101,6 +105,22 @@ pub fn build_program_monitor(
     let safe_area_btn = ToggleButton::with_label("Safe Areas");
     safe_area_btn.set_active(initial_show_safe_areas);
     title_bar.append(&safe_area_btn);
+
+    let on_false_color_changed = Rc::new(on_false_color_changed);
+    let false_color_btn = ToggleButton::with_label("False Color");
+    false_color_btn.set_active(initial_show_false_color);
+    false_color_btn.set_tooltip_text(Some(
+        "False color overlay: maps luminance to a color spectrum for exposure evaluation",
+    ));
+    title_bar.append(&false_color_btn);
+
+    let on_zebra_changed = Rc::new(on_zebra_changed);
+    let zebra_btn = ToggleButton::with_label("Zebra");
+    zebra_btn.set_active(initial_show_zebra);
+    zebra_btn.set_tooltip_text(Some(
+        "Zebra stripes: diagonal lines on regions exceeding the exposure threshold (default 90%)",
+    ));
+    title_bar.append(&zebra_btn);
 
     // Zoom controls: − / zoom% label / + / Fit
     // These are appended to the title bar AFTER we build apply_zoom (below), so we
@@ -189,6 +209,112 @@ pub fn build_program_monitor(
     overlay.set_measure_overlay(&picture_b, false);
     overlay.set_measure_overlay(&picture_a, false);
     overlay.set_measure_overlay(&safe_area_da, false);
+
+    // Shared scope frame for false-color and zebra draw_funcs (320×180 RGBA).
+    // Updated via the returned frame_updater callback each poll tick.
+    let overlay_frame: Rc<RefCell<Option<ScopeFrame>>> = Rc::new(RefCell::new(None));
+
+    // False-color overlay: maps each pixel's luminance to a colour spectrum to
+    // help evaluate exposure without guessing from a standard video image.
+    let false_color_visible = Rc::new(Cell::new(initial_show_false_color));
+    let false_color_da = DrawingArea::new();
+    false_color_da.set_hexpand(true);
+    false_color_da.set_vexpand(true);
+    false_color_da.set_halign(gtk::Align::Fill);
+    false_color_da.set_valign(gtk::Align::Fill);
+    false_color_da.set_can_target(false);
+    {
+        let fc_visible = false_color_visible.clone();
+        let fc_frame = overlay_frame.clone();
+        false_color_da.set_draw_func(move |_da, cr, width, height| {
+            if !fc_visible.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let guard = fc_frame.borrow();
+            let Some(ref frame) = *guard else { return };
+            let fw = frame.width as f64;
+            let fh = frame.height as f64;
+            let sw = width as f64 / fw;
+            let sh = height as f64 / fh;
+            let data = &frame.data;
+            for fy in 0..frame.height {
+                for fx in 0..frame.width {
+                    let base = (fy * frame.width + fx) * 4;
+                    if base + 3 >= data.len() {
+                        break;
+                    }
+                    let r = data[base] as f64 / 255.0;
+                    let g = data[base + 1] as f64 / 255.0;
+                    let b = data[base + 2] as f64 / 255.0;
+                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    let (fr, fg, fb) = false_color_luma(luma);
+                    cr.set_source_rgb(fr, fg, fb);
+                    cr.rectangle(
+                        fx as f64 * sw,
+                        fy as f64 * sh,
+                        sw + 0.5,
+                        sh + 0.5,
+                    );
+                    cr.fill().ok();
+                }
+            }
+        });
+    }
+    overlay.add_overlay(&false_color_da);
+    overlay.set_measure_overlay(&false_color_da, false);
+
+    // Zebra overlay: diagonal yellow stripes on pixels above the threshold.
+    let zebra_visible = Rc::new(Cell::new(initial_show_zebra));
+    let zebra_threshold_cell = Rc::new(Cell::new(initial_zebra_threshold));
+    let zebra_da = DrawingArea::new();
+    zebra_da.set_hexpand(true);
+    zebra_da.set_vexpand(true);
+    zebra_da.set_halign(gtk::Align::Fill);
+    zebra_da.set_valign(gtk::Align::Fill);
+    zebra_da.set_can_target(false);
+    {
+        let z_visible = zebra_visible.clone();
+        let z_thresh = zebra_threshold_cell.clone();
+        let z_frame = overlay_frame.clone();
+        zebra_da.set_draw_func(move |_da, cr, width, height| {
+            if !z_visible.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let guard = z_frame.borrow();
+            let Some(ref frame) = *guard else { return };
+            let threshold = z_thresh.get();
+            let fw = frame.width as f64;
+            let fh = frame.height as f64;
+            let sw = width as f64 / fw;
+            let sh = height as f64 / fh;
+            let data = &frame.data;
+            for fy in 0..frame.height {
+                for fx in 0..frame.width {
+                    let base = (fy * frame.width + fx) * 4;
+                    if base + 3 >= data.len() {
+                        break;
+                    }
+                    let r = data[base] as f64 / 255.0;
+                    let g = data[base + 1] as f64 / 255.0;
+                    let b = data[base + 2] as f64 / 255.0;
+                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    if luma >= threshold && (fx + fy) % 8 < 4 {
+                        cr.set_source_rgba(1.0, 0.85, 0.0, 0.85);
+                        cr.rectangle(
+                            fx as f64 * sw,
+                            fy as f64 * sh,
+                            sw + 0.5,
+                            sh + 0.5,
+                        );
+                        cr.fill().ok();
+                    }
+                }
+            }
+        });
+    }
+    overlay.add_overlay(&zebra_da);
+    overlay.set_measure_overlay(&zebra_da, false);
+
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
 
@@ -443,6 +569,71 @@ pub fn build_program_monitor(
         });
     }
 
+    let false_color_setter: Rc<dyn Fn(bool)> = {
+        let fc_visible = false_color_visible.clone();
+        let fc_da = false_color_da.clone();
+        let fc_btn = false_color_btn.clone();
+        Rc::new(move |enabled: bool| {
+            fc_visible.set(enabled);
+            if fc_btn.is_active() != enabled {
+                fc_btn.set_active(enabled);
+            }
+            fc_da.queue_draw();
+        })
+    };
+    {
+        let false_color_setter = false_color_setter.clone();
+        let on_false_color_changed = on_false_color_changed.clone();
+        false_color_btn.connect_toggled(move |btn| {
+            let enabled = btn.is_active();
+            false_color_setter(enabled);
+            on_false_color_changed(enabled);
+        });
+    }
+
+    let zebra_setter: Rc<dyn Fn(bool, f64)> = {
+        let z_visible = zebra_visible.clone();
+        let z_thresh = zebra_threshold_cell.clone();
+        let z_da = zebra_da.clone();
+        let z_btn = zebra_btn.clone();
+        Rc::new(move |enabled: bool, threshold: f64| {
+            z_visible.set(enabled);
+            z_thresh.set(threshold);
+            if z_btn.is_active() != enabled {
+                z_btn.set_active(enabled);
+            }
+            z_da.queue_draw();
+        })
+    };
+    {
+        let zebra_setter = zebra_setter.clone();
+        let on_zebra_changed = on_zebra_changed.clone();
+        let z_thresh = zebra_threshold_cell.clone();
+        zebra_btn.connect_toggled(move |btn| {
+            let enabled = btn.is_active();
+            zebra_setter(enabled, z_thresh.get());
+            on_zebra_changed(enabled, z_thresh.get());
+        });
+    }
+
+    // frame_updater: push a new scope frame to the false-color and zebra overlays.
+    let frame_updater: Rc<dyn Fn(ScopeFrame)> = {
+        let fc_da = false_color_da.clone();
+        let z_da = zebra_da.clone();
+        let of = overlay_frame.clone();
+        let fc_vis = false_color_visible.clone();
+        let z_vis = zebra_visible.clone();
+        Rc::new(move |frame: ScopeFrame| {
+            *of.borrow_mut() = Some(frame);
+            if fc_vis.get() {
+                fc_da.queue_draw();
+            }
+            if z_vis.get() {
+                z_da.queue_draw();
+            }
+        })
+    };
+
     (
         root,
         pos_label,
@@ -453,6 +644,9 @@ pub fn build_program_monitor(
         peak_cell,
         canvas_frame,
         safe_area_setter,
+        false_color_setter,
+        zebra_setter,
+        frame_updater,
     )
 }
 
@@ -533,4 +727,27 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
 
 pub fn format_timecode(ns: u64, frame_rate: &FrameRate) -> String {
     timecode::format_ns_as_timecode(ns, frame_rate)
+}
+
+/// Map a luminance value (0.0–1.0) to an RGB triple using the standard
+/// false-color exposure palette:
+///   deep purple → blue → cyan → green (correct) → yellow → orange → red → white
+fn false_color_luma(luma: f64) -> (f64, f64, f64) {
+    if luma < 0.04 {
+        (0.30, 0.0, 0.50)   // deep purple — clipped/crushed black
+    } else if luma < 0.20 {
+        (0.0, 0.0, 0.90)    // blue — underexposed shadow
+    } else if luma < 0.45 {
+        (0.0, 0.75, 0.75)   // cyan — low midtone
+    } else if luma < 0.60 {
+        (0.0, 0.80, 0.0)    // green — correctly exposed midtone ✓
+    } else if luma < 0.70 {
+        (1.0, 1.0, 0.0)     // yellow — high midtone
+    } else if luma < 0.90 {
+        (1.0, 0.50, 0.0)    // orange — overexposed highlight
+    } else if luma < 0.97 {
+        (1.0, 0.0, 0.0)     // red — near clip
+    } else {
+        (1.0, 1.0, 1.0)     // white — clipped white
+    }
 }

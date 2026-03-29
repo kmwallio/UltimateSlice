@@ -105,7 +105,7 @@ pub fn build_media_browser(
     flow_box.add_css_class("media-grid");
     scroll.set_child(Some(&flow_box));
     vbox.append(&scroll);
-    let flow_box_paths = Rc::new(RefCell::new(Vec::<(String, bool)>::new()));
+    let flow_box_paths = Rc::new(RefCell::new(Vec::<(String, bool, bool)>::new()));
 
     // Populate from existing library items (e.g. after project load).
     {
@@ -122,7 +122,7 @@ pub fn build_media_browser(
             flow_box.insert(&child, -1);
             flow_box_paths
                 .borrow_mut()
-                .push((item.source_path.clone(), item.is_missing));
+                .push((item.source_path.clone(), item.is_missing, item.is_audio_only));
         }
     }
 
@@ -470,6 +470,23 @@ fn make_grid_item(
         let path_owned = path.to_string();
         let thumb_cache = thumb_cache.clone();
         thumb_area.set_draw_func(move |_, cr, w, h| {
+            if is_audio_only {
+                // Dark purple-tinted background for audio-only items.
+                cr.set_source_rgb(0.10, 0.08, 0.16);
+                cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                cr.fill().ok();
+                // Draw a music-note glyph centred in the thumbnail area.
+                cr.set_source_rgb(0.60, 0.45, 0.88);
+                cr.set_font_size(36.0);
+                let note = "♪";
+                if let Ok(ext) = cr.text_extents(note) {
+                    let x = (w as f64 / 2.0) - (ext.width() / 2.0 + ext.x_bearing());
+                    let y = (h as f64 / 2.0) - (ext.height() / 2.0 + ext.y_bearing());
+                    cr.move_to(x, y);
+                    cr.show_text(note).ok();
+                }
+                return;
+            }
             let cache = thumb_cache.borrow();
             if let Some(surf) = cache.get(&path_owned, 0) {
                 let sx = w as f64 / THUMB_W as f64;
@@ -550,12 +567,16 @@ pub fn probe_media_metadata(uri: &str) -> MediaProbeMetadata {
     }
 }
 
-fn flowbox_matches_library(current_entries: &[(String, bool)], lib: &[MediaItem]) -> bool {
+fn flowbox_matches_library(current_entries: &[(String, bool, bool)], lib: &[MediaItem]) -> bool {
     current_entries.len() == lib.len()
         && current_entries
             .iter()
             .zip(lib.iter())
-            .all(|((path, missing), item)| path == &item.source_path && *missing == item.is_missing)
+            .all(|((path, missing, audio_only), item)| {
+                path == &item.source_path
+                    && *missing == item.is_missing
+                    && *audio_only == item.is_audio_only
+            })
 }
 
 fn queue_flowbox_thumbnail_draws(fb: &FlowBox) {
@@ -580,7 +601,7 @@ fn import_path_into_library(
     flow_box: &FlowBox,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
     probe_cache: &Rc<RefCell<MediaProbeCache>>,
-    flow_box_paths: &Rc<RefCell<Vec<(String, bool)>>>,
+    flow_box_paths: &Rc<RefCell<Vec<(String, bool, bool)>>>,
 ) -> Option<(String, u64, FlowBoxChild)> {
     if path_str.is_empty() {
         return None;
@@ -596,7 +617,7 @@ fn import_path_into_library(
     flow_box.insert(&child, -1);
     flow_box_paths
         .borrow_mut()
-        .push((path_str.clone(), is_missing));
+        .push((path_str.clone(), is_missing, false));
     Some((path_str, duration_ns, child))
 }
 
@@ -627,7 +648,7 @@ fn rebuild_flowbox(
     fb: &FlowBox,
     lib: &[MediaItem],
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
-    flow_box_paths: &Rc<RefCell<Vec<(String, bool)>>>,
+    flow_box_paths: &Rc<RefCell<Vec<(String, bool, bool)>>>,
 ) {
     while let Some(child) = fb.first_child() {
         fb.remove(&child);
@@ -644,6 +665,6 @@ fn rebuild_flowbox(
             thumb_cache,
         );
         fb.insert(&child, -1);
-        paths.push((item.source_path.clone(), item.is_missing));
+        paths.push((item.source_path.clone(), item.is_missing, item.is_audio_only));
     }
 }

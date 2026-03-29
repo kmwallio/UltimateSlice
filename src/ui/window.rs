@@ -3977,7 +3977,7 @@ pub fn build_window(
             }
         })
     };
-    let (preview_widget, source_marks, clip_name_label) = preview::build_preview(
+    let (preview_widget, source_marks, clip_name_label, set_audio_only) = preview::build_preview(
         player.clone(),
         paintable,
         on_append.clone(),
@@ -4522,6 +4522,9 @@ pub fn build_window(
         vu_peak_cell,
         prog_canvas_frame,
         _prog_safe_area_setter,
+        prog_false_color_setter,
+        prog_zebra_setter,
+        prog_frame_updater,
     ) = {
         // Build the interactive transform overlay and wire its drag callback.
         let transform_overlay = Rc::new(crate::ui::transform_overlay::TransformOverlay::new(
@@ -4833,6 +4836,30 @@ pub fn build_window(
                     }
                 }
             },
+            monitor_state.borrow().show_false_color,
+            {
+                let monitor_state = monitor_state.clone();
+                move |show| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_false_color != show {
+                        state.show_false_color = show;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
+            monitor_state.borrow().show_zebra,
+            monitor_state.borrow().zebra_threshold,
+            {
+                let monitor_state = monitor_state.clone();
+                move |show, threshold| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_zebra != show || (state.zebra_threshold - threshold).abs() > 1e-6 {
+                        state.show_zebra = show;
+                        state.zebra_threshold = threshold;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
         )
     };
 
@@ -4976,6 +5003,8 @@ pub fn build_window(
         let keyframe_editor_poll = keyframe_editor_cell.clone();
         let timeline_state_poll = timeline_state.clone();
         let inspector_view_poll = inspector_view.clone();
+        let prog_frame_updater_poll = prog_frame_updater.clone();
+        let monitor_state_poll = monitor_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -5087,7 +5116,10 @@ pub fn build_window(
                 }
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
-                let sf = if scopes_rev.reveals_child() {
+                let sf = if scopes_rev.reveals_child()
+                    || monitor_state_poll.borrow().show_false_color
+                    || monitor_state_poll.borrow().show_zebra
+                {
                     player.try_pull_scope_frame()
                 } else {
                     None
@@ -5119,6 +5151,7 @@ pub fn build_window(
             ts.borrow_mut().track_audio_peak_db = track_peaks;
             // Update colour scopes with the latest video frame.
             if let Some(frame) = scope_frame {
+                prog_frame_updater_poll(frame.clone());
                 crate::ui::color_scopes::update_scope_frame(&scopes_st, frame);
             }
             // Update J/K/L speed label.
@@ -5567,6 +5600,7 @@ pub fn build_window(
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
         let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
+        let set_audio_only = set_audio_only.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
             preview_widget.set_visible(true);
@@ -5588,6 +5622,8 @@ pub fn build_window(
                 let proj = project.borrow();
                 lookup_source_placement_info(&lib, &proj, &path)
             };
+            // Switch preview stack to audio banner when clip has no video.
+            set_audio_only(source_info.is_audio_only);
             if should_reload {
                 let proxy_mode = preferences_state.borrow().proxy_mode.clone();
                 let source_proxy_enabled = proxy_mode.is_enabled();

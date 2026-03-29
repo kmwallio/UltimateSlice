@@ -14,6 +14,19 @@ pub struct ProgramMonitorState {
     pub docked_split_pos: i32,
     #[serde(default)]
     pub show_safe_areas: bool,
+    /// Show false-color luminance overlay on the Program Monitor.
+    #[serde(default)]
+    pub show_false_color: bool,
+    /// Show zebra-stripe overexposure overlay on the Program Monitor.
+    #[serde(default)]
+    pub show_zebra: bool,
+    /// Luminance threshold for zebra stripes (0.0–1.0, default 0.90 = 90 IRE).
+    #[serde(default = "default_zebra_threshold")]
+    pub zebra_threshold: f64,
+}
+
+fn default_zebra_threshold() -> f64 {
+    0.90
 }
 
 fn default_width() -> i32 {
@@ -34,6 +47,9 @@ impl Default for ProgramMonitorState {
             height: default_height(),
             docked_split_pos: default_docked_split_pos(),
             show_safe_areas: false,
+            show_false_color: false,
+            show_zebra: false,
+            zebra_threshold: default_zebra_threshold(),
         }
     }
 }
