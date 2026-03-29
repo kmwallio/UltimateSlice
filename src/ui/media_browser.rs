@@ -265,14 +265,42 @@ pub fn build_media_browser(
             if !flowbox_matches_library(&flow_box_paths.borrow(), &lib) {
                 rebuild_flowbox(&flow_box, &lib, &thumb_cache, &flow_box_paths);
             }
-            // Start probes for library items that arrived via project load
-            // (duration_ns == 0 means the FCPXML parser never stored media_duration_ns).
+            // Start probes for all non-missing library items.
             // probe_cache.request() is a no-op for paths already pending or cached.
+            // This covers two cases:
+            //   - items from project load with duration_ns == 0 (FCPXML didn't store it)
+            //   - items from project load with duration_ns != 0 but is_audio_only/is_image
+            //     still at their default (false) — the probe corrects those fields so proxy
+            //     pre-generation can make an accurate decision.
             {
                 let mut pc = probe_cache.borrow_mut();
                 for item in lib.iter() {
-                    if item.duration_ns == 0 && !item.is_missing {
+                    if !item.is_missing {
                         pc.request(&item.source_path);
+                    }
+                }
+            }
+            // Pre-generate proxies for all already-probed video items when proxy mode is
+            // enabled.  This handles items that were probed in a previous run or that had
+            // duration set in the FCPXML (so the probe-resolved loop above never fired for
+            // them in this session).  proxy_cache.request() is a no-op for items already
+            // pending, completed, or failed.
+            {
+                let prefs = preferences_state.borrow();
+                let proxy_mode = prefs.proxy_mode.clone();
+                if proxy_mode.is_enabled() {
+                    let scale = crate::ui::window::proxy_scale_for_mode(&proxy_mode);
+                    let pc = probe_cache.borrow();
+                    let mut pxc = proxy_cache.borrow_mut();
+                    for item in lib.iter() {
+                        if item.is_missing {
+                            continue;
+                        }
+                        if let Some(result) = pc.get(&item.source_path) {
+                            if !result.is_audio_only && !result.is_image {
+                                pxc.request(&item.source_path, scale, None);
+                            }
+                        }
                     }
                 }
             }

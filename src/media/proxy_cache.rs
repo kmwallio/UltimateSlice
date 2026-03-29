@@ -239,6 +239,11 @@ impl ProxyCache {
         }
         self.pending.insert(key);
         self.total_requested += 1;
+        log::info!(
+            "ProxyCache: enqueuing proxy for {} (scale={:?})",
+            source_path,
+            scale
+        );
         self.written_bytes
             .insert(proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing), 0);
         if let Some(ref tx) = self.work_tx {
@@ -278,6 +283,10 @@ impl ProxyCache {
                 ProxyWorkerUpdate::Done(result) => {
                     self.pending.remove(&result.cache_key);
                     if result.success {
+                        log::info!(
+                            "ProxyCache: proxy ready → {}",
+                            result.proxy_path
+                        );
                         self.proxies
                             .insert(result.cache_key.clone(), result.proxy_path.clone());
                         if let Some(estimate) = self.estimated_bytes.get(&result.cache_key).copied()
