@@ -1746,11 +1746,23 @@ impl ProgramPlayer {
         amix_bg_pad.set_property("volume", 1.0_f64);
         silence_caps.static_pad("src").unwrap().link(&amix_bg_pad)?;
 
-        // Link audiomixer → audioconvert → [level →] autoaudiosink
-        if let Some(ref lv) = level_element {
-            gst::Element::link_many([&audiomixer, &audio_conv_out, lv, &audio_sink])?;
+        // Link audiomixer → [scaletempo] → audioconvert → [level →] autoaudiosink
+        // scaletempo preserves pitch during rate-based seeks (J/K/L shuttle).
+        let scaletempo = gst::ElementFactory::make("scaletempo").build().ok();
+        if let Some(ref st) = scaletempo {
+            pipeline.add(st)?;
+            if let Some(ref lv) = level_element {
+                gst::Element::link_many([&audiomixer, st, &audio_conv_out, lv, &audio_sink])?;
+            } else {
+                gst::Element::link_many([&audiomixer, st, &audio_conv_out, &audio_sink])?;
+            }
         } else {
-            gst::Element::link_many([&audiomixer, &audio_conv_out, &audio_sink])?;
+            log::warn!("scaletempo element not available — J/K/L shuttle will shift pitch");
+            if let Some(ref lv) = level_element {
+                gst::Element::link_many([&audiomixer, &audio_conv_out, lv, &audio_sink])?;
+            } else {
+                gst::Element::link_many([&audiomixer, &audio_conv_out, &audio_sink])?;
+            }
         }
 
         // -- Audio-only pipeline (playbin, unchanged) --------------------------
@@ -3024,15 +3036,18 @@ impl ProgramPlayer {
     }
 
     pub fn set_jkl_rate(&mut self, rate: f64) {
+        let old_rate = self.jkl_rate;
         self.jkl_rate = rate;
         if rate == 0.0 {
             self.pause();
             return;
         }
-        // Capture current position, then restart playback.
+        // Capture current position before changing rate.
         if let Some(start) = self.play_start.take() {
             let elapsed = start.elapsed().as_nanos() as u64;
-            self.timeline_pos_ns = self.base_timeline_ns + elapsed;
+            let speed = if old_rate.abs() > 0.0 { old_rate.abs() } else { 1.0 };
+            self.timeline_pos_ns =
+                (self.base_timeline_ns + (elapsed as f64 * speed) as u64).min(self.timeline_dur_ns);
         }
         // For negative rates, just pause (reverse not yet supported with compositor).
         if rate < 0.0 {
@@ -3042,10 +3057,29 @@ impl ProgramPlayer {
         }
         self.base_timeline_ns = self.timeline_pos_ns;
         self.play_start = Some(Instant::now());
-        // Rebuild to seek decoders at current position with the new rate.
-        self.rebuild_pipeline_at(self.timeline_pos_ns);
-        let _ = self.pipeline.set_state(gst::State::Playing);
-        self.state = PlayerState::Playing;
+
+        if self.state != PlayerState::Playing || self.slots.is_empty() {
+            // Cold start — need full pipeline rebuild.
+            self.rebuild_pipeline_at(self.timeline_pos_ns);
+            let _ = self.pipeline.set_state(gst::State::Playing);
+            self.state = PlayerState::Playing;
+        } else {
+            // Hot rate change — send a rate-seek to the pipeline so scaletempo
+            // adjusts pitch preservation without tearing down the pipeline.
+            // Seek each decoder slot at the new rate.
+            for slot in &self.slots {
+                let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
+                let source_ns = clip.source_pos_ns(self.timeline_pos_ns);
+                let _ = slot.decoder.seek(
+                    rate,
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                    gst::SeekType::Set,
+                    gst::ClockTime::from_nseconds(source_ns),
+                    gst::SeekType::None,
+                    gst::ClockTime::NONE,
+                );
+            }
+        }
         self.update_drop_late_policy();
         self.update_slot_queue_policy();
     }
