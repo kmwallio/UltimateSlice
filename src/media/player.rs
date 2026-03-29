@@ -91,16 +91,23 @@ impl Player {
                 .expect("gtk4paintablesink 'paintable' property must implement gdk4::Paintable")
         };
 
-        // Always try glsinkbin for efficient GL texture upload.
-        // Without it, gtk4paintablesink must upload raw CPU buffers to GPU
-        // textures on every frame, which can freeze the UI with high-res
-        // content (e.g. 5.3K GoPro HEVC).  Falls back to raw paintablesink
-        // only if glsinkbin is unavailable (no GL support).
-        let gl_video_sink = gst::ElementFactory::make("glsinkbin")
-            .property("sink", &paintablesink)
-            .build()
-            .ok();
-        let video_sink = gl_video_sink.as_ref().unwrap_or(&paintablesink);
+        // Use paintablesink directly — do NOT wrap in glsinkbin.
+        //
+        // glsinkbin advertises DMABuf sink caps (video/x-raw(memory:DMABuf)).
+        // VA-API decoders also output DMABuf, so GStreamer's greedy caps
+        // negotiation routes: VA-API decoder → [DMABuf] → glsinkbin → sink,
+        // completely BYPASSING playbin's video-filter property.  The software
+        // prescale filter (≤640×360, I420) is then silently ignored and the
+        // VA-API decoder outputs DMABuf frames directly to the sink at full
+        // resolution, causing odd-height frames (e.g. 1156×495 for a widget
+        // resized to non-even dimensions) and a torrent of per-frame
+        // "not valid for dmabuf format YU12" errors.
+        //
+        // Without glsinkbin, gtk4paintablesink only advertises system-memory
+        // caps, forcing GStreamer to insert a DMABuf→system-memory converter,
+        // which makes the video-filter reliably usable in both decode modes.
+        let gl_video_sink: Option<gst::Element> = None;
+        let video_sink = &paintablesink;
 
         let pipeline = gst::ElementFactory::make("playbin")
             .property("video-sink", video_sink)
@@ -259,11 +266,13 @@ impl Player {
         // we pass to apply_decode_mode() or the early-return guard fires and
         // the VA-API rank policy / software video-filter are never applied.
         let decode_mode = Arc::new(Mutex::new(SourceDecodeMode::HardwareFast));
-        let initial_mode = if *hardware_acceleration_enabled.lock().unwrap() && vaapi_available {
-            SourceDecodeMode::HardwareFast
-        } else {
-            SourceDecodeMode::SoftwareFiltered
-        };
+        // Source preview always uses the software-filtered path.  VA-API decoders
+        // output DMABuf frames; even with glsinkbin removed the DMABuf→system-memory
+        // conversion has proven unreliable across driver/kernel combinations, and
+        // the prescale filter (≤640×360) keeps CPU cost negligible for a preview
+        // widget.  Hardware acceleration setting is respected for the program
+        // player (export pipeline) but NOT for this source-preview player.
+        let initial_mode = SourceDecodeMode::SoftwareFiltered;
         let current_uri = Arc::new(Mutex::new(None));
         let hw_failed_uri = Arc::new(Mutex::new(None));
         let source_playback_priority =
@@ -548,13 +557,10 @@ impl Player {
 
     pub fn set_hardware_acceleration(&self, enabled: bool) -> Result<()> {
         *self.hardware_acceleration_enabled.lock().unwrap() = enabled;
-        if let Some(uri) = self.current_uri.lock().unwrap().clone() {
-            self.load(&uri)?;
-        } else if enabled && self.vaapi_available {
-            self.apply_decode_mode(SourceDecodeMode::HardwareFast);
-        } else {
-            self.apply_decode_mode(SourceDecodeMode::SoftwareFiltered);
-        }
+        // Source preview always stays in SoftwareFiltered mode regardless of
+        // the hardware-acceleration setting — see Player::new() for rationale.
+        // We still store the flag (affects preferred_mode_for_uri callers) but
+        // do not trigger a decode-mode switch here.
         Ok(())
     }
 

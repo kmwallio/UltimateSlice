@@ -219,6 +219,17 @@ pub fn build_media_browser(
             if !flowbox_matches_library(&flow_box_paths.borrow(), &lib) {
                 rebuild_flowbox(&flow_box, &lib, &thumb_cache, &flow_box_paths);
             }
+            // Start probes for library items that arrived via project load
+            // (duration_ns == 0 means the FCPXML parser never stored media_duration_ns).
+            // probe_cache.request() is a no-op for paths already pending or cached.
+            {
+                let mut pc = probe_cache.borrow_mut();
+                for item in lib.iter() {
+                    if item.duration_ns == 0 && !item.is_missing {
+                        pc.request(&item.source_path);
+                    }
+                }
+            }
             drop(lib);
             let thumbnails_ready = !thumb_cache.borrow_mut().poll_ready_keys().is_empty();
             if thumbnails_ready && !thumb_redraw_scheduled.replace(true) {
