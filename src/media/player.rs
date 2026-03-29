@@ -118,15 +118,12 @@ impl Player {
                 .expect("videoconvertscale must be available");
             // Require even width and height (step=2) so I420/YUV420 frames
             // are always a valid 2×2 block multiple for GDK texture creation.
+            // Use 65534 (= 32767×2) as the max — a safe even ceiling above any
+            // real display resolution.  i32::MAX is odd so it would fail the
+            // IntRange step validation: (max - min) % step must equal 0.
             let caps = gst::Caps::builder("video/x-raw")
-                .field(
-                    "width",
-                    gst::IntRange::<i32>::with_step(2, i32::MAX, 2),
-                )
-                .field(
-                    "height",
-                    gst::IntRange::<i32>::with_step(2, i32::MAX, 2),
-                )
+                .field("width", gst::IntRange::<i32>::with_step(2, 65534, 2))
+                .field("height", gst::IntRange::<i32>::with_step(2, 65534, 2))
                 .build();
             let even_caps = gst::ElementFactory::make("capsfilter")
                 .property("caps", &caps)
