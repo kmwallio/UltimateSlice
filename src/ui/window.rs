@@ -3402,6 +3402,20 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        // on_execute_command: inspector pushes undo-tracked commands through here
+        {
+            let timeline_state = timeline_state.clone();
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            move |cmd: Box<dyn crate::undo::EditCommand>| {
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    st.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+            }
+        },
     );
 
     // Sync normalize button state with in-progress flag.

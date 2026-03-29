@@ -434,23 +434,43 @@ impl TimelineState {
     }
 
     fn toggle_track_duck_by_index(&mut self, track_idx: usize) -> bool {
-        let mut proj = self.project.borrow_mut();
-        let Some(track) = proj.tracks.get_mut(track_idx) else {
-            return false;
+        let (track_id, old_duck) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.duck)
         };
-        track.duck = !track.duck;
-        proj.dirty = true;
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::SetTrackDuckCommand {
+                track_id,
+                old_duck,
+                new_duck: !old_duck,
+            }),
+            &mut proj,
+        );
         true
     }
 
     fn toggle_track_solo_by_index(&mut self, track_idx: usize) -> bool {
-        let mut proj = self.project.borrow_mut();
-        let Some(track) = proj.tracks.get_mut(track_idx) else {
-            return false;
+        let (track_id, old_solo) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.soloed)
         };
-        track.soloed = !track.soloed;
-        self.selected_track_id = Some(track.id.clone());
-        proj.dirty = true;
+        self.selected_track_id = Some(track_id.clone());
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::SetTrackSoloCommand {
+                track_id,
+                old_solo,
+                new_solo: !old_solo,
+            }),
+            &mut proj,
+        );
         true
     }
 
@@ -458,12 +478,22 @@ impl TimelineState {
         let Some(track_id) = self.selected_track_id.clone() else {
             return false;
         };
-        let mut proj = self.project.borrow_mut();
-        let Some(track) = proj.track_mut(&track_id) else {
-            return false;
+        let old_solo = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+                return false;
+            };
+            track.soloed
         };
-        track.soloed = !track.soloed;
-        proj.dirty = true;
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::SetTrackSoloCommand {
+                track_id,
+                old_solo,
+                new_solo: !old_solo,
+            }),
+            &mut proj,
+        );
         true
     }
 

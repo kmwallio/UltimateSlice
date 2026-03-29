@@ -178,6 +178,8 @@ pub struct InspectorView {
     pub on_frei0r_changed: Rc<dyn Fn()>,
     /// Called after frei0r param slider changes — triggers live pipeline update without rebuild.
     pub on_frei0r_params_changed: Rc<dyn Fn()>,
+    /// Push an undoable command through the shared history (provided by window.rs).
+    pub on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)>,
     /// Tracks which effect IDs are currently displayed to avoid rebuilding on every update() tick.
     frei0r_displayed_snapshot: Rc<RefCell<Vec<(String, bool, usize)>>>,
     /// Cached frei0r registry for param type lookup in the inspector.
@@ -257,34 +259,27 @@ impl InspectorView {
                 let selected_clip_id = self.selected_clip_id.clone();
                 let effect_id = effect.id.clone();
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 let updating = self.updating.clone();
                 enable_check.connect_toggled(move |btn| {
                     if *updating.borrow() {
                         return;
                     }
-                    let enabled = btn.is_active();
-                    // Clone clip_id and drop the borrow BEFORE calling on_changed,
-                    // which triggers inspector.update() → selected_clip_id.borrow_mut().
+                    // Clone clip_id and drop the borrow BEFORE calling on_changed.
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
-                                    if let Some(e) = clip
-                                        .frei0r_effects
-                                        .iter_mut()
-                                        .find(|e| e.id == effect_id)
-                                    {
-                                        e.enabled = enabled;
-                                    }
-                                    break;
-                                }
-                            }
-                            proj.dirty = true;
-                        }
+                        let track_id = {
+                            let proj = project.borrow();
+                            proj.tracks.iter()
+                                .find(|t| t.clips.iter().any(|c| c.id == cid))
+                                .map(|t| t.id.clone())
+                                .unwrap_or_default()
+                        };
+                        on_execute_command(Box::new(crate::undo::ToggleFrei0rEffectCommand {
+                            clip_id: cid,
+                            track_id,
+                            effect_id: effect_id.clone(),
+                        }));
                         on_changed();
                     }
                 });
@@ -307,23 +302,31 @@ impl InspectorView {
                 let project = self.project.clone();
                 let selected_clip_id = self.selected_clip_id.clone();
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 let idx = i;
                 up_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
-                                    if idx > 0 && idx < clip.frei0r_effects.len() {
-                                        clip.frei0r_effects.swap(idx - 1, idx);
-                                    }
+                        let (track_id, valid) = {
+                            let proj = project.borrow();
+                            let mut tid = String::new();
+                            let mut found = false;
+                            for track in &proj.tracks {
+                                if track.clips.iter().any(|c| c.id == cid) && idx > 0 {
+                                    tid = track.id.clone();
+                                    found = true;
                                     break;
                                 }
                             }
-                            proj.dirty = true;
+                            (tid, found)
+                        };
+                        if valid {
+                            on_execute_command(Box::new(crate::undo::ReorderFrei0rEffectsCommand {
+                                clip_id: cid,
+                                track_id,
+                                index_a: idx - 1,
+                                index_b: idx,
+                            }));
                         }
                         on_changed();
                     }
@@ -339,23 +342,33 @@ impl InspectorView {
                 let project = self.project.clone();
                 let selected_clip_id = self.selected_clip_id.clone();
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 let idx = i;
                 down_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
+                        let (track_id, valid) = {
+                            let proj = project.borrow();
+                            let mut tid = String::new();
+                            let mut found = false;
+                            for track in &proj.tracks {
+                                if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
                                     if idx + 1 < clip.frei0r_effects.len() {
-                                        clip.frei0r_effects.swap(idx, idx + 1);
+                                        tid = track.id.clone();
+                                        found = true;
                                     }
                                     break;
                                 }
                             }
-                            proj.dirty = true;
+                            (tid, found)
+                        };
+                        if valid {
+                            on_execute_command(Box::new(crate::undo::ReorderFrei0rEffectsCommand {
+                                clip_id: cid,
+                                track_id,
+                                index_a: idx,
+                                index_b: idx + 1,
+                            }));
                         }
                         on_changed();
                     }
@@ -371,22 +384,26 @@ impl InspectorView {
                 let project = self.project.clone();
                 let selected_clip_id = self.selected_clip_id.clone();
                 let effect_id = effect.id.clone();
+                let effect_clone = effect.clone();
+                let effect_idx = i;
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 remove_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
-                                    clip.frei0r_effects.retain(|e| e.id != effect_id);
-                                    break;
-                                }
-                            }
-                            proj.dirty = true;
-                        }
+                        let track_id = {
+                            let proj = project.borrow();
+                            proj.tracks.iter()
+                                .find(|t| t.clips.iter().any(|c| c.id == cid))
+                                .map(|t| t.id.clone())
+                                .unwrap_or_default()
+                        };
+                        on_execute_command(Box::new(crate::undo::RemoveFrei0rEffectCommand {
+                            clip_id: cid,
+                            track_id,
+                            effect: effect_clone.clone(),
+                            index: effect_idx,
+                        }));
                         on_changed();
                     }
                 });
@@ -444,6 +461,7 @@ impl InspectorView {
                         let pname = param_name.clone();
                         let on_params_changed = self.on_frei0r_params_changed.clone();
                         let updating = self.updating.clone();
+                        let on_execute_command = self.on_execute_command.clone();
                         toggle.connect_toggled(move |btn| {
                             if *updating.borrow() {
                                 return;
@@ -451,6 +469,21 @@ impl InspectorView {
                             let val = if btn.is_active() { 1.0 } else { 0.0 };
                             let cid = selected_clip_id.borrow().clone();
                             if let Some(cid) = cid {
+                                let (track_id, old_params) = {
+                                    let proj = project.borrow();
+                                    let mut tid = String::new();
+                                    let mut old = std::collections::HashMap::new();
+                                    for track in &proj.tracks {
+                                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                                            tid = track.id.clone();
+                                            if let Some(e) = clip.frei0r_effects.iter().find(|e| e.id == effect_id) {
+                                                old = e.params.clone();
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    (tid, old)
+                                };
                                 {
                                     let mut proj = project.borrow_mut();
                                     for track in &mut proj.tracks {
@@ -469,6 +502,22 @@ impl InspectorView {
                                     }
                                     proj.dirty = true;
                                 }
+                                let new_params = {
+                                    let proj = project.borrow();
+                                    proj.tracks.iter()
+                                        .find(|t| t.id == track_id)
+                                        .and_then(|t| t.clips.iter().find(|c| c.id == cid))
+                                        .and_then(|c| c.frei0r_effects.iter().find(|e| e.id == effect_id))
+                                        .map(|e| e.params.clone())
+                                        .unwrap_or_else(|| old_params.clone())
+                                };
+                                on_execute_command(Box::new(crate::undo::SetFrei0rEffectParamsCommand {
+                                    clip_id: cid.clone(),
+                                    track_id,
+                                    effect_id: effect_id.clone(),
+                                    old_params,
+                                    new_params,
+                                }));
                                 on_params_changed();
                             }
                         });
@@ -543,6 +592,91 @@ impl InspectorView {
                                 on_params_changed();
                             }
                         });
+
+                        // Undo: GestureClick + EventControllerFocus snapshot/commit.
+                        {
+                            type SnapCell = Rc<RefCell<Option<(String, String, String, std::collections::HashMap<String, f64>)>>>;
+                            let snap: SnapCell = Rc::new(RefCell::new(None));
+                            let project = self.project.clone();
+                            let selected_clip_id = self.selected_clip_id.clone();
+                            let effect_id_u = effect.id.clone();
+                            let on_execute_command = self.on_execute_command.clone();
+
+                            let do_snapshot = {
+                                let project = project.clone();
+                                let selected_clip_id = selected_clip_id.clone();
+                                let effect_id_u = effect_id_u.clone();
+                                let snap = snap.clone();
+                                move || {
+                                    let cid = selected_clip_id.borrow().clone();
+                                    if let Some(cid) = cid {
+                                        let proj = project.borrow();
+                                        for track in &proj.tracks {
+                                            if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                                                if let Some(e) = clip.frei0r_effects.iter().find(|e| e.id == effect_id_u) {
+                                                    *snap.borrow_mut() = Some((
+                                                        cid.clone(),
+                                                        track.id.clone(),
+                                                        effect_id_u.clone(),
+                                                        e.params.clone(),
+                                                    ));
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+
+                            let do_commit = {
+                                let project = project.clone();
+                                let snap = snap.clone();
+                                let on_execute_command = on_execute_command.clone();
+                                move || {
+                                    let entry = snap.borrow_mut().take();
+                                    if let Some((clip_id, track_id, eff_id, old_params)) = entry {
+                                        let new_params = {
+                                            let proj = project.borrow();
+                                            proj.tracks.iter()
+                                                .find(|t| t.id == track_id)
+                                                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                                                .and_then(|c| c.frei0r_effects.iter().find(|e| e.id == eff_id))
+                                                .map(|e| e.params.clone())
+                                                .unwrap_or_else(|| old_params.clone())
+                                        };
+                                        on_execute_command(Box::new(crate::undo::SetFrei0rEffectParamsCommand {
+                                            clip_id,
+                                            track_id,
+                                            effect_id: eff_id,
+                                            old_params,
+                                            new_params,
+                                        }));
+                                    }
+                                }
+                            };
+
+                            let ges = gtk4::GestureClick::new();
+                            {
+                                let do_snapshot = do_snapshot.clone();
+                                ges.connect_pressed(move |_, _, _, _| { do_snapshot(); });
+                            }
+                            {
+                                let do_commit = do_commit.clone();
+                                ges.connect_released(move |_, _, _, _| { do_commit(); });
+                            }
+                            slider.add_controller(ges);
+
+                            let focus_ctrl = gtk4::EventControllerFocus::new();
+                            {
+                                let do_snapshot = do_snapshot.clone();
+                                focus_ctrl.connect_enter(move |_| { do_snapshot(); });
+                            }
+                            {
+                                let do_commit = do_commit.clone();
+                                focus_ctrl.connect_leave(move |_| { do_commit(); });
+                            }
+                            slider.add_controller(focus_ctrl);
+                        }
                     }
                 }
 
@@ -1758,11 +1892,13 @@ pub fn build_inspector(
     on_normalize_audio: impl Fn(&str) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
+    on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
+    let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> = Rc::new(on_execute_command);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
     let on_frei0r_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_changed);
     let on_frei0r_params_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_params_changed);
@@ -2200,8 +2336,9 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let project = project.clone();
         let on_frei0r_changed = on_frei0r_changed.clone();
+        let on_execute_command = on_execute_command.clone();
         frei0r_paste_btn.connect_clicked(move |_| {
-            let effects_to_paste = {
+            let effects_to_paste: Vec<_> = {
                 let cb = clipboard.borrow();
                 match cb.as_ref() {
                     Some(effects) if !effects.is_empty() => effects
@@ -2211,22 +2348,37 @@ pub fn build_inspector(
                             new_effect.id = uuid::Uuid::new_v4().to_string();
                             new_effect
                         })
-                        .collect::<Vec<_>>(),
+                        .collect(),
                     _ => return,
                 }
             };
             let cid = selected_clip_id.borrow().clone();
             if let Some(cid) = cid {
-                let mut proj = project.borrow_mut();
-                proj.dirty = true;
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
-                        clip.frei0r_effects.extend(effects_to_paste);
-                        drop(proj);
-                        on_frei0r_changed();
-                        return;
-                    }
+                let track_id = {
+                    let proj = project.borrow();
+                    proj.tracks.iter()
+                        .find(|t| t.clips.iter().any(|c| c.id == cid))
+                        .map(|t| t.id.clone())
+                        .unwrap_or_default()
+                };
+                let insert_index = {
+                    let proj = project.borrow();
+                    proj.tracks.iter()
+                        .find(|t| t.id == track_id)
+                        .and_then(|t| t.clips.iter().find(|c| c.id == cid))
+                        .map(|c| c.frei0r_effects.len())
+                        .unwrap_or(0)
+                };
+                // Push one AddFrei0rEffectCommand per pasted effect so each can be undone.
+                for (offset, effect) in effects_to_paste.into_iter().enumerate() {
+                    on_execute_command(Box::new(crate::undo::AddFrei0rEffectCommand {
+                        clip_id: cid.clone(),
+                        track_id: track_id.clone(),
+                        effect,
+                        index: insert_index + offset,
+                    }));
                 }
+                on_frei0r_changed();
             }
         });
     }
@@ -2950,6 +3102,7 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let name_entry_cb = name_entry.clone();
         let on_clip_changed = on_clip_changed.clone();
+        let on_execute_command = on_execute_command.clone();
 
         apply_btn.connect_clicked(move |_| {
             let new_name = name_entry_cb.text().to_string();
@@ -2958,6 +3111,19 @@ pub fn build_inspector(
             }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
+                let (old_label, track_id) = {
+                    let proj = project.borrow();
+                    let mut old = String::new();
+                    let mut tid = String::new();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                            old = clip.label.clone();
+                            tid = track.id.clone();
+                            break;
+                        }
+                    }
+                    (old, tid)
+                };
                 {
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
@@ -2967,6 +3133,14 @@ pub fn build_inspector(
                             break;
                         }
                     }
+                }
+                if old_label != new_name {
+                    on_execute_command(Box::new(crate::undo::SetClipLabelCommand {
+                        clip_id: clip_id.clone(),
+                        track_id,
+                        old_label,
+                        new_label: new_name,
+                    }));
                 }
                 on_clip_changed();
             }
@@ -3176,6 +3350,103 @@ pub fn build_inspector(
     wire_color_slider!(shadows_warmth_slider, |clip, v| clip.shadows_warmth = v);
     wire_color_slider!(shadows_tint_slider, |clip, v| clip.shadows_tint = v);
 
+    // Undo support for color sliders: GestureClick + EventControllerFocus snapshot/commit.
+    fn attach_color_undo(
+        slider: &Scale,
+        project: Rc<RefCell<Project>>,
+        selected_clip_id: Rc<RefCell<Option<String>>>,
+        on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)>,
+    ) {
+        type SnapCell = Rc<RefCell<Option<(String, String, crate::undo::ClipColorSnapshot)>>>;
+        let snap: SnapCell = Rc::new(RefCell::new(None));
+
+        let do_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let snap = snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *snap.borrow_mut() = Some((
+                                cid.clone(),
+                                track.id.clone(),
+                                crate::undo::ClipColorSnapshot::from_clip(clip),
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_commit = {
+            let project = project.clone();
+            let snap = snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_color)) = entry {
+                    let new_color = {
+                        let proj = project.borrow();
+                        proj.tracks.iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|clip| crate::undo::ClipColorSnapshot::from_clip(clip))
+                    };
+                    if let Some(new_color) = new_color {
+                        on_execute_command(Box::new(crate::undo::SetClipColorCommand {
+                            clip_id,
+                            track_id,
+                            old_color,
+                            new_color,
+                        }));
+                    }
+                }
+            }
+        };
+
+        let ges = gtk4::GestureClick::new();
+        {
+            let do_snapshot = do_snapshot.clone();
+            ges.connect_pressed(move |_, _, _, _| { do_snapshot(); });
+        }
+        {
+            let do_commit = do_commit.clone();
+            ges.connect_released(move |_, _, _, _| { do_commit(); });
+        }
+        slider.add_controller(ges);
+
+        let focus_ctrl = gtk4::EventControllerFocus::new();
+        {
+            let do_snapshot = do_snapshot.clone();
+            focus_ctrl.connect_enter(move |_| { do_snapshot(); });
+        }
+        {
+            focus_ctrl.connect_leave(move |_| { do_commit(); });
+        }
+        slider.add_controller(focus_ctrl);
+    }
+
+    for s in [
+        &brightness_slider, &contrast_slider, &saturation_slider,
+        &temperature_slider, &tint_slider, &denoise_slider,
+        &sharpness_slider, &blur_slider, &shadows_slider,
+        &midtones_slider, &highlights_slider, &exposure_slider,
+        &black_point_slider, &highlights_warmth_slider, &highlights_tint_slider,
+        &midtones_warmth_slider, &midtones_tint_slider,
+        &shadows_warmth_slider, &shadows_tint_slider,
+    ] {
+        attach_color_undo(
+            s,
+            project.clone(),
+            selected_clip_id.clone(),
+            on_execute_command.clone(),
+        );
+    }
+
     // Wire audio sliders
     {
         let project = project.clone();
@@ -3344,6 +3615,78 @@ pub fn build_inspector(
                 );
             }
         });
+    }
+
+    // Undo controllers for volume and pan sliders (shared snapshot).
+    {
+        type VolSnapCell = Rc<RefCell<Option<(String, String, f32, f32)>>>;
+        let vol_snap: VolSnapCell = Rc::new(RefCell::new(None));
+
+        let do_vol_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let vol_snap = vol_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *vol_snap.borrow_mut() = Some((
+                                cid.clone(),
+                                track.id.clone(),
+                                clip.volume,
+                                clip.pan,
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_vol_commit = {
+            let project = project.clone();
+            let vol_snap = vol_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = vol_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_volume, old_pan)) = entry {
+                    let (new_volume, new_pan) = {
+                        let proj = project.borrow();
+                        proj.tracks.iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|c| (c.volume, c.pan))
+                            .unwrap_or((old_volume, old_pan))
+                    };
+                    on_execute_command(Box::new(crate::undo::SetClipVolumeCommand {
+                        clip_id,
+                        track_id,
+                        old_volume,
+                        new_volume,
+                        old_pan,
+                        new_pan,
+                    }));
+                }
+            }
+        };
+
+        for slider in [&volume_slider, &pan_slider] {
+            let ges = gtk4::GestureClick::new();
+            let snap_c = do_vol_snapshot.clone();
+            let commit_c = do_vol_commit.clone();
+            ges.connect_pressed(move |_, _, _, _| { snap_c(); });
+            ges.connect_released(move |_, _, _, _| { commit_c(); });
+            slider.add_controller(ges);
+
+            let focus_ctrl = gtk4::EventControllerFocus::new();
+            let snap_c = do_vol_snapshot.clone();
+            let commit_c = do_vol_commit.clone();
+            focus_ctrl.connect_enter(move |_| { snap_c(); });
+            focus_ctrl.connect_leave(move |_| { commit_c(); });
+            slider.add_controller(focus_ctrl);
+        }
     }
 
     // Wire Normalize button
@@ -3550,6 +3893,81 @@ pub fn build_inspector(
                     on_eq_changed(clip_id, bands);
                 }
             });
+        }
+    }
+
+    // Undo controllers for EQ sliders (shared snapshot for all 9 sliders).
+    {
+        type EqSnapCell = Rc<RefCell<Option<(String, String, [crate::model::clip::EqBand; 3])>>>;
+        let eq_snap: EqSnapCell = Rc::new(RefCell::new(None));
+
+        let do_eq_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let eq_snap = eq_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *eq_snap.borrow_mut() = Some((
+                                cid.clone(),
+                                track.id.clone(),
+                                clip.eq_bands,
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_eq_commit = {
+            let project = project.clone();
+            let eq_snap = eq_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = eq_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_eq_bands)) = entry {
+                    let new_eq_bands = {
+                        let proj = project.borrow();
+                        proj.tracks.iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|c| c.eq_bands)
+                            .unwrap_or(old_eq_bands)
+                    };
+                    on_execute_command(Box::new(crate::undo::SetClipEqCommand {
+                        clip_id,
+                        track_id,
+                        old_eq_bands,
+                        new_eq_bands,
+                    }));
+                }
+            }
+        };
+
+        let all_eq: Vec<Scale> = eq_freq_sliders.iter()
+            .chain(eq_gain_sliders.iter())
+            .chain(eq_q_sliders.iter())
+            .cloned()
+            .collect();
+
+        for s in &all_eq {
+            let ges = gtk4::GestureClick::new();
+            let snap_c = do_eq_snapshot.clone();
+            let commit_c = do_eq_commit.clone();
+            ges.connect_pressed(move |_, _, _, _| { snap_c(); });
+            ges.connect_released(move |_, _, _, _| { commit_c(); });
+            s.add_controller(ges);
+
+            let focus_ctrl = gtk4::EventControllerFocus::new();
+            let snap_c = do_eq_snapshot.clone();
+            let commit_c = do_eq_commit.clone();
+            focus_ctrl.connect_enter(move |_| { snap_c(); });
+            focus_ctrl.connect_leave(move |_| { commit_c(); });
+            s.add_controller(focus_ctrl);
         }
     }
 
@@ -5278,6 +5696,82 @@ pub fn build_inspector(
         });
     }
 
+    // Undo controller for speed slider.
+    {
+        type SpeedSnapCell = Rc<RefCell<Option<(String, String, f64)>>>;
+        let speed_snap: SpeedSnapCell = Rc::new(RefCell::new(None));
+
+        let do_speed_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let speed_snap = speed_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *speed_snap.borrow_mut() = Some((
+                                cid.clone(),
+                                track.id.clone(),
+                                clip.speed,
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_speed_commit = {
+            let project = project.clone();
+            let speed_snap = speed_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = speed_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_speed)) = entry {
+                    let new_speed = {
+                        let proj = project.borrow();
+                        proj.tracks.iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|c| c.speed)
+                            .unwrap_or(old_speed)
+                    };
+                    if (new_speed - old_speed).abs() > 1e-9 {
+                        on_execute_command(Box::new(crate::undo::SetClipSpeedCommand {
+                            clip_id,
+                            track_id,
+                            old_speed,
+                            new_speed,
+                        }));
+                    }
+                }
+            }
+        };
+
+        let ges = gtk4::GestureClick::new();
+        {
+            let do_speed_snapshot = do_speed_snapshot.clone();
+            ges.connect_pressed(move |_, _, _, _| { do_speed_snapshot(); });
+        }
+        {
+            let do_speed_commit = do_speed_commit.clone();
+            ges.connect_released(move |_, _, _, _| { do_speed_commit(); });
+        }
+        speed_slider.add_controller(ges);
+
+        let focus_ctrl = gtk4::EventControllerFocus::new();
+        {
+            let do_speed_snapshot = do_speed_snapshot.clone();
+            focus_ctrl.connect_enter(move |_| { do_speed_snapshot(); });
+        }
+        {
+            focus_ctrl.connect_leave(move |_| { do_speed_commit(); });
+        }
+        speed_slider.add_controller(focus_ctrl);
+    }
+
     // Reverse checkbox
     {
         let project = project.clone();
@@ -6100,6 +6594,7 @@ pub fn build_inspector(
         project,
         on_frei0r_changed,
         on_frei0r_params_changed,
+        on_execute_command,
         frei0r_displayed_snapshot: Rc::new(RefCell::new(Vec::new())),
         frei0r_registry: Rc::new(RefCell::new(None)),
         keyframe_indicator_label,

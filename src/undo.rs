@@ -555,26 +555,92 @@ impl EditCommand for JoinThroughEditCommand {
     }
 }
 
-/// Set color correction on a clip (brightness/contrast/saturation)
-#[allow(dead_code)]
+/// Snapshot of all color-correction properties on a clip.
+/// Used by SetClipColorCommand to fully restore state on undo/redo.
+#[derive(Clone, Debug, Default)]
+pub struct ClipColorSnapshot {
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub denoise: f32,
+    pub sharpness: f32,
+    pub blur: f32,
+    pub shadows: f32,
+    pub midtones: f32,
+    pub highlights: f32,
+    pub exposure: f32,
+    pub black_point: f32,
+    pub highlights_warmth: f32,
+    pub highlights_tint: f32,
+    pub midtones_warmth: f32,
+    pub midtones_tint: f32,
+    pub shadows_warmth: f32,
+    pub shadows_tint: f32,
+}
+
+impl ClipColorSnapshot {
+    pub fn from_clip(clip: &crate::model::clip::Clip) -> Self {
+        Self {
+            brightness: clip.brightness,
+            contrast: clip.contrast,
+            saturation: clip.saturation,
+            temperature: clip.temperature,
+            tint: clip.tint,
+            denoise: clip.denoise,
+            sharpness: clip.sharpness,
+            blur: clip.blur,
+            shadows: clip.shadows,
+            midtones: clip.midtones,
+            highlights: clip.highlights,
+            exposure: clip.exposure,
+            black_point: clip.black_point,
+            highlights_warmth: clip.highlights_warmth,
+            highlights_tint: clip.highlights_tint,
+            midtones_warmth: clip.midtones_warmth,
+            midtones_tint: clip.midtones_tint,
+            shadows_warmth: clip.shadows_warmth,
+            shadows_tint: clip.shadows_tint,
+        }
+    }
+
+    fn apply_to(&self, clip: &mut crate::model::clip::Clip) {
+        clip.brightness = self.brightness;
+        clip.contrast = self.contrast;
+        clip.saturation = self.saturation;
+        clip.temperature = self.temperature;
+        clip.tint = self.tint;
+        clip.denoise = self.denoise;
+        clip.sharpness = self.sharpness;
+        clip.blur = self.blur;
+        clip.shadows = self.shadows;
+        clip.midtones = self.midtones;
+        clip.highlights = self.highlights;
+        clip.exposure = self.exposure;
+        clip.black_point = self.black_point;
+        clip.highlights_warmth = self.highlights_warmth;
+        clip.highlights_tint = self.highlights_tint;
+        clip.midtones_warmth = self.midtones_warmth;
+        clip.midtones_tint = self.midtones_tint;
+        clip.shadows_warmth = self.shadows_warmth;
+        clip.shadows_tint = self.shadows_tint;
+    }
+}
+
+/// Set all color-correction properties on a clip (full snapshot approach).
 pub struct SetClipColorCommand {
     pub clip_id: String,
     pub track_id: String,
-    pub old_brightness: f32,
-    pub old_contrast: f32,
-    pub old_saturation: f32,
-    pub new_brightness: f32,
-    pub new_contrast: f32,
-    pub new_saturation: f32,
+    pub old_color: ClipColorSnapshot,
+    pub new_color: ClipColorSnapshot,
 }
 
 impl EditCommand for SetClipColorCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.brightness = self.new_brightness;
-                clip.contrast = self.new_contrast;
-                clip.saturation = self.new_saturation;
+                self.new_color.apply_to(clip);
             }
         }
         project.dirty = true;
@@ -582,9 +648,7 @@ impl EditCommand for SetClipColorCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.brightness = self.old_brightness;
-                clip.contrast = self.old_contrast;
-                clip.saturation = self.old_saturation;
+                self.old_color.apply_to(clip);
             }
         }
         project.dirty = true;
@@ -657,6 +721,175 @@ impl EditCommand for SetClipEqCommand {
     }
     fn description(&self) -> &str {
         "Set clip EQ"
+    }
+}
+
+/// Set clip volume and/or pan.
+pub struct SetClipVolumeCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_volume: f32,
+    pub new_volume: f32,
+    pub old_pan: f32,
+    pub new_pan: f32,
+}
+
+impl EditCommand for SetClipVolumeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.new_volume;
+                clip.pan = self.new_pan;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.old_volume;
+                clip.pan = self.old_pan;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip volume/pan"
+    }
+}
+
+/// Set clip playback speed.
+pub struct SetClipSpeedCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_speed: f64,
+    pub new_speed: f64,
+}
+
+impl EditCommand for SetClipSpeedCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.speed = self.new_speed;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.speed = self.old_speed;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip speed"
+    }
+}
+
+/// Rename a clip's display label.
+pub struct SetClipLabelCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_label: String,
+    pub new_label: String,
+}
+
+impl EditCommand for SetClipLabelCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.label = self.new_label.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.label = self.old_label.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Rename clip"
+    }
+}
+
+/// Toggle a track's mute state.
+pub struct SetTrackMuteCommand {
+    pub track_id: String,
+    pub old_muted: bool,
+    pub new_muted: bool,
+}
+
+impl EditCommand for SetTrackMuteCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.muted = self.new_muted;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.muted = self.old_muted;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Toggle track mute"
+    }
+}
+
+/// Toggle a track's solo state.
+pub struct SetTrackSoloCommand {
+    pub track_id: String,
+    pub old_solo: bool,
+    pub new_solo: bool,
+}
+
+impl EditCommand for SetTrackSoloCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.soloed = self.new_solo;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.soloed = self.old_solo;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Toggle track solo"
+    }
+}
+
+/// Toggle a track's duck (sidechain) state.
+pub struct SetTrackDuckCommand {
+    pub track_id: String,
+    pub old_duck: bool,
+    pub new_duck: bool,
+}
+
+impl EditCommand for SetTrackDuckCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.duck = self.new_duck;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.duck = self.old_duck;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Toggle track duck"
     }
 }
 
