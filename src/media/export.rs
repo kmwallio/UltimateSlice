@@ -777,7 +777,7 @@ pub fn export_project(
     // the timeline contains title clips or other video-only sources that
     // don't contribute audio.
     let has_audio = !audio_labels.is_empty();
-    if has_audio {
+    if has_audio && options.container != Container::Gif {
         use crate::model::track::AudioRole;
         let project_dur_s = project.duration() as f64 / 1_000_000_000.0;
 

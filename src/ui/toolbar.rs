@@ -1268,7 +1268,7 @@ pub fn build_toolbar(
             let project = project.clone();
             let bg_removal_cache = bg_removal_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
-                if resp == gtk::ResponseType::Cancel {
+                if resp != gtk::ResponseType::Accept && resp != gtk::ResponseType::Other(1) {
                     d.close();
                     return;
                 }
