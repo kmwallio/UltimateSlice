@@ -494,6 +494,35 @@ pub struct Frei0rEffect {
     pub string_params: HashMap<String, String>,
 }
 
+/// An instance of a LADSPA audio effect applied to a clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LadspaEffect {
+    /// Unique instance id (UUID v4).
+    pub id: String,
+    /// LADSPA plugin name (the short identifier from the registry).
+    pub plugin_name: String,
+    /// Full GStreamer element factory name (e.g. `"ladspa-amp-so-amp-stereo"`).
+    pub gst_element_name: String,
+    /// Whether the effect is currently active.
+    #[serde(default = "default_effect_enabled")]
+    pub enabled: bool,
+    /// Numeric parameter values keyed by GStreamer property name.
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
+}
+
+impl LadspaEffect {
+    pub fn new(plugin_name: &str, gst_element_name: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            gst_element_name: gst_element_name.to_string(),
+            enabled: true,
+            params: HashMap::new(),
+        }
+    }
+}
+
 fn default_effect_enabled() -> bool {
     true
 }
@@ -861,6 +890,9 @@ pub struct Clip {
     /// Applied frei0r filter effects, ordered from first to last in the chain.
     #[serde(default)]
     pub frei0r_effects: Vec<Frei0rEffect>,
+    /// Applied LADSPA audio effects, ordered from first to last in the chain.
+    #[serde(default)]
+    pub ladspa_effects: Vec<LadspaEffect>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -1130,6 +1162,7 @@ impl Clip {
             source_timecode_base_ns: None,
             media_duration_ns: None,
             frei0r_effects: Vec::new(),
+            ladspa_effects: Vec::new(),
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,

@@ -8,7 +8,8 @@ use crate::recent;
 use crate::ui::timecode;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
 use crate::ui::{
-    effects_browser, inspector, keyframe_editor, media_browser, preferences, preview,
+    audio_effects_browser, effects_browser, inspector, keyframe_editor, media_browser,
+    preferences, preview,
     program_monitor, title_templates, titles_browser, toolbar,
 };
 use crate::undo::TrackClipsChange;
@@ -6039,6 +6040,44 @@ pub fn build_window(
     let (effects_browser_widget, set_effects_registry) =
         effects_browser::build_effects_browser(on_apply_effect);
 
+    // Audio effects (LADSPA) browser
+    let on_apply_ladspa_effect: Rc<dyn Fn(String)> = {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        Rc::new(move |ladspa_name: String| {
+            let reg = crate::media::ladspa_registry::LadspaRegistry::get_or_discover();
+            let Some(info) = reg.find_by_name(&ladspa_name) else { return };
+            let effect = crate::model::clip::LadspaEffect::new(
+                &info.ladspa_name,
+                &info.gst_element_name,
+            );
+            let clip_id = {
+                let st = timeline_state.borrow();
+                st.selected_clip_id.clone()
+            };
+            let Some(clip_id) = clip_id else { return };
+            {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        clip.ladspa_effects.push(effect);
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+            }
+            let cb = {
+                let st = timeline_state.borrow();
+                st.on_project_changed.clone()
+            };
+            if let Some(cb) = cb {
+                cb();
+            }
+        })
+    };
+    let (audio_effects_browser_widget, set_ladspa_registry) =
+        audio_effects_browser::build_audio_effects_browser(on_apply_ladspa_effect);
+
     // ── Titles browser callbacks ─────────────────────────────────────────
     let on_add_title: Rc<dyn Fn(String)> = {
         let project = project.clone();
@@ -6161,6 +6200,7 @@ pub fn build_window(
     left_stack.set_transition_duration(150);
     left_stack.add_titled(&browser, Some("media"), "Media");
     left_stack.add_titled(&effects_browser_widget, Some("effects"), "Effects");
+    left_stack.add_titled(&audio_effects_browser_widget, Some("audio_effects"), "Audio FX");
     left_stack.add_titled(&titles_browser_widget, Some("titles"), "Titles");
 
     let left_stack_switcher = gtk::StackSwitcher::new();
@@ -6392,6 +6432,7 @@ pub fn build_window(
                             is_audio_only: audio_only,
                             duck: t.duck,
                             duck_amount_db: t.duck_amount_db,
+                            ladspa_effects: c.ladspa_effects.clone(),
                             pitch_shift_semitones: c.pitch_shift_semitones,
                             pitch_preserve: c.pitch_preserve,
                             anamorphic_desqueeze: c.anamorphic_desqueeze,
@@ -7147,11 +7188,13 @@ pub fn build_window(
     }
     window.set_child(Some(&main_stack));
 
-    // ── Frei0r plugin discovery (deferred to avoid blocking startup) ─────
+    // ── Plugin discovery (deferred to avoid blocking startup) ──────────
     glib::idle_add_local_once(move || {
         if gstreamer::init().is_ok() {
             let registry = Rc::new(crate::media::frei0r_registry::Frei0rRegistry::get_or_discover().clone());
             set_effects_registry(registry);
+            let ladspa_reg = Rc::new(crate::media::ladspa_registry::LadspaRegistry::get_or_discover().clone());
+            set_ladspa_registry(ladspa_reg);
         }
     });
 
@@ -8093,6 +8136,122 @@ fn handle_mcp_command(
                 Err(message) => {
                     reply.send(json!({"success": false, "error": message})).ok();
                 }
+            }
+        }
+
+        McpCommand::ListLadspaPlugins { reply } => {
+            let reg = crate::media::ladspa_registry::LadspaRegistry::get_or_discover();
+            let plugins: Vec<serde_json::Value> = reg
+                .plugins
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.ladspa_name,
+                        "display_name": p.display_name,
+                        "description": p.description,
+                        "category": p.category,
+                        "gst_element_name": p.gst_element_name,
+                        "params": p.params.iter().map(|param| serde_json::json!({
+                            "name": param.name,
+                            "display_name": param.display_name,
+                            "default": param.default_value,
+                            "min": param.min,
+                            "max": param.max,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            reply
+                .send(serde_json::json!({"plugins": plugins, "count": plugins.len()}))
+                .ok();
+        }
+
+        McpCommand::AddClipLadspaEffect {
+            clip_id,
+            plugin_name,
+            reply,
+        } => {
+            let reg = crate::media::ladspa_registry::LadspaRegistry::get_or_discover();
+            if let Some(info) = reg.find_by_name(&plugin_name) {
+                let effect = crate::model::clip::LadspaEffect::new(
+                    &info.ladspa_name,
+                    &info.gst_element_name,
+                );
+                let effect_id = effect.id.clone();
+                let mut proj = project.borrow_mut();
+                let mut found = false;
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        clip.ladspa_effects.push(effect);
+                        proj.dirty = true;
+                        found = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                reply
+                    .send(serde_json::json!({"success": found, "effect_id": effect_id}))
+                    .ok();
+                if found {
+                    on_project_changed();
+                }
+            } else {
+                reply
+                    .send(serde_json::json!({"success": false, "error": format!("Plugin not found: {plugin_name}")}))
+                    .ok();
+            }
+        }
+
+        McpCommand::RemoveClipLadspaEffect {
+            clip_id,
+            effect_id,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            for track in &mut proj.tracks {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                    let before = clip.ladspa_effects.len();
+                    clip.ladspa_effects.retain(|e| e.id != effect_id);
+                    if clip.ladspa_effects.len() < before {
+                        proj.dirty = true;
+                        found = true;
+                    }
+                    break;
+                }
+            }
+            drop(proj);
+            reply.send(serde_json::json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipLadspaEffectParams {
+            clip_id,
+            effect_id,
+            params,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            for track in &mut proj.tracks {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                    if let Some(effect) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id)
+                    {
+                        for (k, v) in &params {
+                            effect.params.insert(k.clone(), *v);
+                        }
+                        proj.dirty = true;
+                        found = true;
+                    }
+                    break;
+                }
+            }
+            drop(proj);
+            reply.send(serde_json::json!({"success": found})).ok();
+            if found {
+                on_project_changed();
             }
         }
 

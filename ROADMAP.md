@@ -585,7 +585,7 @@ Tracking docs:
   - [x] Pitch-shift effect per clip (±12 semitones via inspector slider)
   - [ ] Pitch-preserved J/K/L shuttle (apply Rubberband to main pipeline during shuttle)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
-- [ ] Support for LV2 / LADSPA audio plugins
+- [x] LADSPA audio plugin support — Audio FX browser tab, inspector effect display, discovery via GStreamer registry, per-clip effect chain, parameter control, GStreamer preview + FFmpeg export via native `ladspa` filter, FCPXML persistence, MCP tools (list/add/remove/set params)
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
 - [x] Automatic Ducking (per-track `duck` toggle, volume reduced when dialogue/non-ducked audio is active; configurable amount in Preferences; real-time preview; MCP `set_track_duck` tool; FCPXML persistence)
 - [x] Audio normalization and peak-matching (LUFS + peak modes via FFmpeg `ebur128`/`volumedetect`; Inspector button, MCP `normalize_clip_audio` tool, undo, measured loudness display + FCPXML persistence)

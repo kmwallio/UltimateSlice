@@ -679,9 +679,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
-                            // Don't manually escape quotes — quick_xml's
-                            // push_attribute handles XML escaping correctly.
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
+                        }
+                    }
+                    if !clip.ladspa_effects.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.ladspa_effects) {
+                            asset_clip.push_attribute(("us:ladspa-effects", json.as_str()));
                         }
                     }
                     asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
@@ -3519,6 +3522,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-shift-semitones"
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
+            | "us:ladspa-effects"
             | "us:measured-loudness-lufs"
     )
 }

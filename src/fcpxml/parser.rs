@@ -981,12 +981,12 @@ fn parse_asset_clip(
                 clip.blur_keyframes = serde_json::from_str(&json_str).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:frei0r-effects") {
-                // The writer escapes " → &quot; then XML serialization escapes
-                // & → &amp;, producing &amp;quot; in the file.  quick_xml's
-                // unescape decodes &amp;quot; → &quot; but not the second level.
-                // Decode any remaining &quot; so JSON parsing succeeds.
                 let json_str = v.replace("&quot;", "\"");
                 clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:ladspa-effects") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.ladspa_effects = serde_json::from_str(&json_str).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:volume") {
                 clip.volume = v.parse().unwrap_or(1.0);
@@ -2538,6 +2538,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-shift-semitones"
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
+            | "us:ladspa-effects"
             | "us:measured-loudness-lufs"
     )
 }

@@ -86,6 +86,8 @@ pub struct InspectorView {
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub measured_loudness_label: Label,
+    // LADSPA effects
+    pub ladspa_effects_list: GBox,
     // Channel mode
     pub channel_mode_dropdown: gtk4::ComboBoxText,
     // Pitch controls
@@ -1105,6 +1107,199 @@ impl InspectorView {
                         .set_text(&format!("{lufs:.1} LUFS"));
                 } else {
                     self.measured_loudness_label.set_text("");
+                }
+                // LADSPA effects list — interactive controls
+                {
+                    while let Some(child) = self.ladspa_effects_list.first_child() {
+                        self.ladspa_effects_list.remove(&child);
+                    }
+                    if c.ladspa_effects.is_empty() {
+                        let hint = Label::new(Some("No audio effects applied"));
+                        hint.add_css_class("dim-label");
+                        hint.set_halign(gtk4::Align::Start);
+                        self.ladspa_effects_list.append(&hint);
+                    } else {
+                        let reg = crate::media::ladspa_registry::LadspaRegistry::get_or_discover();
+                        let clip_id = c.id.clone();
+                        for (effect_idx, effect) in c.ladspa_effects.iter().enumerate() {
+                            let effect_id = effect.id.clone();
+                            let display_name = reg
+                                .find_by_name(&effect.plugin_name)
+                                .map(|p| p.display_name.clone())
+                                .unwrap_or_else(|| effect.plugin_name.clone());
+
+                            let effect_box = GBox::new(Orientation::Vertical, 2);
+                            effect_box.set_margin_bottom(4);
+
+                            // Header row: [✓] [Name] [▲] [▼] [×]
+                            let header_row = GBox::new(Orientation::Horizontal, 4);
+                            let enable_check = gtk4::CheckButton::new();
+                            enable_check.set_active(effect.enabled);
+                            header_row.append(&enable_check);
+                            let name_label = Label::new(Some(&display_name));
+                            name_label.set_hexpand(true);
+                            name_label.set_halign(gtk4::Align::Start);
+                            header_row.append(&name_label);
+                            let btn_up = Button::with_label("\u{25b2}");
+                            btn_up.set_tooltip_text(Some("Move up"));
+                            btn_up.add_css_class("flat");
+                            btn_up.set_sensitive(effect_idx > 0);
+                            header_row.append(&btn_up);
+                            let btn_down = Button::with_label("\u{25bc}");
+                            btn_down.set_tooltip_text(Some("Move down"));
+                            btn_down.add_css_class("flat");
+                            btn_down.set_sensitive(effect_idx < c.ladspa_effects.len() - 1);
+                            header_row.append(&btn_down);
+                            let btn_remove = Button::with_label("\u{00d7}");
+                            btn_remove.set_tooltip_text(Some("Remove"));
+                            btn_remove.add_css_class("flat");
+                            header_row.append(&btn_remove);
+                            effect_box.append(&header_row);
+
+                            // Wire enable toggle
+                            {
+                                let project = self.project.clone();
+                                let clip_id = clip_id.clone();
+                                let effect_id = effect_id.clone();
+                                let on_changed = self.on_frei0r_changed.clone();
+                                enable_check.connect_toggled(move |btn| {
+                                    let mut proj = project.borrow_mut();
+                                    for track in &mut proj.tracks {
+                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                            if let Some(e) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id) {
+                                                e.enabled = btn.is_active();
+                                                proj.dirty = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    drop(proj);
+                                    on_changed();
+                                });
+                            }
+                            // Wire remove
+                            {
+                                let project = self.project.clone();
+                                let clip_id = clip_id.clone();
+                                let effect_id = effect_id.clone();
+                                let on_changed = self.on_frei0r_changed.clone();
+                                btn_remove.connect_clicked(move |_| {
+                                    let mut proj = project.borrow_mut();
+                                    for track in &mut proj.tracks {
+                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                            clip.ladspa_effects.retain(|e| e.id != effect_id);
+                                            proj.dirty = true;
+                                            break;
+                                        }
+                                    }
+                                    drop(proj);
+                                    on_changed();
+                                });
+                            }
+                            // Wire move up
+                            {
+                                let project = self.project.clone();
+                                let clip_id = clip_id.clone();
+                                let effect_id = effect_id.clone();
+                                let on_changed = self.on_frei0r_changed.clone();
+                                btn_up.connect_clicked(move |_| {
+                                    let mut proj = project.borrow_mut();
+                                    for track in &mut proj.tracks {
+                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                            if let Some(pos) = clip.ladspa_effects.iter().position(|e| e.id == effect_id) {
+                                                if pos > 0 {
+                                                    clip.ladspa_effects.swap(pos, pos - 1);
+                                                    proj.dirty = true;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    drop(proj);
+                                    on_changed();
+                                });
+                            }
+                            // Wire move down
+                            {
+                                let project = self.project.clone();
+                                let clip_id = clip_id.clone();
+                                let effect_id = effect_id.clone();
+                                let on_changed = self.on_frei0r_changed.clone();
+                                btn_down.connect_clicked(move |_| {
+                                    let mut proj = project.borrow_mut();
+                                    for track in &mut proj.tracks {
+                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                            let len = clip.ladspa_effects.len();
+                                            if let Some(pos) = clip.ladspa_effects.iter().position(|e| e.id == effect_id) {
+                                                if pos + 1 < len {
+                                                    clip.ladspa_effects.swap(pos, pos + 1);
+                                                    proj.dirty = true;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    drop(proj);
+                                    on_changed();
+                                });
+                            }
+
+                            // Parameter sliders
+                            if let Some(info) = reg.find_by_name(&effect.plugin_name) {
+                                for param_info in &info.params {
+                                    let val = effect.params.get(&param_info.name).copied().unwrap_or(param_info.default_value);
+                                    let param_row = GBox::new(Orientation::Vertical, 1);
+                                    let param_label = Label::new(Some(&param_info.display_name));
+                                    param_label.set_halign(gtk4::Align::Start);
+                                    param_label.add_css_class("dim-label");
+                                    param_row.append(&param_label);
+
+                                    let min = param_info.min;
+                                    let max = param_info.max;
+                                    let step = (max - min).abs() / 100.0;
+                                    let slider = Scale::with_range(
+                                        Orientation::Horizontal,
+                                        min,
+                                        max,
+                                        if step > 0.0 { step } else { 0.01 },
+                                    );
+                                    slider.set_value(val);
+                                    slider.set_draw_value(true);
+                                    slider.set_digits(2);
+                                    slider.add_mark(param_info.default_value, gtk4::PositionType::Bottom, None);
+                                    param_row.append(&slider);
+
+                                    // Wire slider
+                                    let project = self.project.clone();
+                                    let clip_id = clip_id.clone();
+                                    let effect_id = effect_id.clone();
+                                    let param_name = param_info.name.clone();
+                                    let on_changed = self.on_frei0r_changed.clone();
+                                    slider.connect_value_changed(move |s| {
+                                        let mut proj = project.borrow_mut();
+                                        for track in &mut proj.tracks {
+                                            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                                if let Some(e) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id) {
+                                                    e.params.insert(param_name.clone(), s.value());
+                                                    proj.dirty = true;
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        drop(proj);
+                                        on_changed();
+                                    });
+
+                                    effect_box.append(&param_row);
+                                }
+                            }
+
+                            if effect_idx < c.ladspa_effects.len() - 1 {
+                                effect_box.append(&Separator::new(Orientation::Horizontal));
+                            }
+                            self.ladspa_effects_list.append(&effect_box);
+                        }
+                    }
                 }
                 // Channel mode
                 #[allow(deprecated)]
@@ -2208,6 +2403,13 @@ pub fn build_inspector(
     pitch_hint.set_halign(gtk4::Align::Start);
     pitch_hint.add_css_class("dim-label");
     pitch_inner.append(&pitch_hint);
+
+    // ── Applied Audio Effects (LADSPA) sub-section ────────────────────────
+    let ladspa_effects_expander = Expander::new(Some("Applied Audio Effects"));
+    ladspa_effects_expander.set_expanded(false);
+    audio_inner.append(&ladspa_effects_expander);
+    let ladspa_effects_list = GBox::new(Orientation::Vertical, 4);
+    ladspa_effects_expander.set_child(Some(&ladspa_effects_list));
 
     // ── Track Audio sub-section (Role + Ducking) ──────────────────────────
     let duck_expander = Expander::new(Some("Track Audio"));
@@ -5826,6 +6028,7 @@ pub fn build_inspector(
         pan_slider,
         normalize_btn,
         measured_loudness_label,
+        ladspa_effects_list,
         channel_mode_dropdown,
         pitch_shift_slider,
         pitch_preserve_check,

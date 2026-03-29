@@ -239,6 +239,48 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_ladspa_plugins",
+            "description": "List all available LADSPA audio effect plugins with their parameters.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_clip_ladspa_effect",
+            "description": "Add a LADSPA audio effect to a clip by plugin name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id." },
+                    "plugin_name": { "type": "string", "description": "LADSPA plugin short name from list_ladspa_plugins." }
+                },
+                "required": ["clip_id", "plugin_name"]
+            }
+        },
+        {
+            "name": "remove_clip_ladspa_effect",
+            "description": "Remove a LADSPA audio effect from a clip by effect id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id." },
+                    "effect_id": { "type": "string", "description": "Effect instance id." }
+                },
+                "required": ["clip_id", "effect_id"]
+            }
+        },
+        {
+            "name": "set_clip_ladspa_effect_params",
+            "description": "Set parameters on a LADSPA audio effect instance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id." },
+                    "effect_id": { "type": "string", "description": "Effect instance id." },
+                    "params": { "type": "object", "description": "Parameter name → value pairs." }
+                },
+                "required": ["clip_id", "effect_id", "params"]
+            }
+        },
+        {
             "name": "set_track_role",
             "description": "Set audio role for a track. Roles categorize audio for submix routing and FCPXML metadata.",
             "inputSchema": {
@@ -1300,6 +1342,26 @@ fn dispatch_tool_payload(
         "set_track_solo" => McpCommand::SetTrackSolo {
             track_id: args["track_id"].as_str().unwrap_or("").to_string(),
             solo: args["solo"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "list_ladspa_plugins" => McpCommand::ListLadspaPlugins { reply: tx },
+        "add_clip_ladspa_effect" => McpCommand::AddClipLadspaEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            plugin_name: args["plugin_name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "remove_clip_ladspa_effect" => McpCommand::RemoveClipLadspaEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_clip_ladspa_effect_params" => McpCommand::SetClipLadspaEffectParams {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            params: args.get("params")
+                .and_then(|v| v.as_object())
+                .map(|obj| obj.iter().filter_map(|(k, v)| v.as_f64().map(|val| (k.clone(), val))).collect())
+                .unwrap_or_default(),
             reply: tx,
         },
         "set_track_role" => McpCommand::SetTrackRole {

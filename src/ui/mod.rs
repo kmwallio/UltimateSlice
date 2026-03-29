@@ -1,3 +1,4 @@
+pub mod audio_effects_browser;
 pub mod color_scopes;
 pub mod color_wheel;
 pub mod curves_editor;

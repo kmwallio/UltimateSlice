@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
@@ -35,6 +36,25 @@ pub enum McpCommand {
     SetTrackSolo {
         track_id: String,
         solo: bool,
+        reply: SyncSender<Value>,
+    },
+    ListLadspaPlugins {
+        reply: SyncSender<Value>,
+    },
+    AddClipLadspaEffect {
+        clip_id: String,
+        plugin_name: String,
+        reply: SyncSender<Value>,
+    },
+    RemoveClipLadspaEffect {
+        clip_id: String,
+        effect_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetClipLadspaEffectParams {
+        clip_id: String,
+        effect_id: String,
+        params: HashMap<String, f64>,
         reply: SyncSender<Value>,
     },
     SetTrackRole {

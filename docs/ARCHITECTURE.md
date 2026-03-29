@@ -338,6 +338,10 @@ Before declaring a task finished, agents must verify via MCP:
 | `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
 | `set_track_solo` | Set solo state for a track id; soloed non-muted tracks become the active preview/export set |
+| `list_ladspa_plugins` | List all available LADSPA audio effect plugins with parameters |
+| `add_clip_ladspa_effect` | Add a LADSPA audio effect to a clip by plugin name |
+| `remove_clip_ladspa_effect` | Remove a LADSPA audio effect from a clip by effect id |
+| `set_clip_ladspa_effect_params` | Set parameters on a LADSPA audio effect instance |
 | `set_track_role` | Set audio role for a track (`none`/`dialogue`/`effects`/`music`) for submix categorization |
 | `set_track_duck` | Enable/disable automatic ducking on a track; ducked tracks have volume reduced when dialogue is present |
 | `close_source_preview` | Deselect current source media and hide the source preview |

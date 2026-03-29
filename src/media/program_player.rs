@@ -389,6 +389,8 @@ pub struct ProgramClip {
     pub duck: bool,
     /// Per-track ducking amount in dB (negative, e.g. -6.0).
     pub duck_amount_db: f64,
+    /// Applied LADSPA audio effects.
+    pub ladspa_effects: Vec<crate::model::clip::LadspaEffect>,
     /// Pitch shift in semitones (−12 to +12). 0 = no shift.
     pub pitch_shift_semitones: f64,
     /// When true, preserve pitch during speed changes via Rubberband.
@@ -12560,12 +12562,34 @@ impl ProgramPlayer {
                 .property("interval", 50_000_000u64)
                 .build()
                 .ok();
+            // Create LADSPA effect elements for this clip.
+            let ladspa_elems: Vec<gst::Element> = clip_ref
+                .map(|c| &c.ladspa_effects)
+                .into_iter()
+                .flatten()
+                .filter(|e| e.enabled)
+                .filter_map(|effect| {
+                    let elem = gst::ElementFactory::make(&effect.gst_element_name)
+                        .build()
+                        .ok()?;
+                    for (param, &val) in &effect.params {
+                        if elem.find_property(param).is_some() {
+                            elem.set_property_from_str(param, &val.to_string());
+                        }
+                    }
+                    Some(elem)
+                })
+                .collect();
+
             let mut elems: Vec<&gst::Element> = vec![&decoder, &ac];
             if let Some(ref eq) = eq_elem {
                 elems.push(eq);
             }
             if let Some(ref rb) = rb_elem {
                 elems.push(rb);
+            }
+            for le in &ladspa_elems {
+                elems.push(le);
             }
             if let Some(ref l) = lv {
                 elems.push(l);
@@ -12597,6 +12621,12 @@ impl ProgramPlayer {
                 if let (Some(prev), Some(rb_sink)) = (link_src_pad.clone(), rb.static_pad("sink")) {
                     let _ = prev.link(&rb_sink);
                     link_src_pad = rb.static_pad("src");
+                }
+            }
+            for le in &ladspa_elems {
+                if let (Some(prev), Some(le_sink)) = (link_src_pad.clone(), le.static_pad("sink")) {
+                    let _ = prev.link(&le_sink);
+                    link_src_pad = le.static_pad("src");
                 }
             }
             if let Some(ref p) = pan_elem {
@@ -12648,6 +12678,9 @@ impl ProgramPlayer {
             }
             if let Some(ref rb) = rb_elem {
                 let _ = rb.sync_state_with_parent();
+            }
+            for le in &ladspa_elems {
+                let _ = le.sync_state_with_parent();
             }
             if let Some(ref p) = pan_elem {
                 let _ = p.sync_state_with_parent();
@@ -13123,6 +13156,7 @@ mod tests {
             is_audio_only: false,
             duck: false,
             duck_amount_db: -6.0,
+            ladspa_effects: Vec::new(),
             pitch_shift_semitones: 0.0,
             pitch_preserve: false,
             track_index: 0,
