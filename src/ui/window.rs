@@ -6203,14 +6203,96 @@ pub fn build_window(
     left_stack.add_titled(&audio_effects_browser_widget, Some("audio_effects"), "Audio FX");
     left_stack.add_titled(&titles_browser_widget, Some("titles"), "Titles");
 
-    let left_stack_switcher = gtk::StackSwitcher::new();
-    left_stack_switcher.set_stack(Some(&left_stack));
-    left_stack_switcher.set_halign(gtk::Align::Center);
-    left_stack_switcher.set_margin_top(4);
-    left_stack_switcher.set_margin_bottom(2);
+    // ── Dynamic tab bar (replaces StackSwitcher) ─────────────────────────
+    // 4 ToggleButtons in a radio group.  Layout restructures at runtime:
+    //   wide (≥ 330 px): 1 row  [Media][Effects][Audio FX][Titles]
+    //   narrow (< 330 px): row1 [Media][Effects]
+    //                      row2 [Audio FX][Titles]
+    let tab_btn = |label: &str| -> gtk::ToggleButton {
+        let b = gtk::ToggleButton::with_label(label);
+        b.set_hexpand(true);
+        b
+    };
+    let tb_media    = tab_btn("Media");
+    let tb_effects  = tab_btn("Effects");
+    let tb_audio_fx = tab_btn("Audio FX");
+    let tb_titles   = tab_btn("Titles");
+    tb_media.set_active(true);
+    tb_effects.set_group(Some(&tb_media));
+    tb_audio_fx.set_group(Some(&tb_media));
+    tb_titles.set_group(Some(&tb_media));
+
+    let tab_row1 = gtk::Box::new(Orientation::Horizontal, 0);
+    tab_row1.add_css_class("linked");
+    tab_row1.set_hexpand(true);
+    tab_row1.set_margin_top(4);
+    tab_row1.set_margin_bottom(2);
+    tab_row1.append(&tb_media);
+    tab_row1.append(&tb_effects);
+    tab_row1.append(&tb_audio_fx);
+    tab_row1.append(&tb_titles);
+
+    let tab_row2 = gtk::Box::new(Orientation::Horizontal, 0);
+    tab_row2.add_css_class("linked");
+    tab_row2.set_hexpand(true);
+    tab_row2.set_margin_bottom(2);
+    tab_row2.set_visible(false); // hidden in wide mode
+
+    let tab_bar = gtk::Box::new(Orientation::Vertical, 0);
+    tab_bar.set_hexpand(true);
+    tab_bar.append(&tab_row1);
+    tab_bar.append(&tab_row2);
+
+    // Wire buttons → stack page switches
+    {
+        let s = left_stack.clone();
+        tb_media.connect_toggled(move |b| { if b.is_active() { s.set_visible_child_name("media"); } });
+    }
+    {
+        let s = left_stack.clone();
+        tb_effects.connect_toggled(move |b| { if b.is_active() { s.set_visible_child_name("effects"); } });
+    }
+    {
+        let s = left_stack.clone();
+        tb_audio_fx.connect_toggled(move |b| { if b.is_active() { s.set_visible_child_name("audio_effects"); } });
+    }
+    {
+        let s = left_stack.clone();
+        tb_titles.connect_toggled(move |b| { if b.is_active() { s.set_visible_child_name("titles"); } });
+    }
+
+    // Respond to width changes: dynamically restructure into 1 or 2 rows
+    {
+        let tab_row1 = tab_row1.clone();
+        let tab_row2 = tab_row2.clone();
+        let tb_audio_fx = tb_audio_fx.clone();
+        let tb_titles = tb_titles.clone();
+        let narrow_state = std::cell::Cell::new(false);
+        let narrow_state = std::rc::Rc::new(narrow_state);
+        tab_bar.connect_notify_local(Some("width"), move |widget, _| {
+            let w = widget.width();
+            if w == 0 { return; }
+            let narrow = w < 330;
+            if narrow == narrow_state.get() { return; }
+            narrow_state.set(narrow);
+            if narrow {
+                tab_row1.remove(&tb_audio_fx);
+                tab_row1.remove(&tb_titles);
+                tab_row2.append(&tb_audio_fx);
+                tab_row2.append(&tb_titles);
+                tab_row2.set_visible(true);
+            } else {
+                tab_row2.remove(&tb_audio_fx);
+                tab_row2.remove(&tb_titles);
+                tab_row1.append(&tb_audio_fx);
+                tab_row1.append(&tb_titles);
+                tab_row2.set_visible(false);
+            }
+        });
+    }
 
     let left_stack_container = gtk::Box::new(Orientation::Vertical, 0);
-    left_stack_container.append(&left_stack_switcher);
+    left_stack_container.append(&tab_bar);
     left_stack_container.append(&left_stack);
 
     let left_vpaned = Paned::new(Orientation::Vertical);
