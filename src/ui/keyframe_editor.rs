@@ -357,6 +357,10 @@ fn phase1_property_value_bounds(property: Phase1KeyframeProperty) -> (f64, f64) 
         | Phase1KeyframeProperty::CropRight
         | Phase1KeyframeProperty::CropTop
         | Phase1KeyframeProperty::CropBottom => (0.0, 500.0),
+        Phase1KeyframeProperty::Blur => (0.0, 1.0),
+        Phase1KeyframeProperty::EqLowGain
+        | Phase1KeyframeProperty::EqMidGain
+        | Phase1KeyframeProperty::EqHighGain => (-24.0, 12.0),
     }
 }
 

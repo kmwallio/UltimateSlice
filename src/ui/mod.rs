@@ -1,3 +1,4 @@
+pub mod audio_effects_browser;
 pub mod color_scopes;
 pub mod color_wheel;
 pub mod curves_editor;
@@ -15,4 +16,5 @@ pub mod title_templates;
 pub mod titles_browser;
 pub mod toolbar;
 pub mod transform_overlay;
+pub mod welcome;
 pub mod window;

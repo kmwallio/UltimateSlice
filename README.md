@@ -35,6 +35,7 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 - `anyhow` / `thiserror` / `log` / `env_logger` — MIT OR Apache-2.0
 - `rustfft` — MIT OR Apache-2.0
 - `ort` (ONNX Runtime) / `ndarray` — MIT OR Apache-2.0
+- `tempfile` — MIT OR Apache-2.0
 - FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
 - x264 (Flatpak build dependency) — GPL-2.0-or-later
 
@@ -165,6 +166,28 @@ python3 tools/mcp_socket_client.py --socket /tmp/ultimateslice-mcp.sock
 
 The client reads JSON-RPC lines from stdin and writes responses to stdout.
 See `docs/user/python-mcp.md` for complete command examples.
+
+## Native Install
+
+After building, run `install.sh` to install the binary, desktop entry, icons, MIME type,
+and AppStream metainfo to standard XDG locations:
+
+```bash
+# Install to /usr/local (default)
+sudo ./install.sh
+
+# Install to /usr (distro-style)
+sudo ./install.sh --system
+
+# User-level install (no sudo needed)
+./install.sh --prefix=$HOME/.local
+
+# Remove all installed files
+sudo ./install.sh --uninstall
+```
+
+The script will automatically run `cargo build --release` if the binary is not yet built.
+Run `./install.sh --help` for full usage.
 
 ## Flatpak
 

@@ -594,6 +594,72 @@ impl EditCommand for SetClipColorCommand {
     }
 }
 
+/// Normalize clip audio volume (stores old/new volume + measured loudness).
+#[allow(dead_code)]
+pub struct NormalizeClipAudioCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_volume: f32,
+    pub new_volume: f32,
+    pub old_measured_loudness: Option<f64>,
+    pub new_measured_loudness: Option<f64>,
+}
+
+impl EditCommand for NormalizeClipAudioCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.new_volume;
+                clip.measured_loudness_lufs = self.new_measured_loudness;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.old_volume;
+                clip.measured_loudness_lufs = self.old_measured_loudness;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Normalize clip audio"
+    }
+}
+
+/// Set 3-band parametric EQ on a clip.
+#[allow(dead_code)]
+pub struct SetClipEqCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_eq_bands: [crate::model::clip::EqBand; 3],
+    pub new_eq_bands: [crate::model::clip::EqBand; 3],
+}
+
+impl EditCommand for SetClipEqCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.eq_bands = self.new_eq_bands;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.eq_bands = self.old_eq_bands;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip EQ"
+    }
+}
+
 /// Match one clip's color to another — stores all color parameters before/after.
 pub struct MatchColorCommand {
     pub clip_id: String,
@@ -614,7 +680,7 @@ pub struct MatchColorCommand {
     pub old_midtones_tint: f32,
     pub old_shadows_warmth: f32,
     pub old_shadows_tint: f32,
-    pub old_lut_path: Option<String>,
+    pub old_lut_paths: Vec<String>,
     pub new_brightness: f32,
     pub new_contrast: f32,
     pub new_saturation: f32,
@@ -631,7 +697,7 @@ pub struct MatchColorCommand {
     pub new_midtones_tint: f32,
     pub new_shadows_warmth: f32,
     pub new_shadows_tint: f32,
-    pub new_lut_path: Option<String>,
+    pub new_lut_paths: Vec<String>,
 }
 
 impl MatchColorCommand {
@@ -655,7 +721,7 @@ impl MatchColorCommand {
                     clip.midtones_tint = self.new_midtones_tint;
                     clip.shadows_warmth = self.new_shadows_warmth;
                     clip.shadows_tint = self.new_shadows_tint;
-                    clip.lut_path = self.new_lut_path.clone();
+                    clip.lut_paths = self.new_lut_paths.clone();
                 } else {
                     clip.brightness = self.old_brightness;
                     clip.contrast = self.old_contrast;
@@ -673,7 +739,7 @@ impl MatchColorCommand {
                     clip.midtones_tint = self.old_midtones_tint;
                     clip.shadows_warmth = self.old_shadows_warmth;
                     clip.shadows_tint = self.old_shadows_tint;
-                    clip.lut_path = self.old_lut_path.clone();
+                    clip.lut_paths = self.old_lut_paths.clone();
                 }
             }
         }
@@ -1129,6 +1195,30 @@ impl EditCommand for SetTitlePropertiesCommand {
     }
     fn description(&self) -> &str {
         "Set title properties"
+    }
+}
+
+/// Add an adjustment layer clip to a track (undo removes it).
+pub struct AddAdjustmentLayerCommand {
+    pub clip: Clip,
+    pub track_id: String,
+}
+
+impl EditCommand for AddAdjustmentLayerCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.add_clip(self.clip.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.remove_clip(&self.clip.id);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add adjustment layer"
     }
 }
 

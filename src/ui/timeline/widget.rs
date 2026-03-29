@@ -178,7 +178,8 @@ pub struct ColorGradeClipboard {
     pub shadows_tint: f32,
     pub denoise: f32,
     pub sharpness: f32,
-    pub lut_path: Option<String>,
+    pub blur: f32,
+    pub lut_paths: Vec<String>,
 }
 
 impl ColorGradeClipboard {
@@ -203,7 +204,8 @@ impl ColorGradeClipboard {
             shadows_tint: clip.shadows_tint,
             denoise: clip.denoise,
             sharpness: clip.sharpness,
-            lut_path: clip.lut_path.clone(),
+            blur: clip.blur,
+            lut_paths: clip.lut_paths.clone(),
         }
     }
 
@@ -228,7 +230,8 @@ impl ColorGradeClipboard {
         target.shadows_tint = self.shadows_tint;
         target.denoise = self.denoise;
         target.sharpness = self.sharpness;
-        target.lut_path = self.lut_path.clone();
+        target.blur = self.blur;
+        target.lut_paths = self.lut_paths.clone();
         before != *target
     }
 }
@@ -279,11 +282,15 @@ pub struct TimelineState {
     pub on_extraction_pause: Option<Rc<dyn Fn(bool)>>,
     /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
     pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
+    /// Called when files are dropped from an external file manager: (file_paths, track_idx, timeline_start_ns)
+    pub on_drop_external_files: Option<Rc<dyn Fn(Vec<String>, usize, u64)>>,
     /// Lightweight callback fired immediately when clip selection changes (no pipeline rebuild).
     /// Called with the new selected_clip_id (or None if deselected).
     pub on_clip_selected: Option<Rc<dyn Fn(Option<String>)>>,
     /// Callback fired when user requests audio sync: Vec<(clip_id, source_path, source_in, source_out, timeline_start, track_id)>
     pub on_sync_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
+    /// Callback fired when user requests sync & replace audio (same args as on_sync_audio).
+    pub on_sync_replace_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
     /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
     pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
@@ -320,6 +327,8 @@ pub struct TimelineState {
     pub missing_media_paths: HashSet<String>,
     /// Callback fired when user presses the match-color shortcut (Ctrl+Alt+M).
     pub on_match_color: Option<Rc<dyn Fn()>>,
+    /// Callback fired when user presses the match-frame shortcut (F).
+    pub on_match_frame: Option<Rc<dyn Fn()>>,
 }
 
 impl TimelineState {
@@ -340,8 +349,10 @@ impl TimelineState {
             on_play_pause: None,
             on_extraction_pause: None,
             on_drop_clip: None,
+            on_drop_external_files: None,
             on_clip_selected: None,
             on_sync_audio: None,
+            on_sync_replace_audio: None,
             on_remove_silent_parts: None,
             magnetic_mode: false,
             hover_transition_pair: None,
@@ -360,6 +371,7 @@ impl TimelineState {
             on_tool_changed: None,
             missing_media_paths: HashSet::new(),
             on_match_color: None,
+            on_match_frame: None,
         }
     }
 
@@ -397,6 +409,38 @@ impl TimelineState {
         } else {
             None
         }
+    }
+
+    fn duck_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        let track_idx = self.track_index_at_y(y)?;
+        let project = self.project.borrow();
+        let track = project.tracks.get(track_idx)?;
+        if track.kind != TrackKind::Audio {
+            return None;
+        }
+        let row_y = track_row_top(&project, track_idx);
+        let solo_x = track_label_solo_badge_x(self.show_track_audio_levels);
+        let badge_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
+        let badge_y = row_y + 6.0;
+        if x >= badge_x
+            && x <= badge_x + TRACK_LABEL_SOLO_BADGE_WIDTH
+            && y >= badge_y
+            && y <= badge_y + TRACK_LABEL_SOLO_BADGE_HEIGHT
+        {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn toggle_track_duck_by_index(&mut self, track_idx: usize) -> bool {
+        let mut proj = self.project.borrow_mut();
+        let Some(track) = proj.tracks.get_mut(track_idx) else {
+            return false;
+        };
+        track.duck = !track.duck;
+        proj.dirty = true;
+        true
     }
 
     fn toggle_track_solo_by_index(&mut self, track_idx: usize) -> bool {
@@ -944,7 +988,12 @@ impl TimelineState {
             unlink_selected: self.can_unlink_selected_clips(),
             align_grouped: self.can_align_selected_groups_by_timecode(),
             sync_audio: self.can_sync_selected_clips_by_audio(),
+            sync_replace_audio: self.can_sync_selected_clips_by_audio(),
             remove_silent_parts: self.can_remove_silent_parts(),
+            split_stereo: {
+                let ids = self.selected_ids_or_primary();
+                ids.len() == 1
+            },
         }
     }
 
@@ -1194,11 +1243,13 @@ impl TimelineState {
         true
     }
 
-    /// Collect clip info for audio sync and fire the callback.
-    fn sync_selected_clips_by_audio(&self) {
+    /// Collect selected clip info for audio sync (2+ clips required).
+    pub fn collect_selected_clips_for_sync(
+        &self,
+    ) -> Option<Vec<(String, String, u64, u64, u64, String)>> {
         let ids = self.selected_ids_or_primary();
         if ids.len() < 2 {
-            return;
+            return None;
         }
         let proj = self.project.borrow();
         let clip_infos: Vec<(String, String, u64, u64, u64, String)> = proj
@@ -1219,10 +1270,18 @@ impl TimelineState {
             .collect();
         drop(proj);
         if clip_infos.len() < 2 {
-            return;
+            None
+        } else {
+            Some(clip_infos)
         }
-        if let Some(ref cb) = self.on_sync_audio {
-            cb(clip_infos);
+    }
+
+    /// Collect clip info for audio sync and fire the callback.
+    fn sync_selected_clips_by_audio(&self) {
+        if let Some(clip_infos) = self.collect_selected_clips_for_sync() {
+            if let Some(ref cb) = self.on_sync_audio {
+                cb(clip_infos);
+            }
         }
     }
 
@@ -2289,7 +2348,7 @@ impl TimelineState {
 fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
     match kind {
         ClipKind::Audio => TrackKind::Audio,
-        ClipKind::Video | ClipKind::Image | ClipKind::Title => TrackKind::Video,
+        ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment => TrackKind::Video,
     }
 }
 
@@ -2509,7 +2568,9 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     // Enhancement
     target.denoise = source.denoise;
     target.sharpness = source.sharpness;
-    target.lut_path = source.lut_path.clone();
+    target.blur = source.blur;
+    target.blur_keyframes = source.blur_keyframes.clone();
+    target.lut_paths = source.lut_paths.clone();
     // Audio
     target.volume = source.volume;
     target.pan = source.pan;
@@ -2615,7 +2676,9 @@ struct ClipContextMenuActionability {
     unlink_selected: bool,
     align_grouped: bool,
     sync_audio: bool,
+    sync_replace_audio: bool,
     remove_silent_parts: bool,
+    split_stereo: bool,
 }
 
 impl ClipContextMenuActionability {
@@ -2626,7 +2689,9 @@ impl ClipContextMenuActionability {
             || self.unlink_selected
             || self.align_grouped
             || self.sync_audio
+            || self.sync_replace_audio
             || self.remove_silent_parts
+            || self.split_stereo
     }
 }
 
@@ -2637,7 +2702,9 @@ fn apply_clip_context_menu_actionability(
     btn_unlink_selected: &gtk::Button,
     btn_align_grouped: &gtk::Button,
     btn_sync_audio: &gtk::Button,
+    btn_sync_replace_audio: &gtk::Button,
     btn_remove_silent_parts: &gtk::Button,
+    btn_split_stereo: &gtk::Button,
     actionability: ClipContextMenuActionability,
 ) -> bool {
     let set_state = |button: &gtk::Button, actionable: bool| {
@@ -2650,7 +2717,9 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_unlink_selected, actionability.unlink_selected);
     set_state(btn_align_grouped, actionability.align_grouped);
     set_state(btn_sync_audio, actionability.sync_audio);
+    set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
+    set_state(btn_split_stereo, actionability.split_stereo);
     actionability.any()
 }
 
@@ -2723,6 +2792,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     btn_sync_audio.set_tooltip_text(Some(
         "Align selected clips using audio cross-correlation (requires 2+ clips with audio)",
     ));
+    let btn_sync_replace_audio = gtk::Button::with_label("Sync & Replace Audio");
+    btn_sync_replace_audio.add_css_class("flat");
+    btn_sync_replace_audio.set_tooltip_text(Some(
+        "Sync by audio, then link clips and mute camera audio so external audio replaces it",
+    ));
     let btn_remove_silent_parts = gtk::Button::with_label("Remove Silent Parts\u{2026}");
     btn_remove_silent_parts.add_css_class("flat");
     btn_remove_silent_parts.set_tooltip_text(Some(
@@ -2734,7 +2808,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     clip_context_box.append(&btn_unlink_selected);
     clip_context_box.append(&btn_align_grouped);
     clip_context_box.append(&btn_sync_audio);
+    clip_context_box.append(&btn_sync_replace_audio);
     clip_context_box.append(&btn_remove_silent_parts);
+    let btn_split_stereo = gtk::Button::with_label("Split Stereo to Mono Tracks");
+    btn_split_stereo.add_css_class("flat");
+    btn_split_stereo.set_tooltip_text(Some(
+        "Create left and right mono clips from selected stereo audio on separate tracks",
+    ));
+    clip_context_box.append(&btn_split_stereo);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -2748,6 +2829,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     let btn_track_height_small = gtk::Button::with_label("Track Height: Small");
     let btn_track_height_medium = gtk::Button::with_label("Track Height: Medium");
     let btn_track_height_large = gtk::Button::with_label("Track Height: Large");
+    let btn_add_adjustment_layer = gtk::Button::with_label("Add Adjustment Layer");
     for btn in [
         &btn_track_height_small,
         &btn_track_height_medium,
@@ -2756,6 +2838,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn.add_css_class("flat");
         track_context_box.append(btn);
     }
+    btn_add_adjustment_layer.add_css_class("flat");
+    track_context_box.append(&btn_add_adjustment_layer);
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
@@ -2893,11 +2977,96 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     {
         let state = state.clone();
         let pop_weak = clip_context_pop.downgrade();
+        btn_sync_replace_audio.connect_clicked(move |_| {
+            let st = state.borrow();
+            // Collect the same clip data as sync_selected_clips_by_audio,
+            // but fire the replace callback instead.
+            let cb = st.on_sync_replace_audio.clone();
+            let data = st.collect_selected_clips_for_sync();
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if let (Some(cb), Some(data)) = (cb, data) {
+                cb(data);
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
         btn_remove_silent_parts.connect_clicked(move |_| {
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
             open_remove_silent_parts_dialog(state.clone());
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_split_stereo.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let mut st = state.borrow_mut();
+            let ids = st.selected_ids_or_primary();
+            let clip_id = match ids.into_iter().next() {
+                Some(id) => id,
+                None => return,
+            };
+            let changed = {
+                let mut proj = st.project.borrow_mut();
+                // Find the clip and its track.
+                let clip_data = proj
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(ti, t)| t.clips.iter().map(move |c| (ti, c)))
+                    .find(|(_, c)| c.id == clip_id)
+                    .map(|(ti, c)| (ti, c.clone()));
+                if let Some((track_idx, original)) = clip_data {
+                    let track_label = proj.tracks[track_idx].label.clone();
+                    // Set original to Left channel.
+                    if let Some(clip) = proj.tracks[track_idx]
+                        .clips
+                        .iter_mut()
+                        .find(|c| c.id == clip_id)
+                    {
+                        clip.audio_channel_mode =
+                            crate::model::clip::AudioChannelMode::Left;
+                    }
+                    // Create a clone for Right channel on a new audio track.
+                    let mut right_clip = original.clone();
+                    right_clip.id = uuid::Uuid::new_v4().to_string();
+                    right_clip.audio_channel_mode =
+                        crate::model::clip::AudioChannelMode::Right;
+                    let mut new_track = crate::model::track::Track::new_audio(
+                        format!("{track_label} (R)"),
+                    );
+                    new_track.add_clip(right_clip);
+                    // Rename original track to indicate Left.
+                    proj.tracks[track_idx].label = format!("{track_label} (L)");
+                    proj.tracks.push(new_track);
+                    proj.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            };
+            let proj_cb = st.on_project_changed.clone();
+            drop(st);
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
         });
     }
 
@@ -2941,6 +3110,46 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
+            }
+        });
+    }
+
+    // Add Adjustment Layer button handler
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        btn_add_adjustment_layer.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            if let Some(idx) = track_idx {
+                let (playhead, track_id, is_video, proj_rc) = {
+                    let st = state.borrow();
+                    let proj = st.project.borrow();
+                    let valid = idx < proj.tracks.len() && proj.tracks[idx].kind == TrackKind::Video;
+                    let tid = proj.tracks.get(idx).map(|t| t.id.clone()).unwrap_or_default();
+                    (st.playhead_ns, tid, valid, st.project.clone())
+                };
+                if is_video {
+                    let clip = crate::model::clip::Clip::new_adjustment(playhead, 5_000_000_000);
+                    let cmd = crate::undo::AddAdjustmentLayerCommand {
+                        clip,
+                        track_id,
+                    };
+                    let mut st = state.borrow_mut();
+                    st.history.execute(Box::new(cmd), &mut proj_rc.borrow_mut());
+                    let proj_cb = st.on_project_changed.clone();
+                    drop(st);
+                    if let Some(cb) = proj_cb {
+                        cb();
+                    }
+                    if let Some(a) = area_weak.upgrade() {
+                        a.queue_draw();
+                    }
+                }
+            }
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
             }
         });
     }
@@ -3010,6 +3219,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let btn_track_height_small = btn_track_height_small.clone();
         let btn_track_height_medium = btn_track_height_medium.clone();
         let btn_track_height_large = btn_track_height_large.clone();
+        let btn_add_adjustment_layer = btn_add_adjustment_layer.clone();
         click.connect_pressed(move |gesture, _n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() {
@@ -3082,6 +3292,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             let changed = st
                                 .solo_badge_hit_track_index(x, y)
                                 .map(|track_idx| st.toggle_track_solo_by_index(track_idx))
+                                .unwrap_or(false);
+                            let proj_cb = if changed {
+                                st.on_project_changed.clone()
+                            } else {
+                                None
+                            };
+                            drop(st);
+                            if let Some(cb) = proj_cb {
+                                cb();
+                            }
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return;
+                        }
+                        if st.duck_badge_hit_track_index(x, y).is_some() {
+                            let changed = st
+                                .duck_badge_hit_track_index(x, y)
+                                .map(|track_idx| st.toggle_track_duck_by_index(track_idx))
                                 .unwrap_or(false);
                             let proj_cb = if changed {
                                 st.on_project_changed.clone()
@@ -3225,15 +3454,15 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let mut sel_cb: Option<Rc<dyn Fn(Option<String>)>> = None;
                     let mut new_sel: Option<String> = None;
 
-                    if x < TRACK_LABEL_WIDTH && st.solo_badge_hit_track_index(x, y).is_none() {
+                    if x < TRACK_LABEL_WIDTH && st.solo_badge_hit_track_index(x, y).is_none() && st.duck_badge_hit_track_index(x, y).is_none() {
                         if let Some(track_idx) = st.track_index_at_y(y) {
                             let selected = {
                                 let proj = st.project.borrow();
                                 proj.tracks
                                     .get(track_idx)
-                                    .map(|track| (track.id.clone(), track.height_preset))
+                                    .map(|track| (track.id.clone(), track.height_preset, track.kind))
                             };
-                            if let Some((track_id, preset)) = selected {
+                            if let Some((track_id, preset, track_kind)) = selected {
                                 st.selected_track_id = Some(track_id);
                                 *track_context_track_idx.borrow_mut() = Some(track_idx);
                                 btn_track_height_small.set_sensitive(
@@ -3245,6 +3474,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 btn_track_height_large.set_sensitive(
                                     preset != crate::model::track::TrackHeightPreset::Large,
                                 );
+                                btn_add_adjustment_layer.set_visible(track_kind == TrackKind::Video);
                                 track_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                     x as i32, y as i32, 1, 1,
                                 )));
@@ -3265,7 +3495,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_unlink_selected,
                                 &btn_align_grouped,
                                 &btn_sync_audio,
+                                &btn_sync_replace_audio,
                                 &btn_remove_silent_parts,
+                                &btn_split_stereo,
                                 actionability,
                             ) {
                                 clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -3551,6 +3783,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 } else if x < TRACK_LABEL_WIDTH
                     && y > RULER_HEIGHT
                     && st.solo_badge_hit_track_index(x, y).is_none()
+                    && st.duck_badge_hit_track_index(x, y).is_none()
                 {
                     // Drag started in track label area → track reorder
                     if let Some(track_idx) = st.track_index_at_y(y) {
@@ -4959,6 +5192,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     return glib::Propagation::Stop;
                 }
+                Key::f | Key::F if !ctrl && !shift && !alt => {
+                    let cb = st.on_match_frame.clone();
+                    drop(st);
+                    if let Some(cb) = cb {
+                        cb();
+                    }
+                    return glib::Propagation::Stop;
+                }
                 Key::b | Key::B if ctrl && shift => {
                     let changed = st.join_selected_through_edit();
                     if changed {
@@ -5217,26 +5458,43 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     drop(st);
                 }
             } else {
-                // Payload format: "{source_path}|{duration_ns}"
-                let mut parts = payload.splitn(2, '|');
-                let source_path = match parts.next() {
-                    Some(p) => p.to_string(),
-                    None => return false,
-                };
-                let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                // Check for external file manager drop (file:// URIs) before
+                // attempting to parse as an internal "{source_path}|{duration_ns}" payload.
+                let external_paths = crate::ui::media_browser::parse_external_drop_paths(&payload);
+                if !external_paths.is_empty() {
+                    let (track_idx, timeline_start_ns) = {
+                        let st = state.borrow();
+                        let track_row_idx = st.track_index_at_y(y).unwrap_or(0);
+                        let tns = st.x_to_ns(x);
+                        (track_row_idx, tns)
+                    };
+                    let cb = state.borrow().on_drop_external_files.clone();
+                    if let Some(cb) = cb {
+                        cb(external_paths, track_idx, timeline_start_ns);
+                    }
+                    state.borrow_mut().hover_transition_pair = None;
+                } else {
+                    // Internal payload format: "{source_path}|{duration_ns}"
+                    let mut parts = payload.splitn(2, '|');
+                    let source_path = match parts.next() {
+                        Some(p) => p.to_string(),
+                        None => return false,
+                    };
+                    let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
-                let (track_idx, timeline_start_ns) = {
-                    let st = state.borrow();
-                    let track_row_idx = st.track_index_at_y(y).unwrap_or(0);
-                    let tns = st.x_to_ns(x);
-                    (track_row_idx, tns)
-                };
+                    let (track_idx, timeline_start_ns) = {
+                        let st = state.borrow();
+                        let track_row_idx = st.track_index_at_y(y).unwrap_or(0);
+                        let tns = st.x_to_ns(x);
+                        (track_row_idx, tns)
+                    };
 
-                let cb = state.borrow().on_drop_clip.clone();
-                if let Some(cb) = cb {
-                    cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                    let cb = state.borrow().on_drop_clip.clone();
+                    if let Some(cb) = cb {
+                        cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                    }
+                    state.borrow_mut().hover_transition_pair = None;
                 }
-                state.borrow_mut().hover_transition_pair = None;
             }
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();
@@ -5653,6 +5911,21 @@ fn draw_track_row(
     let _ = cr.move_to(6.0, y + track_height / 2.0 + 4.0);
     let _ = cr.show_text(&track.label);
 
+    // Audio role label (below track name, dimmed).
+    if track.kind == TrackKind::Audio && track.audio_role != crate::model::track::AudioRole::None {
+        let role_label = track.audio_role.short_label();
+        let (role_r, role_g, role_b) = match track.audio_role {
+            crate::model::track::AudioRole::Dialogue => (0.9, 0.7, 0.3),
+            crate::model::track::AudioRole::Effects => (0.3, 0.8, 0.9),
+            crate::model::track::AudioRole::Music => (0.4, 0.9, 0.5),
+            _ => (0.5, 0.5, 0.5),
+        };
+        cr.set_source_rgb(role_r, role_g, role_b);
+        cr.set_font_size(9.0);
+        let _ = cr.move_to(6.0, y + track_height / 2.0 + 15.0);
+        let _ = cr.show_text(role_label);
+    }
+
     let solo_x = track_label_solo_badge_x(st.show_track_audio_levels);
     let solo_y = y + 6.0;
     if track.soloed {
@@ -5671,6 +5944,28 @@ fn draw_track_row(
     cr.set_font_size(10.0);
     let _ = cr.move_to(solo_x + 4.5, solo_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
     let _ = cr.show_text("S");
+
+    // Duck badge (only for audio tracks).
+    if track.kind == TrackKind::Audio {
+        let duck_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
+        let duck_y = solo_y;
+        if track.duck {
+            cr.set_source_rgb(0.2, 0.7, 0.9);
+        } else {
+            cr.set_source_rgb(0.35, 0.35, 0.4);
+        }
+        cr.rectangle(
+            duck_x,
+            duck_y,
+            TRACK_LABEL_SOLO_BADGE_WIDTH,
+            TRACK_LABEL_SOLO_BADGE_HEIGHT,
+        );
+        cr.fill().ok();
+        cr.set_source_rgb(0.1, 0.1, 0.12);
+        cr.set_font_size(10.0);
+        let _ = cr.move_to(duck_x + 4.5, duck_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
+        let _ = cr.show_text("D");
+    }
 
     if st.show_track_audio_levels {
         let meter_x = TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - 6.0;
@@ -5885,8 +6180,47 @@ fn draw_clip(
         cr.restore().ok();
     }
 
+    // ── Adjustment layer hatch pattern + badge ─────────────────────────
+    if clip.kind == crate::model::clip::ClipKind::Adjustment && cw > 20.0 {
+        cr.save().ok();
+        rounded_rect(cr, cx + 1.0, cy + 1.0, (cw - 2.0).max(0.0), (ch - 2.0).max(0.0), 3.0);
+        cr.clip();
+        // Draw diagonal hatch lines
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12);
+        cr.set_line_width(1.0);
+        let spacing = 8.0;
+        let diag = cw + ch;
+        let steps = (diag / spacing).ceil() as i32;
+        for i in 0..steps {
+            let offset = i as f64 * spacing;
+            let _ = cr.move_to(cx + offset, cy);
+            let _ = cr.line_to(cx + offset - ch, cy + ch);
+        }
+        cr.stroke().ok();
+        // Draw "ADJ" badge
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
+        cr.set_font_size(9.0);
+        let _ = cr.move_to(cx + 4.0, cy + 11.0);
+        let _ = cr.show_text("ADJ");
+        // Draw label centered
+        let max_chars = ((cw - 10.0) / 7.0).max(1.0) as usize;
+        let truncated = if clip.label.len() > max_chars {
+            format!("{}…", &clip.label[..max_chars.saturating_sub(1)])
+        } else {
+            clip.label.clone()
+        };
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        cr.set_font_size((ch * 0.4).clamp(8.0, 16.0));
+        let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("X").unwrap());
+        let tx = cx + (cw - te.width()) / 2.0;
+        let ty = cy + (ch + te.height()) / 2.0;
+        let _ = cr.move_to(tx, ty);
+        let _ = cr.show_text(&truncated);
+        cr.restore().ok();
+    }
+
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && cw > 20.0 {
+    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && clip.kind != crate::model::clip::ClipKind::Adjustment && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -6116,12 +6450,9 @@ fn draw_clip(
 
         // Speed badge: show e.g. "2×" or "0.5×" when speed ≠ 1.0, and "◀" when reversed
         let has_speed_badge = (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
-        let has_lut_badge = clip
-            .lut_path
-            .as_ref()
-            .map(|p| !p.is_empty())
-            .unwrap_or(false);
+        let has_lut_badge = !clip.lut_paths.is_empty();
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
+            && clip.kind != crate::model::clip::ClipKind::Adjustment
             && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
@@ -6472,6 +6803,9 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
             if clip.kind == crate::model::clip::ClipKind::Title {
                 return (0.75, 0.62, 0.22); // warm gold for title clips
             }
+            if clip.kind == crate::model::clip::ClipKind::Adjustment {
+                return (0.55, 0.35, 0.75); // purple for adjustment layers
+            }
             match track_kind {
                 TrackKind::Video => (0.17, 0.47, 0.85),
                 TrackKind::Audio => (0.18, 0.65, 0.45),
@@ -6729,6 +7063,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("Y", "Toggle Slip edit tool"),
         ("U", "Toggle Slide edit tool"),
         ("S", "Toggle solo for selected track"),
+        ("F", "Match Frame (load source in Source Monitor)"),
         ("Shift+F", "Create freeze-frame clip from selected clip"),
         (
             "Ctrl+Shift+B",
@@ -7862,7 +8197,7 @@ mod tests {
                     clip.group_id = Some("group-1".to_string());
                     clip.link_group_id = Some("link-1".to_string());
                     clip.brightness = 0.25;
-                    clip.lut_path = Some("/tmp/look.cube".to_string());
+                    clip.lut_paths = vec!["/tmp/look.cube".to_string()];
                 }
                 if clip.id == "right" {
                     clip.transition_after = "cross_dissolve".to_string();
@@ -7901,7 +8236,7 @@ mod tests {
             assert_eq!(merged.group_id.as_deref(), Some("group-1"));
             assert_eq!(merged.link_group_id.as_deref(), Some("link-1"));
             assert_eq!(merged.brightness, 0.25);
-            assert_eq!(merged.lut_path.as_deref(), Some("/tmp/look.cube"));
+            assert_eq!(merged.lut_paths, vec!["/tmp/look.cube"]);
             assert_eq!(merged.transition_after, "cross_dissolve");
             assert_eq!(merged.transition_after_ns, 250_000_000);
         }

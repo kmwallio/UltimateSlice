@@ -351,6 +351,30 @@ entry:focus {
     font-size: 12px;
 }
 
+/* Welcome screen */
+.welcome-title {
+    font-size: 28px;
+    font-weight: bold;
+}
+.welcome-subtitle {
+    font-size: 14px;
+    color: #aaaaaa;
+}
+.welcome-section-header {
+    font-size: 13px;
+    font-weight: bold;
+    color: #aaaaaa;
+    margin-top: 4px;
+    margin-bottom: 2px;
+}
+.welcome-recent-item {
+    padding: 4px 8px;
+}
+.welcome-tip {
+    font-size: 11px;
+    color: #888888;
+}
+
 .toolbar-separator {
     margin-left: 6px;
     margin-right: 6px;

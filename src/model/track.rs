@@ -2,10 +2,79 @@ use super::clip::Clip;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn default_duck_amount_db() -> f64 {
+    -6.0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TrackKind {
     Video,
     Audio,
+}
+
+/// Audio role for a track — determines submix routing and FCPXML role metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioRole {
+    /// No role assigned (mixed into master).
+    #[default]
+    None,
+    /// Dialogue / voice-over.
+    Dialogue,
+    /// Sound effects / foley.
+    Effects,
+    /// Music / score.
+    Music,
+}
+
+impl AudioRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Dialogue => "Dialogue",
+            Self::Effects => "Effects",
+            Self::Music => "Music",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Dialogue => "DLG",
+            Self::Effects => "SFX",
+            Self::Music => "MUS",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "dialogue" => Self::Dialogue,
+            "effects" => Self::Effects,
+            "music" => Self::Music,
+            _ => Self::None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Dialogue => "dialogue",
+            Self::Effects => "effects",
+            Self::Music => "music",
+        }
+    }
+
+    /// FCPXML role attribute value.
+    pub fn fcpxml_role(self) -> &'static str {
+        match self {
+            Self::None => "dialogue",
+            Self::Dialogue => "dialogue",
+            Self::Effects => "effects",
+            Self::Music => "music",
+        }
+    }
+
+    pub const ALL: [AudioRole; 4] = [Self::None, Self::Dialogue, Self::Effects, Self::Music];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +104,18 @@ pub struct Track {
     pub soloed: bool,
     #[serde(default)]
     pub height_preset: TrackHeightPreset,
+    /// Audio role for submix routing and FCPXML metadata.
+    #[serde(default)]
+    pub audio_role: AudioRole,
+    /// When true, this track's volume is automatically reduced (ducked) when
+    /// audio is present on any non-ducked track at the same timeline position.
+    /// Typically enabled on music/effects tracks so dialogue comes through clearly.
+    #[serde(default)]
+    pub duck: bool,
+    /// Ducking volume reduction in dB (negative). Default −6.0.
+    /// Only applied when `duck` is true.
+    #[serde(default = "default_duck_amount_db")]
+    pub duck_amount_db: f64,
 }
 
 impl Track {
@@ -48,6 +129,9 @@ impl Track {
             locked: false,
             soloed: false,
             height_preset: TrackHeightPreset::Medium,
+            audio_role: AudioRole::default(),
+            duck: false,
+            duck_amount_db: default_duck_amount_db(),
         }
     }
 
@@ -61,6 +145,9 @@ impl Track {
             locked: false,
             soloed: false,
             height_preset: TrackHeightPreset::Medium,
+            audio_role: AudioRole::default(),
+            duck: false,
+            duck_amount_db: default_duck_amount_db(),
         }
     }
 

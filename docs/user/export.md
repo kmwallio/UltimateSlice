@@ -135,6 +135,15 @@ Clips with speed keyframes use dynamic expressions for export:
 
 The exported clip duration matches the timeline duration computed from the speed integral.
 
+### Slow-motion interpolation
+
+When **Slow-Motion Interpolation** is enabled in the Inspector (Frame Blending or Optical Flow), export appends `minterpolate` after the speed filter for clips with effective speed < 1.0:
+
+- **Frame Blending** (`mi_mode=blend`): fast temporal averaging between frames.
+- **Optical Flow** (`mi_mode=mci`): motion-compensated interpolation for the smoothest result (significantly slower to encode).
+
+The filter is set to the project frame rate (`fps=NUM/DEN`) so synthesized frames match the output timeline. Normal-speed and fast clips are unaffected. Background prerender also applies minterpolate when enabled.
+
 ## Keyframed Properties
 
 Export evaluates phase-1 clip keyframes with interpolation-aware curves:
@@ -149,6 +158,14 @@ Keyframes are evaluated in clip-local timeline time and rendered directly into f
 - Freeze-frame clips export as video-only holds: ffmpeg samples the resolved freeze source frame and clones it for the resolved hold duration.
 - Freeze-frame timing in export is aligned with Program Monitor preview so freeze durations and transition overlap timing match.
 - Embedded video-track audio is intentionally omitted for freeze-frame clips (silent hold behavior).
+
+## Chapter Markers
+
+- Timeline markers (see [timeline.md](timeline.md#chapter-markers)) are automatically embedded as **chapter metadata** in exported MP4, MOV, and MKV files.
+- Each marker creates a chapter starting at the marker's position; chapters end at the next marker or the project end.
+- Chapters appear in media players that support them (VLC chapter nav, YouTube chapter timestamps, MKV chapter menus, etc.).
+- Projects with no markers produce export output with no chapter metadata (no change in behavior).
+- Verify chapters with: `ffprobe -show_chapters output.mp4`
 
 ## Notes
 

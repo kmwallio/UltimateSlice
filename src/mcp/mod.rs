@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
@@ -35,6 +36,35 @@ pub enum McpCommand {
     SetTrackSolo {
         track_id: String,
         solo: bool,
+        reply: SyncSender<Value>,
+    },
+    ListLadspaPlugins {
+        reply: SyncSender<Value>,
+    },
+    AddClipLadspaEffect {
+        clip_id: String,
+        plugin_name: String,
+        reply: SyncSender<Value>,
+    },
+    RemoveClipLadspaEffect {
+        clip_id: String,
+        effect_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetClipLadspaEffectParams {
+        clip_id: String,
+        effect_id: String,
+        params: HashMap<String, f64>,
+        reply: SyncSender<Value>,
+    },
+    SetTrackRole {
+        track_id: String,
+        role: String,
+        reply: SyncSender<Value>,
+    },
+    SetTrackDuck {
+        track_id: String,
+        duck: bool,
         reply: SyncSender<Value>,
     },
     SetTrackHeightPreset {
@@ -114,6 +144,7 @@ pub enum McpCommand {
         tint: f64,
         denoise: f64,
         sharpness: f64,
+        blur: f64,
         shadows: f64,
         midtones: f64,
         highlights: f64,
@@ -218,7 +249,7 @@ pub enum McpCommand {
     },
     SetClipLut {
         clip_id: String,
-        lut_path: Option<String>,
+        lut_paths: Vec<String>,
         reply: SyncSender<Value>,
     },
     SetClipTransform {
@@ -227,11 +258,36 @@ pub enum McpCommand {
         position_x: f64,
         position_y: f64,
         rotate: Option<i32>,
+        anamorphic_desqueeze: Option<f64>,
         reply: SyncSender<Value>,
     },
     SetClipOpacity {
         clip_id: String,
         opacity: f64,
+        reply: SyncSender<Value>,
+    },
+    SetClipEq {
+        clip_id: String,
+        low_freq: Option<f64>,
+        low_gain: Option<f64>,
+        low_q: Option<f64>,
+        mid_freq: Option<f64>,
+        mid_gain: Option<f64>,
+        mid_q: Option<f64>,
+        high_freq: Option<f64>,
+        high_gain: Option<f64>,
+        high_q: Option<f64>,
+        reply: SyncSender<Value>,
+    },
+    NormalizeClipAudio {
+        clip_id: String,
+        mode: String,
+        target_level: f64,
+        reply: SyncSender<Value>,
+    },
+    RecordVoiceover {
+        duration_ns: u64,
+        track_index: Option<usize>,
         reply: SyncSender<Value>,
     },
     SetClipBlendMode {
@@ -340,8 +396,22 @@ pub enum McpCommand {
     SourcePause {
         reply: SyncSender<Value>,
     },
+    MatchFrame {
+        clip_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    SetClipStabilization {
+        clip_id: String,
+        enabled: bool,
+        smoothing: f64,
+        reply: SyncSender<Value>,
+    },
+    ListBackups {
+        reply: SyncSender<Value>,
+    },
     SyncClipsByAudio {
         clip_ids: Vec<String>,
+        replace_audio: bool,
         reply: SyncSender<Value>,
     },
     CopyClipColorGrade {
@@ -395,6 +465,12 @@ pub enum McpCommand {
         timeline_start_ns: Option<u64>,
         duration_ns: Option<u64>,
         title_text: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    AddAdjustmentLayer {
+        track_index: usize,
+        timeline_start_ns: u64,
+        duration_ns: u64,
         reply: SyncSender<Value>,
     },
     SetClipTitleStyle {

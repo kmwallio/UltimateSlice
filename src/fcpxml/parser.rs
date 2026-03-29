@@ -1,5 +1,6 @@
 use crate::model::clip::{
     BezierControls, Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe,
+    SlowMotionInterp,
 };
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
@@ -61,6 +62,7 @@ struct ActiveClipContext {
     has_us_position: bool,
     has_us_scale: bool,
     has_us_rotate: bool,
+    has_us_anamorphic_desqueeze: bool,
     has_us_position_keyframes: bool,
     has_us_scale_keyframes: bool,
     has_us_rotate_keyframes: bool,
@@ -817,7 +819,7 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image | ClipKind::Title => {
+                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment => {
                     lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
                 }
             };
@@ -869,6 +871,15 @@ fn parse_asset_clip(
             }
             if attrs.contains_key("us:track-soloed") {
                 track.soloed = track_soloed;
+            }
+            if let Some(v) = attrs.get("us:track-audio-role") {
+                track.audio_role = crate::model::track::AudioRole::from_str(v);
+            }
+            if let Some(v) = attrs.get("us:track-duck") {
+                track.duck = v == "true";
+            }
+            if let Some(v) = attrs.get("us:track-duck-amount-db") {
+                track.duck_amount_db = v.parse().unwrap_or(-6.0);
             }
             if attrs.contains_key("us:track-height") {
                 track.height_preset = track_height_preset;
@@ -956,13 +967,26 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:sharpness") {
                 clip.sharpness = v.parse().unwrap_or(0.0);
             }
+            if let Some(v) = attrs.get("us:blur") {
+                clip.blur = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:vidstab-enabled") {
+                clip.vidstab_enabled = v == "true";
+            }
+            if let Some(v) = attrs.get("us:vidstab-smoothing") {
+                clip.vidstab_smoothing = v.parse().unwrap_or(0.5);
+            }
+            if let Some(v) = attrs.get("us:blur-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.blur_keyframes = serde_json::from_str(&json_str).unwrap_or_default();
+            }
             if let Some(v) = attrs.get("us:frei0r-effects") {
-                // The writer escapes " → &quot; then XML serialization escapes
-                // & → &amp;, producing &amp;quot; in the file.  quick_xml's
-                // unescape decodes &amp;quot; → &quot; but not the second level.
-                // Decode any remaining &quot; so JSON parsing succeeds.
                 let json_str = v.replace("&quot;", "\"");
                 clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:ladspa-effects") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.ladspa_effects = serde_json::from_str(&json_str).unwrap_or_default();
             }
             if let Some(v) = attrs.get("us:volume") {
                 clip.volume = v.parse().unwrap_or(1.0);
@@ -977,6 +1001,41 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:pan-keyframes") {
                 clip.pan_keyframes =
                     serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:eq-bands") {
+                let json_str = v.replace("&quot;", "\"");
+                if let Ok(bands) =
+                    serde_json::from_str::<[crate::model::clip::EqBand; 3]>(&json_str)
+                {
+                    clip.eq_bands = bands;
+                }
+            }
+            if let Some(v) = attrs.get("us:eq-low-gain-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.eq_low_gain_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:eq-mid-gain-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.eq_mid_gain_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:eq-high-gain-keyframes") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.eq_high_gain_keyframes =
+                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:pitch-shift-semitones") {
+                clip.pitch_shift_semitones = v.parse().unwrap_or(0.0);
+            }
+            if let Some(v) = attrs.get("us:pitch-preserve") {
+                clip.pitch_preserve = v == "true";
+            }
+            if let Some(v) = attrs.get("us:audio-channel-mode") {
+                clip.audio_channel_mode = crate::model::clip::AudioChannelMode::from_str(v);
+            }
+            if let Some(v) = attrs.get("us:measured-loudness-lufs") {
+                clip.measured_loudness_lufs = v.parse().ok();
             }
             if let Some(v) = attrs.get("us:rotate-keyframes") {
                 clip.rotate_keyframes =
@@ -1018,6 +1077,9 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:flip-v") {
                 clip.flip_v = v.parse().unwrap_or(false);
+            }
+            if let Some(v) = attrs.get("us:anamorphic-desqueeze") {
+                clip.anamorphic_desqueeze = v.parse().unwrap_or(1.0);
             }
             if let Some(v) = attrs.get("us:scale") {
                 clip.scale = v.parse().unwrap_or(1.0);
@@ -1099,8 +1161,10 @@ fn parse_asset_clip(
                 clip.title_secondary_text = v.clone();
             }
             if let Some(v) = attrs.get("us:clip-kind") {
-                if v == "title" {
-                    clip.kind = ClipKind::Title;
+                match v.as_str() {
+                    "title" => clip.kind = ClipKind::Title,
+                    "adjustment" => clip.kind = ClipKind::Adjustment,
+                    _ => {}
                 }
             }
             if let Some(v) = attrs.get("us:speed") {
@@ -1112,6 +1176,13 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:reverse") {
                 clip.reverse = v.parse().unwrap_or(false);
+            }
+            if let Some(v) = attrs.get("us:slow-motion-interp") {
+                clip.slow_motion_interp = match v.as_str() {
+                    "blend" => SlowMotionInterp::Blend,
+                    "optical-flow" => SlowMotionInterp::OpticalFlow,
+                    _ => SlowMotionInterp::Off,
+                };
             }
             if let Some(v) = attrs.get("us:freeze-frame") {
                 clip.freeze_frame = v == "true" || v == "1";
@@ -1188,8 +1259,14 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:bg-removal-threshold") {
                 clip.bg_removal_threshold = v.parse().unwrap_or(0.5);
             }
-            if let Some(v) = attrs.get("us:lut-path") {
-                clip.lut_path = Some(v.clone());
+            if let Some(v) = attrs.get("us:lut-paths") {
+                // New multi-LUT format: JSON array of paths
+                if let Ok(paths) = serde_json::from_str::<Vec<String>>(v) {
+                    clip.lut_paths = paths;
+                }
+            } else if let Some(v) = attrs.get("us:lut-path") {
+                // Backward compat: old single-LUT format
+                clip.lut_paths = vec![v.clone()];
             }
             if let Some(v) = attrs.get("us:transition-after") {
                 clip.transition_after = v.clone();
@@ -1228,6 +1305,7 @@ fn parse_asset_clip(
                     || attrs.contains_key("us:position-y"),
                 has_us_scale: attrs.contains_key("us:scale"),
                 has_us_rotate: attrs.contains_key("us:rotate"),
+                has_us_anamorphic_desqueeze: attrs.contains_key("us:anamorphic-desqueeze"),
                 has_us_position_keyframes: attrs.contains_key("us:position-x-keyframes")
                     || attrs.contains_key("us:position-y-keyframes"),
                 has_us_scale_keyframes: attrs.contains_key("us:scale-keyframes"),
@@ -2356,6 +2434,9 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-muted"
             | "us:track-locked"
             | "us:track-soloed"
+            | "us:track-audio-role"
+            | "us:track-duck"
+            | "us:track-duck-amount-db"
             | "us:track-height"
             | "us:color-label"
             | "us:brightness"
@@ -2370,6 +2451,10 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
+            | "us:blur"
+            | "us:vidstab-enabled"
+            | "us:vidstab-smoothing"
+            | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"
             | "us:volume-keyframes"
@@ -2387,6 +2472,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:rotate"
             | "us:flip-h"
             | "us:flip-v"
+            | "us:anamorphic-desqueeze"
             | "us:scale"
             | "us:scale-keyframes"
             | "us:opacity"
@@ -2402,6 +2488,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:speed-keyframes"
+            | "us:slow-motion-interp"
             | "us:reverse"
             | "us:freeze-frame"
             | "us:freeze-source-ns"
@@ -2426,6 +2513,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:chroma-key-softness"
             | "us:bg-removal-enabled"
             | "us:bg-removal-threshold"
+            | "us:lut-paths"
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
@@ -2443,6 +2531,15 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:eq-bands"
+            | "us:eq-low-gain-keyframes"
+            | "us:eq-mid-gain-keyframes"
+            | "us:eq-high-gain-keyframes"
+            | "us:pitch-shift-semitones"
+            | "us:pitch-preserve"
+            | "us:audio-channel-mode"
+            | "us:ladspa-effects"
+            | "us:measured-loudness-lufs"
     )
 }
 

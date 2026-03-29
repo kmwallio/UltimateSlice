@@ -58,7 +58,13 @@ cargo run -- --mcp
 
 ## First Launch
 
-The application opens with an **Untitled** project containing one Video track and one Audio track.
+When launched without a project file, UltimateSlice shows a **Welcome screen** with:
+- **New Project** and **Open Project...** buttons
+- A **Recent Projects** list (up to 10 entries with modification dates)
+- A tip to get started
+
+Clicking any action transitions smoothly to the editor. If you launch with a project file (e.g., `ultimate-slice project.uspxml`), the welcome screen is skipped and the project opens directly.
+
 UltimateSlice uses a dark, GTK4/libadwaita-inspired control style so popovers, sliders, dropdowns, and tab groups remain visually consistent across panels.
 
 ### Window Layout

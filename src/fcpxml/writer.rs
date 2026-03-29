@@ -561,6 +561,19 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         .push_attribute(("us:track-locked", track.locked.to_string().as_str()));
                     asset_clip
                         .push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
+                    if track.audio_role != crate::model::track::AudioRole::None {
+                        asset_clip.push_attribute((
+                            "us:track-audio-role",
+                            track.audio_role.as_str(),
+                        ));
+                    }
+                    if track.duck {
+                        asset_clip.push_attribute(("us:track-duck", "true"));
+                        asset_clip.push_attribute((
+                            "us:track-duck-amount-db",
+                            track.duck_amount_db.to_string().as_str(),
+                        ));
+                    }
                     asset_clip.push_attribute((
                         "us:track-height",
                         match track.height_preset {
@@ -650,11 +663,28 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
                     asset_clip
                         .push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
+                    asset_clip
+                        .push_attribute(("us:blur", clip.blur.to_string().as_str()));
+                    if !clip.blur_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.blur_keyframes) {
+                            asset_clip.push_attribute(("us:blur-keyframes", json.as_str()));
+                        }
+                    }
+                    if clip.vidstab_enabled {
+                        asset_clip.push_attribute(("us:vidstab-enabled", "true"));
+                        asset_clip.push_attribute((
+                            "us:vidstab-smoothing",
+                            clip.vidstab_smoothing.to_string().as_str(),
+                        ));
+                    }
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
-                            // Don't manually escape quotes — quick_xml's
-                            // push_attribute handles XML escaping correctly.
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
+                        }
+                    }
+                    if !clip.ladspa_effects.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.ladspa_effects) {
+                            asset_clip.push_attribute(("us:ladspa-effects", json.as_str()));
                         }
                     }
                     asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
@@ -674,6 +704,58 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     };
                     if let Some(value) = pan_keyframes_json.as_deref() {
                         asset_clip.push_attribute(("us:pan-keyframes", value));
+                    }
+                    // EQ bands — only emit when non-default.
+                    if clip.has_eq()
+                        || clip.eq_bands.iter().any(|b| {
+                            (b.freq - 200.0).abs() > 0.01
+                                || (b.freq - 1000.0).abs() > 0.01
+                                || (b.freq - 5000.0).abs() > 0.01
+                                || b.q != 1.0
+                        })
+                    {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_bands) {
+                            asset_clip.push_attribute(("us:eq-bands", json.as_str()));
+                        }
+                    }
+                    if !clip.eq_low_gain_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_low_gain_keyframes) {
+                            asset_clip
+                                .push_attribute(("us:eq-low-gain-keyframes", json.as_str()));
+                        }
+                    }
+                    if !clip.eq_mid_gain_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_mid_gain_keyframes) {
+                            asset_clip
+                                .push_attribute(("us:eq-mid-gain-keyframes", json.as_str()));
+                        }
+                    }
+                    if !clip.eq_high_gain_keyframes.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.eq_high_gain_keyframes) {
+                            asset_clip
+                                .push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
+                        }
+                    }
+                    if clip.pitch_shift_semitones.abs() > 0.001 {
+                        asset_clip.push_attribute((
+                            "us:pitch-shift-semitones",
+                            clip.pitch_shift_semitones.to_string().as_str(),
+                        ));
+                    }
+                    if clip.pitch_preserve {
+                        asset_clip.push_attribute(("us:pitch-preserve", "true"));
+                    }
+                    if clip.audio_channel_mode != crate::model::clip::AudioChannelMode::Stereo {
+                        asset_clip.push_attribute((
+                            "us:audio-channel-mode",
+                            clip.audio_channel_mode.as_str(),
+                        ));
+                    }
+                    if let Some(lufs) = clip.measured_loudness_lufs {
+                        asset_clip.push_attribute((
+                            "us:measured-loudness-lufs",
+                            format!("{lufs:.2}").as_str(),
+                        ));
                     }
                     let rotate_keyframes_json = if clip.rotate_keyframes.is_empty() {
                         None
@@ -725,6 +807,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:rotate", clip.rotate.to_string().as_str()));
                     asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
                     asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
+                    if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
+                        asset_clip.push_attribute(("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string().as_str()));
+                    }
                     asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
                     let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
                         None
@@ -797,6 +882,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     if clip.kind == crate::model::clip::ClipKind::Title {
                         asset_clip.push_attribute(("us:clip-kind", "title"));
+                    } else if clip.kind == crate::model::clip::ClipKind::Adjustment {
+                        asset_clip.push_attribute(("us:clip-kind", "adjustment"));
                     }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
@@ -808,6 +895,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         asset_clip.push_attribute(("us:speed-keyframes", value));
                     }
                     asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
+                    if clip.slow_motion_interp != crate::model::clip::SlowMotionInterp::Off {
+                        let val = match clip.slow_motion_interp {
+                            crate::model::clip::SlowMotionInterp::Blend => "blend",
+                            crate::model::clip::SlowMotionInterp::OpticalFlow => "optical-flow",
+                            crate::model::clip::SlowMotionInterp::Off => unreachable!(),
+                        };
+                        asset_clip.push_attribute(("us:slow-motion-interp", val));
+                    }
                     if clip.freeze_frame {
                         asset_clip.push_attribute(("us:freeze-frame", "true"));
                     }
@@ -892,8 +987,11 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.bg_removal_threshold.to_string().as_str(),
                         ));
                     }
-                    if let Some(ref lut) = clip.lut_path {
-                        asset_clip.push_attribute(("us:lut-path", lut.as_str()));
+                    if !clip.lut_paths.is_empty() {
+                        let lut_json = serde_json::to_string(&clip.lut_paths).unwrap_or_default();
+                        asset_clip.push_attribute(("us:lut-paths", lut_json.as_str()));
+                        // Also write first LUT as us:lut-path for backward compat
+                        asset_clip.push_attribute(("us:lut-path", clip.lut_paths[0].as_str()));
                     }
                     if !clip.transition_after.is_empty() {
                         asset_clip.push_attribute((
@@ -1299,41 +1397,42 @@ where
         .iter_mut()
         .flat_map(|track| track.clips.iter_mut())
     {
-        let lut_path_str = match clip.lut_path {
-            Some(ref p) => p.clone(),
-            None => continue,
-        };
-        let lut_local = source_path_to_local_path(&lut_path_str)?;
-        if !lut_local.exists() {
-            // LUT file missing — clear the reference rather than fail the export.
-            clip.lut_path = None;
-            continue;
+        let mut rewritten: Vec<String> = Vec::new();
+        for lut_path_str in &clip.lut_paths {
+            let lut_local = match source_path_to_local_path(lut_path_str) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !lut_local.exists() {
+                continue;
+            }
+            let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
+            if let Some(existing_export) = lut_canonical_to_export.get(&lut_canonical) {
+                let portable = normalize_packaged_path_for_portability(existing_export);
+                rewritten.push(portable.to_string_lossy().to_string());
+                continue;
+            }
+            let lut_file_name = lut_canonical
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("lut.cube");
+            let unique_lut_name =
+                unique_packaged_media_name(lut_file_name, &lut_canonical, &lut_used_names);
+            lut_used_names.insert(unique_lut_name.clone());
+            let lut_dest = library_dir.join(&unique_lut_name);
+            std::fs::copy(&lut_canonical, &lut_dest).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to copy LUT {} to {}: {e}",
+                    lut_canonical.display(),
+                    lut_dest.display()
+                )
+            })?;
+            let resolved_dest = std::fs::canonicalize(&lut_dest).unwrap_or(lut_dest);
+            lut_canonical_to_export.insert(lut_canonical, resolved_dest.clone());
+            let portable = normalize_packaged_path_for_portability(&resolved_dest);
+            rewritten.push(portable.to_string_lossy().to_string());
         }
-        let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
-        if let Some(existing_export) = lut_canonical_to_export.get(&lut_canonical) {
-            let portable = normalize_packaged_path_for_portability(existing_export);
-            clip.lut_path = Some(portable.to_string_lossy().to_string());
-            continue;
-        }
-        let lut_file_name = lut_canonical
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("lut.cube");
-        let unique_lut_name =
-            unique_packaged_media_name(lut_file_name, &lut_canonical, &lut_used_names);
-        lut_used_names.insert(unique_lut_name.clone());
-        let lut_dest = library_dir.join(&unique_lut_name);
-        std::fs::copy(&lut_canonical, &lut_dest).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to copy LUT {} to {}: {e}",
-                lut_canonical.display(),
-                lut_dest.display()
-            )
-        })?;
-        let resolved_dest = std::fs::canonicalize(&lut_dest).unwrap_or(lut_dest);
-        lut_canonical_to_export.insert(lut_canonical, resolved_dest.clone());
-        let portable = normalize_packaged_path_for_portability(&resolved_dest);
-        clip.lut_path = Some(portable.to_string_lossy().to_string());
+        clip.lut_paths = rewritten;
     }
 
     on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
@@ -1913,6 +2012,7 @@ fn patch_asset_clip_block_transform(
         ("us:saturation", clip.saturation.to_string()),
         ("us:temperature", clip.temperature.to_string()),
         ("us:tint", clip.tint.to_string()),
+        ("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string()),
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
@@ -2096,7 +2196,11 @@ fn patch_asset_clip_block_transform(
         ("us:title-bg-box-padding", if clip.title_bg_box { Some(clip.title_bg_box_padding.to_string()) } else { None }),
         ("us:title-clip-bg-color", if clip.title_clip_bg_color != 0 { Some(format!("{:08X}", clip.title_clip_bg_color)) } else { None }),
         ("us:title-secondary-text", if clip.title_secondary_text.is_empty() { None } else { Some(clip.title_secondary_text.clone()) }),
-        ("us:clip-kind", if clip.kind == crate::model::clip::ClipKind::Title { Some("title".to_string()) } else { None }),
+        ("us:clip-kind", match clip.kind {
+            crate::model::clip::ClipKind::Title => Some("title".to_string()),
+            crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
+            _ => None,
+        }),
     ] {
         let next = if let Some(v) = value {
             replace_or_insert_attr(&updated_start, attr, &v)?
@@ -2615,7 +2719,7 @@ fn write_resources(
         for clip in &track.clips {
             // Title clips have no source media — skip to avoid writing
             // broken asset references with empty file:// URIs.
-            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title {
+            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment {
                 continue;
             }
             let export_source_path = clip
@@ -3316,6 +3420,9 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:track-muted"
             | "us:track-locked"
             | "us:track-soloed"
+            | "us:track-audio-role"
+            | "us:track-duck"
+            | "us:track-duck-amount-db"
             | "us:track-height"
             | "us:color-label"
             | "us:brightness"
@@ -3330,6 +3437,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:tint-keyframes"
             | "us:denoise"
             | "us:sharpness"
+            | "us:blur"
+            | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"
             | "us:volume-keyframes"
@@ -3347,6 +3456,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:rotate"
             | "us:flip-h"
             | "us:flip-v"
+            | "us:anamorphic-desqueeze"
             | "us:scale"
             | "us:scale-keyframes"
             | "us:opacity"
@@ -3362,6 +3472,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-y"
             | "us:speed"
             | "us:speed-keyframes"
+            | "us:slow-motion-interp"
             | "us:reverse"
             | "us:freeze-frame"
             | "us:freeze-source-ns"
@@ -3376,6 +3487,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:chroma-key-color"
             | "us:chroma-key-tolerance"
             | "us:chroma-key-softness"
+            | "us:lut-paths"
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
@@ -3403,6 +3515,15 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:eq-bands"
+            | "us:eq-low-gain-keyframes"
+            | "us:eq-mid-gain-keyframes"
+            | "us:eq-high-gain-keyframes"
+            | "us:pitch-shift-semitones"
+            | "us:pitch-preserve"
+            | "us:audio-channel-mode"
+            | "us:ladspa-effects"
+            | "us:measured-loudness-lufs"
     )
 }
 
@@ -3700,6 +3821,39 @@ mod tests {
         project.dirty = true;
         let written = write_fcpxml(&project).expect("write should succeed");
         assert_eq!(written.match_indices("<timeMap").count(), 1);
+    }
+
+    #[test]
+    fn test_write_fcpxml_does_not_duplicate_lut_paths_attribute() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+    <resources>
+        <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+        <asset id="a1" src="file:///tmp/clip.mov" name="clip" duration="240/24s"/>
+    </resources>
+    <library>
+        <event>
+            <project name="LutDupGuard">
+                <sequence duration="240/24s" format="r1">
+                    <spine>
+                        <asset-clip
+                            ref="a1"
+                            offset="0s"
+                            start="0s"
+                            duration="120/24s"
+                            us:lut-paths="[&quot;/tmp/look.cube&quot;]"
+                            us:lut-path="/tmp/look.cube"/>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </library>
+</fcpxml>"#;
+
+        let mut project = parse_fcpxml(xml).expect("parse should succeed");
+        project.dirty = true;
+        let written = write_fcpxml(&project).expect("write should succeed");
+        assert_eq!(written.match_indices("us:lut-paths=").count(), 1);
     }
 
     #[test]
@@ -5558,7 +5712,7 @@ mod tests {
             0,
             ClipKind::Video,
         );
-        clip.lut_path = Some(lut.to_string_lossy().to_string());
+        clip.lut_paths = vec![lut.to_string_lossy().to_string()];
         clip.exposure = 0.5;
         track.add_clip(clip);
         project.tracks.push(track);
@@ -5618,7 +5772,7 @@ mod tests {
             0,
             ClipKind::Video,
         );
-        clip.lut_path = Some(lut.to_string_lossy().to_string());
+        clip.lut_paths = vec![lut.to_string_lossy().to_string()];
         track.add_clip(clip);
         project.tracks.push(track);
 

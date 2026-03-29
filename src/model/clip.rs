@@ -24,6 +24,7 @@ pub enum ClipKind {
     Audio,
     Image,
     Title,
+    Adjustment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +45,64 @@ impl Default for ClipColorLabel {
     fn default() -> Self {
         Self::None
     }
+}
+
+/// Slow-motion frame interpolation mode (export-only).
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlowMotionInterp {
+    #[default]
+    Off,
+    /// Temporal frame blending (minterpolate mi_mode=blend). Fast.
+    Blend,
+    /// Motion-compensated interpolation (minterpolate mi_mode=mci). Slow but smooth.
+    OpticalFlow,
+}
+
+/// Audio channel routing mode for a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioChannelMode {
+    /// Both channels unchanged (stereo passthrough, mono upmixed).
+    #[default]
+    Stereo,
+    /// Extract left channel only (output as mono on both speakers).
+    Left,
+    /// Extract right channel only (output as mono on both speakers).
+    Right,
+    /// Average L+R to mono (output on both speakers).
+    MonoMix,
+}
+
+impl AudioChannelMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Left => "Left Only",
+            Self::Right => "Right Only",
+            Self::MonoMix => "Mono Mix",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stereo => "stereo",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::MonoMix => "mono_mix",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "left" => Self::Left,
+            "right" => Self::Right,
+            "mono_mix" => Self::MonoMix,
+            _ => Self::Stereo,
+        }
+    }
+
+    pub const ALL: [AudioChannelMode; 4] = [Self::Stereo, Self::Left, Self::Right, Self::MonoMix];
 }
 
 /// Compositing blend mode for a clip.
@@ -260,6 +319,10 @@ pub enum Phase1KeyframeProperty {
     CropRight,
     CropTop,
     CropBottom,
+    Blur,
+    EqLowGain,
+    EqMidGain,
+    EqHighGain,
 }
 
 impl Phase1KeyframeProperty {
@@ -282,6 +345,10 @@ impl Phase1KeyframeProperty {
             Self::CropRight => "crop_right",
             Self::CropTop => "crop_top",
             Self::CropBottom => "crop_bottom",
+            Self::Blur => "blur",
+            Self::EqLowGain => "eq_low_gain",
+            Self::EqMidGain => "eq_mid_gain",
+            Self::EqHighGain => "eq_high_gain",
         }
     }
 
@@ -304,6 +371,10 @@ impl Phase1KeyframeProperty {
             "crop_right" | "crop-right" => Some(Self::CropRight),
             "crop_top" | "crop-top" => Some(Self::CropTop),
             "crop_bottom" | "crop-bottom" => Some(Self::CropBottom),
+            "blur" => Some(Self::Blur),
+            "eq_low_gain" | "eq-low-gain" => Some(Self::EqLowGain),
+            "eq_mid_gain" | "eq-mid-gain" => Some(Self::EqMidGain),
+            "eq_high_gain" | "eq-high-gain" => Some(Self::EqHighGain),
             _ => None,
         }
     }
@@ -317,6 +388,9 @@ fn default_saturation() -> f32 {
 }
 fn default_volume() -> f32 {
     1.0
+}
+fn default_vidstab_smoothing() -> f32 {
+    0.5
 }
 fn default_speed() -> f64 {
     1.0
@@ -370,6 +444,36 @@ fn default_temperature() -> f32 {
     6500.0
 }
 
+/// A single band of a 3-band parametric equalizer.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EqBand {
+    /// Center frequency in Hz (20–20000).
+    pub freq: f64,
+    /// Gain in dB (−24.0 to +24.0). Default 0.0 (flat).
+    pub gain: f64,
+    /// Quality factor / bandwidth (0.1–10.0). Default 1.0.
+    pub q: f64,
+}
+
+impl Default for EqBand {
+    fn default() -> Self {
+        Self {
+            freq: 1000.0,
+            gain: 0.0,
+            q: 1.0,
+        }
+    }
+}
+
+/// Default EQ band settings: Low 200 Hz, Mid 1 kHz, High 5 kHz — all flat.
+pub fn default_eq_bands() -> [EqBand; 3] {
+    [
+        EqBand { freq: 200.0, gain: 0.0, q: 1.0 },
+        EqBand { freq: 1000.0, gain: 0.0, q: 1.0 },
+        EqBand { freq: 5000.0, gain: 0.0, q: 1.0 },
+    ]
+}
+
 /// An instance of a frei0r filter effect applied to a clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Frei0rEffect {
@@ -388,6 +492,35 @@ pub struct Frei0rEffect {
     /// (e.g. blend-mode → "normal").
     #[serde(default)]
     pub string_params: HashMap<String, String>,
+}
+
+/// An instance of a LADSPA audio effect applied to a clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LadspaEffect {
+    /// Unique instance id (UUID v4).
+    pub id: String,
+    /// LADSPA plugin name (the short identifier from the registry).
+    pub plugin_name: String,
+    /// Full GStreamer element factory name (e.g. `"ladspa-amp-so-amp-stereo"`).
+    pub gst_element_name: String,
+    /// Whether the effect is currently active.
+    #[serde(default = "default_effect_enabled")]
+    pub enabled: bool,
+    /// Numeric parameter values keyed by GStreamer property name.
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
+}
+
+impl LadspaEffect {
+    pub fn new(plugin_name: &str, gst_element_name: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            plugin_name: plugin_name.to_string(),
+            gst_element_name: gst_element_name.to_string(),
+            enabled: true,
+            params: HashMap::new(),
+        }
+    }
 }
 
 fn default_effect_enabled() -> bool {
@@ -488,9 +621,24 @@ pub struct Clip {
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen), default 0.0
     #[serde(default)]
     pub sharpness: f32,
+    /// Creative blur strength: 0.0 (off) to 1.0 (heavy), default 0.0
+    #[serde(default)]
+    pub blur: f32,
+    /// Optional blur keyframes over clip-local timeline.
+    #[serde(default)]
+    pub blur_keyframes: Vec<NumericKeyframe>,
+    /// Video stabilization enabled (export-only, two-pass via libvidstab).
+    #[serde(default)]
+    pub vidstab_enabled: bool,
+    /// Stabilization smoothing strength: 0.0 (minimal) to 1.0 (maximum).
+    #[serde(default = "default_vidstab_smoothing")]
+    pub vidstab_smoothing: f32,
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Last measured integrated loudness in LUFS (informational, from normalization analysis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_loudness_lufs: Option<f64>,
     /// Optional volume keyframes over clip-local timeline.
     #[serde(default)]
     pub volume_keyframes: Vec<NumericKeyframe>,
@@ -500,6 +648,30 @@ pub struct Clip {
     /// Optional pan keyframes over clip-local timeline.
     #[serde(default)]
     pub pan_keyframes: Vec<NumericKeyframe>,
+    /// 3-band parametric EQ: [Low, Mid, High]. Each band has freq/gain/Q.
+    #[serde(default = "default_eq_bands")]
+    pub eq_bands: [EqBand; 3],
+    /// Optional EQ low-band gain keyframes over clip-local timeline.
+    #[serde(default)]
+    pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
+    /// Optional EQ mid-band gain keyframes over clip-local timeline.
+    #[serde(default)]
+    pub eq_mid_gain_keyframes: Vec<NumericKeyframe>,
+    /// Optional EQ high-band gain keyframes over clip-local timeline.
+    #[serde(default)]
+    pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
+    /// Pitch shift in semitones: −12.0 (one octave down) to +12.0 (one octave up).
+    /// Applied via Rubberband (LADSPA in preview, FFmpeg rubberband filter in export).
+    /// 0.0 = no shift.
+    #[serde(default)]
+    pub pitch_shift_semitones: f64,
+    /// When true, preserve pitch during speed changes (use Rubberband time-stretch
+    /// instead of naive rate-seek which shifts pitch proportionally).
+    #[serde(default)]
+    pub pitch_preserve: bool,
+    /// Audio channel routing: Stereo (default), Left Only, Right Only, or Mono Mix.
+    #[serde(default)]
+    pub audio_channel_mode: AudioChannelMode,
     /// Optional rotation keyframes over clip-local timeline.
     #[serde(default)]
     pub rotate_keyframes: Vec<NumericKeyframe>,
@@ -519,6 +691,10 @@ pub struct Clip {
     /// Optional variable speed keyframes over clip-local timeline.
     #[serde(default)]
     pub speed_keyframes: Vec<NumericKeyframe>,
+    /// Slow-motion frame interpolation mode (export-only).
+    /// Applies minterpolate filter when speed < 1.0.
+    #[serde(default)]
+    pub slow_motion_interp: SlowMotionInterp,
     #[serde(default)]
     pub crop_left: i32,
     #[serde(default)]
@@ -587,10 +763,10 @@ pub struct Clip {
     /// Transition duration in nanoseconds for `transition_after` (0 = none).
     #[serde(default)]
     pub transition_after_ns: u64,
-    /// Absolute path to a .cube LUT file for color grading (applied on export via ffmpeg lut3d).
-    /// None means no LUT is assigned.
+    /// Ordered list of .cube LUT file paths for color grading (applied sequentially on export via ffmpeg lut3d).
+    /// Empty means no LUTs are assigned.
     #[serde(default)]
-    pub lut_path: Option<String>,
+    pub lut_paths: Vec<String>,
     /// Scale multiplier for the clip within the frame: 1.0 = fill frame, 2.0 = zoom in 2×,
     /// 0.5 = half-size with black borders. Range 0.1–4.0, default 1.0.
     #[serde(default = "default_scale")]
@@ -714,6 +890,9 @@ pub struct Clip {
     /// Applied frei0r filter effects, ordered from first to last in the chain.
     #[serde(default)]
     pub frei0r_effects: Vec<Frei0rEffect>,
+    /// Applied LADSPA audio effects, ordered from first to last in the chain.
+    #[serde(default)]
+    pub ladspa_effects: Vec<LadspaEffect>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -732,9 +911,34 @@ pub struct Clip {
     /// Unsupported FCPXML child tags under asset preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_asset_children: Vec<String>,
+    /// Anamorphic desqueeze factor: 1.0 (none), 1.33, 1.5, 1.8, 2.0.
+    #[serde(default = "default_anamorphic_desqueeze")]
+    pub anamorphic_desqueeze: f64,
+}
+
+fn default_anamorphic_desqueeze() -> f64 {
+    1.0
 }
 
 impl Clip {
+    /// Compute composite cache key for all assigned LUTs.
+    /// Returns `None` if no LUTs are assigned.
+    /// Returns `true` when any EQ band has non-zero gain or gain keyframes.
+    pub fn has_eq(&self) -> bool {
+        self.eq_bands.iter().any(|b| b.gain.abs() > 0.001)
+            || !self.eq_low_gain_keyframes.is_empty()
+            || !self.eq_mid_gain_keyframes.is_empty()
+            || !self.eq_high_gain_keyframes.is_empty()
+    }
+
+    pub fn lut_key(&self) -> Option<String> {
+        if self.lut_paths.is_empty() {
+            None
+        } else {
+            Some(self.lut_paths.join("|"))
+        }
+    }
+
     fn remove_keyframes_at_local_time(
         keyframes: &mut Vec<NumericKeyframe>,
         local_time_ns: u64,
@@ -823,11 +1027,15 @@ impl Clip {
         Self::retain_and_rebase_keyframes(&mut self.tint_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.volume_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.pan_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.eq_low_gain_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.eq_mid_gain_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.eq_high_gain_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.rotate_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_left_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_right_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_top_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.crop_bottom_keyframes, start_ns, end_ns);
+        Self::retain_and_rebase_keyframes(&mut self.blur_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.speed_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.scale_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.opacity_keyframes, start_ns, end_ns);
@@ -868,10 +1076,22 @@ impl Clip {
             tint_keyframes: Vec::new(),
             denoise: 0.0,
             sharpness: 0.0,
+            blur: 0.0,
+            blur_keyframes: Vec::new(),
+            vidstab_enabled: false,
+            vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
+            measured_loudness_lufs: None,
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
+            eq_bands: default_eq_bands(),
+            eq_low_gain_keyframes: Vec::new(),
+            eq_mid_gain_keyframes: Vec::new(),
+            eq_high_gain_keyframes: Vec::new(),
+            pitch_shift_semitones: 0.0,
+            pitch_preserve: false,
+            audio_channel_mode: AudioChannelMode::default(),
             rotate_keyframes: Vec::new(),
             crop_left_keyframes: Vec::new(),
             crop_right_keyframes: Vec::new(),
@@ -879,6 +1099,7 @@ impl Clip {
             crop_bottom_keyframes: Vec::new(),
             speed: 1.0,
             speed_keyframes: Vec::new(),
+            slow_motion_interp: SlowMotionInterp::Off,
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
@@ -905,7 +1126,7 @@ impl Clip {
             title_secondary_text: String::new(),
             transition_after: String::new(),
             transition_after_ns: 0,
-            lut_path: None,
+            lut_paths: Vec::new(),
             scale: 1.0,
             scale_keyframes: Vec::new(),
             opacity: 1.0,
@@ -941,13 +1162,23 @@ impl Clip {
             source_timecode_base_ns: None,
             media_duration_ns: None,
             frei0r_effects: Vec::new(),
+            ladspa_effects: Vec::new(),
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
             fcpxml_asset_ref: None,
             fcpxml_unknown_asset_attrs: Vec::new(),
             fcpxml_unknown_asset_children: Vec::new(),
+            anamorphic_desqueeze: 1.0,
         }
+    }
+
+    /// Create a new adjustment layer clip (no source media; effects apply to
+    /// the composited result of all tracks below).
+    pub fn new_adjustment(timeline_start: u64, duration_ns: u64) -> Self {
+        let mut c = Self::new("", duration_ns, timeline_start, ClipKind::Adjustment);
+        c.label = "Adjustment".to_string();
+        c
     }
 
     /// Raw source material duration (source_out − source_in), unaffected by speed.
@@ -965,7 +1196,7 @@ impl Clip {
     /// clips or FCPXML imports without a probe result), or when the clip is
     /// a still image (images can be extended to any timeline length).
     pub fn max_source_out(&self) -> Option<u64> {
-        if self.kind == ClipKind::Image || self.kind == ClipKind::Title {
+        if self.kind == ClipKind::Image || self.kind == ClipKind::Title || self.kind == ClipKind::Adjustment {
             return None;
         }
         self.media_duration_ns
@@ -1065,12 +1296,16 @@ impl Clip {
             Phase1KeyframeProperty::Tint => &self.tint_keyframes,
             Phase1KeyframeProperty::Volume => &self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &self.pan_keyframes,
+            Phase1KeyframeProperty::EqLowGain => &self.eq_low_gain_keyframes,
+            Phase1KeyframeProperty::EqMidGain => &self.eq_mid_gain_keyframes,
+            Phase1KeyframeProperty::EqHighGain => &self.eq_high_gain_keyframes,
             Phase1KeyframeProperty::Speed => &self.speed_keyframes,
             Phase1KeyframeProperty::Rotate => &self.rotate_keyframes,
             Phase1KeyframeProperty::CropLeft => &self.crop_left_keyframes,
             Phase1KeyframeProperty::CropRight => &self.crop_right_keyframes,
             Phase1KeyframeProperty::CropTop => &self.crop_top_keyframes,
             Phase1KeyframeProperty::CropBottom => &self.crop_bottom_keyframes,
+            Phase1KeyframeProperty::Blur => &self.blur_keyframes,
         }
     }
 
@@ -1090,12 +1325,16 @@ impl Clip {
             Phase1KeyframeProperty::Tint => &mut self.tint_keyframes,
             Phase1KeyframeProperty::Volume => &mut self.volume_keyframes,
             Phase1KeyframeProperty::Pan => &mut self.pan_keyframes,
+            Phase1KeyframeProperty::EqLowGain => &mut self.eq_low_gain_keyframes,
+            Phase1KeyframeProperty::EqMidGain => &mut self.eq_mid_gain_keyframes,
+            Phase1KeyframeProperty::EqHighGain => &mut self.eq_high_gain_keyframes,
             Phase1KeyframeProperty::Speed => &mut self.speed_keyframes,
             Phase1KeyframeProperty::Rotate => &mut self.rotate_keyframes,
             Phase1KeyframeProperty::CropLeft => &mut self.crop_left_keyframes,
             Phase1KeyframeProperty::CropRight => &mut self.crop_right_keyframes,
             Phase1KeyframeProperty::CropTop => &mut self.crop_top_keyframes,
             Phase1KeyframeProperty::CropBottom => &mut self.crop_bottom_keyframes,
+            Phase1KeyframeProperty::Blur => &mut self.blur_keyframes,
         }
     }
 
@@ -1112,12 +1351,16 @@ impl Clip {
             Phase1KeyframeProperty::Tint => self.tint as f64,
             Phase1KeyframeProperty::Volume => self.volume as f64,
             Phase1KeyframeProperty::Pan => self.pan as f64,
+            Phase1KeyframeProperty::EqLowGain => self.eq_bands[0].gain,
+            Phase1KeyframeProperty::EqMidGain => self.eq_bands[1].gain,
+            Phase1KeyframeProperty::EqHighGain => self.eq_bands[2].gain,
             Phase1KeyframeProperty::Speed => self.speed,
             Phase1KeyframeProperty::Rotate => self.rotate as f64,
             Phase1KeyframeProperty::CropLeft => self.crop_left as f64,
             Phase1KeyframeProperty::CropRight => self.crop_right as f64,
             Phase1KeyframeProperty::CropTop => self.crop_top as f64,
             Phase1KeyframeProperty::CropBottom => self.crop_bottom as f64,
+            Phase1KeyframeProperty::Blur => self.blur as f64,
         }
     }
 
@@ -1141,6 +1384,10 @@ impl Clip {
             | Phase1KeyframeProperty::CropRight
             | Phase1KeyframeProperty::CropTop
             | Phase1KeyframeProperty::CropBottom => value.clamp(0.0, 500.0),
+            Phase1KeyframeProperty::Blur => value.clamp(0.0, 1.0),
+            Phase1KeyframeProperty::EqLowGain
+            | Phase1KeyframeProperty::EqMidGain
+            | Phase1KeyframeProperty::EqHighGain => value.clamp(-24.0, 12.0),
         }
     }
 
@@ -1276,6 +1523,12 @@ impl Clip {
             Self::remove_keyframes_at_local_time(&mut self.position_y_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.volume_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.pan_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.eq_low_gain_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.eq_mid_gain_keyframes, local_time_ns);
+        removed +=
+            Self::remove_keyframes_at_local_time(&mut self.eq_high_gain_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.speed_keyframes, local_time_ns);
         removed += Self::remove_keyframes_at_local_time(&mut self.rotate_keyframes, local_time_ns);
         removed +=
@@ -1351,6 +1604,21 @@ impl Clip {
             interpolation,
         );
         updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.eq_low_gain_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.eq_mid_gain_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
+            &mut self.eq_high_gain_keyframes,
+            local_time_ns,
+            interpolation,
+        );
+        updated += Self::set_keyframe_interpolation_at_local_time(
             &mut self.speed_keyframes,
             local_time_ns,
             interpolation,
@@ -1396,6 +1664,9 @@ impl Clip {
         changed += Self::move_keyframes_by_time_map(&mut self.position_y_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.volume_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.pan_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.eq_low_gain_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.eq_mid_gain_keyframes, move_map);
+        changed += Self::move_keyframes_by_time_map(&mut self.eq_high_gain_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.speed_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.rotate_keyframes, move_map);
         changed += Self::move_keyframes_by_time_map(&mut self.crop_left_keyframes, move_map);
@@ -1420,6 +1691,9 @@ impl Clip {
             .chain(&self.position_y_keyframes)
             .chain(&self.volume_keyframes)
             .chain(&self.pan_keyframes)
+            .chain(&self.eq_low_gain_keyframes)
+            .chain(&self.eq_mid_gain_keyframes)
+            .chain(&self.eq_high_gain_keyframes)
             .chain(&self.speed_keyframes)
             .chain(&self.rotate_keyframes)
             .chain(&self.crop_left_keyframes)
@@ -1712,7 +1986,7 @@ mod tests {
         assert!(!clip.freeze_frame);
         assert!(clip.freeze_frame_source_ns.is_none());
         assert!(clip.freeze_frame_hold_duration_ns.is_none());
-        assert!(clip.lut_path.is_none());
+        assert!(clip.lut_paths.is_empty());
         assert!(clip.group_id.is_none());
         assert!(clip.link_group_id.is_none());
         assert!(clip.source_timecode_base_ns.is_none());

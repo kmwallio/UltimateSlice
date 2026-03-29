@@ -513,7 +513,7 @@ fn import_path_into_library(
     Some((path_str, duration_ns, child))
 }
 
-fn parse_external_drop_paths(payload: &str) -> Vec<String> {
+pub fn parse_external_drop_paths(payload: &str) -> Vec<String> {
     // Ignore internal app payloads ("{source_path}|{duration_ns}").
     if payload.contains('|') && !payload.contains("file://") {
         return Vec::new();

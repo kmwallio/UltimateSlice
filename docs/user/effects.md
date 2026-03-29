@@ -69,12 +69,30 @@ Optionally generates a 17^3 3D `.cube` LUT for fine-grained non-linear residual 
 
 ---
 
-## Denoise & Sharpness
+## Denoise / Sharpness / Blur
 
 | Slider | Range | Default | Description |
 |--------|-------|---------|-------------|
 | **Denoise** | 0.0 to 1.0 | 0.0 | Gaussian blur strength for noise reduction |
 | **Sharpness** | -1.0 to 1.0 | 0.0 | Negative = soften, positive = sharpen |
+| **Blur** | 0.0 to 1.0 | 0.0 | Creative blur for censoring, depth-of-field, background defocus. Preview via gaussianblur, export via boxblur. Supports keyframe animation. |
+
+---
+
+## Video Stabilization
+
+Compensates camera shake using ffmpeg's libvidstab (two-pass analysis + transform).
+
+| Control | Type | Default | Description |
+|---------|------|---------|-------------|
+| **Enable** | Checkbox | Off | Toggle stabilization for this clip |
+| **Smoothing** | 0.0 to 1.0 | 0.5 | Higher = smoother but may crop edges |
+
+- **Export**: vidstabdetect analyzes motion (pass 1), vidstabtransform applies correction with post-sharpening (pass 2)
+- **Preview**: when proxy mode is enabled, stabilization is baked into the proxy transcode for Program Monitor preview
+- **Without proxies**: applied on export only
+- Gracefully skipped if ffmpeg lacks libvidstab
+- MCP tool: `set_clip_stabilization` (`clip_id`, `enabled`, `smoothing`)
 
 ---
 

@@ -20,6 +20,16 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 | Pan left/right | Scroll the mouse wheel horizontally |
 | Pan ruler view | Middle/right-drag in the ruler |
 
+## Adding Clips to the Timeline
+
+There are several ways to get clips onto the timeline:
+
+- **Drag from Media Browser** — drag a clip from the media library panel and drop it onto a track at the desired position.
+- **Drag from File Manager** — drag files directly from Nautilus, Thunar, or any file manager onto the timeline. Files are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially. Video files with audio create linked A/V clip pairs when auto-link is applicable.
+- **Append to Timeline** — use the "Append to Timeline" button in the media browser to place the selected clip at the end of the first matching track.
+- **Insert / Overwrite** — use Insert (`,`) or Overwrite (`.`) to place the source monitor selection at the playhead position.
+- **Source Monitor drag** — drag from the source monitor preview directly onto a timeline track.
+
 ## Tools
 
 ### Select Tool (`Escape`)
@@ -192,6 +202,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
 | `S` | Toggle solo for selected track |
+| `F` | Match Frame — load selected clip's source in Source Monitor and seek to matching frame |
 | `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (from source monitor) |
@@ -233,6 +244,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Right-click on the ruler to remove the nearest marker.
 - Markers are exported in the FCPXML file.
 - On FCPXML import, standard markers and chapter markers are read and placed at their correct timeline positions.
+- When exporting to MP4, MOV, or MKV, markers are embedded as **chapter metadata** in the output file (see [export.md](export.md#chapter-markers)).
 
 ## Tracks
 
@@ -304,3 +316,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.
 - Linked clips show a `LINK` badge whenever they belong to a clip link group.
 - Non-primary linked peers in the current linked selection show a cyan inset border.
+- **Adjustment layers** appear as purple hatched clips with an "ADJ" badge. They have no source media — their effects (color grading, LUTs, frei0r, blur) apply to the composited result of all tracks below. Add one by right-clicking a video track label and choosing "Add Adjustment Layer". Use the Inspector to set effects. Opacity controls effect intensity (0.0 = no effect, 1.0 = full effect).
+  - **Preview**: Brightness, contrast, and saturation are shown in real-time. Frei0r user effects (e.g. vignette), LUTs, temperature/tint, and blur require **Background Render** to be visible in the Program Monitor — enable it in the status bar. Without Background Render, these effects are applied on **export only**.
+  - **Export**: All adjustment layer effects (including frei0r plugins) are fully applied in the exported file.
+- Title text positioning in the preview may differ from the export when large text extends beyond frame edges at reduced preview quality (Half/Quarter). This is because text clipping at lower resolutions produces different visible bounds than at full resolution. The export is always correct. Setting preview quality to **Full** eliminates this difference.

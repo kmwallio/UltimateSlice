@@ -256,7 +256,7 @@ Tracking docs:
 - [x] Persist speed data in FCPXML (`us:speed` attribute)
 - [x] Reverse playback: per-clip "Reverse" toggle in Inspector applies to Program Monitor preview and export (`reverse`/`areverse`), timeline shows `◀` badge, and state persists via `us:reverse` FCPXML attribute
 - [x] Variable speed ramps: multiple keyframed speed segments within a single clip
-- [ ] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
+- [x] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
 
 ### Keyframe Animation
 - [ ] Property keyframes with interpolation (position, scale, opacity, volume, pan over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
@@ -404,7 +404,7 @@ Tracking docs:
 - [x] Denoise filter per clip (GStreamer `gaussianblur` positive sigma; ffmpeg `hqdn3d` on export)
 - [x] Sharpness / unsharp-mask per clip (GStreamer `gaussianblur` negative sigma; ffmpeg `unsharp` on export)
 - [x] LUT import / apply
-- [ ] Apply multiple LUTs to a clip
+- [x] Apply multiple LUTs to a clip (multi-LUT UI in inspector with numbered list, add/clear all, copy/paste support)
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Preview/Export color parity improvements
   - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
@@ -440,7 +440,7 @@ Tracking docs:
   - [x] Five undo commands (add, remove, reorder, set params, toggle)
   - [x] Graphical curve editor for curves plugin — 240×240 DrawingArea with Catmull-Rom spline, 2–5 draggable control points, channel selector (R/G/B/RGB/Luma), double-click to add/remove points
   - [x] Graphical levels editor for levels plugin — transfer function visualization (240×80), input/output black/white sliders, gamma slider (0.1–4.0 mapped from frei0r 0–1), channel selector (R/G/B/Luma)
-- [ ] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus)
+- [x] Blur as creative effect (controllable radius for censoring, depth-of-field, background defocus) — Inspector slider (0.0–1.0), GStreamer gaussianblur preview, FFmpeg boxblur export, keyframe animation, FCPXML persistence, MCP access, color grade copy/paste
 - [x] Titles / text overlay (`textoverlay`)
 - [x] Titles Browser with 9 built-in templates (Standard, Cinematic, Informational categories)
 - [x] Standalone `ClipKind::Title` clips — transparent/solid-color background, no source media required
@@ -457,9 +457,12 @@ Tracking docs:
 ### Visual Effects
 - [x] Chroma key (green/blue screen) — remove color range for transparency compositing, hue/tolerance/edge-softness controls; GStreamer `alpha` element in preview, ffmpeg `colorkey` filter in export; Inspector panel with enable toggle, green/blue/custom color presets, tolerance and edge-softness sliders
 - [x] AI background removal — offline ONNX Runtime inference (MODNet segmentation model) produces alpha-channel VP9 WebM files; BgRemovalCache with 2-thread worker pool; preview and export use pre-processed result; Inspector toggle + threshold slider; MCP `set_clip_bg_removal` tool; FCPXML persistence
-- [ ] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow)
+- [x] Video stabilization — analyze and compensate camera shake via libvidstab (two-pass workflow); Inspector enable/smoothing controls; export-time analysis + vidstabtransform + post-sharpening; proxy-baked preview when proxy mode enabled; FCPXML persistence; MCP `set_clip_stabilization` tool
 - [x] Blend modes (Multiply, Screen, Overlay, Add, Difference, Soft Light, etc.)
-- [ ] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
+- [x] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
+  - [x] Phase 1: Full-frame adjustment layers with `ClipKind::Adjustment`. Color grading (brightness, contrast, saturation) applied to composited output via permanent GStreamer videobalance element (real-time preview). Frei0r user effects, LUTs, temperature/tint, blur applied on export via time-gated FFmpeg filter chain. Purple hatched timeline rendering, inspector visibility, FCPXML round-trip, MCP tool, undo support, right-click context menu.
+  - [x] Phase 1b: Background prerender support for adjustment layer frei0r effects — when Background Render is enabled, prerender the adjustment frei0r/LUT/blur effects into temporary clips so the Program Monitor shows the full effect chain without real-time GStreamer topology changes
+  - [ ] Phase 2: Bounding box scoping (position, scale, crop constraints on adjustment layer effect region)
 - [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
 
 ### Video Transform (per clip)
@@ -499,6 +502,7 @@ Tracking docs:
 - [x] Shift-constrain while scaling — hold Shift during corner drag to lock aspect ratio
 - [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 - [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
+- [x] Support anamorphic desqueeze (1.33x, 1.5x, 1.8x, 2.0x desqueeze via Inspector and MCP; persists in FCPXML)
 
 ### Monitoring
 - [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state
@@ -511,7 +515,7 @@ Tracking docs:
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [ ] Proxy media generation and management
-- [ ] Auto-backup with versioned history (timestamped backups to dedicated directory with restore UI)
+- [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management
 - [x] Relink dialog — general-purpose UI to find and repoint all offline/missing media
@@ -523,7 +527,7 @@ Tracking docs:
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
 - [x] Frame rate selector in project settings (23.976, 24, 25, 29.97, 30, 60 fps)
-- [ ] Aspect ratio presets (16:9, 4:3, 9:16 vertical, 1:1 square)
+- [x] Aspect ratio presets (16:9, 4:3, 9:16 vertical, 1:1 square)
 - [x] Persist canvas settings in FCPXML `<format>` element
 
 ### Export
@@ -537,7 +541,7 @@ Tracking docs:
 - [x] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
 - [ ] ProRes / WebM / GIF export options
 - [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
-- [ ] Chapter markers in export (embed project markers as MP4/MKV chapter metadata)
+- [x] Chapter markers in export (embed project markers as MP4/MKV chapter metadata via ffmpeg FFMETADATA)
 - [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
 - [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
 - [ ] AAF export — standard interchange for audio post-production (Pro Tools)
@@ -550,12 +554,12 @@ Tracking docs:
 - [x] GTK renderer preference (Auto / Cairo / OpenGL / Vulkan) for low-memory devices
 - [x] Launch-screen clarity polish (empty-state guidance, wider side panels, and cleaner toolbar/inspector hierarchy)
 - [ ] Accessibility: keyboard navigation in all panels
-- [ ] Welcome window for choosing recent project or new one
+- [x] Welcome window for choosing recent project or new one (Stack-based overlay with New/Open/Recent, crossfade transition to editor)
 - [ ] Help documentation and tutorials
 - [ ] Application icon and desktop integration (`.desktop` file)
 - [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
 - [x] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
-- [ ] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
+- [x] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
 - [ ] Customizable workspace layouts (save/restore panel arrangements for different tasks)
 - [ ] Named project snapshots (create named versions at milestones without separate files)
 
@@ -567,25 +571,26 @@ Tracking docs:
 - [ ] Nested Timelines / Compound Clips
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
-- [ ] Match Frame (shortcut to find timeline clip in media library)
+- [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
 - [ ] Proxy Workflow: One-click toggle between original and proxy media
 - [ ] Keyword ranges + favorite/reject ratings in browser
 - [ ] Auditions / clip versions (swap alternate takes nondestructively)
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 
 ### Advanced Audio
-- [ ] Pitch-corrected audio time-stretching via Rubberband
-  - [ ] Rubberband C library integration (FFI bindings or GStreamer `rubberband` element)
-  - [ ] Pitch-preserved playback at variable speeds (J/K/L shuttle, constant speed changes)
-  - [ ] Independent audio clip time-stretch without pitch shift (fit audio to duration)
-  - [ ] Pitch-shift effect per clip (transpose audio without changing duration)
-- [ ] Audio Roles (Dialogue, Effects, Music) with submixing
-- [ ] Support for LV2 / LADSPA audio plugins
-- [ ] Voiceover recording tool with countdown and punch-in
-- [ ] Automatic Ducking (music volume lowers during dialogue)
-- [ ] Audio normalization and peak-matching
-- [ ] Built-in parametric EQ (3-band minimum: low/mid/high with frequency/gain/Q)
-- [ ] Waveform sync (align external audio to camera reference audio by waveform analysis)
+- [x] Pitch-corrected audio time-stretching via Rubberband
+  - [x] GStreamer LADSPA Rubberband element for preview pitch shift
+  - [x] FFmpeg rubberband filter for export (pitch + tempo with formant preservation)
+  - [x] Pitch-preserved speed changes (clip.pitch_preserve flag bypasses atempo, uses rubberband tempo=)
+  - [x] Pitch-shift effect per clip (±12 semitones via inspector slider)
+  - [ ] Pitch-preserved J/K/L shuttle (apply Rubberband to main pipeline during shuttle)
+- [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
+- [x] LADSPA audio plugin support — Audio FX browser tab, inspector effect display, discovery via GStreamer registry, per-clip effect chain, parameter control, GStreamer preview + FFmpeg export via native `ladspa` filter, FCPXML persistence, MCP tools (list/add/remove/set params)
+- [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
+- [x] Automatic Ducking (per-track `duck` toggle, volume reduced when dialogue/non-ducked audio is active; configurable amount in Preferences; real-time preview; MCP `set_track_duck` tool; FCPXML persistence)
+- [x] Audio normalization and peak-matching (LUFS + peak modes via FFmpeg `ebur128`/`volumedetect`; Inspector button, MCP `normalize_clip_audio` tool, undo, measured loudness display + FCPXML persistence)
+- [x] Built-in parametric EQ (3-band: Low/Mid/High with freq/gain/Q per band; GStreamer `equalizer-nbands` preview, FFmpeg `equalizer` export, gain keyframes, Inspector UI, FCPXML persistence, MCP `set_clip_eq` tool, undo)
+- [x] Waveform sync (align external audio to camera reference audio by waveform analysis; "Sync & Replace Audio" context menu action links clips and mutes camera embedded audio; MCP `sync_clips_by_audio` with `replace_audio` flag)
 
 ### AI & Automation
 - [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency

@@ -35,6 +35,7 @@ Supported formats depend on your installed GStreamer plugins (any format `playbi
 
 - Drag a library item directly onto a specific track and position in the timeline.
 - The clip is placed at the drop position on the target track.
+- You can also drag files from your file manager directly onto the **timeline** — they are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially.
 
 ## Notes
 

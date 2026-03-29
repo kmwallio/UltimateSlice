@@ -241,6 +241,7 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 | `rustfft` | `6` | FFT for audio cross-correlation sync |
 | `ort` | `2.0.0-rc.12` | ONNX Runtime for AI background removal |
 | `ndarray` | `0.17` | N-dimensional array for ONNX tensor I/O |
+| `tempfile` | `3` | Temporary files for ffmpeg chapter metadata |
 
 **Do not upgrade gstreamer without also upgrading gtk4/gdk4/glib to the matching glib version.**
 
@@ -337,6 +338,12 @@ Before declaring a task finished, agents must verify via MCP:
 | `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |
 | `set_magnetic_mode` | Enable/disable magnetic (gap-free) timeline mode |
 | `set_track_solo` | Set solo state for a track id; soloed non-muted tracks become the active preview/export set |
+| `list_ladspa_plugins` | List all available LADSPA audio effect plugins with parameters |
+| `add_clip_ladspa_effect` | Add a LADSPA audio effect to a clip by plugin name |
+| `remove_clip_ladspa_effect` | Remove a LADSPA audio effect from a clip by effect id |
+| `set_clip_ladspa_effect_params` | Set parameters on a LADSPA audio effect instance |
+| `set_track_role` | Set audio role for a track (`none`/`dialogue`/`effects`/`music`) for submix categorization |
+| `set_track_duck` | Enable/disable automatic ducking on a track; ducked tracks have volume reduced when dialogue is present |
 | `close_source_preview` | Deselect current source media and hide the source preview |
 | `get_preferences` | Get persisted application preferences |
 | `set_hardware_acceleration` | Set hardware-acceleration preference and apply to source preview playback |
@@ -356,7 +363,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `link_clips` | Assign a shared clip link group to two or more clips |
 | `unlink_clips` | Clear clip link groups for the provided clips and their linked peers |
 | `align_grouped_clips_by_timecode` | Align grouped clips referenced by clip ids using stored source-time metadata |
-| `sync_clips_by_audio` | Synchronize 2+ clips by FFT audio cross-correlation (first clip is anchor) |
+| `sync_clips_by_audio` | Synchronize 2+ clips by FFT audio cross-correlation (first clip is anchor); optional `replace_audio` flag links clips and mutes anchor's embedded audio |
 | `copy_clip_color_grade` | Copy color grading static values from a clip into the internal color-grade clipboard |
 | `paste_clip_color_grade` | Paste previously copied color grading values onto a target clip |
 | `trim_clip` | Change a clip's `source_in_ns` / `source_out_ns` |
@@ -370,9 +377,16 @@ Before declaring a task finished, agents must verify via MCP:
 | `pause` | Pause program monitor playback |
 | `stop` | Stop program monitor playback and return playhead to start |
 | `take_screenshot` | Capture a PNG screenshot of the full application window (GTK snapshot + GSK CairoRenderer); saved to CWD as `ultimateslice-screenshot-<epoch>.png` |
+| `match_frame` | Match Frame: load a timeline clip's source in the Source Monitor and seek to the matching source timecode (uses selected clip or optional `clip_id`) |
+| `set_clip_stabilization` | Enable/configure video stabilization (libvidstab) on a clip; applied during export |
+| `set_clip_transform` | Set scale, position, and optional rotation/anamorphic offset for a clip. scale > 1.0 zooms in (crops), scale < 1.0 zooms out (letterbox). position_x/y shift the frame from -1.0 (full left/top) to 1.0 (full right/bottom). rotate is in degrees (-180 to 180 typical). anamorphic_desqueeze applies lens expansion (e.g. 1.33, 2.0). |
+| `list_backups` | List available versioned backup files with timestamps and sizes |
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
-| `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`) at an absolute timeline position |
+| `set_clip_eq` | Set 3-band parametric EQ on a clip (optional per-band `low_freq`/`low_gain`/`low_q`, `mid_freq`/`mid_gain`/`mid_q`, `high_freq`/`high_gain`/`high_q`; omitted fields keep current value) |
+| `normalize_clip_audio` | Analyze clip loudness and normalize volume; `mode` (`peak`/`lufs`), `target_level` (dB); blocks during ffmpeg analysis (1–5 s) |
+| `record_voiceover` | Record audio from microphone for `duration_ns` at playhead position; places WAV clip on audio track; blocks during recording |
+| `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`/`eq_low_gain`/`eq_mid_gain`/`eq_high_gain`) at an absolute timeline position |
 | `remove_clip_keyframe` | Remove a phase-1 keyframe for a property at an absolute timeline position |
 | `set_clip_chroma_key` | Set chroma key (green/blue screen) params on a clip by id |
 | `set_project_title` | Rename the project |
@@ -388,6 +402,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `reorder_track` | Move a track from one index to another (undoable) |
 | `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
 | `create_project` | Discard the current project and start a new empty one (optional title) |
+| `add_adjustment_layer` | Add an adjustment layer clip at a track index and timeline position; effects apply to composited result of all tracks below |
 
 For automation-heavy loops, MCP keeps a short-lived per-session read cache for repeated `get_project`, `list_tracks`, and `list_clips` calls. Both direct tool calls and `batch_call_tools` can reuse this cache, and it is invalidated when a mutating tool runs so subsequent reads observe the updated state.
 

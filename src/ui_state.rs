@@ -565,6 +565,18 @@ pub struct PreferencesState {
     /// Audio crossfade duration in nanoseconds.
     #[serde(default = "default_crossfade_duration_ns")]
     pub crossfade_duration_ns: u64,
+    /// Enable automatic audio ducking (lower music when dialogue is present).
+    #[serde(default)]
+    pub duck_enabled: bool,
+    /// Ducking volume reduction in dB (negative). Default −6.0.
+    #[serde(default = "default_duck_amount_db")]
+    pub duck_amount_db: f64,
+    /// Enable versioned auto-backups to $XDG_DATA_HOME/ultimateslice/backups/.
+    #[serde(default = "default_backup_enabled")]
+    pub backup_enabled: bool,
+    /// Maximum number of versioned backups per project title.
+    #[serde(default = "default_backup_max_versions")]
+    pub backup_max_versions: usize,
 }
 
 impl Default for PreferencesState {
@@ -588,6 +600,10 @@ impl Default for PreferencesState {
             crossfade_enabled: false,
             crossfade_curve: CrossfadeCurve::default(),
             crossfade_duration_ns: default_crossfade_duration_ns(),
+            duck_enabled: false,
+            duck_amount_db: default_duck_amount_db(),
+            backup_enabled: default_backup_enabled(),
+            backup_max_versions: default_backup_max_versions(),
         }
     }
 }
@@ -606,6 +622,15 @@ fn default_source_monitor_auto_link_av() -> bool {
 
 fn default_crossfade_duration_ns() -> u64 {
     200_000_000
+}
+fn default_duck_amount_db() -> f64 {
+    -6.0
+}
+fn default_backup_enabled() -> bool {
+    true
+}
+fn default_backup_max_versions() -> usize {
+    20
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

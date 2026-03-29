@@ -1,5 +1,5 @@
 use crate::media::program_player::ProgramPlayer;
-use crate::model::clip::{Clip, ClipKind, NumericKeyframe};
+use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -118,16 +118,23 @@ pub fn export_project(
         .collect();
     let mut primary_clips: Vec<&crate::model::clip::Clip> = active_video_tracks
         .first()
-        .map(|t| t.clips.iter().collect())
+        .map(|t| t.clips.iter().filter(|c| c.kind != ClipKind::Adjustment).collect())
         .unwrap_or_default();
     primary_clips.sort_by_key(|c| c.timeline_start);
 
     // Remaining video tracks: each is a list of (overlay) clips
+    // Collect adjustment clips from ALL tracks before filtering them out.
+    let all_adjustment_clips: Vec<&Clip> = active_video_tracks
+        .iter()
+        .flat_map(|t| t.clips.iter())
+        .filter(|c| c.kind == ClipKind::Adjustment)
+        .collect();
+
     let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = active_video_tracks
         .into_iter()
         .skip(1)
         .map(|t| {
-            let mut clips: Vec<&Clip> = t.clips.iter().collect();
+            let mut clips: Vec<&Clip> = t.clips.iter().filter(|c| c.kind != ClipKind::Adjustment).collect();
             clips.sort_by_key(|c| c.timeline_start);
             clips
         })
@@ -184,8 +191,8 @@ pub fn export_project(
     };
 
     let resolve_export_path = |clip: &Clip| -> String {
-        if clip.kind == ClipKind::Title {
-            return String::new(); // Title clips use lavfi, not file input
+        if clip.kind == ClipKind::Title || clip.kind == ClipKind::Adjustment {
+            return String::new(); // Title/adjustment clips use lavfi or no input
         }
         if clip.bg_removal_enabled {
             if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
@@ -198,6 +205,7 @@ pub fn export_project(
     };
 
     // Inputs: primary video clips (0..primary_clips.len())
+    // Adjustment clips are already filtered out of primary_clips.
     for clip in &primary_clips {
         if clip.kind == ClipKind::Title {
             let dur_s = clip.duration() as f64 / 1_000_000_000.0;
@@ -219,6 +227,7 @@ pub fn export_project(
     }
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
+    // Adjustment clips are already filtered out of secondary_track_clips.
     for clip in &secondary_clips_flat {
         if clip.kind == ClipKind::Title {
             let dur_s = clip.duration() as f64 / 1_000_000_000.0;
@@ -254,20 +263,43 @@ pub fn export_project(
             .arg(&clip.source_path);
     }
 
+    // Chapter metadata input (FFMETADATA file from project markers).
+    // Must be added after all media inputs so the input index is correct.
+    let _chapter_metadata = write_chapter_metadata(&project.markers, project.duration())?;
+    if let Some(ref meta) = _chapter_metadata {
+        let metadata_input_idx = audio_base + audio_clips.len();
+        cmd.arg("-f")
+            .arg("ffmetadata")
+            .arg("-i")
+            .arg(meta.path());
+        cmd.arg("-map_metadata").arg(format!("{metadata_input_idx}"));
+    }
+
     let mut filter = String::new();
     let color_caps = detect_color_filter_capabilities(&ffmpeg);
 
+    // === Vidstab pre-analysis pass for clips with stabilization enabled ===
+    let mut vidstab_trf: HashMap<String, String> = HashMap::new();
+    for clip in primary_clips.iter().chain(secondary_clips_flat.iter()) {
+        if let Ok(Some(trf)) = run_vidstab_analysis(&ffmpeg, clip, frame_duration_s) {
+            vidstab_trf.insert(clip.id.clone(), trf);
+        }
+    }
+
     // === Primary video track: scale/correct each clip then concatenate ===
+    // Adjustment clips are already filtered out of primary_clips.
     for (i, clip) in primary_clips.iter().enumerate() {
         let color_filter = build_color_filter(clip);
         let temp_tint_filter = build_temperature_tint_filter_with_caps(clip, &color_caps);
         let grading_filter = build_grading_filter_with_caps(clip, &color_caps);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
+        let blur_filter = build_blur_filter(clip);
+        let vidstab_filter = build_vidstab_filter(clip, vidstab_trf.get(&clip.id).map(|s| s.as_str()));
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
         let title_filter = build_title_filter(clip, out_h);
-        let speed_filter = build_timing_filter(clip, frame_duration_s);
+        let speed_filter = build_timing_filter(clip, frame_duration_s, project.frame_rate.numerator, project.frame_rate.denominator);
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
@@ -303,8 +335,9 @@ pub fn export_project(
                 "T",
             );
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
+            let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{rotate_filter},fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{speed_filter}\
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
@@ -315,14 +348,16 @@ pub fn export_project(
             ));
         } else if clip.chroma_key_enabled || clip.bg_removal_enabled {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
+            let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
+            let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{title_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -360,20 +395,21 @@ pub fn export_project(
             let next_label = format!("pv{}", i + 1);
             let out_label = format!("vseq{}", i + 1);
             let clip = &primary_clips[i];
+            let next_clip = &primary_clips[i + 1];
             let sep = if i == 0 { "" } else { ";" };
-            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, primary_clips[i + 1]) {
+            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, next_clip) {
                 let offset_s = (running_s - d_s).max(0.0);
                 let xfade = transition_xfade_name(&clip.transition_after);
                 filter.push_str(&format!(
                     "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
                 ));
-                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0 - d_s;
+                running_s += next_clip.duration() as f64 / 1_000_000_000.0 - d_s;
                 total_overlap_s += d_s;
             } else {
                 filter.push_str(&format!(
                     "{sep}[{prev_label}][{next_label}]concat=n=2:v=1:a=0[{out_label}]"
                 ));
-                running_s += primary_clips[i + 1].duration() as f64 / 1_000_000_000.0;
+                running_s += next_clip.duration() as f64 / 1_000_000_000.0;
             }
             prev_label = out_label;
         }
@@ -391,9 +427,14 @@ pub fn export_project(
         filter.push_str(&format!("concat=n={}:v=1:a=0[vbase]", primary_clips.len()));
     }
 
+    // Use the pre-collected adjustment clips from all tracks.
+    let mut adjustment_clips = all_adjustment_clips;
+    adjustment_clips.sort_by_key(|c| c.timeline_start);
+
     // === Secondary video tracks: overlay each clip at its timeline position ===
     // Chain overlays: [vbase] → overlay clip 0 → [vcomp0] → overlay clip 1 → [vcomp1] → ...
     let mut prev_label = "vbase".to_string();
+    // Adjustment clips are already filtered out of secondary_clips_flat.
     for (k, clip) in secondary_clips_flat.iter().enumerate() {
         let in_idx = sec_base + k;
         let color_filter = build_color_filter(clip);
@@ -401,10 +442,12 @@ pub fn export_project(
         let grading_filter = build_grading_filter_with_caps(clip, &color_caps);
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
+        let blur_filter = build_blur_filter(clip);
+        let vidstab_filter = build_vidstab_filter(clip, vidstab_trf.get(&clip.id).map(|s| s.as_str()));
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
         let title_filter = build_title_filter(clip, out_h);
-        let speed_filter = build_timing_filter(clip, frame_duration_s);
+        let speed_filter = build_timing_filter(clip, frame_duration_s, project.frame_rate.numerator, project.frame_rate.denominator);
         let lut_prefix = build_lut_filter_prefix(clip);        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let rotate_filter = build_rotation_filter(clip, true);
         let has_transform_keyframes = has_transform_keyframes(clip);
@@ -441,8 +484,9 @@ pub fn export_project(
                 "T",
             );
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
+            let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
@@ -453,8 +497,9 @@ pub fn export_project(
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
             let opacity = clip.opacity.clamp(0.0, 1.0);
+            let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,fps={}/{}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -478,11 +523,73 @@ pub fn export_project(
         }
         prev_label = next_label;
     }
+    // === Adjustment layers: apply effects to the composited result ===
+    // Each adjustment layer applies its effects (color, LUT, blur, frei0r) to the
+    // composite output, time-gated to the adjustment clip's duration.
+    for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
+        let adj_color = build_color_filter(adj_clip);
+        let adj_temp_tint = build_temperature_tint_filter_with_caps(adj_clip, &color_caps);
+        let adj_grading = build_grading_filter_with_caps(adj_clip, &color_caps);
+        let adj_denoise = build_denoise_filter(adj_clip);
+        let adj_sharpen = build_sharpen_filter(adj_clip);
+        let adj_blur = build_blur_filter(adj_clip);
+        let adj_frei0r = build_frei0r_effects_filter(adj_clip);
+        let adj_lut = build_lut_filter_prefix(adj_clip);
+
+        // Combine all effect filters into a single chain.
+        // The filter builders return strings with a leading comma (e.g. ",eq=brightness=0.1")
+        // and build_lut_filter_prefix returns a trailing comma (e.g. "lut3d=file.cube,").
+        // We concatenate then strip the leading comma so the chain starts clean.
+        let mut effects_chain = String::new();
+        if !adj_lut.is_empty() {
+            effects_chain.push_str(&adj_lut);
+        }
+        effects_chain.push_str(&adj_color);
+        effects_chain.push_str(&adj_temp_tint);
+        effects_chain.push_str(&adj_grading);
+        effects_chain.push_str(&adj_denoise);
+        effects_chain.push_str(&adj_sharpen);
+        effects_chain.push_str(&adj_blur);
+        effects_chain.push_str(&adj_frei0r);
+
+        if effects_chain.is_empty() {
+            continue; // No effects — skip this adjustment layer
+        }
+        // Strip leading/trailing commas to avoid empty filter names.
+        let effects_chain = effects_chain.trim_matches(',').to_string();
+        if effects_chain.is_empty() {
+            continue;
+        }
+
+        let start_s = adj_clip.timeline_start as f64 / 1_000_000_000.0;
+        let end_s = (adj_clip.timeline_start + adj_clip.duration()) as f64 / 1_000_000_000.0;
+        let opacity = adj_clip.opacity.clamp(0.0, 1.0);
+        let next_label = format!("vadj{adj_idx}");
+
+        if opacity < 1.0 - f64::EPSILON {
+            // Partial opacity: split → apply effects → overlay with opacity
+            let orig_label = format!("vadj{adj_idx}orig");
+            let work_label = format!("vadj{adj_idx}work");
+            let fx_label = format!("vadj{adj_idx}fx");
+            filter.push_str(&format!(
+                ";[{prev_label}]split[{orig_label}][{work_label}];\
+                 [{work_label}]{effects_chain},format=yuva420p,colorchannelmixer=aa={opacity:.4}[{fx_label}];\
+                 [{orig_label}][{fx_label}]overlay=enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
+            ));
+        } else {
+            // Full opacity: apply effects directly to the stream.
+            filter.push_str(&format!(
+                ";[{prev_label}]{effects_chain}[{next_label}]"
+            ));
+        }
+        prev_label = next_label;
+    }
+
     // Final output video label — use the last composited label directly
     let vout_label = prev_label;
 
     // === Audio pipeline ===
-    let mut audio_labels: Vec<String> = Vec::new();
+    let mut audio_labels: Vec<(String, crate::model::track::AudioRole)> = Vec::new();
     let clip_audio_fades: HashMap<String, ClipAudioFade> =
         if crossfade_enabled && crossfade_duration_ns > 0 {
             let mut crossfade_tracks: Vec<Vec<&Clip>> = Vec::new();
@@ -542,17 +649,30 @@ pub fn export_project(
             let label = format!("va{i}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_audio_speed_filter(clip);
+            let ch_filter = build_channel_filter(clip);
+            let ch_part = if ch_filter.is_empty() { String::new() } else { format!(",{ch_filter}") };
             let volume_filter = build_volume_filter(clip);
+            let pitch_filter = build_pitch_filter(clip);
+            let pitch_part = if pitch_filter.is_empty() { String::new() } else { format!(",{pitch_filter}") };
+            let ladspa_filter = build_ladspa_effects_filter(clip);
+            let ladspa_part = if ladspa_filter.is_empty() { String::new() } else { format!(",{ladspa_filter}") };
+            let eq_filter = build_eq_filter(clip);
+            let eq_part = if eq_filter.is_empty() { String::new() } else { format!(",{eq_filter}") };
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            audio_labels.push(label);
+            // Primary video clips — find track role from project.
+            let role = project.tracks.iter()
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+                .map(|t| t.audio_role)
+                .unwrap_or_default();
+            audio_labels.push((label, role));
         }
     }
 
@@ -569,17 +689,30 @@ pub fn export_project(
             let label = format!("sva{k}");
             let areverse = if clip.reverse { "areverse," } else { "" };
             let atempo = build_audio_speed_filter(clip);
+            let ch_filter = build_channel_filter(clip);
+            let ch_part = if ch_filter.is_empty() { String::new() } else { format!(",{ch_filter}") };
             let volume_filter = build_volume_filter(clip);
+            let pitch_filter = build_pitch_filter(clip);
+            let pitch_part = if pitch_filter.is_empty() { String::new() } else { format!(",{pitch_filter}") };
+            let ladspa_filter = build_ladspa_effects_filter(clip);
+            let ladspa_part = if ladspa_filter.is_empty() { String::new() } else { format!(",{ladspa_filter}") };
+            let eq_filter = build_eq_filter(clip);
+            let eq_part = if eq_filter.is_empty() { String::new() } else { format!(",{eq_filter}") };
             let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            audio_labels.push(label);
+            // Find the track for this secondary clip to get its role.
+            let role = project.tracks.iter()
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+                .map(|t| t.audio_role)
+                .unwrap_or_default();
+            audio_labels.push((label, role));
         }
     }
 
@@ -589,18 +722,46 @@ pub fn export_project(
         let label = format!("aa{j}");
         let areverse = if clip.reverse { "areverse," } else { "" };
         let atempo = build_audio_speed_filter(clip);
+        let ch_filter = build_channel_filter(clip);
+        let ch_part = if ch_filter.is_empty() { String::new() } else { format!(",{ch_filter}") };
         let volume_filter = build_volume_filter(clip);
+        let pitch_filter = build_pitch_filter(clip);
+        let pitch_part = if pitch_filter.is_empty() { String::new() } else { format!(",{pitch_filter}") };
+        let ladspa_filter = build_ladspa_effects_filter(clip);
+        let ladspa_part = if ladspa_filter.is_empty() { String::new() } else { format!(",{ladspa_filter}") };
+        let eq_filter = build_eq_filter(clip);
+        let eq_part = if eq_filter.is_empty() {
+            String::new()
+        } else {
+            format!(",{eq_filter}")
+        };
+        // Ducking filter: reduce volume when non-ducked audio overlaps.
+        let duck_filter = project
+            .tracks
+            .iter()
+            .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+            .map(|track| build_duck_filter(clip, track, &project.tracks))
+            .unwrap_or_default();
+        let duck_part = if duck_filter.is_empty() {
+            String::new()
+        } else {
+            format!(",{duck_filter}")
+        };
         let fades = clip_audio_fades.get(&clip.id).copied().unwrap_or_default();
         let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
         let pre_pan = format!("{label}_prepan");
         let post_pan = format!("{label}_panned");
         filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
         append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
         filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-        audio_labels.push(label);
+        let role = project.tracks.iter()
+            .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+            .map(|t| t.audio_role)
+            .unwrap_or_default();
+        audio_labels.push((label, role));
     }
 
     // Mix all audio streams.
@@ -612,15 +773,71 @@ pub fn export_project(
     // don't contribute audio.
     let has_audio = !audio_labels.is_empty();
     if has_audio {
-        let n = audio_labels.len();
+        use crate::model::track::AudioRole;
         let project_dur_s = project.duration() as f64 / 1_000_000_000.0;
-        filter.push(';');
-        for label in &audio_labels {
-            filter.push_str(&format!("[{label}]"));
+
+        // Group audio labels by role for submix routing.
+        let roles_in_use: Vec<AudioRole> = {
+            let mut roles: Vec<AudioRole> = audio_labels.iter().map(|(_, r)| *r).collect();
+            roles.sort_by_key(|r| *r as u8);
+            roles.dedup();
+            roles
+        };
+
+        if roles_in_use.len() <= 1 {
+            // Single role (or all None) — no submix needed, mix directly.
+            let n = audio_labels.len();
+            filter.push(';');
+            for (label, _) in &audio_labels {
+                filter.push_str(&format!("[{label}]"));
+            }
+            filter.push_str(&format!(
+                "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+            ));
+        } else {
+            // Multiple roles — create per-role submixes, then master mix.
+            let mut submix_labels: Vec<String> = Vec::new();
+            for role in &roles_in_use {
+                let role_labels: Vec<&str> = audio_labels
+                    .iter()
+                    .filter(|(_, r)| r == role)
+                    .map(|(l, _)| l.as_str())
+                    .collect();
+                if role_labels.is_empty() {
+                    continue;
+                }
+                let submix_name = format!("submix_{}", role.as_str());
+                let n = role_labels.len();
+                filter.push(';');
+                for l in &role_labels {
+                    filter.push_str(&format!("[{l}]"));
+                }
+                if n == 1 {
+                    // Single input — just rename, no amix needed.
+                    filter.push_str(&format!("anull[{submix_name}]"));
+                } else {
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0[{submix_name}]"
+                    ));
+                }
+                submix_labels.push(submix_name);
+            }
+            // Master mix from submixes.
+            let n = submix_labels.len();
+            filter.push(';');
+            for l in &submix_labels {
+                filter.push_str(&format!("[{l}]"));
+            }
+            if n == 1 {
+                filter.push_str(&format!(
+                    "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                ));
+            } else {
+                filter.push_str(&format!(
+                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                ));
+            }
         }
-        filter.push_str(&format!(
-            "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-        ));
     }
 
     cmd.arg("-filter_complex")
@@ -746,6 +963,11 @@ pub fn export_project(
         let msg = format!("ffmpeg export failed: {detail}");
         let _ = tx.send(ExportProgress::Error(msg.clone()));
         return Err(anyhow!("{msg}"));
+    }
+
+    // Clean up temporary vidstab .trf files.
+    for trf in vidstab_trf.values() {
+        let _ = std::fs::remove_file(trf);
     }
 
     let _ = tx.send(ExportProgress::Done);
@@ -995,6 +1217,81 @@ fn build_keyframed_property_expression(
     format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
 }
 
+/// Build an FFmpeg volume filter that applies ducking to a clip.
+/// Returns empty string if the clip's track doesn't have ducking enabled or
+/// there are no overlapping non-ducked audio sources.
+///
+/// The filter uses `between(t, start, end)` to detect time ranges where
+/// non-ducked audio overlaps, and applies the duck gain during those ranges.
+fn build_duck_filter(
+    clip: &Clip,
+    track: &crate::model::track::Track,
+    all_tracks: &[crate::model::track::Track],
+) -> String {
+    if !track.duck {
+        return String::new();
+    }
+
+    let clip_start = clip.timeline_start;
+    let clip_end = clip.timeline_start + clip.duration();
+    let duck_gain = 10.0_f64.powf(track.duck_amount_db.min(0.0) / 20.0);
+
+    // Find all time ranges where non-ducked audio overlaps this clip.
+    // Non-ducked audio sources: video clips with embedded audio + audio-only
+    // clips on non-ducked tracks.
+    let mut overlap_ranges: Vec<(f64, f64)> = Vec::new();
+
+    for t in all_tracks {
+        if t.id == track.id {
+            continue; // Skip the ducked track itself.
+        }
+        if t.duck {
+            continue; // Skip other ducked tracks.
+        }
+        for c in &t.clips {
+            let c_start = c.timeline_start;
+            let c_end = c.timeline_start + c.duration();
+            // Check overlap with the ducked clip.
+            if c_start < clip_end && c_end > clip_start {
+                // Convert to source-relative time for the ducked clip.
+                let overlap_start = c_start.max(clip_start).saturating_sub(clip_start);
+                let overlap_end = c_end.min(clip_end).saturating_sub(clip_start);
+                let start_s = overlap_start as f64 / 1e9;
+                let end_s = overlap_end as f64 / 1e9;
+                overlap_ranges.push((start_s, end_s));
+            }
+        }
+    }
+
+    if overlap_ranges.is_empty() {
+        return String::new();
+    }
+
+    // Merge overlapping ranges.
+    overlap_ranges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (s, e) in &overlap_ranges {
+        if let Some(last) = merged.last_mut() {
+            if *s <= last.1 {
+                last.1 = last.1.max(*e);
+                continue;
+            }
+        }
+        merged.push((*s, *e));
+    }
+
+    // Build the FFmpeg expression: duck during overlap ranges, normal otherwise.
+    // volume='if(between(t,S1,E1)+between(t,S2,E2)+..., DUCK_GAIN, 1.0)':eval=frame
+    let conditions: Vec<String> = merged
+        .iter()
+        .map(|(s, e)| format!("between(t,{s:.4},{e:.4})"))
+        .collect();
+    let cond_expr = conditions.join("+");
+    format!(
+        "volume='if({cond_expr},{duck_gain:.6},1.0)':eval=frame"
+    )
+}
+
 fn build_volume_filter(clip: &Clip) -> String {
     if clip.volume_keyframes.is_empty() {
         return format!("volume={:.4}", clip.volume.clamp(0.0, 4.0));
@@ -1008,6 +1305,46 @@ fn build_volume_filter(clip: &Clip) -> String {
     );
     // Keyframed volume expressions depend on `t`, so force per-frame evaluation.
     format!("volume='{expr}':eval=frame")
+}
+
+/// Build FFmpeg `equalizer` filter chain for the clip's 3-band parametric EQ.
+/// Returns an empty string when EQ is flat (all gains 0 and no keyframes).
+fn build_eq_filter(clip: &Clip) -> String {
+    if !clip.has_eq() {
+        return String::new();
+    }
+    let band_kfs: [&[NumericKeyframe]; 3] = [
+        &clip.eq_low_gain_keyframes,
+        &clip.eq_mid_gain_keyframes,
+        &clip.eq_high_gain_keyframes,
+    ];
+    let mut parts = Vec::new();
+    for (i, band) in clip.eq_bands.iter().enumerate() {
+        let has_kfs = !band_kfs[i].is_empty();
+        if band.gain.abs() < 0.001 && !has_kfs {
+            continue;
+        }
+        let bw = band.freq / band.q.max(0.1);
+        if has_kfs {
+            let gain_expr = build_keyframed_property_expression(
+                band_kfs[i],
+                band.gain,
+                -24.0,
+                24.0,
+                "t",
+            );
+            parts.push(format!(
+                "equalizer=f={:.1}:t=h:w={:.1}:g='{gain_expr}'",
+                band.freq, bw
+            ));
+        } else {
+            parts.push(format!(
+                "equalizer=f={:.1}:t=h:w={:.1}:g={:.2}",
+                band.freq, bw, band.gain
+            ));
+        }
+    }
+    parts.join(",")
 }
 
 fn build_pan_expression(clip: &Clip) -> String {
@@ -1151,6 +1488,75 @@ fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
+fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.blur > 0.0 {
+        let r = (clip.blur.clamp(0.0, 1.0) * 10.0).round() as i32;
+        format!(",boxblur={r}:{r}")
+    } else {
+        String::new()
+    }
+}
+
+/// Run vidstab analysis (pass 1) for a clip, producing a .trf transform file.
+/// Returns the .trf path on success, or None if analysis fails or vidstab is disabled.
+fn run_vidstab_analysis(
+    ffmpeg: &str,
+    clip: &Clip,
+    frame_duration_s: f64,
+) -> Result<Option<String>> {
+    if !clip.vidstab_enabled || clip.vidstab_smoothing <= 0.0 {
+        return Ok(None);
+    }
+    // Skip non-video clips (titles, adjustments, audio, images)
+    if clip.kind != ClipKind::Video || clip.source_path.is_empty() {
+        return Ok(None);
+    }
+    let trf_path = format!(
+        "/tmp/ultimateslice-vidstab-{}.trf",
+        clip.id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
+    );
+    let shakiness = ((clip.vidstab_smoothing * 10.0).round() as i32).clamp(1, 10);
+    let (in_s, dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
+    let status = Command::new(ffmpeg)
+        .arg("-y")
+        .arg("-ss")
+        .arg(format!("{in_s:.6}"))
+        .arg("-t")
+        .arg(format!("{dur_s:.6}"))
+        .arg("-i")
+        .arg(&clip.source_path)
+        .arg("-vf")
+        .arg(format!(
+            "vidstabdetect=shakiness={shakiness}:result={trf_path}"
+        ))
+        .arg("-f")
+        .arg("null")
+        .arg("-")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() && std::path::Path::new(&trf_path).exists() => Ok(Some(trf_path)),
+        _ => {
+            log::warn!("vidstab analysis failed for clip {}", clip.id);
+            Ok(None)
+        }
+    }
+}
+
+/// Build the vidstabtransform filter string for pass 2 of stabilization.
+fn build_vidstab_filter(clip: &Clip, trf_path: Option<&str>) -> String {
+    match trf_path {
+        Some(trf) if clip.vidstab_enabled => {
+            let smoothing = ((clip.vidstab_smoothing * 30.0).round() as i32).clamp(1, 30);
+            format!(
+                ",vidstabtransform=input={trf}:smoothing={smoothing}:zoom=0:optzoom=1,unsharp=5:5:0.8:3:3:0.4"
+            )
+        }
+        _ => String::new(),
+    }
+}
+
 /// Build a chain of FFmpeg frei0r filters for user-applied effects on a clip.
 /// Each enabled effect becomes `,frei0r=filter_name={name}:filter_params={p1}|{p2}|...`.
 /// Effects with no FFmpeg frei0r support are silently skipped.
@@ -1263,16 +1669,17 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
     result
 }
 
-/// LUT filter for use at the start of a chain (trailing comma, no leading).
-/// Returns `lut3d={path},` or empty string.
+/// LUT filter chain for use at the start of a filter pipeline (trailing comma, no leading).
+/// Returns `lut3d={path1},lut3d={path2},` or empty string.
 fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
-    if let Some(ref path) = clip.lut_path {
+    let mut result = String::new();
+    for path in &clip.lut_paths {
         if !path.is_empty() && std::path::Path::new(path).exists() {
             let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
-            return format!("lut3d={escaped},");
+            result.push_str(&format!("lut3d={escaped},"));
         }
     }
-    String::new()
+    result
 }
 
 fn parse_title_font(font_desc: &str) -> (String, f64) {
@@ -1525,7 +1932,12 @@ fn title_clip_lavfi_color(
     )
 }
 
-fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -> String {
+fn build_timing_filter(
+    clip: &crate::model::clip::Clip,
+    frame_duration_s: f64,
+    fps_num: u32,
+    fps_den: u32,
+) -> String {
     if clip.kind == ClipKind::Title {
         // Title clips are generated at exact duration by lavfi, no timing filter needed.
         return String::new();
@@ -1538,6 +1950,9 @@ fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -
             ",trim=duration={frame_s:.6},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={pad_s:.6},trim=duration={hold_s:.6},setpts=PTS-STARTPTS"
         );
     }
+
+    let minterp_suffix = build_minterpolate_suffix(clip, fps_num, fps_den);
+
     if !clip.speed_keyframes.is_empty() {
         // Build a source→timeline time mapping for setpts.  Speed keyframes
         // are in timeline coordinates, but FFmpeg's PTS is in source
@@ -1611,20 +2026,50 @@ fn build_timing_filter(clip: &crate::model::clip::Clip, frame_duration_s: f64) -
         // Wrap: convert seconds → PTS units, trim to clip duration.
         let dur_s = clip_dur_ns as f64 / 1_000_000_000.0;
         return if clip.reverse {
-            format!(",reverse,setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS")
+            format!(",reverse,setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS{minterp_suffix}")
         } else {
-            format!(",setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS")
+            format!(",setpts=({expr})/TB,trim=duration={dur_s:.6},setpts=PTS-STARTPTS{minterp_suffix}")
         };
     }
     let has_speed = (clip.speed - 1.0).abs() > 0.001;
     match (clip.reverse, has_speed) {
-        (false, false) => String::new(),
-        (false, true) => format!(",setpts=PTS/{:.6}", clip.speed),
+        (false, false) => minterp_suffix,
+        (false, true) => format!(",setpts=PTS/{:.6}{minterp_suffix}", clip.speed),
         // `reverse` already emits a valid timeline in ffmpeg; STARTPTS-PTS here can
         // cause non-monotonic DTS and near-empty video output.
-        (true, false) => ",reverse".to_string(),
-        (true, true) => format!(",reverse,setpts=PTS/{:.6}", clip.speed),
+        (true, false) => format!(",reverse{minterp_suffix}"),
+        (true, true) => format!(",reverse,setpts=PTS/{:.6}{minterp_suffix}", clip.speed),
     }
+}
+
+/// Build the minterpolate filter suffix for slow-motion frame interpolation.
+/// Returns empty string if interpolation is Off or the clip isn't slow-motion.
+fn build_minterpolate_suffix(clip: &Clip, fps_num: u32, fps_den: u32) -> String {
+    if clip.slow_motion_interp == SlowMotionInterp::Off {
+        return String::new();
+    }
+    // Check if clip has slow-motion segments:
+    // - For constant speed: speed < 1.0
+    // - For speed keyframes: any keyframe value < 1.0
+    let is_slow = if !clip.speed_keyframes.is_empty() {
+        clip.speed_keyframes.iter().any(|kf| kf.value < 1.0)
+    } else {
+        clip.speed < 1.0 - 0.001
+    };
+    if !is_slow {
+        return String::new();
+    }
+    let mi_mode = match clip.slow_motion_interp {
+        SlowMotionInterp::Blend => "blend",
+        SlowMotionInterp::OpticalFlow => "mci",
+        SlowMotionInterp::Off => unreachable!(),
+    };
+    let fps = if fps_den > 0 {
+        format!("{fps_num}/{fps_den}")
+    } else {
+        format!("{fps_num}")
+    };
+    format!(",minterpolate=fps={fps}:mi_mode={mi_mode}")
 }
 
 /// Build an ffmpeg crop + re-pad filter for user-controlled crop.
@@ -1714,6 +2159,16 @@ fn build_rotation_filter(clip: &crate::model::clip::Clip, transparent_pad: bool)
         ",rotate={:.10}:fillcolor={fill}",
         -(rot as f64).to_radians()
     )
+}
+
+fn build_anamorphic_filter(clip: &crate::model::clip::Clip) -> String {
+    if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
+        // Physically desqueeze the source pixels horizontally and reset SAR to 1.
+        // This ensures subsequent scale/fit/crop filters work in a consistent square-pixel space.
+        format!("scale=iw*{}:ih,setsar=1,", clip.anamorphic_desqueeze)
+    } else {
+        String::new()
+    }
 }
 
 /// Build a scale + crop/pad filter for user-controlled scale and position.
@@ -1831,7 +2286,139 @@ fn build_atempo(speed: f64) -> String {
 /// uses the mean speed as an atempo approximation (atempo and asetrate do not
 /// support time-varying expressions). True variable-speed audio requires
 /// Rubberband, which is a separate roadmap item.
+/// Build an FFmpeg filter for pitch shifting and/or pitch-preserved speed change
+/// using the `rubberband` filter. Returns empty string if no pitch processing needed.
+fn build_pitch_filter(clip: &crate::model::clip::Clip) -> String {
+    let has_pitch_shift = clip.pitch_shift_semitones.abs() > 0.001;
+    let has_pitch_preserve = clip.pitch_preserve && (clip.speed - 1.0).abs() > 0.001;
+
+    if !has_pitch_shift && !has_pitch_preserve {
+        return String::new();
+    }
+
+    // FFmpeg rubberband filter: pitch= is a ratio (2^(semitones/12)),
+    // tempo= is the speed factor (only used for pitch-preserved speed changes).
+    let pitch_ratio = if has_pitch_shift {
+        2.0_f64.powf(clip.pitch_shift_semitones / 12.0)
+    } else {
+        1.0
+    };
+
+    let tempo = if has_pitch_preserve {
+        clip.speed.clamp(0.05, 16.0)
+    } else {
+        1.0
+    };
+
+    let mut params = Vec::new();
+    if (pitch_ratio - 1.0).abs() > 0.0001 {
+        params.push(format!("pitch={pitch_ratio:.6}"));
+    }
+    if (tempo - 1.0).abs() > 0.0001 {
+        params.push(format!("tempo={tempo:.6}"));
+    }
+    // Preserve formants for voice content.
+    params.push("formant=preserved".to_string());
+
+    format!("rubberband={}", params.join(":"))
+}
+
+/// Build an FFmpeg filter for audio channel routing (Left/Right/MonoMix).
+/// Returns empty string for Stereo (default passthrough).
+fn build_channel_filter(clip: &crate::model::clip::Clip) -> String {
+    use crate::model::clip::AudioChannelMode;
+    match clip.audio_channel_mode {
+        AudioChannelMode::Stereo => String::new(),
+        AudioChannelMode::Left => "pan=stereo|c0=c0|c1=c0".to_string(),
+        AudioChannelMode::Right => "pan=stereo|c0=c1|c1=c1".to_string(),
+        AudioChannelMode::MonoMix => "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string(),
+    }
+}
+
+/// Build FFmpeg filter chain for LADSPA audio effects on a clip.
+/// Uses FFmpeg's native `ladspa` filter which loads .so plugins directly.
+/// Find the absolute path to a LADSPA .so file.
+fn find_ladspa_so(name: &str) -> Option<String> {
+    let search_dirs = [
+        "/usr/lib/ladspa",
+        "/usr/lib/x86_64-linux-gnu/ladspa",
+        "/usr/local/lib/ladspa",
+        "/usr/lib64/ladspa",
+    ];
+    for dir in &search_dirs {
+        let path = format!("{dir}/{name}");
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn build_ladspa_effects_filter(clip: &crate::model::clip::Clip) -> String {
+    if clip.ladspa_effects.is_empty() {
+        return String::new();
+    }
+    let reg = crate::media::ladspa_registry::LadspaRegistry::get_or_discover();
+    let mut parts = Vec::new();
+    for effect in &clip.ladspa_effects {
+        if !effect.enabled {
+            continue;
+        }
+        // Find the LADSPA .so file and plugin label.
+        // The GStreamer element name encodes the .so path:
+        // "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-stereo"
+        // → .so = "ladspa-rubberband" (replace hyphens with path logic)
+        // For FFmpeg's ladspa filter: ladspa=file=SONAME:plugin=LABEL[:controls=c0|c1|...]
+        let info = reg.find_by_name(&effect.plugin_name);
+        // Extract .so filename from the GStreamer element name pattern.
+        // Pattern: ladspa-{soname-with-hyphens}-so-{pluginname}
+        let gst_name = &effect.gst_element_name;
+        let stripped = gst_name.strip_prefix("ladspa-").unwrap_or(gst_name);
+        // Find "-so-" separator.
+        if let Some(so_pos) = stripped.find("-so-") {
+            let so_part = &stripped[..so_pos];
+            let plugin_part = &stripped[so_pos + 4..];
+            // .so filename keeps hyphens as-is (e.g. "ladspa-rubberband.so").
+            // Use absolute path since FFmpeg doesn't search LADSPA_PATH reliably.
+            let so_name = format!("{so_part}.so");
+            let Some(so_file) = find_ladspa_so(&so_name) else {
+                log::warn!("LADSPA export: .so not found: {so_name}, skipping effect");
+                continue;
+            };
+            // LADSPA plugin labels use underscores (GStreamer converts _ → -).
+            let plugin_part = plugin_part.replace('-', "_");
+            // Build controls string from params (ordered by registry param list).
+            let controls = if let Some(info) = info {
+                let vals: Vec<String> = info
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let val = effect.params.get(&p.name).copied().unwrap_or(p.default_value);
+                        format!("{val:.6}")
+                    })
+                    .collect();
+                if vals.is_empty() {
+                    String::new()
+                } else {
+                    format!(":controls={}", vals.join("|"))
+                }
+            } else {
+                String::new()
+            };
+            parts.push(format!(
+                "ladspa=file={so_file}:plugin={plugin_part}{controls}"
+            ));
+        }
+    }
+    parts.join(",")
+}
+
 fn build_audio_speed_filter(clip: &crate::model::clip::Clip) -> String {
+    // When pitch_preserve is true, the rubberband filter handles the tempo change,
+    // so skip atempo to avoid double speed-change.
+    if clip.pitch_preserve && (clip.speed - 1.0).abs() > 0.001 {
+        return String::new();
+    }
     if !clip.speed_keyframes.is_empty() {
         // Compute mean speed over the clip's timeline duration.
         let dur = clip.duration();
@@ -2201,6 +2788,144 @@ pub(crate) fn detect_silence(
     Ok(intervals)
 }
 
+/// Measure integrated loudness (LUFS) of a clip's audio via FFmpeg `ebur128` filter.
+/// Returns the integrated loudness value in LUFS (e.g. -18.3).
+pub(crate) fn analyze_loudness_lufs(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f64> {
+    let ffmpeg = find_ffmpeg()?;
+    if !probe_has_audio(&ffmpeg, source_path) {
+        return Err(anyhow!("Clip has no audio stream"));
+    }
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Err(anyhow!("Clip has zero duration"));
+    }
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-vn", // skip video decode — audio-only analysis
+            "-af",
+            "ebur128",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg ebur128: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Parse the summary block. The ebur128 filter outputs lines like:
+    //   [Parsed_ebur128_0 @ 0x...] Summary:
+    //
+    //     Integrated loudness:
+    //       I:         -25.9 LUFS
+    // The "Summary:" line has a filter tag prefix; the "I:" line does not.
+    let mut in_summary = false;
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        // "Summary:" may be prefixed by "[Parsed_ebur128_0 @ 0x...]"
+        if trimmed.contains("Summary:") {
+            in_summary = true;
+            continue;
+        }
+        if in_summary {
+            // e.g. "    I:         -25.9 LUFS"
+            if trimmed.starts_with("I:") {
+                let rest = trimmed["I:".len()..].trim();
+                if let Some(val) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    if val.is_finite() {
+                        return Ok(val);
+                    }
+                }
+            }
+        }
+    }
+    Err(anyhow!(
+        "Could not parse integrated loudness from ffmpeg ebur128 output"
+    ))
+}
+
+/// Measure peak amplitude (dB) of a clip's audio via FFmpeg `volumedetect` filter.
+/// Returns the max volume in dBFS (e.g. -3.5, where 0.0 = full scale).
+pub(crate) fn analyze_peak_db(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f64> {
+    let ffmpeg = find_ffmpeg()?;
+    if !probe_has_audio(&ffmpeg, source_path) {
+        return Err(anyhow!("Clip has no audio stream"));
+    }
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Err(anyhow!("Clip has zero duration"));
+    }
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-vn", // skip video decode — audio-only analysis
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg volumedetect: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Parse "max_volume: -X.X dB" from volumedetect output.
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("max_volume:") {
+            let rest = &line[pos + "max_volume:".len()..];
+            if let Some(val) = rest
+                .trim()
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                return Ok(val);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Could not parse max_volume from ffmpeg volumedetect output"
+    ))
+}
+
+/// Compute the linear gain multiplier needed to shift measured LUFS to a target LUFS.
+pub(crate) fn compute_lufs_gain(measured_lufs: f64, target_lufs: f64) -> f64 {
+    10.0_f64.powf((target_lufs - measured_lufs) / 20.0)
+}
+
+/// Compute the linear gain multiplier needed to shift measured peak dB to a target dB.
+pub(crate) fn compute_peak_gain(measured_peak_db: f64, target_peak_db: f64) -> f64 {
+    10.0_f64.powf((target_peak_db - measured_peak_db) / 20.0)
+}
+
 /// Find the ffmpeg binary, checking PATH and common install locations.
 pub(crate) fn find_ffmpeg() -> Result<String> {
     // First try the name directly (respects the process PATH)
@@ -2226,6 +2951,52 @@ pub(crate) fn find_ffmpeg() -> Result<String> {
     Err(anyhow!("ffmpeg not found — please install ffmpeg"))
 }
 
+/// Generate an FFMETADATA file with chapter entries from project markers.
+/// Returns `None` if there are no markers.
+fn write_chapter_metadata(
+    markers: &[crate::model::project::Marker],
+    project_duration_ns: u64,
+) -> Result<Option<tempfile::NamedTempFile>> {
+    if markers.is_empty() {
+        return Ok(None);
+    }
+    use std::io::Write;
+    let mut file = tempfile::NamedTempFile::new()?;
+    writeln!(file, ";FFMETADATA1")?;
+    writeln!(file)?;
+
+    let sorted: Vec<_> = {
+        let mut v: Vec<_> = markers.iter().collect();
+        v.sort_by_key(|m| m.position_ns);
+        v
+    };
+
+    for (i, marker) in sorted.iter().enumerate() {
+        let start = marker.position_ns;
+        let end = if i + 1 < sorted.len() {
+            sorted[i + 1].position_ns
+        } else {
+            project_duration_ns
+        };
+        // Escape special FFMETADATA characters in the title: = ; # \ and newlines
+        let title = marker
+            .label
+            .replace('\\', "\\\\")
+            .replace('=', "\\=")
+            .replace(';', "\\;")
+            .replace('#', "\\#")
+            .replace('\n', " ");
+        writeln!(file, "[CHAPTER]")?;
+        writeln!(file, "TIMEBASE=1/1000000000")?;
+        writeln!(file, "START={start}")?;
+        writeln!(file, "END={end}")?;
+        writeln!(file, "title={title}")?;
+        writeln!(file)?;
+    }
+    file.flush()?;
+    Ok(Some(file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2236,8 +3007,8 @@ mod tests {
         build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
         compute_export_coloradj_params,
         estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
-        parse_progress_line, video_input_seek_and_duration, AudioCodec, ClipAudioFade,
-        ExportOptions, VideoCodec,
+        parse_progress_line, video_input_seek_and_duration, write_chapter_metadata,
+        AudioCodec, ClipAudioFade, ExportOptions, VideoCodec,
     };
     use gstreamer as gst;
     use crate::media::program_player::ProgramPlayer;
@@ -2476,7 +3247,7 @@ mod tests {
         clip.freeze_frame = true;
         clip.freeze_frame_hold_duration_ns = Some(2_500_000_000);
 
-        let filter = build_timing_filter(&clip, 1.0 / 25.0);
+        let filter = build_timing_filter(&clip, 1.0 / 25.0, 25, 1);
         assert!(filter.contains("trim=duration=0.040000"));
         assert!(filter.contains("tpad=stop_mode=clone:stop_duration=2.460000"));
         assert!(filter.contains("trim=duration=2.500000"));
@@ -3013,5 +3784,61 @@ mod tests {
         assert!(filter.contains("|y|n"), "Expected y/n for bools, got: {}", filter);
         // Must contain r/g/b compound format for COLORs.
         assert!(filter.contains("0.000000/0.000000/0.000000"), "Missing compound COLOR format in: {}", filter);
+    }
+
+    // --- Chapter metadata tests ---
+
+    #[test]
+    fn chapter_metadata_empty_markers_returns_none() {
+        let result = write_chapter_metadata(&[], 10_000_000_000).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn chapter_metadata_single_marker() {
+        use crate::model::project::Marker;
+        let markers = vec![Marker::new(5_000_000_000, "Intro".to_string())];
+        let file = write_chapter_metadata(&markers, 20_000_000_000)
+            .unwrap()
+            .expect("should produce metadata file");
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        assert!(content.starts_with(";FFMETADATA1"));
+        assert!(content.contains("[CHAPTER]"));
+        assert!(content.contains("START=5000000000"));
+        assert!(content.contains("END=20000000000"));
+        assert!(content.contains("title=Intro"));
+        assert!(content.contains("TIMEBASE=1/1000000000"));
+    }
+
+    #[test]
+    fn chapter_metadata_multiple_markers_sorted() {
+        use crate::model::project::Marker;
+        // Provide markers out of order to verify sorting
+        let markers = vec![
+            Marker::new(15_000_000_000, "Middle".to_string()),
+            Marker::new(0, "Start".to_string()),
+            Marker::new(30_000_000_000, "End".to_string()),
+        ];
+        let file = write_chapter_metadata(&markers, 60_000_000_000)
+            .unwrap()
+            .expect("should produce metadata file");
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        // Verify chapter order: Start (0→15B), Middle (15B→30B), End (30B→60B)
+        let chapters: Vec<&str> = content.matches("[CHAPTER]").collect();
+        assert_eq!(chapters.len(), 3);
+        assert!(content.contains("START=0\nEND=15000000000\ntitle=Start"));
+        assert!(content.contains("START=15000000000\nEND=30000000000\ntitle=Middle"));
+        assert!(content.contains("START=30000000000\nEND=60000000000\ntitle=End"));
+    }
+
+    #[test]
+    fn chapter_metadata_escapes_special_characters() {
+        use crate::model::project::Marker;
+        let markers = vec![Marker::new(0, "Title=With;Special#Chars\\Here\nNewline".to_string())];
+        let file = write_chapter_metadata(&markers, 10_000_000_000)
+            .unwrap()
+            .expect("should produce metadata file");
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        assert!(content.contains("title=Title\\=With\\;Special\\#Chars\\\\Here Newline"));
     }
 }

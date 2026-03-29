@@ -239,6 +239,72 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_ladspa_plugins",
+            "description": "List all available LADSPA audio effect plugins with their parameters.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_clip_ladspa_effect",
+            "description": "Add a LADSPA audio effect to a clip by plugin name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id." },
+                    "plugin_name": { "type": "string", "description": "LADSPA plugin short name from list_ladspa_plugins." }
+                },
+                "required": ["clip_id", "plugin_name"]
+            }
+        },
+        {
+            "name": "remove_clip_ladspa_effect",
+            "description": "Remove a LADSPA audio effect from a clip by effect id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id." },
+                    "effect_id": { "type": "string", "description": "Effect instance id." }
+                },
+                "required": ["clip_id", "effect_id"]
+            }
+        },
+        {
+            "name": "set_clip_ladspa_effect_params",
+            "description": "Set parameters on a LADSPA audio effect instance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id." },
+                    "effect_id": { "type": "string", "description": "Effect instance id." },
+                    "params": { "type": "object", "description": "Parameter name → value pairs." }
+                },
+                "required": ["clip_id", "effect_id", "params"]
+            }
+        },
+        {
+            "name": "set_track_role",
+            "description": "Set audio role for a track. Roles categorize audio for submix routing and FCPXML metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "role": { "type": "string", "enum": ["none", "dialogue", "effects", "music"], "description": "Audio role for the track." }
+                },
+                "required": ["track_id", "role"]
+            }
+        },
+        {
+            "name": "set_track_duck",
+            "description": "Enable or disable automatic ducking on a track. When enabled, the track's volume is reduced when dialogue (video-embedded audio or non-ducked audio tracks) is present.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "duck": { "type": "boolean", "description": "Whether the track should be ducked when dialogue is present." }
+                },
+                "required": ["track_id", "duck"]
+            }
+        },
+        {
             "name": "set_track_height_preset",
             "description": "Set timeline display height preset for a track by id ('small', 'medium', or 'large').",
             "inputSchema": {
@@ -428,7 +494,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_color",
-            "description": "Set color correction and denoise/sharpness effects for a clip by id.",
+            "description": "Set color correction and denoise/sharpness/blur effects for a clip by id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -440,6 +506,7 @@ fn tools_list() -> Value {
                     "tint":       { "type": "number",  "description": "Tint on green-magenta axis: -1.0 (green) to 1.0 (magenta). Default 0.0." },
                     "denoise":    { "type": "number",  "description": "Denoise strength: 0.0 (off) to 1.0 (heavy). Default 0.0." },
                     "sharpness":  { "type": "number",  "description": "Sharpness: -1.0 (soften) to 1.0 (sharpen). Default 0.0." },
+                    "blur":       { "type": "number",  "description": "Creative blur strength: 0.0 (off) to 1.0 (heavy). Default 0.0." },
                     "shadows":    { "type": "number",  "description": "Shadow grading: -1.0 (crush) to 1.0 (lift). Default 0.0." },
                     "midtones":   { "type": "number",  "description": "Midtone grading: -1.0 (darken) to 1.0 (brighten). Default 0.0." },
                     "highlights": { "type": "number",  "description": "Highlight grading: -1.0 (pull down) to 1.0 (boost). Default 0.0." },
@@ -662,19 +729,19 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_lut",
-            "description": "Assign or clear a 3D LUT (.cube) file for a clip. The LUT is applied on export via ffmpeg lut3d. Pass null or omit lut_path to clear.",
+            "description": "Set the 3D LUT (.cube) stack for a clip. LUTs are applied sequentially on export via ffmpeg lut3d. Pass an array of paths to set (empty array or null to clear). A single string path is accepted for backward compatibility (sets a single-element stack).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id":  { "type": "string", "description": "Clip id (from list_clips)." },
-                    "lut_path": { "type": ["string", "null"], "description": "Absolute path to a .cube LUT file, or null to clear." }
+                    "lut_paths": { "type": ["array", "string", "null"], "description": "Array of absolute .cube LUT file paths (applied in order), a single path string, or null to clear." }
                 },
                 "required": ["clip_id"]
             }
         },
         {
             "name": "set_clip_transform",
-            "description": "Set scale, position, and optional rotation offset for a clip. scale > 1.0 zooms in (crops), scale < 1.0 zooms out (letterbox). position_x/y shift the frame from -1.0 (full left/top) to 1.0 (full right/bottom). rotate is in degrees (-180 to 180 typical).",
+            "description": "Set scale, position, and optional rotation/anamorphic offset for a clip. scale > 1.0 zooms in (crops), scale < 1.0 zooms out (letterbox). position_x/y shift the frame from -1.0 (full left/top) to 1.0 (full right/bottom). rotate is in degrees (-180 to 180 typical). anamorphic_desqueeze applies lens expansion (e.g. 1.33, 2.0).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -682,7 +749,8 @@ fn tools_list() -> Value {
                     "scale":      { "type": "number", "description": "Zoom scale factor: 1.0 = normal, 2.0 = 2× zoom in, 0.5 = half size. Range 0.1–4.0." },
                     "position_x": { "type": "number", "description": "Horizontal offset: -1.0 (left) to 1.0 (right). Default 0.0 (center)." },
                     "position_y": { "type": "number", "description": "Vertical offset: -1.0 (top) to 1.0 (bottom). Default 0.0 (center)." },
-                    "rotate":     { "type": "integer", "description": "Rotation in degrees. Optional; omit to keep existing value." }
+                    "rotate":     { "type": "integer", "description": "Rotation in degrees. Optional; omit to keep existing value." },
+                    "anamorphic_desqueeze": { "type": "number", "description": "Anamorphic desqueeze factor (1.0 = none, 1.33, 1.5, 1.8, 2.0). Optional." }
                 },
                 "required": ["clip_id"]
             }
@@ -700,6 +768,51 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_eq",
+            "description": "Set 3-band parametric EQ on a clip. Each band has freq (Hz), gain (dB), and Q (bandwidth). All parameters optional — omitted fields keep their current value.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":   { "type": "string", "description": "Clip id (from list_clips)." },
+                    "low_freq":  { "type": "number", "description": "Low band center frequency (20–20000 Hz, default 200)." },
+                    "low_gain":  { "type": "number", "description": "Low band gain in dB (−24 to +24, default 0)." },
+                    "low_q":     { "type": "number", "description": "Low band Q factor (0.1–10.0, default 1.0)." },
+                    "mid_freq":  { "type": "number", "description": "Mid band center frequency (20–20000 Hz, default 1000)." },
+                    "mid_gain":  { "type": "number", "description": "Mid band gain in dB (−24 to +24, default 0)." },
+                    "mid_q":     { "type": "number", "description": "Mid band Q factor (0.1–10.0, default 1.0)." },
+                    "high_freq": { "type": "number", "description": "High band center frequency (20–20000 Hz, default 5000)." },
+                    "high_gain": { "type": "number", "description": "High band gain in dB (−24 to +24, default 0)." },
+                    "high_q":    { "type": "number", "description": "High band Q factor (0.1–10.0, default 1.0)." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "normalize_clip_audio",
+            "description": "Analyze clip loudness and normalize volume. Measures integrated loudness (LUFS) or peak amplitude via ffmpeg, then adjusts clip volume to reach target level. Blocks while ffmpeg analyzes audio (typically 1–5 seconds).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":      { "type": "string", "description": "Clip id (from list_clips)." },
+                    "mode":         { "type": "string", "enum": ["peak", "lufs"], "description": "Normalization mode: 'peak' for peak amplitude, 'lufs' for EBU R128 integrated loudness. Default 'lufs'." },
+                    "target_level": { "type": "number", "description": "Target level in dB. For 'lufs': -14.0 (YouTube), -23.0 (broadcast). For 'peak': 0.0 or -1.0. Default -14.0." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "record_voiceover",
+            "description": "Record audio from the default microphone for a fixed duration and place it as a clip on an audio track at the current playhead position. Blocks while recording.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "duration_ns": { "type": "integer", "description": "Recording duration in nanoseconds." },
+                    "track_index": { "type": "integer", "description": "Target audio track index (default: first audio track)." }
+                },
+                "required": ["duration_ns"]
+            }
+        },
+        {
             "name": "set_clip_blend_mode",
             "description": "Set compositing blend mode for a clip by id.",
             "inputSchema": {
@@ -713,12 +826,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_keyframe",
-            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) for a clip at a timeline position.",
+            "description": "Create or update a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom, blur) for a clip at a timeline position.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
-                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property to keyframe." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom", "blur"], "description": "Animated property to keyframe." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." },
                     "value": { "type": "number", "description": "Property value at this keyframe time." },
                     "interpolation": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out"], "description": "Interpolation mode for the segment following this keyframe. Optional; defaults to linear." },
@@ -738,12 +851,12 @@ fn tools_list() -> Value {
         },
         {
             "name": "remove_clip_keyframe",
-            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom) at a timeline position for a clip.",
+            "description": "Remove a phase-1 keyframe (position_x, position_y, scale, opacity, brightness, contrast, saturation, temperature, tint, volume, pan, speed, rotate, crop_left, crop_right, crop_top, crop_bottom, blur) at a timeline position for a clip.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
-                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom"], "description": "Animated property keyframe lane." },
+                    "property": { "type": "string", "enum": ["position_x", "position_y", "scale", "opacity", "brightness", "contrast", "saturation", "temperature", "tint", "volume", "pan", "speed", "rotate", "crop_left", "crop_right", "crop_top", "crop_bottom", "blur"], "description": "Animated property keyframe lane." },
                     "timeline_pos_ns": { "type": "integer", "description": "Absolute timeline position in nanoseconds. Optional; defaults to current playhead." }
                 },
                 "required": ["clip_id", "property"]
@@ -932,6 +1045,34 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "match_frame",
+            "description": "Match Frame: find a timeline clip's source in the media library, load it in the Source Monitor, and seek to the matching source timecode. Uses the selected clip or the specified clip_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Optional clip ID to match. If omitted, uses the currently selected clip." }
+                }
+            }
+        },
+        {
+            "name": "list_backups",
+            "description": "List available versioned backup files with timestamps and sizes.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "set_clip_stabilization",
+            "description": "Enable or configure video stabilization (libvidstab) on a clip. Stabilization is applied during export (two-pass analysis + transform).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip ID to stabilize." },
+                    "enabled": { "type": "boolean", "description": "Enable or disable stabilization." },
+                    "smoothing": { "type": "number", "description": "Smoothing strength: 0.0 (minimal) to 1.0 (maximum). Default 0.5." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "batch_call_tools",
             "description": "Execute multiple MCP tool calls in-order within one request. Returns per-call success/error records.",
             "inputSchema": {
@@ -963,14 +1104,18 @@ fn tools_list() -> Value {
         },
         {
             "name": "sync_clips_by_audio",
-            "description": "Synchronize two or more timeline clips by audio cross-correlation. The first clip is used as the anchor; other clips are repositioned based on matching audio content. Returns offset and confidence for each non-anchor clip.",
+            "description": "Synchronize two or more timeline clips by audio cross-correlation. The first clip is used as the anchor; other clips are repositioned based on matching audio content. When replace_audio is true (default false), the anchor's embedded audio is muted and all clips are linked so the external audio replaces the camera audio.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Two or more clip ids to sync. First clip is the anchor."
+                        "description": "Two or more clip ids to sync. First clip is the anchor (typically the camera clip)."
+                    },
+                    "replace_audio": {
+                        "type": "boolean",
+                        "description": "When true, link all synced clips and mute the anchor clip's embedded audio so external audio replaces it. Default false."
                     }
                 },
                 "required": ["clip_ids"]
@@ -978,7 +1123,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "copy_clip_color_grade",
-            "description": "Copy color grading values from a clip into an internal clipboard. The copied grade can then be pasted onto other clips with paste_clip_color_grade. Copies static values only (brightness, contrast, saturation, temperature, tint, exposure, black_point, shadows, midtones, highlights, warmth/tint per tonal region, denoise, sharpness, lut_path).",
+            "description": "Copy color grading values from a clip into an internal clipboard. The copied grade can then be pasted onto other clips with paste_clip_color_grade. Copies static values only (brightness, contrast, saturation, temperature, tint, exposure, black_point, shadows, midtones, highlights, warmth/tint per tonal region, denoise, sharpness, lut_paths).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1096,6 +1241,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "add_adjustment_layer",
+            "description": "Add an adjustment layer clip at a track index and timeline position. Adjustment layer effects (color grading, LUTs, frei0r) apply to the composited result of all tracks below.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_index": { "type": "integer", "description": "Video track index" },
+                    "timeline_start_ns": { "type": "integer", "description": "Timeline start position in nanoseconds" },
+                    "duration_ns": { "type": "integer", "description": "Duration in nanoseconds" }
+                },
+                "required": ["track_index", "timeline_start_ns", "duration_ns"]
+            }
+        },
+        {
             "name": "set_clip_title_style",
             "description": "Set title/text overlay styling properties on a clip. Includes font, color, position, outline, shadow, background box.",
             "inputSchema": {
@@ -1184,6 +1342,36 @@ fn dispatch_tool_payload(
         "set_track_solo" => McpCommand::SetTrackSolo {
             track_id: args["track_id"].as_str().unwrap_or("").to_string(),
             solo: args["solo"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "list_ladspa_plugins" => McpCommand::ListLadspaPlugins { reply: tx },
+        "add_clip_ladspa_effect" => McpCommand::AddClipLadspaEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            plugin_name: args["plugin_name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "remove_clip_ladspa_effect" => McpCommand::RemoveClipLadspaEffect {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_clip_ladspa_effect_params" => McpCommand::SetClipLadspaEffectParams {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            params: args.get("params")
+                .and_then(|v| v.as_object())
+                .map(|obj| obj.iter().filter_map(|(k, v)| v.as_f64().map(|val| (k.clone(), val))).collect())
+                .unwrap_or_default(),
+            reply: tx,
+        },
+        "set_track_role" => McpCommand::SetTrackRole {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            role: args["role"].as_str().unwrap_or("none").to_string(),
+            reply: tx,
+        },
+        "set_track_duck" => McpCommand::SetTrackDuck {
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            duck: args["duck"].as_bool().unwrap_or(false),
             reply: tx,
         },
         "set_track_height_preset" => McpCommand::SetTrackHeightPreset {
@@ -1302,6 +1490,7 @@ fn dispatch_tool_payload(
             tint: args["tint"].as_f64().unwrap_or(0.0),
             denoise: args["denoise"].as_f64().unwrap_or(0.0),
             sharpness: args["sharpness"].as_f64().unwrap_or(0.0),
+            blur: args["blur"].as_f64().unwrap_or(0.0),
             shadows: args["shadows"].as_f64().unwrap_or(0.0),
             midtones: args["midtones"].as_f64().unwrap_or(0.0),
             highlights: args["highlights"].as_f64().unwrap_or(0.0),
@@ -1416,13 +1605,18 @@ fn dispatch_tool_payload(
         },
         "set_clip_lut" => McpCommand::SetClipLut {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            lut_path: match &args["lut_path"] {
-                Value::String(s) => Some(s.clone()),
-                Value::Null
-                | Value::Bool(_)
-                | Value::Number(_)
-                | Value::Array(_)
-                | Value::Object(_) => None,
+            lut_paths: {
+                // Accept: array of strings, single string, "lut_paths" key, or legacy "lut_path" key
+                let raw = if !args["lut_paths"].is_null() {
+                    &args["lut_paths"]
+                } else {
+                    &args["lut_path"]
+                };
+                match raw {
+                    Value::Array(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+                    Value::String(s) => vec![s.clone()],
+                    _ => Vec::new(),
+                }
             },
             reply: tx,
         },
@@ -1432,11 +1626,36 @@ fn dispatch_tool_payload(
             position_x: args["position_x"].as_f64().unwrap_or(0.0),
             position_y: args["position_y"].as_f64().unwrap_or(0.0),
             rotate: args["rotate"].as_i64().map(|v| v as i32),
+            anamorphic_desqueeze: args["anamorphic_desqueeze"].as_f64(),
             reply: tx,
         },
         "set_clip_opacity" => McpCommand::SetClipOpacity {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             opacity: args["opacity"].as_f64().unwrap_or(1.0),
+            reply: tx,
+        },
+        "set_clip_eq" => McpCommand::SetClipEq {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            low_freq: args.get("low_freq").and_then(|v| v.as_f64()),
+            low_gain: args.get("low_gain").and_then(|v| v.as_f64()),
+            low_q: args.get("low_q").and_then(|v| v.as_f64()),
+            mid_freq: args.get("mid_freq").and_then(|v| v.as_f64()),
+            mid_gain: args.get("mid_gain").and_then(|v| v.as_f64()),
+            mid_q: args.get("mid_q").and_then(|v| v.as_f64()),
+            high_freq: args.get("high_freq").and_then(|v| v.as_f64()),
+            high_gain: args.get("high_gain").and_then(|v| v.as_f64()),
+            high_q: args.get("high_q").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+        "normalize_clip_audio" => McpCommand::NormalizeClipAudio {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            mode: args.get("mode").and_then(|v| v.as_str()).unwrap_or("lufs").to_string(),
+            target_level: args.get("target_level").and_then(|v| v.as_f64()).unwrap_or(-14.0),
+            reply: tx,
+        },
+        "record_voiceover" => McpCommand::RecordVoiceover {
+            duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
+            track_index: args.get("track_index").and_then(|v| v.as_u64()).map(|v| v as usize),
             reply: tx,
         },
         "set_clip_blend_mode" => McpCommand::SetClipBlendMode {
@@ -1548,6 +1767,17 @@ fn dispatch_tool_payload(
         },
         "source_play" => McpCommand::SourcePlay { reply: tx },
         "source_pause" => McpCommand::SourcePause { reply: tx },
+        "match_frame" => McpCommand::MatchFrame {
+            clip_id: args.get("clip_id").and_then(|v| v.as_str()).map(str::to_string),
+            reply: tx,
+        },
+        "list_backups" => McpCommand::ListBackups { reply: tx },
+        "set_clip_stabilization" => McpCommand::SetClipStabilization {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+            smoothing: args.get("smoothing").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            reply: tx,
+        },
         "sync_clips_by_audio" => McpCommand::SyncClipsByAudio {
             clip_ids: args["clip_ids"]
                 .as_array()
@@ -1557,6 +1787,7 @@ fn dispatch_tool_payload(
                         .collect()
                 })
                 .unwrap_or_default(),
+            replace_audio: args.get("replace_audio").and_then(|v| v.as_bool()).unwrap_or(false),
             reply: tx,
         },
         "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {
@@ -1637,6 +1868,12 @@ fn dispatch_tool_payload(
             timeline_start_ns: args["timeline_start_ns"].as_u64(),
             duration_ns: args["duration_ns"].as_u64(),
             title_text: args["title_text"].as_str().map(String::from),
+            reply: tx,
+        },
+        "add_adjustment_layer" => McpCommand::AddAdjustmentLayer {
+            track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
+            timeline_start_ns: args["timeline_start_ns"].as_u64().unwrap_or(0),
+            duration_ns: args["duration_ns"].as_u64().unwrap_or(5_000_000_000),
             reply: tx,
         },
         "set_clip_title_style" => McpCommand::SetClipTitleStyle {

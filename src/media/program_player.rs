@@ -14,6 +14,47 @@ use glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
+
+/// Access a child of a GStreamer ChildProxy element by index.
+/// Uses FFI because `gst::Element` doesn't statically implement `IsA<ChildProxy>`,
+/// so `dynamic_cast_ref::<gst::ChildProxy>()` often fails even when the element
+/// does implement the ChildProxy interface at the GObject level.
+fn child_proxy_get_child(element: &gst::Element, index: u32) -> Option<glib::Object> {
+    unsafe {
+        let ptr = gstreamer::ffi::gst_child_proxy_get_child_by_index(
+            element.as_ptr() as *mut gstreamer::ffi::GstChildProxy,
+            index,
+        );
+        if ptr.is_null() {
+            None
+        } else {
+            Some(glib::translate::from_glib_full(ptr))
+        }
+    }
+}
+
+/// Set freq/gain/bandwidth on a single EQ band child element.
+fn eq_set_band(element: &gst::Element, band_idx: u32, freq: f64, gain: f64, q: f64) {
+    if let Some(band) = child_proxy_get_child(element, band_idx) {
+        let gain_clamped = gain.clamp(-24.0, 12.0);
+        band.set_property("freq", freq);
+        band.set_property("gain", gain_clamped);
+        band.set_property("bandwidth", freq / q.max(0.1));
+        log::debug!(
+            "eq_set_band: band={} freq={:.0} gain={:.1} bw={:.0}",
+            band_idx, freq, gain_clamped, freq / q.max(0.1)
+        );
+    } else {
+        log::warn!("eq_set_band: child_proxy returned None for band={}", band_idx);
+    }
+}
+
+/// Set only the gain on a single EQ band child element (for keyframe updates).
+fn eq_set_band_gain(element: &gst::Element, band_idx: u32, gain: f64) {
+    if let Some(band) = child_proxy_get_child(element, band_idx) {
+        band.set_property("gain", gain.clamp(-24.0, 12.0));
+    }
+}
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -26,7 +67,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_PREVIEW_AUDIO_GAIN: f64 = 3.981_071_705_5; // +12 dB
-const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 2;
+const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 3;
 
 fn frame_hash_u64(data: &[u8]) -> u64 {
     let mut h = 1469598103934665603u64;
@@ -276,12 +317,23 @@ pub struct ProgramClip {
     pub denoise: f64,
     /// Sharpness: -1.0 (soften) to 1.0 (sharpen)
     pub sharpness: f64,
+    /// Creative blur strength: 0.0 (off) to 1.0 (heavy)
+    pub blur: f64,
+    pub blur_keyframes: Vec<NumericKeyframe>,
+    /// Video stabilization enabled (baked into proxy when proxy mode is on).
+    pub vidstab_enabled: bool,
+    pub vidstab_smoothing: f32,
     /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     pub volume: f64,
     pub volume_keyframes: Vec<NumericKeyframe>,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     pub pan: f64,
     pub pan_keyframes: Vec<NumericKeyframe>,
+    /// 3-band parametric EQ settings.
+    pub eq_bands: [crate::model::clip::EqBand; 3],
+    pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
+    pub eq_mid_gain_keyframes: Vec<NumericKeyframe>,
+    pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
     pub rotate_keyframes: Vec<NumericKeyframe>,
     pub crop_left_keyframes: Vec<NumericKeyframe>,
     pub crop_right_keyframes: Vec<NumericKeyframe>,
@@ -320,6 +372,8 @@ pub struct ProgramClip {
     pub speed: f64,
     /// Optional variable speed keyframes over clip-local timeline.
     pub speed_keyframes: Vec<NumericKeyframe>,
+    /// Slow-motion frame interpolation mode (export/prerender only).
+    pub slow_motion_interp: crate::model::clip::SlowMotionInterp,
     /// Reverse playback when true.
     pub reverse: bool,
     /// Freeze-frame enabled for this clip (video-only hold semantics).
@@ -331,14 +385,25 @@ pub struct ProgramClip {
     /// True for clips that have no video (audio-track clips). They are routed
     /// to a dedicated audio-only pipeline instead of the video player.
     pub is_audio_only: bool,
+    /// Whether this clip's track has ducking enabled (volume reduces when dialogue is present).
+    pub duck: bool,
+    /// Per-track ducking amount in dB (negative, e.g. -6.0).
+    pub duck_amount_db: f64,
+    /// Applied LADSPA audio effects.
+    pub ladspa_effects: Vec<crate::model::clip::LadspaEffect>,
+    /// Pitch shift in semitones (−12 to +12). 0 = no shift.
+    pub pitch_shift_semitones: f64,
+    /// When true, preserve pitch during speed changes via Rubberband.
+    pub pitch_preserve: bool,
+    pub anamorphic_desqueeze: f64,
     /// Track index — higher index clips (B-roll, overlays) take priority in preview.
     pub track_index: usize,
     /// Transition to next clip on same track (e.g. "cross_dissolve").
     pub transition_after: String,
     /// Transition duration in nanoseconds.
     pub transition_after_ns: u64,
-    /// LUT file path for color grading (used for proxy lookup when proxy mode is enabled).
-    pub lut_path: Option<String>,
+    /// LUT file paths for color grading (used for proxy lookup when proxy mode is enabled).
+    pub lut_paths: Vec<String>,
     /// Scale multiplier: 1.0 = fill frame, >1.0 = zoom in, <1.0 = shrink with black borders.
     pub scale: f64,
     pub scale_keyframes: Vec<NumericKeyframe>,
@@ -379,6 +444,8 @@ pub struct ProgramClip {
     pub has_audio: bool,
     /// True when this clip is a still image (PNG, JPEG, etc.).
     pub is_image: bool,
+    /// True when this clip is an adjustment layer (effects apply to composite below).
+    pub is_adjustment: bool,
     /// Chroma key enabled flag.
     pub chroma_key_enabled: bool,
     /// Chroma key target color as 0xRRGGBB.
@@ -467,6 +534,15 @@ impl ProgramClip {
         .clamp(-1.0, 1.0)
     }
 
+    pub fn blur_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        ModelClip::evaluate_keyframed_value(
+            &self.blur_keyframes,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.blur,
+        )
+        .clamp(0.0, 1.0)
+    }
+
     pub fn position_x_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
         ModelClip::evaluate_keyframed_value(
             &self.position_x_keyframes,
@@ -498,6 +574,21 @@ impl ProgramClip {
             self.pan,
         )
         .clamp(-1.0, 1.0)
+    }
+
+    /// Evaluate keyframed EQ gain (dB) for band `idx` at a given timeline position.
+    pub fn eq_gain_at_timeline_ns(&self, band_idx: usize, timeline_pos_ns: u64) -> f64 {
+        let kfs = match band_idx {
+            0 => &self.eq_low_gain_keyframes,
+            1 => &self.eq_mid_gain_keyframes,
+            _ => &self.eq_high_gain_keyframes,
+        };
+        ModelClip::evaluate_keyframed_value(
+            kfs,
+            self.local_timeline_position_ns(timeline_pos_ns),
+            self.eq_bands[band_idx.min(2)].gain,
+        )
+        .clamp(-24.0, 24.0)
     }
 
     pub fn rotate_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
@@ -769,6 +860,8 @@ struct VideoSlot {
     audio_mixer_pad: Option<gst::Pad>,
     /// `audioconvert` element between decoder audio and audiomixer (must be cleaned up).
     audio_conv: Option<gst::Element>,
+    /// Optional per-slot `equalizer-nbands` element for 3-band parametric EQ.
+    audio_equalizer: Option<gst::Element>,
     /// Optional per-slot `audiopanorama` element for pan automation.
     audio_panorama: Option<gst::Element>,
     /// Optional per-slot `level` element for per-track metering.
@@ -780,6 +873,8 @@ struct VideoSlot {
     /// frei0r 3-point-color-balance for shadows/midtones/highlights.
     colorbalance_3pt: Option<gst::Element>,
     gaussianblur: Option<gst::Element>,
+    /// frei0r squareblur for creative blur effect (RGBA-native, no format conversion needed).
+    squareblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
     imagefreeze: Option<gst::Element>,
@@ -964,6 +1059,16 @@ struct BlendOverlay {
     zorder: u32,
 }
 
+/// Adjustment layer time-range metadata (kept for potential future use).
+struct AdjustmentOverlay {
+    #[allow(dead_code)]
+    track_index: usize,
+    #[allow(dead_code)]
+    timeline_start_ns: u64,
+    #[allow(dead_code)]
+    timeline_end_ns: u64,
+}
+
 pub struct ProgramPlayer {
     /// The single GStreamer pipeline containing compositor + audiomixer.
     pipeline: gst::Pipeline,
@@ -977,6 +1082,16 @@ pub struct ProgramPlayer {
     /// Separate playbin for audio-only clips (music tracks etc.).
     audio_pipeline: gst::Element,
     audio_current_source: Option<AudioCurrentSource>,
+    /// Indices of audio clips currently playing in the multi-clip audio mixer.
+    audio_multi_active: Vec<usize>,
+    /// Separate pipeline for mixing multiple simultaneous audio-track clips.
+    /// Built on demand when >1 audio clip is active; torn down when ≤1 remain.
+    audio_multi_pipeline: Option<gst::Pipeline>,
+    /// Audiomixer pads in the multi pipeline, keyed by audio_clip index.
+    /// Used for live volume updates during playback.
+    audio_multi_pads: HashMap<usize, gst::Pad>,
+    /// Audiopanorama elements in the multi pipeline, keyed by audio_clip index.
+    audio_multi_pan_elems: HashMap<usize, gst::Element>,
     /// Clip index whose audiomixer pad is temporarily forced to 0.0 while
     /// reverse audio for that clip is routed through `audio_pipeline`.
     reverse_video_ducked_clip_idx: Option<usize>,
@@ -1004,6 +1119,12 @@ pub struct ProgramPlayer {
     crossfade_enabled: bool,
     crossfade_curve: CrossfadeCurve,
     crossfade_duration_ns: u64,
+    /// Automatic ducking: reduce volume on duck-flagged tracks when dialogue is active.
+    duck_enabled: bool,
+    /// Ducking gain (linear multiplier, e.g., 0.5 for -6dB).
+    duck_gain: f64,
+    /// When true, all audio output is suppressed (voiceover recording mode).
+    master_muted: bool,
     proxy_paths: HashMap<String, String>,
     /// Proxy cache keys already reported as fallback-to-original in this session.
     /// Prevents warning spam while proxies are still being generated.
@@ -1022,6 +1143,8 @@ pub struct ProgramPlayer {
     /// with PulseAudio/PipeWire flat-volume behaviour and inadvertently change
     /// the main pipeline's audio level.
     audio_volume_element: Option<gst::Element>,
+    /// GStreamer `equalizer-nbands` element on the audio-only pipeline for EQ.
+    audio_eq_element: Option<gst::Element>,
     /// GStreamer `audiopanorama` element on the audio-only pipeline for panning.
     audio_panorama_element: Option<gst::Element>,
     pub audio_peak_db: [f64; 2],
@@ -1035,6 +1158,19 @@ pub struct ProgramPlayer {
     /// The blend probe on compositor output reads these to apply per-pixel
     /// blend math against the real base layers.
     blend_overlays: Arc<Mutex<HashMap<usize, BlendOverlay>>>,
+    /// Adjustment layer overlays for post-compositor color grading.
+    adjustment_overlays: Arc<Mutex<Vec<AdjustmentOverlay>>>,
+    /// Shared timeline position (ns) for the adjustment probe to check time ranges.
+    adjustment_timeline_pos: Arc<AtomicU64>,
+    /// Permanent adjustment layer videobalance element between compositor output
+    /// and display chain.  Set to neutral when no adjustment layer is active.
+    adj_videobalance: gst::Element,
+    /// Permanent adjustment layer frei0r coloradj-rgb element (temperature/tint).
+    /// None if frei0r is not available.
+    adj_coloradj: Option<gst::Element>,
+    /// Permanent adjustment layer frei0r three-point-color-balance element.
+    /// None if frei0r is not available.
+    adj_3point: Option<gst::Element>,
     /// When false, the scope appsink callback skips frame allocation (scopes panel hidden).
     scope_enabled: Arc<AtomicBool>,
     /// Monotonic counter incremented whenever a new scope frame is captured.
@@ -1186,6 +1322,9 @@ impl ProgramPlayer {
         let latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
         let blend_overlays: Arc<Mutex<HashMap<usize, BlendOverlay>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let adjustment_overlays: Arc<Mutex<Vec<AdjustmentOverlay>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let adjustment_timeline_pos: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         // Flag set false when the scopes panel is hidden to skip the frame copy allocation.
         let scope_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
         let scope_frame_seq: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
@@ -1379,6 +1518,7 @@ impl ProgramPlayer {
 
         // -- Audio mixer --------------------------------------------------------
         let audiomixer = gst::ElementFactory::make("audiomixer")
+            .property("ignore-inactive-pads", true)
             .build()
             .map_err(|_| anyhow!("audiomixer element not available"))?;
 
@@ -1442,15 +1582,59 @@ impl ProgramPlayer {
         comp_bg_pad.set_property("zorder", 0u32);
         black_caps.static_pad("src").unwrap().link(&comp_bg_pad)?;
 
-        // Link compositor → processing caps → convert → scale → output caps → display/scope
-        gst::Element::link_many([
+        // Permanent adjustment layer elements between compositor output and
+        // display chain.  Properties are set to neutral values by default and
+        // updated when an adjustment layer is active.  This avoids any pipeline
+        // topology changes (which can deadlock GStreamer's state-change machinery).
+        let adj_videoconvert = gst::ElementFactory::make("videoconvert")
+            .build()
+            .map_err(|_| anyhow!("videoconvert not available"))?;
+        let adj_videobalance = gst::ElementFactory::make("videobalance")
+            .build()
+            .map_err(|_| anyhow!("videobalance not available"))?;
+        // Neutral defaults (identity transform).
+        adj_videobalance.set_property("brightness", 0.0_f64);
+        adj_videobalance.set_property("contrast", 1.0_f64);
+        adj_videobalance.set_property("saturation", 1.0_f64);
+        adj_videobalance.set_property("hue", 0.0_f64);
+
+        let adj_coloradj: Option<gst::Element> = None;
+        let adj_3point: Option<gst::Element> = None;
+
+        pipeline.add(&adj_videoconvert)?;
+        pipeline.add(&adj_videobalance)?;
+
+        // Link: compositor → caps → [adj_convert → adj_videobalance →] convert → scale → caps → display
+        // The permanent videobalance handles brightness/contrast/saturation for
+        // adjustment layers.  Temperature/tint/3-point and frei0r user effects
+        // are applied on export only (frei0r elements cannot be safely added to
+        // or removed from a live GStreamer pipeline without deadlocking).
+        //
+        // Try linking with the adjustment elements; fall back to direct link
+        // if videobalance causes caps negotiation issues on this system.
+        let adj_link_ok = gst::Element::link_many([
             &compositor,
             &comp_capsfilter,
+            &adj_videoconvert,
+            &adj_videobalance,
             &videoconvert_out,
             &videoscale_out,
             &preview_capsfilter,
             &video_sink_bin,
-        ])?;
+        ]).is_ok();
+        if !adj_link_ok {
+            log::warn!("ProgramPlayer: adjustment elements could not be linked — falling back");
+            pipeline.remove(&adj_videoconvert).ok();
+            pipeline.remove(&adj_videobalance).ok();
+            gst::Element::link_many([
+                &compositor,
+                &comp_capsfilter,
+                &videoconvert_out,
+                &videoscale_out,
+                &preview_capsfilter,
+                &video_sink_bin,
+            ])?;
+        }
         // Blend-mode probe on compositor output.  For each frame, reads captured
         // overlay buffers from blend-mode clips and applies pixel-accurate blend
         // math against the compositor's normal "over" output (where the blend-mode
@@ -1507,6 +1691,11 @@ impl ProgramPlayer {
                 });
             }
         }
+
+        // NOTE: Adjustment layer effects are handled by the permanent
+        // adj_effects_bin (GStreamer elements between compositor and display),
+        // NOT by a buffer probe.  The bin is rebuilt in rebuild_pipeline_at()
+        // and on slider changes via rebuild_adjustment_effects_chain().
 
         // Probe on compositor output: always increments cseq (cheap) but only
         // copies the full-res frame when compositor_capture_enabled is set (during
@@ -1586,9 +1775,23 @@ impl ProgramPlayer {
         if let Some(ref pan) = audio_panorama_element {
             pan.set_property("panorama", 0.0_f32);
         }
+        let audio_eq_element = gst::ElementFactory::make("equalizer-nbands")
+            .property("num-bands", 3u32)
+            .build()
+            .ok();
+        if let Some(ref eq) = audio_eq_element {
+            // Set default band frequencies.
+            let defaults = crate::model::clip::default_eq_bands();
+            for (i, b) in defaults.iter().enumerate() {
+                eq_set_band(eq, i as u32, b.freq, b.gain, b.q);
+            }
+        }
         let mut audio_filters: Vec<gst::Element> = Vec::new();
         if let Some(ref vol) = audio_volume_element {
             audio_filters.push(vol.clone());
+        }
+        if let Some(ref eq) = audio_eq_element {
+            audio_filters.push(eq.clone());
         }
         if let Some(ref pan) = audio_panorama_element {
             audio_filters.push(pan.clone());
@@ -1648,6 +1851,10 @@ impl ProgramPlayer {
                 audio_clips: Vec::new(),
                 audio_pipeline,
                 audio_current_source: None,
+                audio_multi_active: Vec::new(),
+                audio_multi_pipeline: None,
+                audio_multi_pads: HashMap::new(),
+                audio_multi_pan_elems: HashMap::new(),
                 reverse_video_ducked_clip_idx: None,
                 slots: Vec::new(),
                 timeline_pos_ns: 0,
@@ -1665,6 +1872,9 @@ impl ProgramPlayer {
                 crossfade_enabled: false,
                 crossfade_curve: CrossfadeCurve::default(),
                 crossfade_duration_ns: 200_000_000,
+                duck_enabled: false,
+                duck_gain: 1.0,
+                master_muted: false,
                 proxy_paths: HashMap::new(),
                 proxy_fallback_warned_keys: HashSet::new(),
                 bg_removal_paths: HashMap::new(),
@@ -1672,6 +1882,7 @@ impl ProgramPlayer {
                 level_element,
                 level_element_audio,
                 audio_volume_element,
+                audio_eq_element,
                 audio_panorama_element,
                 audio_peak_db: [-60.0, -60.0],
                 audio_track_peak_db: Vec::new(),
@@ -1679,6 +1890,11 @@ impl ProgramPlayer {
                 latest_scope_frame,
                 latest_compositor_frame,
                 blend_overlays,
+                adjustment_overlays,
+                adjustment_timeline_pos,
+                adj_videobalance,
+                adj_coloradj,
+                adj_3point,
                 scope_enabled,
                 scope_frame_seq,
                 compositor_frame_seq,
@@ -1797,6 +2013,15 @@ impl ProgramPlayer {
         self.crossfade_curve = curve;
         self.crossfade_duration_ns = duration_ns;
         self.sync_preview_audio_levels(self.timeline_pos_ns);
+    }
+
+    pub fn set_duck_settings(&mut self, enabled: bool, amount_db: f64) {
+        self.duck_enabled = enabled;
+        self.duck_gain = if enabled {
+            10.0_f64.powf(amount_db.min(0.0) / 20.0)
+        } else {
+            1.0
+        };
     }
 
     fn cleanup_background_prerender_cache(&mut self) {
@@ -2376,6 +2601,7 @@ impl ProgramPlayer {
         let _ = self.audio_pipeline.set_state(gst::State::Null);
         self.audio_pipeline.set_property("uri", "");
         let _ = self.audio_pipeline.set_state(gst::State::Ready);
+        self.teardown_audio_multi_pipeline();
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
         self.base_timeline_ns = 0;
@@ -2390,6 +2616,114 @@ impl ProgramPlayer {
         self.current_prerender_segment_key = None;
         self.teardown_prepreroll_sidecars();
         self.cleanup_background_prerender_cache();
+
+        // Populate adjustment overlays from the loaded clips.
+        self.rebuild_adjustment_overlays();
+    }
+
+    /// Update the adjustment overlay time-range metadata from the current clip set.
+    fn rebuild_adjustment_overlays(&self) {
+        if let Ok(mut overlays) = self.adjustment_overlays.lock() {
+            overlays.clear();
+            for clip in &self.clips {
+                if clip.is_adjustment {
+                    overlays.push(AdjustmentOverlay {
+                        track_index: clip.track_index,
+                        timeline_start_ns: clip.timeline_start_ns,
+                        timeline_end_ns: clip.timeline_start_ns + clip.source_out_ns.saturating_sub(clip.source_in_ns),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Rebuild the GStreamer effects chain inside the permanent adjustment
+    /// effects bin.  Called from `rebuild_pipeline_at()` and slider callbacks.
+    /// Uses a signature to skip rebuilds when nothing changed.
+    /// Update the permanent adjustment layer elements with values from the
+    /// active adjustment layers at the current playhead.  Only sets GStreamer
+    /// element properties — never modifies pipeline topology (which would
+    /// deadlock during live state transitions).
+    fn rebuild_adjustment_effects_chain(&mut self) {
+        let pos = self.timeline_pos_ns;
+        let active_adj: Vec<&ProgramClip> = self.clips.iter()
+            .filter(|c| c.is_adjustment && pos >= c.timeline_start_ns && pos < c.timeline_end_ns())
+            .collect();
+
+        if active_adj.is_empty() {
+            // Reset to neutral (identity transform).
+            self.adj_videobalance.set_property("brightness", 0.0_f64);
+            self.adj_videobalance.set_property("contrast", 1.0_f64);
+            self.adj_videobalance.set_property("saturation", 1.0_f64);
+            self.adj_videobalance.set_property("hue", 0.0_f64);
+            if let Some(ref ca) = self.adj_coloradj {
+                ca.set_property("r", 0.5_f64);
+                ca.set_property("g", 0.5_f64);
+                ca.set_property("b", 0.5_f64);
+            }
+            if let Some(ref cb) = self.adj_3point {
+                cb.set_property("black-color-r", 0.5_f64);
+                cb.set_property("black-color-g", 0.5_f64);
+                cb.set_property("black-color-b", 0.5_f64);
+                cb.set_property("gray-color-r", 0.5_f64);
+                cb.set_property("gray-color-g", 0.5_f64);
+                cb.set_property("gray-color-b", 0.5_f64);
+                cb.set_property("white-color-r", 0.5_f64);
+                cb.set_property("white-color-g", 0.5_f64);
+                cb.set_property("white-color-b", 0.5_f64);
+            }
+            return;
+        }
+
+        // Use the first active adjustment layer (future: merge multiple).
+        let clip = active_adj[0];
+        let has_coloradj = self.adj_coloradj.is_some();
+        let has_3point = self.adj_3point.is_some();
+        let p = Self::compute_videobalance_params(
+            clip.brightness, clip.contrast, clip.saturation,
+            clip.temperature, clip.tint,
+            clip.shadows, clip.midtones, clip.highlights,
+            clip.exposure, clip.black_point,
+            clip.highlights_warmth, clip.highlights_tint,
+            clip.midtones_warmth, clip.midtones_tint,
+            clip.shadows_warmth, clip.shadows_tint,
+            has_coloradj, has_3point,
+        );
+        self.adj_videobalance.set_property("brightness", p.brightness);
+        self.adj_videobalance.set_property("contrast", p.contrast);
+        self.adj_videobalance.set_property("saturation", p.saturation);
+        self.adj_videobalance.set_property("hue", p.hue);
+
+        if let Some(ref ca) = self.adj_coloradj {
+            let cp = Self::compute_coloradj_params(clip.temperature, clip.tint);
+            ca.set_property("r", cp.r);
+            ca.set_property("g", cp.g);
+            ca.set_property("b", cp.b);
+        }
+
+        if let Some(ref cb) = self.adj_3point {
+            let tp = Self::compute_3point_params(
+                clip.shadows, clip.midtones, clip.highlights,
+                clip.black_point,
+                clip.highlights_warmth, clip.highlights_tint,
+                clip.midtones_warmth, clip.midtones_tint,
+                clip.shadows_warmth, clip.shadows_tint,
+            );
+            cb.set_property("black-color-r", tp.black_r);
+            cb.set_property("black-color-g", tp.black_g);
+            cb.set_property("black-color-b", tp.black_b);
+            cb.set_property("gray-color-r", tp.gray_r);
+            cb.set_property("gray-color-g", tp.gray_g);
+            cb.set_property("gray-color-b", tp.gray_b);
+            cb.set_property("white-color-r", tp.white_r);
+            cb.set_property("white-color-g", tp.white_g);
+            cb.set_property("white-color-b", tp.white_b);
+        }
+    }
+
+    /// Update the shared timeline position for the adjustment probe.
+    fn sync_adjustment_timeline_pos(&self) {
+        self.adjustment_timeline_pos.store(self.timeline_pos_ns, Ordering::Relaxed);
     }
 
     // ── Transport controls ─────────────────────────────────────────────────
@@ -2562,7 +2896,7 @@ impl ProgramPlayer {
         // Ensure playback starts with playback-rate seeks (including reverse)
         // even when slots were already loaded by paused-seek paths.
         for slot in &self.slots {
-            let clip = &self.clips[slot.clip_idx];
+            let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
             let _ = Self::seek_slot_decoder_with_retry(
                 slot,
                 clip,
@@ -2605,6 +2939,13 @@ impl ProgramPlayer {
         if self.audio_current_source.is_some() {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            // Re-sync clock before resuming.
+            if let Some(base) = self.pipeline.base_time() {
+                mp.set_base_time(base);
+            }
+            let _ = mp.set_state(gst::State::Playing);
+        }
         self.state = PlayerState::Playing;
         self.base_timeline_ns = pos;
         self.play_start = Some(Instant::now());
@@ -2612,6 +2953,10 @@ impl ProgramPlayer {
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
         self.update_slot_queue_policy();
+        // Re-apply master mute if active (voiceover recording mode).
+        if self.master_muted {
+            self.set_master_mute(true);
+        }
     }
 
     pub fn pause(&mut self) {
@@ -2628,6 +2973,9 @@ impl ProgramPlayer {
         }
         let _ = self.pipeline.set_state(gst::State::Paused);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            let _ = mp.set_state(gst::State::Paused);
+        }
         self.state = PlayerState::Paused;
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
@@ -2647,6 +2995,7 @@ impl ProgramPlayer {
         self.teardown_prepreroll_sidecars();
         let _ = self.pipeline.set_state(gst::State::Ready);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
+        self.teardown_audio_multi_pipeline();
         self.apply_reverse_video_main_audio_ducking(None);
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
@@ -2937,6 +3286,46 @@ impl ProgramPlayer {
         }
     }
 
+    /// Mute/unmute the main audio output (for voiceover recording).
+    pub fn set_master_mute(&mut self, mute: bool) {
+        self.master_muted = mute;
+        // Mute the main pipeline's audio sink.
+        if self.audio_sink.find_property("mute").is_some() {
+            self.audio_sink.set_property("mute", mute);
+        }
+        // Also set volume to 0 on the audio sink for backends that don't support mute.
+        if self.audio_sink.find_property("volume").is_some() {
+            self.audio_sink.set_property(
+                "volume",
+                if mute { 0.0_f64 } else { 1.0_f64 },
+            );
+        }
+        // Mute audiomixer pads (the actual per-clip mix volumes).
+        if mute {
+            for slot in &self.slots {
+                if let Some(ref pad) = slot.audio_mixer_pad {
+                    pad.set_property("volume", 0.0_f64);
+                }
+            }
+        }
+        // Also mute the audio-only pipeline.
+        if let Some(ref vol) = self.audio_volume_element {
+            vol.set_property("volume", if mute { 0.0 } else { 1.0 });
+        }
+        // Mute the multi-clip audio pipeline if active.
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            if let Some(sink) = mp.by_name("autoaudiosink0") {
+                if sink.find_property("mute").is_some() {
+                    sink.set_property("mute", mute);
+                }
+            }
+            // Also just set the pipeline to Ready when muted for a clean stop.
+            if mute {
+                let _ = mp.set_state(gst::State::Paused);
+            }
+        }
+    }
+
     fn set_audio_pipeline_volume(&self, volume: f64) {
         if let Some(ref vol_elem) = self.audio_volume_element {
             vol_elem.set_property("volume", volume);
@@ -2951,13 +3340,40 @@ impl ProgramPlayer {
         }
     }
 
+    fn set_audio_pipeline_eq(&self, eq_bands: &[crate::model::clip::EqBand; 3]) {
+        if let Some(ref eq_elem) = self.audio_eq_element {
+            for (i, b) in eq_bands.iter().enumerate() {
+                eq_set_band(eq_elem, i as u32, b.freq, b.gain, b.q);
+            }
+        }
+    }
+
+    /// Sync EQ band gains (with keyframe evaluation) for the current audio-only clip.
+    fn sync_audio_pipeline_eq(&self, timeline_pos_ns: u64) {
+        if let Some(ref eq_elem) = self.audio_eq_element {
+            if let Some(source) = self.audio_current_source {
+                let clip = match source {
+                    AudioCurrentSource::AudioClip(idx) => self.audio_clips.get(idx),
+                    AudioCurrentSource::ReverseVideoClip(idx) => self.clips.get(idx),
+                };
+                if let Some(clip) = clip {
+                    for i in 0..3u32 {
+                        let b = &clip.eq_bands[i as usize];
+                        eq_set_band(eq_elem, i, b.freq, b.gain, b.q);
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_main_audio_slot_volumes(&self, timeline_pos_ns: u64) {
         for slot in &self.slots {
-            if slot.is_prerender_slot {
+            // When master-muted, we still need to zero prerender slot pads.
+            if slot.is_prerender_slot && !self.master_muted {
                 continue;
             }
             if let Some(ref pad) = slot.audio_mixer_pad {
-                let volume = if slot.hidden {
+                let volume = if self.master_muted || slot.hidden {
                     0.0
                 } else {
                     self.effective_main_clip_volume(slot.clip_idx, timeline_pos_ns)
@@ -2972,16 +3388,78 @@ impl ProgramPlayer {
                 };
                 pan_elem.set_property("panorama", pan as f32);
             }
+            // Sync EQ band gains (including keyframe evaluation).
+            if let Some(ref eq_elem) = slot.audio_equalizer {
+                if !slot.hidden {
+                    if let Some(clip) = self.clips.get(slot.clip_idx) {
+                        for i in 0..3u32 {
+                            let gain = clip.eq_gain_at_timeline_ns(i as usize, timeline_pos_ns);
+                            eq_set_band_gain(eq_elem, i, gain);
+                        }
+                    }
+                }
+            }
         }
     }
 
     fn sync_preview_audio_levels(&self, timeline_pos_ns: u64) {
         self.apply_main_audio_slot_volumes(timeline_pos_ns);
         if let Some(source) = self.audio_current_source {
-            let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
-            self.set_audio_pipeline_volume(volume);
-            let pan = self.effective_audio_source_pan(source, timeline_pos_ns);
-            self.set_audio_pipeline_pan(pan);
+            if self.master_muted {
+                self.set_audio_pipeline_volume(0.0);
+            } else {
+                let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
+                self.set_audio_pipeline_volume(volume);
+                let pan = self.effective_audio_source_pan(source, timeline_pos_ns);
+                self.set_audio_pipeline_pan(pan);
+            }
+        }
+        if !self.master_muted {
+            self.sync_audio_pipeline_eq(timeline_pos_ns);
+        }
+        // Sync multi-audio pipeline volumes (for keyframe animation + ducking).
+        // Determine if any non-ducked audio is present at this position (triggers ducking).
+        // Ducking is active when any track has duck=true AND non-ducked audio
+        // (dialogue) is present at the current position. No global preference gate
+        // needed — the per-track duck toggle is sufficient.
+        let any_track_ducks = self.audio_clips.iter().any(|c| c.duck);
+        let should_duck = any_track_ducks && {
+            // Check if any video clip with embedded audio is active (dialogue source).
+            let has_video_audio = self.clips.iter().any(|c| {
+                c.has_embedded_audio()
+                    && !c.is_audio_only
+                    && timeline_pos_ns >= c.timeline_start_ns
+                    && timeline_pos_ns < c.timeline_end_ns()
+            });
+            // Check if any non-ducked audio-only clip is active.
+            let has_non_ducked_audio = self.audio_clips.iter().enumerate().any(|(i, c)| {
+                !c.duck
+                    && timeline_pos_ns >= c.timeline_start_ns
+                    && timeline_pos_ns < c.timeline_end_ns()
+                    && self.audio_multi_active.contains(&i)
+            });
+            has_video_audio || has_non_ducked_audio
+        };
+        for (&aidx, pad) in &self.audio_multi_pads {
+            if let Some(clip) = self.audio_clips.get(aidx) {
+                let mut vol = if self.master_muted {
+                    0.0
+                } else {
+                    clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
+                };
+                // Apply ducking reduction to tracks marked as duck targets.
+                if should_duck && clip.duck {
+                    let gain = 10.0_f64.powf(clip.duck_amount_db.min(0.0) / 20.0);
+                    vol *= gain;
+                }
+                pad.set_property("volume", vol);
+            }
+        }
+        for (&aidx, pan_elem) in &self.audio_multi_pan_elems {
+            if let Some(clip) = self.audio_clips.get(aidx) {
+                let pan = clip.pan_at_timeline_ns(timeline_pos_ns);
+                pan_elem.set_property("panorama", pan as f32);
+            }
         }
     }
 
@@ -3048,6 +3526,7 @@ impl ProgramPlayer {
 
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
+        self.sync_adjustment_timeline_pos();
         self.prewarm_upcoming_boundary(new_pos);
 
         // Timeline end reached after update?
@@ -3068,7 +3547,11 @@ impl ProgramPlayer {
         }
 
         // Detect clip boundary changes: have the active clips changed?
-        let desired = self.clips_active_at(new_pos);
+        // Exclude adjustment layers — they have no slots and don't affect boundaries.
+        let desired: Vec<usize> = self.clips_active_at(new_pos)
+            .into_iter()
+            .filter(|&i| i >= self.clips.len() || !self.clips[i].is_adjustment)
+            .collect();
         let current: Vec<usize> = if let Some(active) = self.prerender_active_clips.clone() {
             active
         } else {
@@ -3209,7 +3692,7 @@ impl ProgramPlayer {
     pub fn update_current_color(&mut self, brightness: f64, contrast: f64, saturation: f64) {
         self.update_current_effects(
             brightness, contrast, saturation, 6500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
     }
 
@@ -3233,7 +3716,41 @@ impl ProgramPlayer {
         midtones_tint: f64,
         shadows_warmth: f64,
         shadows_tint: f64,
+        blur: f64,
     ) {
+        // For adjustment layers, update the GStreamer effects chain directly (no per-clip slot).
+        if let Some(clip_idx) = self.current_idx {
+            if clip_idx < self.clips.len() && self.clips[clip_idx].is_adjustment {
+                let clip = &mut self.clips[clip_idx];
+                clip.brightness = brightness;
+                clip.contrast = contrast;
+                clip.saturation = saturation;
+                clip.temperature = temperature;
+                clip.tint = tint;
+                clip.denoise = denoise;
+                clip.sharpness = sharpness;
+                clip.blur = blur;
+                clip.shadows = shadows;
+                clip.midtones = midtones;
+                clip.highlights = highlights;
+                clip.exposure = exposure;
+                clip.black_point = black_point;
+                clip.highlights_warmth = highlights_warmth;
+                clip.highlights_tint = highlights_tint;
+                clip.midtones_warmth = midtones_warmth;
+                clip.midtones_tint = midtones_tint;
+                clip.shadows_warmth = shadows_warmth;
+                clip.shadows_tint = shadows_tint;
+                self.rebuild_adjustment_overlays();
+                self.rebuild_adjustment_effects_chain();
+                // Flush compositor to force updated effects to take effect.
+                if self.state != PlayerState::Playing {
+                    self.reseek_slot_for_current();
+                }
+                return;
+            }
+        }
+
         // Check whether the required effect elements exist.  If the slider
         // values moved away from defaults but the slot was built without the
         // element (because values were at defaults when the slot was created),
@@ -3257,6 +3774,7 @@ impl ProgramPlayer {
             let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
         };
+        let need_creative_blur = blur > f64::EPSILON;
         let topology_changed = if let Some(slot) =
             self.current_idx.and_then(|idx| self.slot_for_clip(idx))
         {
@@ -3264,6 +3782,7 @@ impl ProgramPlayer {
                 || (need_coloradj && slot.coloradj_rgb.is_none() && slot.videobalance.is_none())
                 || (need_3point && slot.colorbalance_3pt.is_none() && slot.videobalance.is_none())
                 || (need_blur && slot.gaussianblur.is_none())
+                || (need_creative_blur && slot.squareblur.is_none())
         } else {
             false
         };
@@ -3282,6 +3801,7 @@ impl ProgramPlayer {
                 clip.tint = tint;
                 clip.denoise = denoise;
                 clip.sharpness = sharpness;
+                clip.blur = blur;
                 clip.shadows = shadows;
                 clip.midtones = midtones;
                 clip.highlights = highlights;
@@ -3361,6 +3881,9 @@ impl ProgramPlayer {
                 let sigma = (denoise * 4.0 - sharpness * 6.0).clamp(-20.0, 20.0);
                 gb.set_property("sigma", sigma);
             }
+            if let Some(ref sb) = slot.squareblur {
+                sb.set_property("kernel-size", blur.clamp(0.0, 1.0));
+            }
         }
         // Keep self.clips in sync so future slot reuse and topology checks
         // see the current slider values (self.clips is only fully refreshed
@@ -3374,6 +3897,7 @@ impl ProgramPlayer {
             clip.tint = tint;
             clip.denoise = denoise;
             clip.sharpness = sharpness;
+            clip.blur = blur;
             clip.shadows = shadows;
             clip.midtones = midtones;
             clip.highlights = highlights;
@@ -3443,6 +3967,15 @@ impl ProgramPlayer {
             Some(i) => i,
             None => return false,
         };
+
+        // For adjustment layers, update the clip's frei0r list and rebuild the
+        // post-compositor effects chain.
+        if clip_idx < self.clips.len() && self.clips[clip_idx].is_adjustment {
+            self.clips[clip_idx].frei0r_effects = effects.to_vec();
+            // Frei0r user effects on adjustment layers are applied on export only;
+            // the preview path uses permanent videobalance/coloradj/3point elements.
+            return true; // Signal caller to reseek
+        }
 
         // Check topology: does the slot already have matching elements?
         let topology_matches = if let Some(slot) = self.slot_for_clip(clip_idx) {
@@ -3552,6 +4085,75 @@ impl ProgramPlayer {
                 );
                 self.set_audio_pipeline_pan(effective_pan);
             }
+            // Live-update multi-audio pipeline mixer pads if active.
+            if let Some(pad) = self.audio_multi_pads.get(&i) {
+                let effective_vol = if self.master_muted {
+                    0.0
+                } else {
+                    volume.clamp(0.0, 4.0)
+                };
+                pad.set_property("volume", effective_vol);
+            }
+            if let Some(pan_elem) = self.audio_multi_pan_elems.get(&i) {
+                pan_elem.set_property("panorama", pan.clamp(-1.0, 1.0) as f32);
+            }
+        }
+    }
+
+    /// Update EQ band parameters for a specific clip (called from Inspector/MCP).
+    pub fn update_eq_for_clip(
+        &mut self,
+        clip_id: &str,
+        eq_bands: [crate::model::clip::EqBand; 3],
+    ) {
+        // Update stored data on ProgramClip.
+        if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
+            self.clips[i].eq_bands = eq_bands;
+            // Sync live GStreamer element.
+            let slot_found = self.slots.iter().any(|s| s.clip_idx == i && !s.is_prerender_slot);
+            if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == i && !s.is_prerender_slot)
+            {
+                if let Some(ref eq_elem) = slot.audio_equalizer {
+                    for bi in 0..3u32 {
+                        let b = &eq_bands[bi as usize];
+                        eq_set_band(eq_elem, bi, b.freq, b.gain, b.q);
+                    }
+                    log::info!(
+                        "update_eq_for_clip: set EQ on clip={} gains=[{:.1}, {:.1}, {:.1}]",
+                        clip_id, eq_bands[0].gain, eq_bands[1].gain, eq_bands[2].gain,
+                    );
+                } else {
+                    log::warn!(
+                        "update_eq_for_clip: slot found for clip={} but audio_equalizer is None",
+                        clip_id,
+                    );
+                }
+            } else {
+                log::warn!(
+                    "update_eq_for_clip: no slot found for clip={} (clip_idx={}, slots={}, slot_found={})",
+                    clip_id, i, self.slots.len(), slot_found,
+                );
+            }
+            return;
+        }
+        // Audio-only clips use the multi-audio pipeline.
+        if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
+            self.audio_clips[i].eq_bands = eq_bands;
+            // If this audio clip is the currently playing source via playbin, update live.
+            if self.audio_current_source == Some(AudioCurrentSource::AudioClip(i)) {
+                self.set_audio_pipeline_eq(&eq_bands);
+            }
+            // If playing via multi pipeline, rebuild it to pick up new EQ settings.
+            if self.audio_multi_pipeline.is_some() && self.audio_multi_active.contains(&i) {
+                let active = self.audio_multi_active.clone();
+                let pos = self.timeline_pos_ns;
+                // Force rebuild by clearing the active list.
+                self.audio_multi_active.clear();
+                self.rebuild_audio_multi_pipeline(&active, pos);
+            }
+            log::info!("update_eq_for_clip: stored EQ for audio-only clip={}", clip_id);
+        } else {
+            log::warn!("update_eq_for_clip: clip={} not found in clips or audio_clips", clip_id);
         }
     }
 
@@ -3588,8 +4190,8 @@ impl ProgramPlayer {
 
     pub fn set_title(&self, text: &str, font: &str, color_rgba: u32, rel_x: f64, rel_y: f64) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
-            let (_, proc_h) = self.preview_processing_dimensions();
-            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, proc_h);
+            let (pw, ph) = self.preview_processing_dimensions();
+            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, self.project_height, pw, ph);
         }
     }
 
@@ -3621,8 +4223,8 @@ impl ProgramPlayer {
     ) {
         let idx = self.clips.iter().position(|c| c.id == clip_id);
         if let Some(slot) = idx.and_then(|i| self.slot_for_clip(i)) {
-            let (_, proc_h) = self.preview_processing_dimensions();
-            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, proc_h);
+            let (pw, ph) = self.preview_processing_dimensions();
+            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, self.project_height, pw, ph);
         }
     }
 
@@ -3918,6 +4520,14 @@ impl ProgramPlayer {
         if let Some(idx) = self.current_idx {
             if let Some(clip) = self.clips.get_mut(idx) {
                 clip.opacity = opacity;
+                if clip.is_adjustment {
+                    self.rebuild_adjustment_overlays();
+                    self.rebuild_adjustment_effects_chain();
+                    if self.state != PlayerState::Playing {
+                        self.reseek_slot_for_current();
+                    }
+                    return;
+                }
             }
             // Update compositor pad alpha for this slot.
             if let Some(slot) = self.slot_for_clip(idx) {
@@ -4383,21 +4993,20 @@ impl ProgramPlayer {
             }
         }
 
+        let lut_composite = if clip.lut_paths.is_empty() { None } else { Some(clip.lut_paths.join("|")) };
         if self.proxy_enabled {
-            let key =
-                crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+            let key = crate::media::proxy_cache::proxy_key_with_vidstab(
+                &clip.source_path, lut_composite.as_deref(),
+                clip.vidstab_enabled, clip.vidstab_smoothing,
+            );
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
-        } else if self.preview_luts
-            && clip
-                .lut_path
-                .as_deref()
-                .map(|p| !p.is_empty())
-                .unwrap_or(false)
-        {
-            let key =
-                crate::media::proxy_cache::proxy_key(&clip.source_path, clip.lut_path.as_deref());
+        } else if self.preview_luts && !clip.lut_paths.is_empty() {
+            let key = crate::media::proxy_cache::proxy_key_with_vidstab(
+                &clip.source_path, lut_composite.as_deref(),
+                clip.vidstab_enabled, clip.vidstab_smoothing,
+            );
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
@@ -4941,7 +5550,7 @@ impl ProgramPlayer {
         );
         // Also warm the effects-bin construction path.
         let (proc_w, proc_h) = self.preview_processing_dimensions();
-        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, None);
+        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, self.project_height, None);
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
         if self.prepreroll_sidecars.len() >= MAX_PREPREROLL_SIDECARS {
@@ -5100,10 +5709,12 @@ impl ProgramPlayer {
                 hash_keyframes(&mut hasher, &c.tint_keyframes);
                 c.denoise.to_bits().hash(&mut hasher);
                 c.sharpness.to_bits().hash(&mut hasher);
+                c.blur.to_bits().hash(&mut hasher);
+                hash_keyframes(&mut hasher, &c.blur_keyframes);
                 c.shadows.to_bits().hash(&mut hasher);
                 c.midtones.to_bits().hash(&mut hasher);
                 c.highlights.to_bits().hash(&mut hasher);
-                c.lut_path.hash(&mut hasher);
+                c.lut_paths.hash(&mut hasher);
                 c.exposure.to_bits().hash(&mut hasher);
                 c.black_point.to_bits().hash(&mut hasher);
                 c.highlights_warmth.to_bits().hash(&mut hasher);
@@ -5151,6 +5762,8 @@ impl ProgramPlayer {
                         v.hash(&mut hasher);
                     }
                 }
+                // Slow-motion interpolation mode
+                c.slow_motion_interp.hash(&mut hasher);
             }
         }
         hasher.finish()
@@ -5247,15 +5860,23 @@ impl ProgramPlayer {
             return;
         }
         let duration_ns = segment_end_ns.saturating_sub(segment_start_ns);
+        // Separate adjustment clips from regular inputs for prerender.
+        let adjustment_clips_for_prerender: Vec<ProgramClip> = active
+            .iter()
+            .filter_map(|&idx| self.clips.get(idx))
+            .filter(|c| c.is_adjustment)
+            .cloned()
+            .collect();
         let inputs: Vec<(ProgramClip, String, u64, bool, bool)> = active
             .iter()
             .filter_map(|&idx| {
-                self.clips.get(idx).map(|clip| {
+                self.clips.get(idx).and_then(|clip| {
+                    if clip.is_adjustment { return None; }
                     let c = clip.clone();
                     let (path, source_is_proxy, _) = self.resolve_source_path_for_clip(&c);
                     let source_ns = c.source_pos_ns(segment_start_ns);
                     let has_audio = self.has_audio_for_path_fast(&path, c.has_embedded_audio());
-                    (c, path, source_ns, has_audio, source_is_proxy)
+                    Some((c, path, source_ns, has_audio, source_is_proxy))
                 })
             })
             .collect();
@@ -5299,10 +5920,12 @@ impl ProgramPlayer {
         let out_w = (self.project_width / prerender_divisor).max(2);
         let out_h = (self.project_height / prerender_divisor).max(2);
         let transition_spec_for_job = transition_spec.clone();
+        let adj_clips_for_job = adjustment_clips_for_prerender;
         std::thread::spawn(move || {
             let success = Self::render_prerender_segment_video_file(
                 &output_path,
                 &inputs,
+                &adj_clips_for_job,
                 duration_ns,
                 out_w,
                 out_h,
@@ -5648,6 +6271,7 @@ impl ProgramPlayer {
         self.slots.iter().any(|slot| {
             !slot.hidden
                 && !slot.is_prerender_slot
+                
                 && self
                     .compute_transition_state(slot.clip_idx, timeline_pos_ns)
                     .is_some()
@@ -6397,14 +7021,24 @@ impl ProgramPlayer {
         color_rgba: u32,
         rel_x: f64,
         rel_y: f64,
+        project_h: u32,
+        proc_w: u32,
         proc_h: u32,
     ) {
         const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
-        // GStreamer textoverlay uses Pango which renders points ~4× larger than
-        // FFmpeg drawtext pixels at the same numeric value.  Empirically at
-        // 1080p: GStreamer 12pt ≈ FFmpeg 48px.  The export formula produces
-        // `base_size * (4/3) * (out_h / 1080)` pixels.  To match, we scale
-        // the Pango size by `(4/3) / 4 = 1/3` relative to the base size.
+        // GStreamer textoverlay renders Pango text proportionally to the video
+        // frame.  Measured: 1 Pango pt ≈ 0.0037 of frame height (constant
+        // across 540p/1080p/2160p).  Since the fraction is resolution-independent,
+        // we use project_h (not proc_h) to match the export formula:
+        //   export:  fontsize_px = base_size × (4/3) × (out_h / 1080)
+        //   preview: pango_pt × 0.0037 = base_size × (4/3) / 1080
+        //            pango_pt = base_size × (4/3) / (0.0037 × 1080) ≈ base_size / 3
+        //
+        // For non-1080p projects: pango_pt = base_size × (4/3) / (0.0037 × project_h)
+        //
+        // The (project_h / 1080) factor in the formula below cancels out with
+        // the (4/3)/3.0 constant because textoverlay proportional scaling handles
+        // the resolution automatically.
         const PANGO_EXPORT_MATCH: f64 = 1.0 / 3.0;
         if let Some(ref to) = slot.textoverlay {
             let silent = text.is_empty();
@@ -6412,13 +7046,25 @@ impl ProgramPlayer {
             if !silent {
                 to.set_property("text", text);
                 let (family, base_size) = Self::parse_pango_font_desc(font);
-                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (proc_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (project_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
-                to.set_property_from_str("halignment", "position");
-                to.set_property_from_str("valignment", "position");
-                to.set_property("xpos", rel_x);
-                to.set_property("ypos", rel_y);
+                // Use center alignment + pixel deltas to match FFmpeg drawtext
+                // centering semantics: drawtext places text center at
+                // (rel_x × w, rel_y × h).  Using halignment/valignment=center
+                // with deltax/deltay avoids text-width-dependent clipping
+                // differences between preview and export resolutions.
+                //
+                // valignment=center places the text TOP edge (not center) at
+                // the vertical center.  Compensate by adding half the text
+                // height in pixels to deltay.
+                to.set_property_from_str("halignment", "center");
+                to.set_property_from_str("valignment", "center");
+                let text_h_px = (scaled_size * 0.0037 * proc_h as f64).round();
+                let dx = ((rel_x - 0.5) * proc_w as f64).round() as i32;
+                let dy = ((rel_y - 0.5) * proc_h as f64 + text_h_px * 0.35).round() as i32;
+                to.set_property("deltax", dx);
+                to.set_property("deltay", dy);
                 let r = (color_rgba >> 24) & 0xFF;
                 let g = (color_rgba >> 16) & 0xFF;
                 let b = (color_rgba >> 8) & 0xFF;
@@ -6446,8 +7092,11 @@ impl ProgramPlayer {
                 let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
                 to.set_property("outline-color", argb);
             }
-            // Shadow
-            to.set_property("draw-shadow", clip.title_shadow);
+            // Shadow: GStreamer textoverlay only supports a fixed ~1px shadow
+            // with no configurable offset/color.  Disable it to avoid visual
+            // mismatch with the export's fully customizable drawtext shadow.
+            // The shadow is rendered correctly on export.
+            to.set_property("draw-shadow", false);
             // Background box (shaded background)
             to.set_property("shaded-background", clip.title_bg_box);
         }
@@ -6621,6 +7270,10 @@ impl ProgramPlayer {
         let mut added_clip_idxs: Vec<usize> = Vec::new();
         for (zorder_offset, clip_idx) in desired.iter().enumerate() {
             if current.contains(clip_idx) {
+                continue;
+            }
+            // Adjustment layers have no compositor slot — skip without error.
+            if *clip_idx < self.clips.len() && self.clips[*clip_idx].is_adjustment {
                 continue;
             }
             if let Some(mut slot) = self.build_slot_for_clip(*clip_idx, zorder_offset, true) {
@@ -6909,6 +7562,10 @@ impl ProgramPlayer {
             let mut added_ok = true;
             let mut added_clip_idxs: Vec<usize> = Vec::new();
             for clip_idx in &added {
+                // Adjustment layers have no compositor slot — skip without error.
+                if *clip_idx < self.clips.len() && self.clips[*clip_idx].is_adjustment {
+                    continue;
+                }
                 // Use zorder 0 temporarily; corrected in step 4.
                 if let Some(mut slot) = self.build_slot_for_clip(*clip_idx, 0, true) {
                     // Set pad offsets so post-seek buffers (running-time 0)
@@ -7042,6 +7699,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             self.pipeline.remove(ac).ok();
         }
+        if let Some(ref eq_elem) = slot.audio_equalizer {
+            self.pipeline.remove(eq_elem).ok();
+        }
         if let Some(ref ap) = slot.audio_panorama {
             self.pipeline.remove(ap).ok();
         }
@@ -7060,6 +7720,10 @@ impl ProgramPlayer {
         if let Some(ref ac) = slot.audio_conv {
             let _ = ac.set_state(gst::State::Null);
             let _ = ac.state(gst::ClockTime::from_mseconds(100));
+        }
+        if let Some(ref eq_elem) = slot.audio_equalizer {
+            let _ = eq_elem.set_state(gst::State::Null);
+            let _ = eq_elem.state(gst::ClockTime::from_mseconds(100));
         }
         if let Some(ref ap) = slot.audio_panorama {
             let _ = ap.set_state(gst::State::Null);
@@ -7170,6 +7834,7 @@ impl ProgramPlayer {
         clip: &ProgramClip,
         target_width: u32,
         target_height: u32,
+        project_height: u32,
         lut: Option<Arc<CubeLut>>,
     ) -> (
         gst::Bin,
@@ -7177,6 +7842,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // coloradj_rgb (frei0r temperature/tint)
         Option<gst::Element>, // colorbalance_3pt (frei0r shadows/midtones/highlights)
         Option<gst::Element>, // gaussianblur
+        Option<gst::Element>, // squareblur (creative blur)
         Option<gst::Element>, // videocrop
         Option<gst::Element>, // videobox_crop_alpha
         Option<gst::Element>, // imagefreeze
@@ -7286,7 +7952,7 @@ impl ProgramPlayer {
             (conv1, videobalance)
         };
 
-        // conv2 + gaussianblur: only if blur/sharpen is active.
+        // conv2 + gaussianblur: only if denoise/sharpen is active.
         let (conv2, gaussianblur) = if need_blur {
             (
                 gst::ElementFactory::make("videoconvert").build().ok(),
@@ -7294,6 +7960,15 @@ impl ProgramPlayer {
             )
         } else {
             (None, None)
+        };
+
+        // Separate squareblur element for creative blur (RGBA-native, no
+        // format conversion needed unlike gaussianblur which requires AYUV).
+        let need_creative_blur = clip.blur > f64::EPSILON;
+        let squareblur = if need_creative_blur {
+            gst::ElementFactory::make("frei0r-filter-squareblur").build().ok()
+        } else {
+            None
         };
 
         // User-applied frei0r filter effects (from clip.frei0r_effects).
@@ -7350,6 +8025,13 @@ impl ProgramPlayer {
 
         // Textoverlay: only if title text is set.
         let textoverlay = if need_title {
+            gst::ElementFactory::make("textoverlay").build().ok()
+        } else {
+            None
+        };
+        // Shadow textoverlay: rendered BEFORE the main textoverlay so the shadow
+        // appears behind the foreground text.  Only created when shadow is enabled.
+        let shadow_textoverlay = if need_title && clip.title_shadow {
             gst::ElementFactory::make("textoverlay").build().ok()
         } else {
             None
@@ -7450,6 +8132,9 @@ impl ProgramPlayer {
         if let Some(ref gb) = gaussianblur {
             gb.set_property("sigma", blur_sigma);
         }
+        if let Some(ref sb) = squareblur {
+            sb.set_property("kernel-size", clip.blur.clamp(0.0, 1.0));
+        }
         if let Some(ref a) = alpha_filter {
             a.set_property("alpha", 1.0_f64);
         }
@@ -7473,9 +8158,7 @@ impl ProgramPlayer {
         }
         if let Some(ref to) = textoverlay {
             const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
-            // Match export sizing: GStreamer Pango renders ~4× larger per
-            // numeric point value than FFmpeg drawtext pixels.  See
-            // apply_title_to_slot for the full derivation.
+            // See apply_title_to_slot for derivation.
             const PANGO_EXPORT_MATCH: f64 = 1.0 / 3.0;
             if clip.title_text.is_empty() {
                 to.set_property("silent", true);
@@ -7484,13 +8167,41 @@ impl ProgramPlayer {
                 to.set_property("silent", false);
                 to.set_property("text", &clip.title_text);
                 let (family, base_size) = Self::parse_pango_font_desc(&clip.title_font);
-                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (target_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (project_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
-                to.set_property_from_str("halignment", "position");
-                to.set_property_from_str("valignment", "position");
-                to.set_property("xpos", clip.title_x);
-                to.set_property("ypos", clip.title_y);
+                to.set_property_from_str("halignment", "center");
+                to.set_property_from_str("valignment", "center");
+                let text_h_px = (scaled_size * 0.0037 * target_height as f64).round();
+                let dx = ((clip.title_x - 0.5) * target_width as f64).round() as i32;
+                let dy = ((clip.title_y - 0.5) * target_height as f64 + text_h_px * 0.35).round() as i32;
+                to.set_property("deltax", dx);
+                to.set_property("deltay", dy);
+
+                // Configure shadow textoverlay with same text/font but
+                // shadow color and pixel offset.
+                if let Some(ref st) = shadow_textoverlay {
+                    st.set_property("silent", false);
+                    st.set_property("text", &clip.title_text);
+                    st.set_property("font-desc", &adjusted_font);
+                    st.set_property_from_str("halignment", "center");
+                    st.set_property_from_str("valignment", "center");
+                    st.set_property("draw-shadow", false);
+                    st.set_property("draw-outline", false);
+                    let scale_factor = project_height as f64 / TITLE_REFERENCE_HEIGHT;
+                    let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
+                    let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
+                    st.set_property("deltax", dx + sx);
+                    st.set_property("deltay", dy + sy);
+                    // Shadow color (RRGGBBAA → AARRGGBB for GStreamer)
+                    let sc = clip.title_shadow_color;
+                    let sr = (sc >> 24) & 0xFF;
+                    let sg = (sc >> 16) & 0xFF;
+                    let sb = (sc >> 8) & 0xFF;
+                    let sa = sc & 0xFF;
+                    let s_argb: u32 = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+                    st.set_property("color", s_argb);
+                }
             }
         }
 
@@ -7530,6 +8241,24 @@ impl ProgramPlayer {
         // 0. imagefreeze for still-image / freeze-frame clips (before everything).
         if let Some(ref e) = imagefreeze {
             chain.push(e.clone());
+        }
+        // 0a. Override pixel-aspect-ratio for anamorphic desqueeze
+        if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
+            if let Ok(cs) = gst::ElementFactory::make("capssetter")
+                .property("join", true)
+                .property(
+                    "caps",
+                    &gst::Caps::builder("video/x-raw")
+                        .field(
+                            "pixel-aspect-ratio",
+                            gst::Fraction::new((clip.anamorphic_desqueeze * 1000.0).round() as i32, 1000),
+                        )
+                        .build(),
+                )
+                .build()
+            {
+                chain.push(cs);
+            }
         }
         // 0b. When a real-time LUT is active, override the source colorimetry
         //    to BT.709 full-range.  Many camera files (S-Log3 HEVC, etc.) carry
@@ -7609,6 +8338,9 @@ impl ProgramPlayer {
         if let Some(ref e) = gaussianblur {
             chain.push(e.clone());
         }
+        if let Some(ref e) = squareblur {
+            chain.push(e.clone());
+        }
         // 3a. User-applied frei0r filter effects (after built-in color/blur).
         for e in &frei0r_user_effects {
             chain.push(e.clone());
@@ -7645,6 +8377,10 @@ impl ProgramPlayer {
             chain.push(e.clone());
         }
         if let Some(ref e) = videoflip_flip {
+            chain.push(e.clone());
+        }
+        // Shadow textoverlay goes BEFORE the main text so it renders behind.
+        if let Some(ref e) = shadow_textoverlay {
             chain.push(e.clone());
         }
         if let Some(ref e) = textoverlay {
@@ -7699,6 +8435,7 @@ impl ProgramPlayer {
             coloradj_rgb,
             colorbalance_3pt,
             gaussianblur,
+            squareblur,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -7780,7 +8517,13 @@ impl ProgramPlayer {
     /// decode, effects, and compositor pad entirely.
     fn build_audio_only_slot_for_clip(&mut self, clip_idx: usize) -> Option<VideoSlot> {
         let clip = self.clips[clip_idx].clone();
-        let (effective_path, using_proxy, proxy_key) = self.resolve_source_path_for_clip(&clip);
+        // For audio-only clips, always use the original source — proxy transcodes
+        // are video-optimized and add unnecessary decode overhead for pure audio.
+        let (effective_path, using_proxy, proxy_key) = if clip.is_audio_only {
+            (clip.source_path.clone(), false, clip.source_path.clone())
+        } else {
+            self.resolve_source_path_for_clip(&clip)
+        };
         let uri = format!("file://{}", effective_path);
 
         let clip_has_audio =
@@ -7831,38 +8574,87 @@ impl ProgramPlayer {
 
         // Create decoder with audio-only caps to skip video decode.
         let audio_caps = gst::Caps::builder("audio/x-raw").build();
-        let decoder = gst::ElementFactory::make("uridecodebin")
+        let mut builder = gst::ElementFactory::make("uridecodebin")
             .property("uri", &uri)
-            .property("caps", &audio_caps)
-            .build()
-            .ok()?;
+            .property("caps", &audio_caps);
+        // For audio-only clips, reduce buffering overhead.
+        if clip.is_audio_only {
+            builder = builder.property("use-buffering", false);
+        }
+        let decoder = builder.build().ok()?;
 
         if self.pipeline.add(&decoder).is_err() {
             return None;
         }
 
-        // Audio path: audioconvert → [audiopanorama] → [level] → audiomixer pad.
-        let (audio_conv, audio_panorama, audio_level, amix_pad) = {
+        // Audio path: audioconvert → [equalizer-nbands?] → [audiopanorama?] → [level?] → audiomixer pad.
+        // For audio-only track clips, skip EQ/pan/level when they're at defaults to reduce overhead.
+        let needs_eq = clip.eq_bands.iter().any(|b| b.gain.abs() > 0.001);
+        let needs_pan = clip.pan.abs() > 0.001 || !clip.pan_keyframes.is_empty();
+        // Skip level metering for audio-only track clips to reduce CPU — the per-track
+        // meters will use the main pipeline's level elements for video-embedded audio.
+        let needs_level = !clip.is_audio_only;
+        let (audio_conv, audio_equalizer, audio_panorama, audio_level, amix_pad) = {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
-            let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
-            let mut lv = gst::ElementFactory::make("level")
-                .property("post-messages", true)
-                .property("interval", 50_000_000u64)
-                .build()
-                .ok();
+            let mut eq = if needs_eq {
+                gst::ElementFactory::make("equalizer-nbands")
+                    .property("num-bands", 3u32)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
+            let mut ap = if needs_pan {
+                gst::ElementFactory::make("audiopanorama").build().ok()
+            } else {
+                None
+            };
+            let mut lv = if needs_level {
+                gst::ElementFactory::make("level")
+                    .property("post-messages", true)
+                    .property("interval", 50_000_000u64)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
                     let mut link_src = ac.static_pad("src");
+                    // Insert equalizer between audioconvert and audiopanorama.
+                    if let Some(ref equalizer) = eq {
+                        if self.pipeline.add(equalizer).is_ok() {
+                            // Set initial EQ band params from clip.
+                            for i in 0..3u32 {
+                                let b = &clip.eq_bands[i as usize];
+                                eq_set_band(equalizer, i, b.freq, b.gain, b.q);
+                            }
+                            if let (Some(ac_src), Some(eq_sink)) =
+                                (link_src.clone(), equalizer.static_pad("sink"))
+                            {
+                                let _ = ac_src.link(&eq_sink);
+                                link_src = equalizer.static_pad("src");
+                                log::info!("build_audio_only_slot: equalizer-nbands linked OK");
+                            } else {
+                                log::warn!("build_audio_only_slot: equalizer pad link failed, removing");
+                                self.pipeline.remove(equalizer).ok();
+                                eq = None;
+                            }
+                        } else {
+                            log::warn!("build_audio_only_slot: failed to add equalizer to pipeline");
+                            eq = None;
+                        }
+                    }
                     if let Some(ref pano) = ap {
                         if self.pipeline.add(pano).is_ok() {
                             pano.set_property(
                                 "panorama",
                                 self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns) as f32,
                             );
-                            if let (Some(ac_src), Some(pano_sink)) =
-                                (ac.static_pad("src"), pano.static_pad("sink"))
+                            if let (Some(prev_src), Some(pano_sink)) =
+                                (link_src.clone(), pano.static_pad("sink"))
                             {
-                                let _ = ac_src.link(&pano_sink);
+                                let _ = prev_src.link(&pano_sink);
                                 link_src = pano.static_pad("src");
                             } else {
                                 self.pipeline.remove(pano).ok();
@@ -7909,11 +8701,12 @@ impl ProgramPlayer {
                     None
                 }
             } else {
+                eq = None;
                 ap = None;
                 lv = None;
                 None
             };
-            (ac, ap, lv, pad)
+            (ac, eq, ap, lv, pad)
         };
 
         // Dynamic pad-added: only link audio pads (no video sink available).
@@ -7945,6 +8738,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref eq_elem) = audio_equalizer {
+            let _ = eq_elem.sync_state_with_parent();
+        }
         if let Some(ref ap) = audio_panorama {
             let _ = ap.sync_state_with_parent();
         }
@@ -7965,12 +8761,14 @@ impl ProgramPlayer {
             compositor_pad: None,
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_equalizer,
             audio_panorama,
             audio_level,
             videobalance: None,
             coloradj_rgb: None,
             colorbalance_3pt: None,
             gaussianblur: None,
+            squareblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: None,
@@ -8233,12 +9031,14 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad),
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_equalizer: None,
             audio_panorama,
             audio_level,
             videobalance: None,
             coloradj_rgb: None,
             colorbalance_3pt: None,
             gaussianblur: None,
+            squareblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: None,
@@ -8264,6 +9064,7 @@ impl ProgramPlayer {
     fn render_prerender_segment_video_file(
         output_path: &str,
         inputs: &[(ProgramClip, String, u64, bool, bool)],
+        adjustment_clips: &[ProgramClip],
         duration_ns: u64,
         out_w: u32,
         out_h: u32,
@@ -8324,8 +9125,9 @@ impl ProgramPlayer {
                 // Apply LUT at source resolution (before downscale) so it
                 // processes the same pixel values as the export path.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{}{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
+                    Self::prerender_build_anamorphic_filter(clip),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                     Self::prerender_build_rotation_filter(clip, false),
@@ -8342,14 +9144,16 @@ impl ProgramPlayer {
                     Self::prerender_build_sharpen_filter(clip),
                     Self::prerender_build_frei0r_effects_filter(clip),
                     Self::prerender_build_title_filter(clip, out_h),
+                    Self::prerender_build_minterpolate_filter(clip, fps),
                 ));
             } else if i == 0 {
                 if clip.chroma_key_enabled {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{},fps={}{}{}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{}{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{}{}{},fps={}{}{}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
+                        Self::prerender_build_anamorphic_filter(clip),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
                         Self::prerender_build_rotation_filter(clip, false),
@@ -8362,11 +9166,12 @@ impl ProgramPlayer {
                         Self::prerender_build_frei0r_effects_filter(clip),
                         Self::prerender_build_chroma_key_filter(clip),
                         Self::prerender_build_title_filter(clip, out_h),
+                        Self::prerender_build_minterpolate_filter(clip, fps),
                     ));
                 } else {
                     // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
                         Self::prerender_build_lut_filter(clip, *source_is_proxy),
                         Self::prerender_build_crop_filter(clip, out_w, out_h, false),
                         Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
@@ -8379,14 +9184,16 @@ impl ProgramPlayer {
                         Self::prerender_build_sharpen_filter(clip),
                         Self::prerender_build_frei0r_effects_filter(clip),
                         Self::prerender_build_title_filter(clip, out_h),
+                        Self::prerender_build_minterpolate_filter(clip, fps),
                     ));
                 }
             } else {
                 // Overlay tracks: convert to yuva420p early so pad fills transparent.
                 // Apply LUT at source resolution before format/scale for parity.
                 nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
+                    "[{i}:v]setpts=PTS-STARTPTS{}{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{}{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
                     Self::prerender_build_lut_filter(clip, *source_is_proxy),
+                    Self::prerender_build_anamorphic_filter(clip),
                     Self::prerender_build_crop_filter(clip, out_w, out_h, true),
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
                     Self::prerender_build_rotation_filter(clip, true),
@@ -8398,6 +9205,7 @@ impl ProgramPlayer {
                     Self::prerender_build_frei0r_effects_filter(clip),
                     Self::prerender_build_chroma_key_filter(clip),
                     Self::prerender_build_title_filter(clip, out_h),
+                    Self::prerender_build_minterpolate_filter(clip, fps),
                     clip.opacity.clamp(0.0, 1.0),
                 ));
             }
@@ -8428,6 +9236,38 @@ impl ProgramPlayer {
                 last_label = next;
             }
         }
+        // Apply adjustment layer effects to the composited output.
+        for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
+            let adj_color = Self::prerender_build_color_filter(adj_clip);
+            let adj_temp_tint = Self::prerender_build_temperature_tint_filter(adj_clip, &color_caps);
+            let adj_grading = Self::prerender_build_grading_filter(adj_clip);
+            let adj_denoise = Self::prerender_build_denoise_filter(adj_clip);
+            let adj_sharpen = Self::prerender_build_sharpen_filter(adj_clip);
+            let adj_blur = if adj_clip.blur > f64::EPSILON {
+                let radius = (adj_clip.blur * 10.0).clamp(0.0, 10.0);
+                format!(",boxblur={radius:.0}:{radius:.0}")
+            } else {
+                String::new()
+            };
+            let adj_frei0r = Self::prerender_build_frei0r_effects_filter(adj_clip);
+
+            let mut effects = String::new();
+            effects.push_str(&adj_color);
+            effects.push_str(&adj_temp_tint);
+            effects.push_str(&adj_grading);
+            effects.push_str(&adj_denoise);
+            effects.push_str(&adj_sharpen);
+            effects.push_str(&adj_blur);
+            effects.push_str(&adj_frei0r);
+
+            let effects = effects.trim_matches(',').to_string();
+            if !effects.is_empty() {
+                let next = format!("vadj{adj_idx}");
+                nodes.push(format!("[{last_label}]{effects}[{next}]"));
+                last_label = next;
+            }
+        }
+
         let mut audio_labels: Vec<String> = Vec::new();
         for (i, (clip, _, _, has_audio, _)) in inputs.iter().enumerate() {
             if !*has_audio {
@@ -8638,17 +9478,27 @@ impl ProgramPlayer {
         }
     }
 
+    fn prerender_build_anamorphic_filter(clip: &ProgramClip) -> String {
+        if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
+            // Physically desqueeze the source pixels horizontally and reset SAR to 1.
+            format!(",scale=iw*{}:ih,setsar=1", clip.anamorphic_desqueeze)
+        } else {
+            String::new()
+        }
+    }
+
     fn prerender_build_lut_filter(clip: &ProgramClip, source_is_proxy: bool) -> String {
         if source_is_proxy {
             return String::new();
         }
-        if let Some(path) = clip.lut_path.as_deref() {
+        let mut result = String::new();
+        for path in &clip.lut_paths {
             if !path.is_empty() && Path::new(path).exists() {
                 let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
-                return format!(",lut3d={escaped}");
+                result.push_str(&format!(",lut3d={escaped}"));
             }
         }
-        String::new()
+        result
     }
 
     fn prerender_build_chroma_key_filter(clip: &ProgramClip) -> String {
@@ -8945,6 +9795,28 @@ impl ProgramPlayer {
         filter
     }
 
+    fn prerender_build_minterpolate_filter(clip: &ProgramClip, fps: u32) -> String {
+        use crate::model::clip::SlowMotionInterp;
+        if clip.slow_motion_interp == SlowMotionInterp::Off {
+            return String::new();
+        }
+        // Only apply for slow-motion clips
+        let is_slow = if !clip.speed_keyframes.is_empty() {
+            clip.speed_keyframes.iter().any(|kf| kf.value < 1.0)
+        } else {
+            clip.speed < 1.0 - 0.001
+        };
+        if !is_slow {
+            return String::new();
+        }
+        let mi_mode = match clip.slow_motion_interp {
+            SlowMotionInterp::Blend => "blend",
+            SlowMotionInterp::OpticalFlow => "mci",
+            SlowMotionInterp::Off => unreachable!(),
+        };
+        format!(",minterpolate=fps={fps}:mi_mode={mi_mode}")
+    }
+
     fn build_slot_for_clip(
         &mut self,
         clip_idx: usize,
@@ -9005,11 +9877,10 @@ impl ProgramPlayer {
 
         let (proc_w, proc_h) = self.preview_processing_dimensions();
 
-        // Resolve real-time LUT: only apply via pad probe when the source
-        // is NOT already LUT-baked (proxy or preview-LUT media).
+        // Apply first LUT in realtime preview; full stack applied in prerender/export.
         let realtime_lut = if !using_proxy {
-            clip.lut_path
-                .as_deref()
+            clip.lut_paths
+                .first()
                 .filter(|p| !p.is_empty())
                 .and_then(|p| self.get_or_parse_lut(p))
         } else {
@@ -9023,6 +9894,7 @@ impl ProgramPlayer {
             coloradj_rgb,
             colorbalance_3pt,
             gaussianblur,
+            squareblur,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -9034,7 +9906,7 @@ impl ProgramPlayer {
             capsfilter_zoom,
             videobox_zoom,
             frei0r_user_effects,
-        ) = Self::build_effects_bin(&clip, proc_w, proc_h, realtime_lut);
+        ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_height, realtime_lut);
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
         if clip.is_title {
@@ -9143,12 +10015,14 @@ impl ProgramPlayer {
                 compositor_pad: Some(comp_pad.clone()),
                 audio_mixer_pad: None,
                 audio_conv: None,
+                audio_equalizer: None,
                 audio_panorama: None,
                 audio_level: None,
                 videobalance: videobalance.clone(),
                 coloradj_rgb: coloradj_rgb.clone(),
                 colorbalance_3pt: colorbalance_3pt.clone(),
                 gaussianblur: gaussianblur.clone(),
+                squareblur: squareblur.clone(),
                 videocrop: videocrop.clone(),
                 videobox_crop_alpha: videobox_crop_alpha.clone(),
                 imagefreeze: imagefreeze.clone(),
@@ -9175,7 +10049,7 @@ impl ProgramPlayer {
             );
             Self::apply_title_to_slot(
                 &slot_ref_for_transform, &clip.title_text, &clip.title_font,
-                clip.title_color, clip.title_x, clip.title_y, proc_h,
+                clip.title_color, clip.title_x, clip.title_y, self.project_height, proc_w, proc_h,
             );
             Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
             Self::apply_zoom_to_slot(
@@ -9201,12 +10075,14 @@ impl ProgramPlayer {
                 compositor_pad: Some(comp_pad),
                 audio_mixer_pad: None,
                 audio_conv: None,
+                audio_equalizer: None,
                 audio_panorama: None,
                 audio_level: None,
                 videobalance,
                 coloradj_rgb,
                 colorbalance_3pt,
                 gaussianblur,
+                squareblur,
                 videocrop,
                 videobox_crop_alpha,
                 imagefreeze,
@@ -9227,6 +10103,13 @@ impl ProgramPlayer {
                 is_blend_mode,
                 blend_alpha,
             });
+        }
+
+        // Adjustment layers have no visual output in the compositor — their effects
+        // are applied post-compositor via the adjustment probe.  Skip slot creation.
+        if clip.is_adjustment {
+            log::debug!("ProgramPlayer: skipping slot for adjustment layer clip={}", clip.id);
+            return None;
         }
 
         // Create uridecodebin for this clip.
@@ -9346,9 +10229,13 @@ impl ProgramPlayer {
             });
         }
 
-        // Create audio path: audioconvert → [audiopanorama] → [level] → audiomixer pad.
-        let (audio_conv, audio_panorama, audio_level, amix_pad) = if clip_has_audio {
+        // Create audio path: audioconvert → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
+        let (audio_conv, audio_equalizer, audio_panorama, audio_level, amix_pad) = if clip_has_audio {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
+            let mut eq = gst::ElementFactory::make("equalizer-nbands")
+                .property("num-bands", 3u32)
+                .build()
+                .ok();
             let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
             let mut lv = gst::ElementFactory::make("level")
                 .property("post-messages", true)
@@ -9358,16 +10245,47 @@ impl ProgramPlayer {
             let pad = if let Some(ref ac) = ac {
                 if self.pipeline.add(ac).is_ok() {
                     let mut link_src = ac.static_pad("src");
+                    // Insert equalizer between audioconvert and audiopanorama.
+                    if let Some(ref equalizer) = eq {
+                        if self.pipeline.add(equalizer).is_ok() {
+                            for i in 0..3u32 {
+                                let b = &clip.eq_bands[i as usize];
+                                eq_set_band(equalizer, i, b.freq, b.gain, b.q);
+                            }
+                            if let (Some(prev_src), Some(eq_sink)) =
+                                (link_src.clone(), equalizer.static_pad("sink"))
+                            {
+                                let link_result = prev_src.link(&eq_sink);
+                                if link_result.is_ok() {
+                                    link_src = equalizer.static_pad("src");
+                                    log::info!("build_slot_for_clip: equalizer-nbands linked OK for clip_idx={}", clip_idx);
+                                } else {
+                                    log::warn!("build_slot_for_clip: equalizer pad link FAILED: {:?}", link_result);
+                                    self.pipeline.remove(equalizer).ok();
+                                    eq = None;
+                                }
+                            } else {
+                                log::warn!("build_slot_for_clip: equalizer static pads not available");
+                                self.pipeline.remove(equalizer).ok();
+                                eq = None;
+                            }
+                        } else {
+                            log::warn!("build_slot_for_clip: failed to add equalizer to pipeline");
+                            eq = None;
+                        }
+                    } else {
+                        log::warn!("build_slot_for_clip: equalizer-nbands element not available");
+                    }
                     if let Some(ref pano) = ap {
                         if self.pipeline.add(pano).is_ok() {
                             pano.set_property(
                                 "panorama",
                                 self.effective_main_clip_pan(clip_idx, self.timeline_pos_ns) as f32,
                             );
-                            if let (Some(ac_src), Some(pano_sink)) =
-                                (ac.static_pad("src"), pano.static_pad("sink"))
+                            if let (Some(prev_src), Some(pano_sink)) =
+                                (link_src.clone(), pano.static_pad("sink"))
                             {
-                                let _ = ac_src.link(&pano_sink);
+                                let _ = prev_src.link(&pano_sink);
                                 link_src = pano.static_pad("src");
                             } else {
                                 self.pipeline.remove(pano).ok();
@@ -9409,22 +10327,24 @@ impl ProgramPlayer {
                         None
                     }
                 } else {
+                    eq = None;
                     ap = None;
                     lv = None;
                     None
                 }
             } else {
+                eq = None;
                 ap = None;
                 lv = None;
                 None
             };
-            (ac, ap, lv, pad)
+            (ac, eq, ap, lv, pad)
         } else {
             log::info!(
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -9510,6 +10430,9 @@ impl ProgramPlayer {
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
         }
+        if let Some(ref eq_elem) = audio_equalizer {
+            let _ = eq_elem.sync_state_with_parent();
+        }
         if let Some(ref ap) = audio_panorama {
             let _ = ap.sync_state_with_parent();
         }
@@ -9528,12 +10451,14 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad.clone()),
             audio_mixer_pad: amix_pad.clone(),
             audio_conv: audio_conv.clone(),
+            audio_equalizer: audio_equalizer.clone(),
             audio_panorama: audio_panorama.clone(),
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
             coloradj_rgb: coloradj_rgb.clone(),
             colorbalance_3pt: colorbalance_3pt.clone(),
             gaussianblur: gaussianblur.clone(),
+            squareblur: squareblur.clone(),
             videocrop: videocrop.clone(),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
             imagefreeze: imagefreeze.clone(),
@@ -9564,6 +10489,7 @@ impl ProgramPlayer {
             clip.flip_h,
             clip.flip_v,
         );
+        let (pw, ph) = self.preview_processing_dimensions();
         Self::apply_title_to_slot(
             &slot_ref_for_transform,
             &clip.title_text,
@@ -9571,7 +10497,8 @@ impl ProgramPlayer {
             clip.title_color,
             clip.title_x,
             clip.title_y,
-            proc_h,
+            self.project_height,
+            pw, ph,
         );
         Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
         Self::apply_zoom_to_slot(
@@ -9593,12 +10520,14 @@ impl ProgramPlayer {
             compositor_pad: Some(comp_pad),
             audio_mixer_pad: amix_pad,
             audio_conv,
+            audio_equalizer,
             audio_panorama,
             audio_level,
             videobalance,
             coloradj_rgb,
             colorbalance_3pt,
             gaussianblur,
+            squareblur,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -10172,6 +11101,7 @@ impl ProgramPlayer {
             let sigma = (c.denoise * 4.0 - c.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
         };
+        let need_creative_blur = |c: &ProgramClip| c.blur > f64::EPSILON;
         let need_rotate = |c: &ProgramClip| c.rotate.rem_euclid(360) != 0;
         let need_flip = |c: &ProgramClip| c.flip_h || c.flip_v;
         let need_title = |c: &ProgramClip| !c.title_text.is_empty();
@@ -10181,6 +11111,7 @@ impl ProgramPlayer {
             && need_coloradj(a) == need_coloradj(b)
             && need_3point(a) == need_3point(b)
             && need_blur(a) == need_blur(b)
+            && need_creative_blur(a) == need_creative_blur(b)
             && need_rotate(a) == need_rotate(b)
             && need_flip(a) == need_flip(b)
             && need_title(a) == need_title(b)
@@ -10219,6 +11150,7 @@ impl ProgramPlayer {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             sigma.abs() > f64::EPSILON
         };
+        let need_creative_blur = clip.blur > f64::EPSILON;
         let need_rotate = clip.rotate.rem_euclid(360) != 0;
         let need_flip = clip.flip_h || clip.flip_v;
         let need_title = !clip.title_text.is_empty();
@@ -10260,6 +11192,7 @@ impl ProgramPlayer {
             && coloradj_ok
             && threepoint_ok
             && (!need_blur || slot.gaussianblur.is_some())
+            && (!need_creative_blur || slot.squareblur.is_some())
             && (!need_rotate || slot.videoflip_rotate.is_some())
             && (!need_flip || slot.videoflip_flip.is_some())
             && (!need_title || slot.textoverlay.is_some())
@@ -10418,10 +11351,15 @@ impl ProgramPlayer {
             tp.set_property("white-color-b", p.white_b as f32);
         }
 
-        // Gaussianblur
+        // Gaussianblur (denoise/sharpness)
         if let Some(ref gb) = slot.gaussianblur {
             let sigma = (clip.denoise * 4.0 - clip.sharpness * 6.0).clamp(-20.0, 20.0);
             gb.set_property("sigma", sigma);
+        }
+
+        // Squareblur (creative blur)
+        if let Some(ref sb) = slot.squareblur {
+            sb.set_property("kernel-size", clip.blur.clamp(0.0, 1.0));
         }
 
         // Chroma key alpha element
@@ -10456,7 +11394,7 @@ impl ProgramPlayer {
 
         // Title overlay
         {
-            let (_, proc_h) = self.preview_processing_dimensions();
+            let (pw, ph) = self.preview_processing_dimensions();
             Self::apply_title_to_slot(
                 slot,
                 &clip.title_text,
@@ -10464,7 +11402,8 @@ impl ProgramPlayer {
                 clip.title_color,
                 clip.title_x,
                 clip.title_y,
-                proc_h,
+                self.project_height,
+                pw, ph,
             );
             Self::apply_title_style_to_slot(slot, clip);
         }
@@ -10823,11 +11762,17 @@ impl ProgramPlayer {
         }
         true
     }
-
     fn build_live_video_slots_for_active(&mut self, active: &[usize], was_playing: bool) {
         self.prerender_active_clips = None;
         self.current_prerender_segment_key = None;
         for (zorder_offset, &clip_idx) in active.iter().enumerate() {
+            // Adjustment layers have no compositor slot — effects are applied
+            // by the post-compositor probe.
+            if clip_idx < self.clips.len() && self.clips[clip_idx].is_adjustment {
+                continue;
+            }
+            // Audio-only clips are handled by the separate audio pipeline,
+            // not the main compositor pipeline (to avoid clock interference).
             // Compute transition-enter offset for clips entering via transition overlap.
             let trans_offset = self.transition_enter_offset_for_clip(clip_idx);
             // When experimental preview optimizations are enabled, use lightweight
@@ -10859,6 +11804,8 @@ impl ProgramPlayer {
 
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
+        self.timeline_pos_ns = timeline_pos;
+        self.sync_adjustment_timeline_pos();
         let rebuild_started = Instant::now();
         let was_playing = self.state == PlayerState::Playing;
         let had_existing_slots = !self.slots.is_empty();
@@ -11014,6 +11961,8 @@ impl ProgramPlayer {
         if !used_prerender {
             self.build_live_video_slots_for_active(&active, was_playing);
         }
+        // Rebuild the post-compositor adjustment effects chain if needed.
+        self.rebuild_adjustment_effects_chain();
         let t_build = rebuild_started.elapsed().as_millis();
 
         // Transition pipeline to Paused so decoders preroll and can accept seeks.
@@ -11133,7 +12082,7 @@ impl ProgramPlayer {
             self.clip_seek_flags()
         };
         for slot in &self.slots {
-            let clip = &self.clips[slot.clip_idx];
+            let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
             if was_playing {
                 let ok = Self::seek_slot_decoder_with_retry(
                     slot,
@@ -11433,15 +12382,397 @@ impl ProgramPlayer {
                 }
             }
         }
+        // Poll multi-audio pipeline bus for level messages.
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            if let Some(bus) = mp.bus() {
+                while let Some(msg) = bus.pop() {
+                    if let gstreamer::MessageView::Element(e) = msg.view() {
+                        if let Some(s) = e.structure() {
+                            if s.name() == "level" {
+                                if let Ok(peak) = s.get::<glib::ValueArray>("peak") {
+                                    let vals = peak.as_slice();
+                                    let l = vals
+                                        .first()
+                                        .and_then(|v| v.get::<f64>().ok())
+                                        .unwrap_or(-60.0);
+                                    let r =
+                                        vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
+                                    self.push_master_peak(l, r);
+                                    // Route level to the specific track using the
+                                    // element name (e.g. "audiolevel_track3" → track 3).
+                                    if let Some(src) = msg.src() {
+                                        let name = src.name().to_string();
+                                        if let Some(idx_str) = name.strip_prefix("audiolevel_track") {
+                                            if let Ok(ti) = idx_str.parse::<usize>() {
+                                                self.push_track_peak(ti, l, r);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         eos
     }
 
     // ── Audio-only pipeline ────────────────────────────────────────────────
 
+    /// Build a separate pipeline that mixes multiple audio-track clips.
+    /// This pipeline is independent from the main compositor pipeline to
+    /// avoid clock interference that causes video stuttering.
+    fn rebuild_audio_multi_pipeline(&mut self, active: &[usize], timeline_pos_ns: u64) {
+        if active == self.audio_multi_active && self.audio_multi_pipeline.is_some() {
+            return; // No change needed.
+        }
+        self.teardown_audio_multi_pipeline();
+
+        // Build pipeline string: multiple uridecodebin sources → audiomixer → autoaudiosink
+        let pipeline = gst::Pipeline::builder().name("audio-multi").build();
+        let mixer = match gst::ElementFactory::make("audiomixer")
+            .property("ignore-inactive-pads", true)
+            .build()
+        {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let conv_out = match gst::ElementFactory::make("audioconvert").build() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let sink = match gst::ElementFactory::make("autoaudiosink").build() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if pipeline.add_many([&mixer, &conv_out, &sink]).is_err() {
+            return;
+        }
+        if gst::Element::link_many([&mixer, &conv_out, &sink]).is_err() {
+            return;
+        }
+
+        // Collect per-clip info before building (to avoid borrow issues).
+        struct AudioBranch {
+            source_path: String,
+            source_in_ns: u64,
+            source_out_ns: u64,
+            timeline_start_ns: u64,
+            volume: f64,
+            pan: f64,
+            track_index: usize,
+            audio_clip_idx: usize,
+        }
+        let branches: Vec<AudioBranch> = active
+            .iter()
+            .filter_map(|&aidx| {
+                let clip = self.audio_clips.get(aidx)?;
+                if !std::path::Path::new(&clip.source_path).exists() {
+                    return None;
+                }
+                let vol = if self.master_muted {
+                    0.0
+                } else {
+                    clip.volume_at_timeline_ns(timeline_pos_ns).clamp(0.0, 4.0)
+                };
+                let pan = clip.pan_at_timeline_ns(timeline_pos_ns);
+                Some(AudioBranch {
+                    source_path: clip.source_path.clone(),
+                    source_in_ns: clip.source_in_ns,
+                    source_out_ns: clip.source_out_ns,
+                    timeline_start_ns: clip.timeline_start_ns,
+                    volume: vol,
+                    pan,
+                    track_index: clip.track_index,
+                    audio_clip_idx: aidx,
+                })
+            })
+            .collect();
+
+        let mut decoders: Vec<(gst::Element, AudioBranch)> = Vec::new();
+
+        for branch in branches {
+            let uri = format!("file://{}", branch.source_path);
+            let audio_caps = gst::Caps::builder("audio/x-raw").build();
+            let decoder = match gst::ElementFactory::make("uridecodebin")
+                .property("uri", &uri)
+                .property("caps", &audio_caps)
+                .property("use-buffering", false)
+                .build()
+            {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let ac = match gst::ElementFactory::make("audioconvert").build() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // Optional EQ for this branch (skip when flat).
+            let clip_ref = self.audio_clips.get(active[decoders.len()]);
+            let needs_eq = clip_ref.map(|c| c.eq_bands.iter().any(|b| b.gain.abs() > 0.001)).unwrap_or(false);
+            let eq_elem = if needs_eq {
+                gst::ElementFactory::make("equalizer-nbands")
+                    .property("num-bands", 3u32)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
+            if let (Some(ref eq), Some(clip)) = (&eq_elem, clip_ref) {
+                for i in 0..3u32 {
+                    let b = &clip.eq_bands[i as usize];
+                    eq_set_band(eq, i, b.freq, b.gain, b.q);
+                }
+            }
+            // Optional Rubberband pitch shifter (LADSPA).
+            let needs_pitch = clip_ref
+                .map(|c| c.pitch_shift_semitones.abs() > 0.001)
+                .unwrap_or(false);
+            let rb_elem = if needs_pitch {
+                gst::ElementFactory::make(
+                    "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-stereo",
+                )
+                .build()
+                .ok()
+                .or_else(|| {
+                    // Fallback: try mono variant if stereo isn't available.
+                    gst::ElementFactory::make(
+                        "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-mono",
+                    )
+                    .build()
+                    .ok()
+                })
+            } else {
+                None
+            };
+            if let (Some(ref rb), Some(clip)) = (&rb_elem, clip_ref) {
+                let semitones = clip.pitch_shift_semitones.clamp(-12.0, 12.0);
+                let whole = semitones.trunc() as i32;
+                let cents = ((semitones - semitones.trunc()) * 100.0) as f32;
+                rb.set_property("semitones", whole);
+                rb.set_property("cents", cents);
+            }
+
+            // Name the level element with the track index so bus messages
+            // can be routed to the correct per-track meter.
+            let lv = gst::ElementFactory::make("level")
+                .name(&format!("audiolevel_track{}", branch.track_index))
+                .property("post-messages", true)
+                .property("interval", 50_000_000u64)
+                .build()
+                .ok();
+            // Create LADSPA effect elements for this clip.
+            let ladspa_elems: Vec<gst::Element> = clip_ref
+                .map(|c| &c.ladspa_effects)
+                .into_iter()
+                .flatten()
+                .filter(|e| e.enabled)
+                .filter_map(|effect| {
+                    let elem = gst::ElementFactory::make(&effect.gst_element_name)
+                        .build()
+                        .ok()?;
+                    for (param, &val) in &effect.params {
+                        if elem.find_property(param).is_some() {
+                            elem.set_property_from_str(param, &val.to_string());
+                        }
+                    }
+                    Some(elem)
+                })
+                .collect();
+
+            let mut elems: Vec<&gst::Element> = vec![&decoder, &ac];
+            if let Some(ref eq) = eq_elem {
+                elems.push(eq);
+            }
+            if let Some(ref rb) = rb_elem {
+                elems.push(rb);
+            }
+            for le in &ladspa_elems {
+                elems.push(le);
+            }
+            if let Some(ref l) = lv {
+                elems.push(l);
+            }
+            if pipeline.add_many(elems.iter().copied()).is_err() {
+                continue;
+            }
+            // Audiopanorama for pan control (skip when centered).
+            let pan_elem = if branch.pan.abs() > 0.001 {
+                gst::ElementFactory::make("audiopanorama").build().ok()
+            } else {
+                None
+            };
+            if let Some(ref p) = pan_elem {
+                elems.push(p);
+                // Re-add to pipeline (elems already added above won't duplicate).
+                let _ = pipeline.add(p);
+            }
+
+            // Link: audioconvert → [equalizer] → [rubberband] → [audiopanorama] → [level] → audiomixer pad.
+            let mut link_src_pad = ac.static_pad("src");
+            if let Some(ref eq) = eq_elem {
+                if let (Some(prev), Some(eq_sink)) = (link_src_pad.clone(), eq.static_pad("sink")) {
+                    let _ = prev.link(&eq_sink);
+                    link_src_pad = eq.static_pad("src");
+                }
+            }
+            if let Some(ref rb) = rb_elem {
+                if let (Some(prev), Some(rb_sink)) = (link_src_pad.clone(), rb.static_pad("sink")) {
+                    let _ = prev.link(&rb_sink);
+                    link_src_pad = rb.static_pad("src");
+                }
+            }
+            for le in &ladspa_elems {
+                if let (Some(prev), Some(le_sink)) = (link_src_pad.clone(), le.static_pad("sink")) {
+                    let _ = prev.link(&le_sink);
+                    link_src_pad = le.static_pad("src");
+                }
+            }
+            if let Some(ref p) = pan_elem {
+                p.set_property("panorama", branch.pan as f32);
+                if let (Some(prev), Some(p_sink)) = (link_src_pad.clone(), p.static_pad("sink")) {
+                    let _ = prev.link(&p_sink);
+                    link_src_pad = p.static_pad("src");
+                }
+            }
+            if let Some(ref l) = lv {
+                if let (Some(prev), Some(lv_sink)) = (link_src_pad.clone(), l.static_pad("sink")) {
+                    let _ = prev.link(&lv_sink);
+                    link_src_pad = l.static_pad("src");
+                }
+            }
+
+            if let Some(pad) = mixer.request_pad_simple("sink_%u") {
+                pad.set_property("volume", branch.volume);
+                if let Some(src) = link_src_pad {
+                    let _ = src.link(&pad);
+                }
+                // Store pad for live volume updates during playback.
+                self.audio_multi_pads.insert(branch.audio_clip_idx, pad);
+            }
+            // Store pan element for live pan updates.
+            if let Some(p) = pan_elem.clone() {
+                self.audio_multi_pan_elems.insert(branch.audio_clip_idx, p);
+            }
+
+            let ac_for_cb = ac.clone();
+            decoder.connect_pad_added(move |_, pad| {
+                let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
+                if let Some(caps) = caps {
+                    if let Some(s) = caps.structure(0) {
+                        if s.name().starts_with("audio/") {
+                            if let Some(sink) = ac_for_cb.static_pad("sink") {
+                                if !sink.is_linked() {
+                                    let _ = pad.link(&sink);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            let _ = ac.sync_state_with_parent();
+            if let Some(ref eq) = eq_elem {
+                let _ = eq.sync_state_with_parent();
+            }
+            if let Some(ref rb) = rb_elem {
+                let _ = rb.sync_state_with_parent();
+            }
+            for le in &ladspa_elems {
+                let _ = le.sync_state_with_parent();
+            }
+            if let Some(ref p) = pan_elem {
+                let _ = p.sync_state_with_parent();
+            }
+            if let Some(ref l) = lv {
+                let _ = l.sync_state_with_parent();
+            }
+            let _ = decoder.sync_state_with_parent();
+            decoders.push((decoder, branch));
+        }
+
+        // Preroll the pipeline, then seek each decoder to its correct source position.
+        // Slave the multi-audio pipeline to the main pipeline's clock so
+        // audio and video stay in sync over long playback sessions.
+        if let Some(clock) = self.pipeline.clock() {
+            pipeline.use_clock(Some(&clock));
+        }
+        if let Some(base) = self.pipeline.base_time() {
+            pipeline.set_base_time(base);
+        }
+
+        let _ = pipeline.set_state(gst::State::Paused);
+        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(2)));
+
+        for (decoder, branch) in &decoders {
+            // Compute the source position this clip should play from.
+            let source_pos_ns = if timeline_pos_ns >= branch.timeline_start_ns {
+                branch.source_in_ns
+                    + (timeline_pos_ns - branch.timeline_start_ns)
+                        .min(branch.source_out_ns.saturating_sub(branch.source_in_ns))
+            } else {
+                branch.source_in_ns
+            };
+            let _ = decoder.seek(
+                1.0,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(source_pos_ns),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(branch.source_out_ns),
+            );
+        }
+
+        // Only start playing if the program player is actually in playback mode.
+        if self.state == PlayerState::Playing {
+            let _ = pipeline.set_state(gst::State::Playing);
+        }
+
+        log::info!(
+            "audio_multi_pipeline: built with {} sources at pos={:.2}s",
+            active.len(),
+            timeline_pos_ns as f64 / 1e9
+        );
+
+        self.audio_multi_active = active.to_vec();
+        self.audio_multi_pipeline = Some(pipeline);
+    }
+
+    fn teardown_audio_multi_pipeline(&mut self) {
+        if let Some(ref pipeline) = self.audio_multi_pipeline {
+            let _ = pipeline.set_state(gst::State::Null);
+            let _ = pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+        }
+        self.audio_multi_pipeline = None;
+        self.audio_multi_active.clear();
+        self.audio_multi_pads.clear();
+        self.audio_multi_pan_elems.clear();
+    }
+
     fn audio_clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
-        self.audio_clips.iter().position(|c| {
-            timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
-        })
+        // Return the highest-track-index active clip (topmost audio track wins
+        // when the single-playbin pipeline can only play one source at a time).
+        self.audio_clips
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+            })
+            .max_by_key(|(_, c)| c.track_index)
+            .map(|(i, _)| i)
+    }
+
+    /// Return all audio clip indices active at the given position.
+    fn audio_clips_active_at(&self, timeline_pos_ns: u64) -> Vec<usize> {
+        self.audio_clips
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn load_audio_clip_idx(&mut self, idx: usize, timeline_pos_ns: u64) {
@@ -11467,6 +12798,8 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Ready);
             self.audio_pipeline.set_property("uri", &uri);
             let _ = self.audio_pipeline.set_state(gst::State::Paused);
+            // Wait for Paused so pads are linked before seeking.
+            let _ = self.audio_pipeline.state(Some(gst::ClockTime::from_seconds(2)));
             let _ = self.audio_pipeline.seek(
                 clip.seek_rate(),
                 clip.audio_seek_flags(),
@@ -11540,45 +12873,75 @@ impl ProgramPlayer {
         let reverse_video_audio = self.reverse_video_clip_at_for_audio(timeline_pos_ns);
         self.apply_reverse_video_main_audio_ducking(reverse_video_audio);
         if let Some(idx) = reverse_video_audio {
+            self.teardown_audio_multi_pipeline();
             self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
-        } else if let Some(idx) = self.audio_clip_at(timeline_pos_ns) {
-            self.load_audio_clip_idx(idx, timeline_pos_ns);
         } else {
-            let _ = self.audio_pipeline.set_state(gst::State::Ready);
-            self.audio_current_source = None;
+            let active = self.audio_clips_active_at(timeline_pos_ns);
+            if !active.is_empty() {
+                // Use the multi-clip mixer for all audio-track playback (1 or more clips).
+                let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                self.audio_current_source = None;
+                self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
+            } else {
+                self.teardown_audio_multi_pipeline();
+                let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                self.audio_current_source = None;
+            }
         }
         self.sync_preview_audio_levels(timeline_pos_ns);
     }
 
     fn poll_audio(&mut self, timeline_pos_ns: u64) {
-        let wanted = if let Some(idx) = self.reverse_video_clip_at_for_audio(timeline_pos_ns) {
-            Some(AudioCurrentSource::ReverseVideoClip(idx))
-        } else {
-            self.audio_clip_at(timeline_pos_ns)
-                .map(AudioCurrentSource::AudioClip)
-        };
-        self.apply_reverse_video_main_audio_ducking(match wanted {
-            Some(AudioCurrentSource::ReverseVideoClip(idx)) => Some(idx),
-            _ => None,
-        });
-        if wanted != self.audio_current_source {
-            match wanted {
-                Some(AudioCurrentSource::AudioClip(idx)) => {
-                    self.load_audio_clip_idx(idx, timeline_pos_ns);
-                    let _ = self.audio_pipeline.set_state(gst::State::Playing);
-                }
-                Some(AudioCurrentSource::ReverseVideoClip(idx)) => {
-                    self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
-                    let _ = self.audio_pipeline.set_state(gst::State::Playing);
-                }
-                None => {
-                    let _ = self.audio_pipeline.set_state(gst::State::Ready);
-                    self.audio_current_source = None;
-                }
+        // Check for reverse-video audio first (special case using the playbin).
+        let reverse_idx = self.reverse_video_clip_at_for_audio(timeline_pos_ns);
+        self.apply_reverse_video_main_audio_ducking(reverse_idx);
+        if let Some(idx) = reverse_idx {
+            // Reverse video audio uses the playbin path.
+            if self.audio_multi_pipeline.is_some() {
+                self.teardown_audio_multi_pipeline();
             }
-        } else if let Some(source) = self.audio_current_source {
-            let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
-            self.set_audio_pipeline_volume(volume);
+            let wanted = AudioCurrentSource::ReverseVideoClip(idx);
+            if self.audio_current_source != Some(wanted) {
+                self.load_reverse_video_audio_clip_idx(idx, timeline_pos_ns);
+                let _ = self.audio_pipeline.set_state(gst::State::Playing);
+            }
+            self.sync_preview_audio_levels(timeline_pos_ns);
+            return;
+        }
+
+        // All audio-track clips use the multi-clip mixer pipeline.
+        let active = self.audio_clips_active_at(timeline_pos_ns);
+        if !active.is_empty() {
+            // Ensure the playbin isn't playing stale audio.
+            if self.audio_current_source.is_some() {
+                let _ = self.audio_pipeline.set_state(gst::State::Ready);
+                self.audio_current_source = None;
+            }
+            if active != self.audio_multi_active {
+                self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
+            }
+            self.sync_preview_audio_levels(timeline_pos_ns);
+            return;
+        }
+
+        // No audio clips active — tear down multi pipeline if present.
+        if self.audio_multi_pipeline.is_some() {
+            self.teardown_audio_multi_pipeline();
+        }
+        if self.audio_current_source.is_some() {
+            let _ = self.audio_pipeline.set_state(gst::State::Ready);
+            self.audio_current_source = None;
+        }
+        self.sync_preview_audio_levels(timeline_pos_ns);
+
+        // Legacy: keep the volume sync for any leftover audio state.
+        if let Some(source) = self.audio_current_source {
+            if self.master_muted {
+                self.set_audio_pipeline_volume(0.0);
+            } else {
+                let volume = self.effective_audio_source_volume(source, timeline_pos_ns);
+                self.set_audio_pipeline_volume(volume);
+            }
         }
         self.sync_preview_audio_levels(timeline_pos_ns);
     }
@@ -11697,6 +13060,44 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
     use std::sync::Mutex;
+
+    #[test]
+    fn test_equalizer_nbands_child_proxy_ffi() {
+        use gst::prelude::*;
+        gst::init().unwrap();
+        let eq = gst::ElementFactory::make("equalizer-nbands")
+            .property("num-bands", 3u32)
+            .build()
+            .expect("equalizer-nbands element should be available");
+        assert_eq!(eq.property::<u32>("num-bands"), 3);
+        // Verify child_proxy_get_child works
+        for i in 0..3u32 {
+            let band = super::child_proxy_get_child(&eq, i)
+                .unwrap_or_else(|| panic!("child_proxy band {i} should not be null"));
+            band.set_property("freq", 1000.0_f64);
+            band.set_property("gain", 6.0_f64);
+            band.set_property("bandwidth", 500.0_f64);
+            let gain: f64 = band.property("gain");
+            assert!((gain - 6.0).abs() < 0.001, "gain should be 6.0, got {gain}");
+        }
+        // Verify eq_set_band helper
+        let bands = crate::model::clip::default_eq_bands();
+        for (i, b) in bands.iter().enumerate() {
+            super::eq_set_band(&eq, i as u32, b.freq, b.gain, b.q);
+        }
+        // Set a non-zero gain via helper and read it back
+        super::eq_set_band(&eq, 0, 200.0, 10.0, 1.0);
+        let band0 = super::child_proxy_get_child(&eq, 0).unwrap();
+        let g: f64 = band0.property("gain");
+        let f: f64 = band0.property("freq");
+        assert!((g - 10.0).abs() < 0.001, "band0 gain should be 10.0, got {g}");
+        assert!((f - 200.0).abs() < 0.001, "band0 freq should be 200.0, got {f}");
+        // Test eq_set_band_gain
+        super::eq_set_band_gain(&eq, 0, -12.0);
+        let g2: f64 = band0.property("gain");
+        assert!((g2 - (-12.0)).abs() < 0.001, "band0 gain should be -12.0, got {g2}");
+    }
+
     fn make_clip() -> ProgramClip {
         ProgramClip {
             id: "c1".to_string(),
@@ -11716,10 +13117,18 @@ mod tests {
             tint_keyframes: Vec::new(),
             denoise: 0.0,
             sharpness: 0.0,
+            blur: 0.0,
+            blur_keyframes: Vec::new(),
+            vidstab_enabled: false,
+            vidstab_smoothing: 0.5,
             volume: 1.0,
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
+            eq_bands: crate::model::clip::default_eq_bands(),
+            eq_low_gain_keyframes: Vec::new(),
+            eq_mid_gain_keyframes: Vec::new(),
+            eq_high_gain_keyframes: Vec::new(),
             rotate_keyframes: Vec::new(),
             crop_left_keyframes: Vec::new(),
             crop_right_keyframes: Vec::new(),
@@ -11739,15 +13148,21 @@ mod tests {
             title_y: 0.0,
             speed: 1.0,
             speed_keyframes: Vec::new(),
+            slow_motion_interp: crate::model::clip::SlowMotionInterp::Off,
             reverse: false,
             freeze_frame: false,
             freeze_frame_source_ns: None,
             freeze_frame_hold_duration_ns: None,
             is_audio_only: false,
+            duck: false,
+            duck_amount_db: -6.0,
+            ladspa_effects: Vec::new(),
+            pitch_shift_semitones: 0.0,
+            pitch_preserve: false,
             track_index: 0,
             transition_after: String::new(),
             transition_after_ns: 0,
-            lut_path: None,
+            lut_paths: Vec::new(),
             scale: 1.0,
             scale_keyframes: Vec::new(),
             opacity: 1.0,
@@ -11770,6 +13185,7 @@ mod tests {
             shadows_tint: 0.0,
             has_audio: true,
             is_image: false,
+            is_adjustment: false,
             chroma_key_enabled: false,
             chroma_key_color: 0x00FF00,
             chroma_key_tolerance: 0.3,
@@ -11789,6 +13205,7 @@ mod tests {
             title_clip_bg_color: 0,
             title_secondary_text: String::new(),
             is_title: false,
+            anamorphic_desqueeze: 1.0,
         }
     }
 
@@ -11966,7 +13383,7 @@ mod tests {
             clip.id
         );
         std::fs::write(&lut_path, "LUT_3D_SIZE 2\n0 0 0\n1 1 1\n").expect("write LUT test file");
-        clip.lut_path = Some(lut_path.clone());
+        clip.lut_paths = vec![lut_path.clone()];
         let with_original = ProgramPlayer::prerender_build_lut_filter(&clip, false);
         let with_proxy = ProgramPlayer::prerender_build_lut_filter(&clip, true);
         assert!(with_original.contains("lut3d="));
@@ -12424,6 +13841,7 @@ mod tests {
             compositor_pad: None,
             audio_mixer_pad: None,
             audio_conv: None,
+            audio_equalizer: None,
             audio_panorama: None,
             audio_level: None,
             videobalance: if has_videobalance { identity() } else { None },
@@ -12434,6 +13852,7 @@ mod tests {
                 None
             },
             gaussianblur: if has_gaussianblur { identity() } else { None },
+            squareblur: None, // no squareblur in test slots
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: if has_imagefreeze { identity() } else { None },

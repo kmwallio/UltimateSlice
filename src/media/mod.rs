@@ -1,4 +1,6 @@
 pub mod audio_sync;
+pub mod ladspa_registry;
+pub mod voiceover;
 pub mod bg_removal_cache;
 pub mod color_match;
 pub mod cube_lut;

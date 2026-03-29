@@ -45,14 +45,29 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 
 ---
 
-## Denoise & Sharpness
+## Denoise / Sharpness / Blur
 
-Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (export).
+Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp`/`boxblur` (export).
 
 | Slider | Range | Default | Effect |
 |---|---|---|---|
 | **Denoise** | 0.0 → 1.0 | 0.0 | Gaussian blur strength (noise reduction) |
 | **Sharpness** | −1.0 → 1.0 | 0.0 | Negative = soften, positive = sharpen |
+| **Blur** | 0.0 → 1.0 | 0.0 | Creative blur (censoring, depth-of-field, background defocus). Preview via gaussianblur, export via boxblur. Supports keyframe animation. |
+
+## Stabilization
+
+Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass workflow). When **proxy mode is enabled**, stabilization is baked into the proxy transcode so the effect is visible in the Program Monitor preview. Without proxies, stabilization is applied on export only.
+
+| Control | Type | Default | Effect |
+|---|---|---|---|
+| **Enable** | Checkbox | Off | Toggle stabilization for this clip |
+| **Smoothing** | 0.0 → 1.0 | 0.5 | Higher = smoother (less shake) but may crop edges. Maps to vidstab shakiness (1–10) for analysis and smoothing (1–30) for transform |
+
+- Pass 1 (analysis): `vidstabdetect` runs during export to detect motion vectors
+- Pass 2 (transform): `vidstabtransform` applies stabilizing corrections with post-sharpening (`unsharp`) to compensate for slight softening
+- If ffmpeg lacks libvidstab, stabilization is silently skipped
+- Persists in FCPXML via `us:vidstab-enabled` and `us:vidstab-smoothing` vendor attributes
 
 ---
 
@@ -62,6 +77,12 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 |---|---|---|---|
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
+
+### Normalize Audio
+
+The **Normalize...** button (next to the volume slider) analyzes the clip's loudness using FFmpeg's EBU R128 measurement and adjusts the volume to hit **-14 LUFS** (YouTube/streaming standard). After analysis, the measured loudness is displayed (e.g., "−18.3 LUFS") and the volume slider updates to the normalized value. Fully undo-able.
+
+MCP tool: `normalize_clip_audio` supports `mode` (`lufs` or `peak`) and `target_level` (e.g., `-14.0` for LUFS, `0.0` for peak dBFS).
 
 ### Audio keyframes (phase 1)
 
@@ -75,6 +96,21 @@ Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp` (ex
 - **◆ Aud KF** indicator shows when the playhead is on an audio keyframe.
 - **⏺ Record Keyframes** toggle in the audio section is synced with the transform section toggle — activating either enables animation mode for both sections. When active, volume and pan slider changes auto-create keyframes at the playhead position.
 
+### Equalizer (3-band parametric)
+
+Collapsible section inside Audio with three bands: **Low**, **Mid**, **High**.
+
+| Parameter | Range | Defaults (Low / Mid / High) |
+|---|---|---|
+| **Freq (Hz)** | 20–1000 / 200–8000 / 1000–20000 | 200 / 1000 / 5000 |
+| **Gain (dB)** | −24 → +24 | 0 (flat) |
+| **Q** | 0.1 → 10.0 | 1.0 |
+
+- Preview: GStreamer `equalizer-nbands` element (real-time parameter updates).
+- Export: chained FFmpeg `equalizer` filters with per-band frequency, bandwidth, and gain.
+- Gain per band supports keyframe animation via `eq_low_gain`, `eq_mid_gain`, `eq_high_gain` keyframe properties.
+- MCP tool: `set_clip_eq` with 9 optional parameters.
+
 ---
 
 ## Video Transform
@@ -84,6 +120,7 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | Control | Options | Description |
 |---|---|---|
 | **Blend Mode** | Dropdown | Compositing blend mode: Normal (default), Multiply, Screen, Overlay, Add, Difference, Soft Light. Preview blends against real lower layers via compositor probe; export uses ffmpeg `blend` filter |
+| **Anamorphic Desqueeze** | Dropdown | Lens desqueeze factor: None (1.0x), 1.33x, 1.5x, 1.8x, 2.0x. Applies non-square pixel aspect ratio for anamorphic footage |
 | **Scale** | 0.1 → 4.0 | Zoom factor. 1.0 = normal, 2.0 = 2× zoom in (crops), 0.5 = half size (letterbox/pillarbox) |
 | **Opacity** | 0.0 → 1.0 | Layer blend amount. 1.0 = fully opaque, 0.0 = fully transparent |
 | **Position X** | −1.0 → 1.0 | Horizontal offset within the frame. 0.0 = center, −1.0 = full left, 1.0 = full right |
@@ -196,8 +233,18 @@ Controls the playback speed and direction of the clip. Changing speed adjusts th
 |---|---|---|---|
 | **Speed Multiplier** | 0.25× → 4.0× | 1.0× | 0.5× = slow-motion, 2.0× = fast-forward |
 | **Reverse** | Checkbox | Off | Play the clip backwards (reversed frame order) |
+| **Slow-Motion Interpolation** | Off / Frame Blending / Optical Flow | Off | Synthesizes intermediate frames on export for smooth slow-motion (speed < 1.0 only) |
 
 Marks at **½×**, **1×**, **2×** for quick snapping.
+
+### Slow-motion interpolation
+
+When a clip's speed is below 1.0, the default behavior repeats frames to fill the longer duration, which can look stuttery. The **Slow-Motion Interpolation** dropdown offers two alternatives:
+
+- **Frame Blending** — fast temporal averaging (`minterpolate mi_mode=blend`). Produces a slight motion-blur effect between frames.
+- **Optical Flow** — motion-compensated interpolation (`minterpolate mi_mode=mci`). Slower to encode but produces the smoothest result by synthesizing true intermediate frames.
+
+This is an **export-only** feature — `minterpolate` is too CPU-intensive for real-time preview. Background prerender includes it when enabled. The setting has no effect when speed is 1.0 or higher. Persists via FCPXML.
 
 ### Variable speed ramps
 
@@ -242,7 +289,7 @@ You can copy all color grading values from one clip and paste them onto another.
 | **Ctrl+Alt+C** | Copy color grade from the selected clip |
 | **Ctrl+Alt+V** | Paste color grade onto the selected clip |
 
-**Copied properties:** Brightness, Contrast, Saturation, Temperature, Tint, Exposure, Black Point, Shadows, Midtones, Highlights, per-tone Warmth/Tint, Denoise, Sharpness, and LUT path. Static values only — keyframe animations are not included.
+**Copied properties:** Brightness, Contrast, Saturation, Temperature, Tint, Exposure, Black Point, Shadows, Midtones, Highlights, per-tone Warmth/Tint, Denoise, Sharpness, Blur, and LUT path. Static values only — keyframe animations are not included.
 
 > **Tip:** Use **Ctrl+Shift+V** (Paste Attributes) to copy *all* clip attributes including audio, transforms, and effects. Use **Ctrl+Alt+V** (Paste Color Grade) when you only want to match the color look between clips.
 
@@ -325,7 +372,7 @@ Each applied effect row shows:
 
 ### Preview & Export
 
-- **Preview**: GStreamer `frei0r-filter-*` elements inserted after the built-in color pipeline (brightness/contrast/saturation/LUT/temperature/tint/grading/denoise/sharpness) and before chroma key. Parameter changes update live without pipeline rebuild.
+- **Preview**: GStreamer `frei0r-filter-*` elements inserted after the built-in color pipeline (brightness/contrast/saturation/LUT/temperature/tint/grading/denoise/sharpness/blur) and before chroma key. Parameter changes update live without pipeline rebuild.
 - **Export**: FFmpeg `frei0r=filter_name={name}:filter_params={p1}|{p2}|...` filter chain. Parameters are passed in registry-defined order.
 
 ### MCP tools
