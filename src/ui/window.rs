@@ -2140,7 +2140,7 @@ fn auto_preview_divisor(
     }
 }
 
-fn proxy_scale_for_mode(
+pub(crate) fn proxy_scale_for_mode(
     mode: &crate::ui_state::ProxyMode,
 ) -> crate::media::proxy_cache::ProxyScale {
     match mode {
@@ -5685,7 +5685,13 @@ pub fn build_window(
 
     // ── Media browser ─────────────────────────────────────────────────────
     let (browser, clear_media_selection, force_rebuild_media_browser) =
-        media_browser::build_media_browser(library.clone(), on_source_selected.clone(), on_relink_media_gui.clone());
+        media_browser::build_media_browser(
+            library.clone(),
+            on_source_selected.clone(),
+            on_relink_media_gui.clone(),
+            proxy_cache.clone(),
+            preferences_state.clone(),
+        );
 
     // Now that both on_source_selected and force_rebuild_media_browser exist,
     // fill in the real relink implementation.

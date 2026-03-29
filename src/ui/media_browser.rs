@@ -1,6 +1,8 @@
 use crate::media::probe_cache::MediaProbeCache;
+use crate::media::proxy_cache::{ProxyCache, ProxyScale};
 use crate::media::thumb_cache::ThumbnailCache;
 use crate::model::media_library::MediaItem;
+use crate::ui_state::PreferencesState;
 use gdk4;
 use gio;
 use glib;
@@ -19,10 +21,14 @@ const THUMB_H: i32 = 90;
 ///
 /// * `library`            – shared list of imported media items
 /// * `on_source_selected` – called when the user selects a library item (path, duration_ns)
+/// * `proxy_cache`        – shared proxy cache; used to pre-generate proxies when proxy mode is on
+/// * `preferences_state`  – shared preferences; read for proxy mode/scale
 pub fn build_media_browser(
     library: Rc<RefCell<Vec<MediaItem>>>,
     on_source_selected: Rc<dyn Fn(String, u64)>,
     on_relink_media: Rc<dyn Fn()>,
+    proxy_cache: Rc<RefCell<ProxyCache>>,
+    preferences_state: Rc<RefCell<PreferencesState>>,
 ) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
     let vbox = GBox::new(Orientation::Vertical, 4);
     vbox.set_width_request(240);
@@ -153,6 +159,8 @@ pub fn build_media_browser(
         let flow_box = flow_box.clone();
         let thumb_cache = thumb_cache.clone();
         let probe_cache = probe_cache.clone();
+        let proxy_cache = proxy_cache.clone();
+        let preferences_state = preferences_state.clone();
         let flow_box_paths = flow_box_paths.clone();
         let empty_hint = empty_hint.clone();
         let import_btn = import_btn.clone();
@@ -196,6 +204,34 @@ pub fn build_media_browser(
                             .unwrap_or(false);
                         if !audio_only {
                             tc.request(path, 0);
+                        }
+                    }
+                }
+                // Pre-generate proxies for newly-probed video items when proxy mode is
+                // enabled.  This ensures proxies are ready before the user selects the
+                // clip in the browser; without this, the first preview always uses the
+                // full-res original because proxy generation only starts on selection.
+                {
+                    let prefs = preferences_state.borrow();
+                    let proxy_mode = prefs.proxy_mode.clone();
+                    if proxy_mode.is_enabled() {
+                        let scale = crate::ui::window::proxy_scale_for_mode(&proxy_mode);
+                        let lib = library.borrow();
+                        let mut pc = proxy_cache.borrow_mut();
+                        for path in &resolved {
+                            let audio_only = lib
+                                .iter()
+                                .find(|i| i.source_path == *path)
+                                .map(|i| i.is_audio_only)
+                                .unwrap_or(false);
+                            let is_image = lib
+                                .iter()
+                                .find(|i| i.source_path == *path)
+                                .map(|i| i.is_image)
+                                .unwrap_or(false);
+                            if !audio_only && !is_image {
+                                pc.request(path, scale.clone(), None);
+                            }
                         }
                     }
                 }
