@@ -91,64 +91,56 @@ impl Player {
                 .expect("gtk4paintablesink 'paintable' property must implement gdk4::Paintable")
         };
 
-        // Wrap paintablesink in a small bin that enforces even (2×2-multiple)
-        // dimensions immediately before the sink.
+        // Choose video-sink: try glsinkbin (GPU-resident frames) first, fall back to
+        // safe_sink (CPU path) if glsinkbin is not installed.
         //
-        // Background: gtk4paintablesink re-negotiates its preferred display size
-        // when the GTK widget receives its final allocation (typically a few
-        // seconds after the pipeline starts).  playbin / playsink honours this
-        // by rescaling the video to the widget's physical-pixel dimensions (e.g.
-        // 1114×477 at 2× HiDPI).  If that height is odd, GDK's I420 texture
-        // builder asserts "image size is not a multiple of the block size 2x2"
-        // and the sink crashes.
+        // Why glsinkbin works here (unlike the earlier attempt that was reverted):
+        // Source preview is always in SoftwareFiltered mode — avdec_h264/h265 outputs
+        // system-memory frames, never DMABuf.  The "glsinkbin bypasses video-filter via
+        // DMABuf caps negotiation" problem only arises when BOTH (a) the decoder can
+        // output DMABuf (VA-API) AND (b) the sink accepts DMABuf (glsinkbin).  With
+        // a software decoder neither condition holds, so video-filter is applied normally.
         //
-        // The bin is: videoconvertscale → capsfilter(even-dims) → [glsinkbin →] gtk4paintablesink
+        // With glsinkbin as direct video-sink:
+        //   • Frames become GdkGLTexture → GTK4 renders with zero CPU→GPU copy per frame.
+        //   • GL textures have no 2×2 alignment requirement, so the even-dims safety net
+        //     (safe_sink) is not needed.  We enforce even dims in the prescale capsfilter
+        //     instead (step=2 IntRange), which is earlier and cheaper.
         //
-        // glsinkbin (when available) is placed AFTER the videoconvertscale so it
-        // receives system-memory frames rather than DMABuf.  This avoids the
-        // "glsinkbin bypasses video-filter via DMABuf caps negotiation" problem —
-        // the videoconvertscale acts as a DMABuf barrier.  With glsinkbin, frames
-        // are uploaded to a GL texture once (on the GStreamer clock thread) and
-        // GTK4 renders them as GdkGLTexture with zero CPU→GPU copy per frame.
-        // Without glsinkbin (fallback), gtk4paintablesink creates a GdkMemoryTexture
-        // which GTK4 must upload to the GPU on every rendered frame — much slower.
-        let (gl_video_sink, safe_sink) = {
-            let bin = gst::Bin::new();
-            let conv = gst::ElementFactory::make("videoconvertscale")
-                .build()
-                .expect("videoconvertscale must be available");
-            // Require even width and height (step=2) so I420/YUV420 frames
-            // are always a valid 2×2 block multiple for GDK texture creation.
-            // Use 65534 (= 32767×2) as the max — a safe even ceiling above any
-            // real display resolution.  i32::MAX is odd so it would fail the
-            // IntRange step validation: (max - min) % step must equal 0.
-            let caps = gst::Caps::builder("video/x-raw")
-                .field("width", gst::IntRange::<i32>::with_step(2, 65534, 2))
-                .field("height", gst::IntRange::<i32>::with_step(2, 65534, 2))
-                .build();
-            let even_caps = gst::ElementFactory::make("capsfilter")
-                .property("caps", &caps)
-                .build()
-                .expect("capsfilter must be available");
-            // Try to wrap gtk4paintablesink in glsinkbin for GPU-resident frames.
-            let gl_sink_opt = gst::ElementFactory::make("glsinkbin")
-                .property("sink", &paintablesink)
-                .build()
-                .ok();
-            let gl_video_sink_ref = gl_sink_opt.clone();
-            let final_sink: &gst::Element = gl_sink_opt
-                .as_ref()
-                .unwrap_or(&paintablesink);
-            bin.add_many([&conv, &even_caps, final_sink]).ok();
-            gst::Element::link_many([&conv, &even_caps, final_sink]).ok();
-            let sink_pad = conv.static_pad("sink").unwrap();
-            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
-                .ok();
-            (gl_video_sink_ref, bin.upcast::<gst::Element>())
+        // Fallback safe_sink: videoconvertscale → capsfilter(even-dims) → gtk4paintablesink.
+        // Used when glsinkbin is not installed.  Produces GdkMemoryTexture (CPU path).
+        let (video_sink, gl_video_sink) = match gst::ElementFactory::make("glsinkbin")
+            .property("sink", &paintablesink)
+            .build()
+        {
+            Ok(glbin) => {
+                log::info!("source preview: using glsinkbin (GPU path)");
+                (glbin.clone(), Some(glbin))
+            }
+            Err(_) => {
+                log::warn!("source preview: glsinkbin unavailable, using CPU safe_sink fallback");
+                let bin = gst::Bin::new();
+                let conv = gst::ElementFactory::make("videoconvertscale")
+                    .build()
+                    .expect("videoconvertscale must be available");
+                let caps = gst::Caps::builder("video/x-raw")
+                    .field("width", gst::IntRange::<i32>::with_step(2, 65534, 2))
+                    .field("height", gst::IntRange::<i32>::with_step(2, 65534, 2))
+                    .build();
+                let even_caps = gst::ElementFactory::make("capsfilter")
+                    .property("caps", &caps)
+                    .build()
+                    .expect("capsfilter must be available");
+                bin.add_many([&conv, &even_caps, &paintablesink]).ok();
+                gst::Element::link_many([&conv, &even_caps, &paintablesink]).ok();
+                let sink_pad = conv.static_pad("sink").unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                (bin.upcast::<gst::Element>(), None)
+            }
         };
 
         let pipeline = gst::ElementFactory::make("playbin")
-            .property("video-sink", &safe_sink)
+            .property("video-sink", &video_sink)
             .build()?;
         // Disable subtitle/text rendering and visualisations — not needed for
         // a source preview and saves decode work.  Use property_from_str so
@@ -230,24 +222,25 @@ impl Player {
                     "caps",
                     &gst::Caps::builder("video/x-raw")
                         .field("format", "I420")
-                        .field("width", gst::IntRange::new(1i32, 320))
-                        .field("height", gst::IntRange::new(1i32, 180))
+                        .field("width", gst::IntRange::<i32>::with_step(2, 320, 2))
+                        .field("height", gst::IntRange::<i32>::with_step(2, 180, 2))
                         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                         .build(),
                 )
                 .build()
                 .expect("capsfilter must be available");
 
-            // Leaky queue after prescale: decouples the expensive
-            // decode+prescale thread from the effects chain so that slow
-            // decode at 5.3K doesn't stall the sink/main thread.
-            // Start leaky so the decoder can run ahead; set_playback_smoothness_policy
-            // tunes depth and leak mode at runtime.
+            // Non-leaky queue after prescale: decouples decode from the effects
+            // chain.  For file playback a non-leaky queue is always better than
+            // leaky — the decoder pauses when full and resumes without dropping
+            // frames.  A leaky queue actively drops frames on transient jitter,
+            // which is the primary cause of choppy source-preview playback.
+            // Depth and leak mode are tuned at runtime by set_playback_smoothness_policy.
             let prescale_queue = gst::ElementFactory::make("queue")
-                .property("max-size-buffers", 4u32)
+                .property("max-size-buffers", 8u32)
                 .property("max-size-bytes", 0u32)
                 .property("max-size-time", 0u64)
-                .property_from_str("leaky", "downstream")
+                .property_from_str("leaky", "no")
                 .build()
                 .expect("queue must be available");
 
@@ -652,12 +645,16 @@ impl Player {
     /// clamped to a minimum of 160×90 and maximum of 1920×1080.
     pub fn set_prescale_resolution(&self, width: i32, height: i32) {
         if let Some(ref caps_elem) = self.prescale_caps {
-            let w = width.clamp(160, 1920);
-            let h = height.clamp(90, 1080);
+            // Round down to even so the prescale always outputs even-dimension
+            // I420 frames.  GL textures (glsinkbin path) have no alignment
+            // requirement but the capsfilter uses step=2 IntRange, so the max
+            // value must also be even.
+            let w = (width.clamp(160, 1920) / 2) * 2;
+            let h = (height.clamp(90, 1080) / 2) * 2;
             let caps = gst::Caps::builder("video/x-raw")
                 .field("format", "I420")
-                .field("width", gst::IntRange::new(1i32, w))
-                .field("height", gst::IntRange::new(1i32, h))
+                .field("width", gst::IntRange::<i32>::with_step(2, w.max(2), 2))
+                .field("height", gst::IntRange::<i32>::with_step(2, h.max(2), 2))
                 .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                 .build();
             caps_elem.set_property("caps", &caps);
@@ -765,14 +762,13 @@ impl Player {
             crate::ui_state::PlaybackPriority::Accurate
         );
         if let Some(ref q) = self.prescale_queue {
-            if playing {
-                if accurate_mode {
-                    q.set_property("max-size-buffers", 6u32);
-                    q.set_property_from_str("leaky", "no");
-                } else {
-                    q.set_property("max-size-buffers", 2u32);
-                    q.set_property_from_str("leaky", "downstream");
-                }
+            // For file playback, a non-leaky queue allows the decoder to run
+            // ahead without dropping frames.  Leaky queues drop frames on any
+            // transient slowdown and are the primary cause of choppy playback.
+            // Use a larger buffer in accurate mode so scrubbing doesn't stall.
+            if playing && accurate_mode {
+                q.set_property("max-size-buffers", 6u32);
+                q.set_property_from_str("leaky", "no");
             } else {
                 q.set_property("max-size-buffers", 8u32);
                 q.set_property_from_str("leaky", "no");
@@ -801,7 +797,10 @@ impl Player {
             sink.set_property("qos", playing);
         }
         if sink.find_property("max-lateness").is_some() {
-            let max_lateness_ns: i64 = if playing { 20_000_000 } else { -1 };
+            // 40ms tolerance — same as the program player.  20ms was too tight:
+            // at 30fps a frame is 33ms, so a 21ms-late frame would be dropped
+            // even though it arrived well within the inter-frame interval.
+            let max_lateness_ns: i64 = if playing { 40_000_000 } else { -1 };
             sink.set_property("max-lateness", max_lateness_ns);
         }
     }
