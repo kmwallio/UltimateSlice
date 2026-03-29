@@ -31,8 +31,11 @@ Use the toolbar linked split control **Export | ▼** (styled as one control):
 | **QuickTime** | `.mov` | ProRes, H.264 |
 | **WebM** | `.webm` | VP9, AV1 |
 | **Matroska** | `.mkv` | Any codec |
+| **Animated GIF** | `.gif` | Animation, social media (no audio) |
 
 MP4 and MOV containers get `-movflags +faststart` for web streaming compatibility.
+
+> **Animated GIF**: Selecting this container hides the Video Codec and Audio settings (not applicable). A **GIF Frame Rate** spinner (1–30 fps, default 15) appears instead. GIF export uses FFmpeg's two-step `palettegen` → `paletteuse` pipeline with Bayer dithering for optimal color quality. The output loops infinitely (`-loop 0`). GIF files are significantly larger than video formats — use short clips or reduce the frame rate for smaller files.
 
 ### Output Resolution
 
@@ -97,7 +100,7 @@ Use the **Preset** row in the Export dialog to save and reuse named export confi
 - **Delete** removes the selected preset.
 - Selecting a preset immediately applies its codec/container/resolution/CRF/audio settings.
 - **(Custom)** means no saved preset is currently selected.
-- New installs (and older UI-state files missing export preset config) start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, and **WebM VP9 1080p**.
+- New installs (and older UI-state files missing export preset config) start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, **WebM VP9 1080p**, and **Animated GIF**.
 
 Preset data is stored in local UI state and persists across app restarts.
 
@@ -117,6 +120,40 @@ After choosing the output file, an export progress dialog shows:
 - Progress is capped at **99%** while encoding/muxing is still running, then switches to **100%** only after export completes successfully.
 - A status label showing the output path.
 - A **Close** button (available once export completes or errors).
+
+## Batch Export Queue
+
+Queue multiple exports to run sequentially — useful for overnight renders, social media variants, or outputting the same project in multiple formats.
+
+### Adding jobs to the queue
+
+In the Export Settings dialog, configure your options as usual, then click **Add to Queue** instead of **Export Now**. A file chooser prompts for the output path. The job is added to the queue immediately (no export starts yet).
+
+### Opening the queue
+
+Click the **▼** dropdown next to the Export button and choose **Export Queue…**.
+
+### Queue window
+
+| Control | Description |
+|---|---|
+| Job list | Shows each job: file name, output path, and status badge |
+| **✕** (per job) | Remove a Pending or Error job |
+| **Run Queue** | Export all Pending jobs in order (background thread, live status updates) |
+| **Clear Done/Error** | Remove all completed and failed jobs from the list |
+
+Status badges: `Pending` → `Running…` → `Done ✓` or `Error ✗`
+
+The queue persists across application restarts.
+
+### MCP queue tools
+
+| Tool | Description |
+|---|---|
+| `add_to_export_queue` | Add an export job; optionally specify `preset_name` |
+| `list_export_queue` | List all jobs with status |
+| `clear_export_queue` | Remove jobs; optional `status_filter`: `"all"`, `"done"`, `"error"` |
+| `run_export_queue` | Run all pending jobs and block until complete |
 
 ## Speed-Changed Clips
 

@@ -273,6 +273,7 @@ pub enum ExportContainer {
     Mov,
     WebM,
     Mkv,
+    Gif,
 }
 
 impl Default for ExportContainer {
@@ -288,6 +289,7 @@ impl ExportContainer {
             Container::Mov => Self::Mov,
             Container::WebM => Self::WebM,
             Container::Mkv => Self::Mkv,
+            Container::Gif => Self::Gif,
         }
     }
 
@@ -297,6 +299,7 @@ impl ExportContainer {
             Self::Mov => Container::Mov,
             Self::WebM => Container::WebM,
             Self::Mkv => Container::Mkv,
+            Self::Gif => Container::Gif,
         }
     }
 }
@@ -355,6 +358,9 @@ pub struct ExportPreset {
     pub audio_codec: ExportAudioCodec,
     #[serde(default = "default_export_audio_bitrate_kbps")]
     pub audio_bitrate_kbps: u32,
+    /// Frames per second override for GIF output. None = use project frame rate.
+    #[serde(default)]
+    pub gif_fps: Option<u32>,
 }
 
 impl ExportPreset {
@@ -368,6 +374,7 @@ impl ExportPreset {
             crf: options.crf,
             audio_codec: ExportAudioCodec::from_audio_codec(&options.audio_codec),
             audio_bitrate_kbps: options.audio_bitrate_kbps,
+            gif_fps: options.gif_fps,
         }
     }
 
@@ -380,6 +387,7 @@ impl ExportPreset {
             crf: self.crf,
             audio_codec: self.audio_codec.to_audio_codec(),
             audio_bitrate_kbps: self.audio_bitrate_kbps,
+            gif_fps: self.gif_fps,
         }
     }
 }
@@ -477,6 +485,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 23,
             audio_codec: ExportAudioCodec::Aac,
             audio_bitrate_kbps: 192,
+            gif_fps: None,
         },
         ExportPreset {
             name: "High Quality H.264 4K".to_string(),
@@ -487,6 +496,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 18,
             audio_codec: ExportAudioCodec::Aac,
             audio_bitrate_kbps: 320,
+            gif_fps: None,
         },
         ExportPreset {
             name: "Archive ProRes 4K".to_string(),
@@ -497,6 +507,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 18,
             audio_codec: ExportAudioCodec::Pcm,
             audio_bitrate_kbps: 320,
+            gif_fps: None,
         },
         ExportPreset {
             name: "WebM VP9 1080p".to_string(),
@@ -507,8 +518,84 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 30,
             audio_codec: ExportAudioCodec::Opus,
             audio_bitrate_kbps: 160,
+            gif_fps: None,
+        },
+        ExportPreset {
+            name: "Animated GIF".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Gif,
+            output_width: 640,
+            output_height: 0,
+            crf: 23,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 128,
+            gif_fps: Some(15),
         },
     ]
+}
+
+// ── Batch Export Queue ─────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportQueueJobStatus {
+    Pending,
+    Running,
+    Done,
+    Error,
+}
+
+impl Default for ExportQueueJobStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportQueueJob {
+    /// Unique identifier for the job (random hex string).
+    pub id: String,
+    /// Human-readable label derived from the output file name.
+    pub label: String,
+    /// Absolute path for the output file.
+    pub output_path: String,
+    /// Export settings snapshot.
+    pub options: ExportPreset,
+    #[serde(default)]
+    pub status: ExportQueueJobStatus,
+    /// Error message when status == Error.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl ExportQueueJob {
+    /// Create a new pending job, deriving the label from the output file name.
+    pub fn new(output_path: impl Into<String>, options: ExportPreset) -> Self {
+        let output_path = output_path.into();
+        let label = std::path::Path::new(&output_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&output_path)
+            .to_string();
+        let id = format!("{:x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos());
+        Self {
+            id,
+            label,
+            output_path,
+            options,
+            status: ExportQueueJobStatus::Pending,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExportQueueState {
+    #[serde(default)]
+    pub jobs: Vec<ExportQueueJob>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -641,6 +728,8 @@ struct UiState {
     preferences: PreferencesState,
     #[serde(default)]
     export_presets: ExportPresetsState,
+    #[serde(default)]
+    export_queue: ExportQueueState,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -705,6 +794,16 @@ pub fn save_export_presets_state(state: &ExportPresetsState) {
     save_ui_state(&ui);
 }
 
+pub fn load_export_queue_state() -> ExportQueueState {
+    load_ui_state().export_queue
+}
+
+pub fn save_export_queue_state(state: &ExportQueueState) {
+    let mut ui = load_ui_state();
+    ui.export_queue = state.clone();
+    save_ui_state(&ui);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +818,7 @@ mod tests {
             crf: 18,
             audio_codec: AudioCodec::Opus,
             audio_bitrate_kbps: 256,
+            gif_fps: None,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");
@@ -771,6 +871,7 @@ mod tests {
                 "High Quality H.264 4K",
                 "Archive ProRes 4K",
                 "WebM VP9 1080p",
+                "Animated GIF",
             ]
         );
         assert!(parsed.export_presets.last_used_preset.is_none());

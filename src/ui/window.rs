@@ -10280,6 +10280,7 @@ fn handle_mcp_command(
                             crate::media::export::Container::Mov => "mov",
                             crate::media::export::Container::WebM => "webm",
                             crate::media::export::Container::Mkv => "mkv",
+                            crate::media::export::Container::Gif => "gif",
                         },
                         "output_width": options.output_width,
                         "output_height": options.output_height,
@@ -10328,9 +10329,10 @@ fn handle_mcp_command(
                 "mov" => crate::media::export::Container::Mov,
                 "webm" => crate::media::export::Container::WebM,
                 "mkv" => crate::media::export::Container::Mkv,
+                "gif" => crate::media::export::Container::Gif,
                 _ => {
                     reply
-                        .send(json!({"success": false, "error": "container must be one of: mp4, mov, webm, mkv"}))
+                        .send(json!({"success": false, "error": "container must be one of: mp4, mov, webm, mkv, gif"}))
                         .ok();
                     return;
                 }
@@ -10361,6 +10363,7 @@ fn handle_mcp_command(
                 crf,
                 audio_codec,
                 audio_bitrate_kbps,
+                gif_fps: None,
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(
@@ -11568,6 +11571,134 @@ fn handle_mcp_command(
                 pp.flush_compositor_for_title_update();
             }
             reply.send(json!({"success": found})).ok();
+        }
+        McpCommand::AddToExportQueue {
+            output_path,
+            preset_name,
+            reply,
+        } => {
+            if output_path.is_empty() {
+                reply.send(json!({"success": false, "error": "output_path is required"})).ok();
+                return;
+            }
+            let preset = if let Some(name) = preset_name {
+                let state = crate::ui_state::load_export_presets_state();
+                if let Some(p) = state.presets.iter().find(|p| p.name.eq_ignore_ascii_case(&name)) {
+                    p.clone()
+                } else {
+                    reply.send(json!({"success": false, "error": format!("preset '{name}' not found")})).ok();
+                    return;
+                }
+            } else {
+                let state = crate::ui_state::load_export_presets_state();
+                let last = state.last_used_preset.clone();
+                state.presets.into_iter()
+                    .find(|p| Some(&p.name) == last.as_ref())
+                    .or_else(|| {
+                        let defaults = crate::ui_state::load_export_presets_state().presets;
+                        defaults.into_iter().next()
+                    })
+                    .unwrap_or_else(|| crate::ui_state::ExportPreset {
+                        name: "default".to_string(),
+                        video_codec: crate::ui_state::ExportVideoCodec::H264,
+                        container: crate::ui_state::ExportContainer::Mp4,
+                        output_width: 1920,
+                        output_height: 1080,
+                        crf: 23,
+                        audio_codec: crate::ui_state::ExportAudioCodec::Aac,
+                        audio_bitrate_kbps: 192,
+                        gif_fps: None,
+                    })
+            };
+            let job = crate::ui_state::ExportQueueJob::new(&output_path, preset);
+            let job_id = job.id.clone();
+            let job_label = job.label.clone();
+            let mut queue = crate::ui_state::load_export_queue_state();
+            queue.jobs.push(job);
+            crate::ui_state::save_export_queue_state(&queue);
+            reply.send(json!({"success": true, "id": job_id, "label": job_label})).ok();
+        }
+        McpCommand::ListExportQueue { reply } => {
+            let queue = crate::ui_state::load_export_queue_state();
+            let jobs: Vec<serde_json::Value> = queue.jobs.iter().map(|j| {
+                json!({
+                    "id": j.id,
+                    "label": j.label,
+                    "output_path": j.output_path,
+                    "status": format!("{:?}", j.status).to_lowercase(),
+                    "error": j.error
+                })
+            }).collect();
+            let count = jobs.len();
+            reply.send(json!({"jobs": jobs, "count": count})).ok();
+        }
+        McpCommand::ClearExportQueue { status_filter, reply } => {
+            let mut queue = crate::ui_state::load_export_queue_state();
+            let filter = status_filter.as_deref().unwrap_or("all");
+            let before = queue.jobs.len();
+            queue.jobs.retain(|j| match filter {
+                "done" => j.status != crate::ui_state::ExportQueueJobStatus::Done,
+                "error" => j.status != crate::ui_state::ExportQueueJobStatus::Error,
+                _ => false,  // "all" removes everything, so retain nothing
+            });
+            crate::ui_state::save_export_queue_state(&queue);
+            let removed = before - queue.jobs.len();
+            reply.send(json!({"success": true, "removed": removed})).ok();
+        }
+        McpCommand::RunExportQueue { reply } => {
+            let queue = crate::ui_state::load_export_queue_state();
+            let pending: Vec<crate::ui_state::ExportQueueJob> = queue.jobs.iter()
+                .filter(|j| j.status == crate::ui_state::ExportQueueJobStatus::Pending)
+                .cloned()
+                .collect();
+            if pending.is_empty() {
+                reply.send(json!({"success": true, "message": "No pending jobs.", "results": []})).ok();
+                return;
+            }
+            let proj_snapshot = project.borrow().clone();
+            let bg_paths = bg_removal_cache.borrow().paths.clone();
+            std::thread::spawn(move || {
+                let mut results = vec![];
+                for job in &pending {
+                    {
+                        let mut q = crate::ui_state::load_export_queue_state();
+                        if let Some(j) = q.jobs.iter_mut().find(|j| j.id == job.id) {
+                            j.status = crate::ui_state::ExportQueueJobStatus::Running;
+                        }
+                        crate::ui_state::save_export_queue_state(&q);
+                    }
+                    let opts = job.options.to_export_options();
+                    let (ptx, _prx) = std::sync::mpsc::channel::<crate::media::export::ExportProgress>();
+                    let export_result = crate::media::export::export_project(
+                        &proj_snapshot,
+                        &job.output_path,
+                        opts,
+                        None,
+                        &bg_paths,
+                        ptx,
+                    );
+                    let (new_status, err_msg) = match export_result {
+                        Ok(()) => (crate::ui_state::ExportQueueJobStatus::Done, None),
+                        Err(e) => (crate::ui_state::ExportQueueJobStatus::Error, Some(e.to_string())),
+                    };
+                    {
+                        let mut q = crate::ui_state::load_export_queue_state();
+                        if let Some(j) = q.jobs.iter_mut().find(|j| j.id == job.id) {
+                            j.status = new_status.clone();
+                            j.error = err_msg.clone();
+                        }
+                        crate::ui_state::save_export_queue_state(&q);
+                    }
+                    results.push(json!({
+                        "id": job.id,
+                        "label": job.label,
+                        "output_path": job.output_path,
+                        "status": format!("{:?}", new_status).to_lowercase(),
+                        "error": err_msg
+                    }));
+                }
+                reply.send(json!({"success": true, "results": results})).ok();
+            });
         }
     }
 }

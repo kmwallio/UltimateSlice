@@ -493,6 +493,22 @@ pub enum McpCommand {
         title_secondary_text: Option<String>,
         reply: SyncSender<Value>,
     },
+    AddToExportQueue {
+        output_path: String,
+        preset_name: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    ListExportQueue {
+        reply: SyncSender<Value>,
+    },
+    ClearExportQueue {
+        /// "all", "done", "error", or None (same as "all")
+        status_filter: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    RunExportQueue {
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

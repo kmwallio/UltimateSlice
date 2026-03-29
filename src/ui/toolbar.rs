@@ -6,7 +6,7 @@ use crate::model::media_library::MediaItem;
 use crate::model::project::{FrameRate, Project};
 use crate::recent;
 use crate::ui::timeline::{ActiveTool, TimelineState};
-use crate::ui_state::{self, ExportPreset, ExportPresetsState};
+use crate::ui_state::{self, ExportPreset, ExportPresetsState, ExportQueueJob};
 use gio;
 use glib;
 use gtk4::prelude::*;
@@ -68,6 +68,7 @@ fn container_from_selected(selected: u32) -> Container {
         1 => Container::Mov,
         2 => Container::WebM,
         3 => Container::Mkv,
+        4 => Container::Gif,
         _ => Container::Mp4,
     }
 }
@@ -78,6 +79,7 @@ fn selected_from_container(container: &Container) -> u32 {
         Container::Mov => 1,
         Container::WebM => 2,
         Container::Mkv => 3,
+        Container::Gif => 4,
     }
 }
 
@@ -129,16 +131,24 @@ fn collect_export_options(
     crf_slider: &gtk::Scale,
     ac_combo: &gtk::DropDown,
     ab_entry: &gtk::Entry,
+    gif_fps_spin: &gtk::SpinButton,
 ) -> ExportOptions {
     let (output_width, output_height) = output_resolution_from_selected(or_combo.selected());
+    let container = container_from_selected(ct_combo.selected());
+    let gif_fps = if container == Container::Gif {
+        Some(gif_fps_spin.value() as u32)
+    } else {
+        None
+    };
     ExportOptions {
         video_codec: video_codec_from_selected(vc_combo.selected()),
-        container: container_from_selected(ct_combo.selected()),
+        container,
         output_width,
         output_height,
         crf: crf_slider.value() as u32,
         audio_codec: audio_codec_from_selected(ac_combo.selected()),
         audio_bitrate_kbps: ab_entry.text().parse::<u32>().unwrap_or(192),
+        gif_fps,
     }
 }
 
@@ -150,6 +160,7 @@ fn apply_export_options(
     crf_slider: &gtk::Scale,
     ac_combo: &gtk::DropDown,
     ab_entry: &gtk::Entry,
+    gif_fps_spin: &gtk::SpinButton,
 ) {
     vc_combo.set_selected(selected_from_video_codec(&options.video_codec));
     ct_combo.set_selected(selected_from_container(&options.container));
@@ -160,6 +171,9 @@ fn apply_export_options(
     crf_slider.set_value(options.crf as f64);
     ac_combo.set_selected(selected_from_audio_codec(&options.audio_codec));
     ab_entry.set_text(&options.audio_bitrate_kbps.to_string());
+    if let Some(fps) = options.gif_fps {
+        gif_fps_spin.set_value(fps as f64);
+    }
 }
 
 fn refresh_preset_dropdown(
@@ -930,6 +944,7 @@ pub fn build_toolbar(
                 "QuickTime (.mov)",
                 "WebM (.webm)",
                 "Matroska (.mkv)",
+                "Animated GIF (.gif)",
             ]);
             ct_combo.set_selected(0);
             grid.attach(&ct_label, 0, 2, 1, 1);
@@ -949,7 +964,7 @@ pub fn build_toolbar(
             grid.attach(&or_label, 0, 3, 1, 1);
             grid.attach(&or_combo, 1, 3, 1, 1);
 
-            // CRF
+            // CRF (hidden for GIF)
             let crf_label = gtk::Label::new(Some("Quality (CRF):"));
             crf_label.set_halign(gtk::Align::End);
             let crf_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -965,7 +980,18 @@ pub fn build_toolbar(
             grid.attach(&crf_label, 0, 4, 1, 1);
             grid.attach(&crf_box, 1, 4, 1, 1);
 
-            // Audio codec
+            // GIF frame rate (shown only for GIF container)
+            let gif_fps_label = gtk::Label::new(Some("GIF Frame Rate:"));
+            gif_fps_label.set_halign(gtk::Align::End);
+            let gif_fps_spin = gtk::SpinButton::with_range(1.0, 30.0, 1.0);
+            gif_fps_spin.set_value(15.0);
+            gif_fps_spin.set_tooltip_text(Some("Frames per second for the animated GIF (lower = smaller file)"));
+            grid.attach(&gif_fps_label, 0, 5, 1, 1);
+            grid.attach(&gif_fps_spin, 1, 5, 1, 1);
+            gif_fps_label.set_visible(false);
+            gif_fps_spin.set_visible(false);
+
+            // Audio codec (hidden for GIF)
             let ac_label = gtk::Label::new(Some("Audio Codec:"));
             ac_label.set_halign(gtk::Align::End);
             let ac_combo = gtk::DropDown::from_strings(&[
@@ -975,17 +1001,45 @@ pub fn build_toolbar(
                 "PCM (uncompressed)",
             ]);
             ac_combo.set_selected(0);
-            grid.attach(&ac_label, 0, 5, 1, 1);
-            grid.attach(&ac_combo, 1, 5, 1, 1);
+            grid.attach(&ac_label, 0, 6, 1, 1);
+            grid.attach(&ac_combo, 1, 6, 1, 1);
 
-            // Audio bitrate
+            // Audio bitrate (hidden for GIF)
             let ab_label = gtk::Label::new(Some("Audio Bitrate:"));
             ab_label.set_halign(gtk::Align::End);
             let ab_entry = gtk::Entry::new();
             ab_entry.set_text("192");
             ab_entry.set_tooltip_text(Some("Audio bitrate in kbps (ignored for FLAC/PCM)"));
-            grid.attach(&ab_label, 0, 6, 1, 1);
-            grid.attach(&ab_entry, 1, 6, 1, 1);
+            grid.attach(&ab_label, 0, 7, 1, 1);
+            grid.attach(&ab_entry, 1, 7, 1, 1);
+
+            // Connect container selection to show/hide GIF-specific and audio rows
+            {
+                let gif_fps_label = gif_fps_label.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
+                let crf_label = crf_label.clone();
+                let crf_box = crf_box.clone();
+                let ac_label = ac_label.clone();
+                let ac_combo = ac_combo.clone();
+                let ab_label = ab_label.clone();
+                let ab_entry = ab_entry.clone();
+                let vc_label = vc_label.clone();
+                let vc_combo = vc_combo.clone();
+                ct_combo.connect_selected_notify(move |ct| {
+                    let is_gif = ct.selected() == 4;
+                    gif_fps_label.set_visible(is_gif);
+                    gif_fps_spin.set_visible(is_gif);
+                    // Hide video codec + CRF rows for GIF (GIF handles its own encoding)
+                    vc_label.set_visible(!is_gif);
+                    vc_combo.set_visible(!is_gif);
+                    crf_label.set_visible(!is_gif);
+                    crf_box.set_visible(!is_gif);
+                    ac_label.set_visible(!is_gif);
+                    ac_combo.set_visible(!is_gif);
+                    ab_label.set_visible(!is_gif);
+                    ab_entry.set_visible(!is_gif);
+                });
+            }
 
             {
                 let state = presets_state.borrow();
@@ -1004,6 +1058,7 @@ pub fn build_toolbar(
                             &crf_slider,
                             &ac_combo,
                             &ab_entry,
+                            &gif_fps_spin,
                         );
                     }
                 }
@@ -1020,6 +1075,7 @@ pub fn build_toolbar(
                 let crf_slider = crf_slider.clone();
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
                 let btn_update_preset = btn_update_preset.clone();
                 let btn_delete_preset = btn_delete_preset.clone();
                 preset_dropdown.connect_selected_notify(move |dropdown| {
@@ -1046,6 +1102,7 @@ pub fn build_toolbar(
                         &crf_slider,
                         &ac_combo,
                         &ab_entry,
+                        &gif_fps_spin,
                     );
                 });
             }
@@ -1059,6 +1116,7 @@ pub fn build_toolbar(
                 let crf_slider = crf_slider.clone();
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
                 btn_save_preset.connect_clicked(move |_| {
                     let dialog = gtk::Dialog::builder()
                         .title("Save Export Preset")
@@ -1079,6 +1137,7 @@ pub fn build_toolbar(
                         let crf_slider = crf_slider.clone();
                         let ac_combo = ac_combo.clone();
                         let ab_entry = ab_entry.clone();
+                        let gif_fps_spin = gif_fps_spin.clone();
                         move |d, resp| {
                             if resp == gtk::ResponseType::Accept {
                                 let name = entry.text().to_string();
@@ -1089,6 +1148,7 @@ pub fn build_toolbar(
                                     &crf_slider,
                                     &ac_combo,
                                     &ab_entry,
+                                    &gif_fps_spin,
                                 );
                                 let ok = {
                                     let mut state = presets_state.borrow_mut();
@@ -1127,6 +1187,7 @@ pub fn build_toolbar(
                 let crf_slider = crf_slider.clone();
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
                 btn_update_preset.connect_clicked(move |_| {
                     let selected = preset_dropdown.selected();
                     if selected == 0 {
@@ -1148,6 +1209,7 @@ pub fn build_toolbar(
                             &crf_slider,
                             &ac_combo,
                             &ab_entry,
+                            &gif_fps_spin,
                         );
                         let ok = state
                             .upsert_preset(ExportPreset::from_export_options(existing_name, &options))
@@ -1200,12 +1262,13 @@ pub fn build_toolbar(
 
             opt_dialog.content_area().append(&grid);
             opt_dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            opt_dialog.add_button("Add to Queue", gtk::ResponseType::Other(1));
             opt_dialog.add_button("Choose Output File…", gtk::ResponseType::Accept);
 
             let project = project.clone();
             let bg_removal_cache = bg_removal_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
-                if resp != gtk::ResponseType::Accept {
+                if resp == gtk::ResponseType::Cancel {
                     d.close();
                     return;
                 }
@@ -1217,6 +1280,7 @@ pub fn build_toolbar(
                     &crf_slider,
                     &ac_combo,
                     &ab_entry,
+                    &gif_fps_spin,
                 );
                 let mut state = presets_state.borrow_mut();
                 state.last_used_preset = if preset_dropdown.selected() > 0 {
@@ -1229,6 +1293,58 @@ pub fn build_toolbar(
                 };
                 ui_state::save_export_presets_state(&state);
                 let ext = options.container.extension();
+                drop(state);
+
+                // "Add to Queue" — prompt for output path then add to the queue without exporting
+                if resp == gtk::ResponseType::Other(1) {
+                    d.close();
+                    let file_dialog = gtk::FileDialog::new();
+                    file_dialog.set_title("Add to Export Queue — Choose Output File");
+                    file_dialog.set_initial_name(Some(&format!("export.{ext}")));
+                    let window: Option<gtk::Window> = None;
+                    let options_q = options.clone();
+                    file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let output = path.to_string_lossy().to_string();
+                                let preset = ExportPreset::from_export_options("(queued)", &options_q);
+                                let job = ExportQueueJob::new(&output, preset);
+                                let mut queue = ui_state::load_export_queue_state();
+                                queue.jobs.push(job);
+                                ui_state::save_export_queue_state(&queue);
+                                // Brief confirmation toast via a small notification window
+                                let note = gtk::Window::builder()
+                                    .title("Added to Queue")
+                                    .default_width(320)
+                                    .build();
+                                let lbl = gtk::Label::new(Some(&format!(
+                                    "Added to export queue:\n{}",
+                                    std::path::Path::new(&output)
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or(&output)
+                                )));
+                                lbl.set_margin_start(16);
+                                lbl.set_margin_end(16);
+                                lbl.set_margin_top(16);
+                                lbl.set_margin_bottom(16);
+                                note.set_child(Some(&lbl));
+                                note.present();
+                                let note_weak = note.downgrade();
+                                glib::timeout_add_local_once(
+                                    std::time::Duration::from_secs(2),
+                                    move || {
+                                        if let Some(w) = note_weak.upgrade() {
+                                            w.close();
+                                        }
+                                    },
+                                );
+                            }
+                        }
+                    });
+                    return;
+                }
+
                 d.close();
 
                 // Now open file-chooser for the output path
@@ -1595,6 +1711,30 @@ pub fn build_toolbar(
     export_pop_box.append(&btn_export_project_with_media);
     export_pop_box.append(&btn_export_frame);
     export_pop_box.append(&btn_restore_backup);
+
+    // Export Queue dialog entry
+    let btn_export_queue = gtk::Button::with_label("Export Queue…");
+    btn_export_queue.add_css_class("flat");
+    btn_export_queue.set_tooltip_text(Some("View and run the batch export queue"));
+    {
+        let export_pop_weak = export_pop.downgrade();
+        let project = project.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
+        btn_export_queue.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let dialog = crate::ui::export_queue::build_export_queue_dialog(
+                project.clone(),
+                bg_removal_cache.clone(),
+                window.as_ref(),
+            );
+            dialog.present();
+        });
+    }
+    export_pop_box.append(&btn_export_queue);
+
     export_pop.set_child(Some(&export_pop_box));
     export_pop.set_parent(&btn_export_more);
     {

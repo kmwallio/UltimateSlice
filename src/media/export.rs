@@ -42,6 +42,7 @@ pub enum Container {
     Mov,
     WebM,
     Mkv,
+    Gif,
 }
 
 impl Container {
@@ -51,6 +52,7 @@ impl Container {
             Container::Mov => "mov",
             Container::WebM => "webm",
             Container::Mkv => "mkv",
+            Container::Gif => "gif",
         }
     }
 }
@@ -67,6 +69,8 @@ pub struct ExportOptions {
     pub crf: u32,
     pub audio_codec: AudioCodec,
     pub audio_bitrate_kbps: u32,
+    /// Frames per second for GIF output (None = use project frame rate). Only used when container = Gif.
+    pub gif_fps: Option<u32>,
 }
 
 impl Default for ExportOptions {
@@ -79,6 +83,7 @@ impl Default for ExportOptions {
             crf: 23,
             audio_codec: AudioCodec::Aac,
             audio_bitrate_kbps: 192,
+            gif_fps: None,
         }
     }
 }
@@ -840,12 +845,29 @@ pub fn export_project(
         }
     }
 
+    // For GIF output, extend the filtergraph with palettegen + paletteuse and map [gifout].
+    // For all other containers, map [vout_label] directly.
+    let (filter, map_label) = if options.container == Container::Gif {
+        let fps_val = options
+            .gif_fps
+            .unwrap_or_else(|| project.frame_rate.as_f64().round().clamp(1.0, 30.0) as u32)
+            .clamp(1, 30);
+        let gif_filter = format!(
+            ";[{vout_label}]fps={fps_val},split[gifa][gifb];\
+             [gifa]palettegen=max_colors=256:stats_mode=full[gifp];\
+             [gifb][gifp]paletteuse=dither=bayer:bayer_scale=5[gifout]"
+        );
+        (filter + &gif_filter, "gifout".to_string())
+    } else {
+        (filter, vout_label)
+    };
+
     cmd.arg("-filter_complex")
         .arg(&filter)
         .arg("-map")
-        .arg(format!("[{vout_label}]"));
+        .arg(format!("[{map_label}]"));
 
-    if has_audio {
+    if has_audio && options.container != Container::Gif {
         cmd.arg("-map").arg("[aout]");
         match options.audio_codec {
             AudioCodec::Aac => {
@@ -869,45 +891,50 @@ pub fn export_project(
         }
     }
 
-    match options.video_codec {
-        VideoCodec::H264 => {
-            cmd.arg("-c:v")
-                .arg("libx264")
-                .arg("-crf")
-                .arg(options.crf.to_string())
-                .arg("-pix_fmt")
-                .arg("yuv420p");
-        }
-        VideoCodec::H265 => {
-            cmd.arg("-c:v")
-                .arg("libx265")
-                .arg("-crf")
-                .arg(options.crf.to_string())
-                .arg("-pix_fmt")
-                .arg("yuv420p");
-        }
-        VideoCodec::Vp9 => {
-            cmd.arg("-c:v")
-                .arg("libvpx-vp9")
-                .arg("-crf")
-                .arg(options.crf.to_string())
-                .arg("-b:v")
-                .arg("0")
-                .arg("-pix_fmt")
-                .arg("yuv420p");
-        }
-        VideoCodec::ProRes => {
-            cmd.arg("-c:v").arg("prores_ks").arg("-profile:v").arg("3");
-        }
-        VideoCodec::Av1 => {
-            cmd.arg("-c:v")
-                .arg("libaom-av1")
-                .arg("-crf")
-                .arg(options.crf.to_string())
-                .arg("-b:v")
-                .arg("0")
-                .arg("-pix_fmt")
-                .arg("yuv420p");
+    if options.container == Container::Gif {
+        // GIF container handles its own encoding; add -loop 0 for infinite loop
+        cmd.arg("-loop").arg("0");
+    } else {
+        match options.video_codec {
+            VideoCodec::H264 => {
+                cmd.arg("-c:v")
+                    .arg("libx264")
+                    .arg("-crf")
+                    .arg(options.crf.to_string())
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
+            VideoCodec::H265 => {
+                cmd.arg("-c:v")
+                    .arg("libx265")
+                    .arg("-crf")
+                    .arg(options.crf.to_string())
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
+            VideoCodec::Vp9 => {
+                cmd.arg("-c:v")
+                    .arg("libvpx-vp9")
+                    .arg("-crf")
+                    .arg(options.crf.to_string())
+                    .arg("-b:v")
+                    .arg("0")
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
+            VideoCodec::ProRes => {
+                cmd.arg("-c:v").arg("prores_ks").arg("-profile:v").arg("3");
+            }
+            VideoCodec::Av1 => {
+                cmd.arg("-c:v")
+                    .arg("libaom-av1")
+                    .arg("-crf")
+                    .arg(options.crf.to_string())
+                    .arg("-b:v")
+                    .arg("0")
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
         }
     }
 
@@ -2586,6 +2613,19 @@ fn estimate_export_total_bitrate_bps(
     out_w: u32,
     out_h: u32,
 ) -> u64 {
+    // GIF is a palette-indexed format with no audio; use a rough estimate
+    if options.container == Container::Gif {
+        let gif_fps = options
+            .gif_fps
+            .unwrap_or_else(|| project.frame_rate.as_f64().round().clamp(1.0, 30.0) as u32)
+            .clamp(1, 30) as f64;
+        let pixel_scale =
+            ((out_w.max(1) as f64 * out_h.max(1) as f64) / (640.0 * 480.0)).max(0.1);
+        // Approximate: ~20 kbps per 640×480 pixel at 15fps, scaled by resolution and fps
+        let gif_kbps = (20_000.0 * pixel_scale * (gif_fps / 15.0)).clamp(500.0, 20_000.0);
+        return (gif_kbps * 1_000.0) as u64;
+    }
+
     let fps = project.frame_rate.as_f64().clamp(1.0, 120.0);
     let pixel_scale = ((out_w.max(1) as f64 * out_h.max(1) as f64) / (1920.0 * 1080.0)).max(0.1);
     let fps_scale = (fps / 30.0).max(0.5);

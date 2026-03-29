@@ -1279,6 +1279,44 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_id"]
             }
+        },
+        {
+            "name": "add_to_export_queue",
+            "description": "Add an export job to the batch queue. Optionally load settings from a named preset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "output_path": { "type": "string", "description": "Full output file path (e.g. /home/user/output.gif)" },
+                    "preset_name": { "type": "string", "description": "Name of a saved export preset to use. If omitted, uses last-used preset." }
+                },
+                "required": ["output_path"]
+            }
+        },
+        {
+            "name": "list_export_queue",
+            "description": "List all jobs in the batch export queue with their current status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "clear_export_queue",
+            "description": "Remove jobs from the batch export queue. Use status_filter to only remove done or error jobs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "status_filter": { "type": "string", "description": "Which jobs to remove: 'all' (default), 'done', or 'error'" }
+                }
+            }
+        },
+        {
+            "name": "run_export_queue",
+            "description": "Run all pending jobs in the batch export queue sequentially. Blocks until complete.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
         }
     ]})
 }
@@ -1896,6 +1934,17 @@ fn dispatch_tool_payload(
             title_secondary_text: args["title_secondary_text"].as_str().map(String::from),
             reply: tx,
         },
+        "add_to_export_queue" => McpCommand::AddToExportQueue {
+            output_path: args["output_path"].as_str().unwrap_or("").to_string(),
+            preset_name: args["preset_name"].as_str().map(String::from),
+            reply: tx,
+        },
+        "list_export_queue" => McpCommand::ListExportQueue { reply: tx },
+        "clear_export_queue" => McpCommand::ClearExportQueue {
+            status_filter: args["status_filter"].as_str().map(String::from),
+            reply: tx,
+        },
+        "run_export_queue" => McpCommand::RunExportQueue { reply: tx },
 
         _ => {
             return Err(tool_error_payload(

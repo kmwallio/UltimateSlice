@@ -539,8 +539,8 @@ Tracking docs:
   - Audio codec: AAC, Opus, FLAC, PCM
   - Audio sample rate and channel layout (stereo / mono)
 - [x] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
-- [ ] ProRes / WebM / GIF export options
-- [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
+- [x] ProRes / WebM / GIF export options
+- [x] Batch export / render queue (queue multiple export jobs to run sequentially)
 - [x] Chapter markers in export (embed project markers as MP4/MKV chapter metadata via ffmpeg FFMETADATA)
 - [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
 - [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
