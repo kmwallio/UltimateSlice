@@ -102,16 +102,17 @@ impl Player {
         // builder asserts "image size is not a multiple of the block size 2x2"
         // and the sink crashes.
         //
-        // Wrapping paintablesink in a bin with a `videoconvertscale` followed by
-        // a capsfilter that requires even width/height ensures the last conversion
-        // step always rounds to a 2×2-safe size.  The `video-filter` prescale
-        // (≤640×360) is still applied upstream; this is just a safety net in case
-        // playsink reconfigures and bypasses it.
+        // The bin is: videoconvertscale → capsfilter(even-dims) → [glsinkbin →] gtk4paintablesink
         //
-        // Do NOT use glsinkbin: it advertises DMABuf sink caps and lets playbin
-        // route the decoder output directly to the sink, bypassing video-filter.
-        let gl_video_sink: Option<gst::Element> = None;
-        let safe_sink = {
+        // glsinkbin (when available) is placed AFTER the videoconvertscale so it
+        // receives system-memory frames rather than DMABuf.  This avoids the
+        // "glsinkbin bypasses video-filter via DMABuf caps negotiation" problem —
+        // the videoconvertscale acts as a DMABuf barrier.  With glsinkbin, frames
+        // are uploaded to a GL texture once (on the GStreamer clock thread) and
+        // GTK4 renders them as GdkGLTexture with zero CPU→GPU copy per frame.
+        // Without glsinkbin (fallback), gtk4paintablesink creates a GdkMemoryTexture
+        // which GTK4 must upload to the GPU on every rendered frame — much slower.
+        let (gl_video_sink, safe_sink) = {
             let bin = gst::Bin::new();
             let conv = gst::ElementFactory::make("videoconvertscale")
                 .build()
@@ -129,12 +130,21 @@ impl Player {
                 .property("caps", &caps)
                 .build()
                 .expect("capsfilter must be available");
-            bin.add_many([&conv, &even_caps, &paintablesink]).ok();
-            gst::Element::link_many([&conv, &even_caps, &paintablesink]).ok();
+            // Try to wrap gtk4paintablesink in glsinkbin for GPU-resident frames.
+            let gl_sink_opt = gst::ElementFactory::make("glsinkbin")
+                .property("sink", &paintablesink)
+                .build()
+                .ok();
+            let gl_video_sink_ref = gl_sink_opt.clone();
+            let final_sink: &gst::Element = gl_sink_opt
+                .as_ref()
+                .unwrap_or(&paintablesink);
+            bin.add_many([&conv, &even_caps, final_sink]).ok();
+            gst::Element::link_many([&conv, &even_caps, final_sink]).ok();
             let sink_pad = conv.static_pad("sink").unwrap();
             bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
                 .ok();
-            bin.upcast::<gst::Element>()
+            (gl_video_sink_ref, bin.upcast::<gst::Element>())
         };
 
         let pipeline = gst::ElementFactory::make("playbin")
