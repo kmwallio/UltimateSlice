@@ -144,46 +144,135 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     let uri = crate::media::thumbnail::path_to_uri(&source_path);
     let is_image = crate::model::clip::is_image_file(&source_path);
 
-    // For still images, insert imagefreeze so the single decoded frame becomes
-    // a continuous stream that pull_sample() can always grab from.
-    let freeze = if is_image { "imagefreeze ! " } else { "" };
-    // Connect the secondary (audio / metadata) pads from uridecodebin to a
-    // fakesink so the multiqueue never stalls waiting for a consumer.  Without
-    // this, a video+audio file blocks during PAUSED preroll because the audio
-    // pad is unlinked and the multiqueue fills up, starving the video path.
-    let pipeline_desc = format!(
-        "uridecodebin name=dec uri=\"{uri}\" \
-         dec. ! {freeze}videoconvert ! videoscale ! \
-         video/x-raw,format=RGBA,width={THUMB_W},height={THUMB_H} ! \
-         appsink name=sink sync=false max-buffers=1 drop=false \
-         dec. ! fakesink sync=false"
-    );
+    // Build the pipeline programmatically to reliably handle multi-stream files
+    // (e.g. GoPro HEVC which has video + audio + GPS metadata pads).
+    //
+    // parse::launch with `dec. ! videoconvert dec. ! fakesink` is ambiguous
+    // for uridecodebin's dynamic pads: depending on the GStreamer version the
+    // audio pad may steal the videoconvert slot and leave the video path
+    // unlinked, causing the multiqueue to fill and stall preroll forever.
+    //
+    // Instead: connect pad-added on uridecodebin and route video pads to the
+    // thumbnail chain, all other pads to a fakesink.  This guarantees every
+    // pad is consumed and preroll can always complete.
+    let pipeline = gst::Pipeline::new();
 
-    let guard = super::PipelineGuard(
-        gst::parse::launch(&pipeline_desc)?
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| anyhow::anyhow!("not a pipeline"))?,
-    );
-    let pipeline = &guard.0;
+    let uridec = gst::ElementFactory::make("uridecodebin")
+        .property("uri", &uri)
+        .build()
+        .map_err(|e| anyhow::anyhow!("uridecodebin: {e}"))?;
 
-    let appsink = pipeline
-        .by_name("sink")
-        .ok_or_else(|| anyhow::anyhow!("no appsink"))?
+    let convert = gst::ElementFactory::make("videoconvert")
+        .build()
+        .map_err(|e| anyhow::anyhow!("videoconvert: {e}"))?;
+
+    let maybe_freeze: Option<gst::Element> = if is_image {
+        Some(
+            gst::ElementFactory::make("imagefreeze")
+                .build()
+                .map_err(|e| anyhow::anyhow!("imagefreeze: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    let scale = gst::ElementFactory::make("videoscale")
+        .build()
+        .map_err(|e| anyhow::anyhow!("videoscale: {e}"))?;
+
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "RGBA")
+        .field("width", THUMB_W)
+        .field("height", THUMB_H)
+        .build();
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .property("caps", &caps)
+        .build()
+        .map_err(|e| anyhow::anyhow!("capsfilter: {e}"))?;
+
+    let appsink = gst::ElementFactory::make("appsink")
+        .property("sync", false)
+        .property("max-buffers", 1u32)
+        .property("drop", false)
+        .build()
+        .map_err(|e| anyhow::anyhow!("appsink: {e}"))?
         .downcast::<AppSink>()
-        .map_err(|_| anyhow::anyhow!("not appsink"))?;
+        .map_err(|_| anyhow::anyhow!("appsink downcast"))?;
 
-    if let Some(dec) = pipeline
-        .by_name("dec")
-        .and_then(|e| e.dynamic_cast::<gst::Bin>().ok())
+    // Add all static elements to the pipeline.
+    let mut static_elements: Vec<&gst::Element> = vec![&uridec, &convert, &scale, &capsfilter];
+    if let Some(ref f) = maybe_freeze {
+        static_elements.push(f);
+    }
+    static_elements.push(appsink.upcast_ref());
+    pipeline.add_many(static_elements.as_slice())?;
+
+    // Link the video processing chain:  [imagefreeze →] videoconvert → videoscale → capsfilter → appsink
+    if let Some(ref freeze) = maybe_freeze {
+        gst::Element::link_many(&[freeze, &convert, &scale, &capsfilter, appsink.upcast_ref()])?;
+    } else {
+        gst::Element::link_many(&[&convert, &scale, &capsfilter, appsink.upcast_ref()])?;
+    }
+
+    // When uridecodebin adds a decoded pad: route video to the thumbnail
+    // chain, everything else (audio, metadata) to a new fakesink.
     {
-        dec.connect_element_added(|_, element| {
-            tune_decoder_threads(element);
+        let pipeline_weak = pipeline.downgrade();
+        let convert_weak = convert.downgrade();
+        let freeze_weak = maybe_freeze.as_ref().map(|f| f.downgrade());
+        uridec.connect_pad_added(move |_src, pad| {
+            let Some(pipeline) = pipeline_weak.upgrade() else { return };
+            let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
+            let is_video = caps.as_ref().map_or(false, |c| {
+                c.iter().any(|s| s.name().starts_with("video/"))
+            });
+
+            if is_video {
+                // Link video pad into the thumbnail chain.
+                let sink_element = if let Some(ref fw) = freeze_weak {
+                    fw.upgrade()
+                } else {
+                    convert_weak.upgrade()
+                };
+                if let Some(sink) = sink_element {
+                    if let Some(sink_pad) = sink.static_pad("sink") {
+                        if !sink_pad.is_linked() {
+                            let _ = pad.link(&sink_pad);
+                        }
+                    }
+                }
+            } else {
+                // Drain audio / metadata pads to prevent multiqueue stall.
+                if let Ok(fakesink) = gst::ElementFactory::make("fakesink")
+                    .property("sync", false)
+                    .build()
+                {
+                    let _ = pipeline.add(&fakesink);
+                    let _ = fakesink.sync_state_with_parent();
+                    if let Some(sink_pad) = fakesink.static_pad("sink") {
+                        let _ = pad.link(&sink_pad);
+                    }
+                }
+            }
         });
     }
 
+    // Also tune any decoder elements for single-threaded, low-latency extraction.
+    {
+        let uridec_bin = uridec.dynamic_cast_ref::<gst::Bin>();
+        if let Some(bin) = uridec_bin {
+            bin.connect_element_added(|_, element| {
+                tune_decoder_threads(element);
+            });
+        }
+    }
+
+    let guard = super::PipelineGuard(pipeline.clone());
+    let pipeline = &guard.0;
+
     pipeline.set_state(gst::State::Paused)?;
-    // Wait for pre-roll (up to 5 s)
-    let _ = pipeline.state(Some(gst::ClockTime::from_seconds(5)));
+    // Wait for pre-roll (up to 10 s — 4K HEVC files can be slow to decode).
+    let _ = pipeline.state(Some(gst::ClockTime::from_seconds(10)));
 
     if time_ns > 0 {
         let _ = pipeline.seek_simple(

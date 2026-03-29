@@ -344,20 +344,15 @@ impl Player {
 
     pub fn stop(&self) -> Result<()> {
         self.set_playback_smoothness_policy(false);
-        // Seek to the beginning while the pipeline is still in an active state
-        // (PLAYING or PAUSED) so that pressing Play after Stop resumes from
-        // position 0.  Then go to PAUSED rather than READY:
+        // Go to PAUSED rather than READY to preserve the gtk4paintablesink GL
+        // context.  Going to READY tears down the GL texture; the subsequent
+        // READY→PAUSED→PLAYING transition cannot reconstruct it without a full
+        // GL preroll cycle, leaving video permanently black while audio plays.
         //
-        // Going to READY tears down the gtk4paintablesink GL texture / surface.
-        // When the user then presses Play, the pipeline transitions
-        // READY→PAUSED→PLAYING but the video sink cannot reconstruct its GL
-        // context without a full preroll cycle, resulting in audio playing with
-        // a permanently black video display.  Staying in PAUSED preserves the
-        // GL context and shows the first frame after the seek.
-        let _ = self.pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-            gst::ClockTime::from_seconds(0),
-        );
+        // We intentionally do NOT seek to position 0 here: calling seek_simple()
+        // in the same call-chain as safe_set_state creates an async race where
+        // the deferred set_state(Paused) timer can fire during a subsequent
+        // load() preroll and corrupt the playbin state machine.
         Self::safe_set_state(&self.pipeline, gst::State::Paused);
         *self.state.lock().unwrap() = PlayerState::Stopped;
         Ok(())
