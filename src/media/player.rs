@@ -171,14 +171,6 @@ impl Player {
             let prescale = gst::ElementFactory::make("videoconvertscale")
                 .build()
                 .expect("videoconvertscale must be available");
-            // Use nearest-neighbour scaling for speed — source preview quality is
-            // secondary to a smooth frame rate.  Bilinear (default) adds significant
-            // cost when downscaling from 5.3K to 640×360.
-            if prescale.find_property("method").is_some() {
-                prescale.set_property_from_str("method", "nearest-neighbour");
-            }
-            // Multi-threaded prescale: each CPU tile is converted in parallel,
-            // cutting the 5.3K→640×360 cost proportionally.
             // On macOS, vtdec (VideoToolbox) outputs IOSurface-backed NV12 buffers.
             // The parallelized task runner in videoconvertscale reads them on worker
             // threads after the backing memory may be released → SIGSEGV in
@@ -186,15 +178,6 @@ impl Player {
             #[cfg(target_os = "macos")]
             if prescale.find_property("n-threads").is_some() {
                 prescale.set_property("n-threads", 1u32);
-            }
-            #[cfg(not(target_os = "macos"))]
-            if prescale.find_property("n-threads").is_some() {
-                let threads = (std::thread::available_parallelism()
-                    .map(|n| n.get() as u32)
-                    .unwrap_or(4)
-                    / 2)
-                .clamp(2, 8);
-                prescale.set_property("n-threads", threads);
             }
             let prescale_caps = gst::ElementFactory::make("capsfilter")
                 .property(
