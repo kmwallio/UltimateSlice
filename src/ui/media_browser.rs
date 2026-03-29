@@ -475,16 +475,42 @@ fn make_grid_item(
                 cr.set_source_rgb(0.10, 0.08, 0.16);
                 cr.rectangle(0.0, 0.0, w as f64, h as f64);
                 cr.fill().ok();
-                // Draw a music-note glyph centred in the thumbnail area.
+
+                // Draw a music note (eighth note) using Cairo paths — reliable
+                // on all systems regardless of font glyph availability.
+                let cx = w as f64 / 2.0;
+                let cy = h as f64 / 2.0;
+                let s = (h.min(w) as f64 / 80.0).clamp(0.5, 1.4);
+
                 cr.set_source_rgb(0.60, 0.45, 0.88);
-                cr.set_font_size(36.0);
-                let note = "♪";
-                if let Ok(ext) = cr.text_extents(note) {
-                    let x = (w as f64 / 2.0) - (ext.width() / 2.0 + ext.x_bearing());
-                    let y = (h as f64 / 2.0) - (ext.height() / 2.0 + ext.y_bearing());
-                    cr.move_to(x, y);
-                    cr.show_text(note).ok();
-                }
+
+                // Notehead — filled ellipse, slightly tilted counter-clockwise.
+                cr.save().ok();
+                cr.translate(cx - 4.0 * s, cy + 10.0 * s);
+                cr.rotate(-0.38);
+                cr.scale(9.0 * s, 6.0 * s);
+                cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+                cr.restore().ok();
+                cr.fill().ok();
+
+                // Stem — from right edge of notehead, straight up.
+                let stem_x = cx + 5.0 * s;
+                let stem_bottom = cy + 10.5 * s;
+                let stem_top = cy - 16.0 * s;
+                cr.set_line_width(2.5 * s);
+                cr.move_to(stem_x, stem_bottom);
+                cr.line_to(stem_x, stem_top);
+                cr.stroke().ok();
+
+                // Flag — a bezier curve sweeping right from the top of the stem.
+                cr.move_to(stem_x, stem_top);
+                cr.curve_to(
+                    stem_x + 14.0 * s, stem_top + 4.0 * s,
+                    stem_x + 14.0 * s, stem_top + 14.0 * s,
+                    stem_x + 4.0 * s,  stem_top + 18.0 * s,
+                );
+                cr.stroke().ok();
+
                 return;
             }
             let cache = thumb_cache.borrow();
