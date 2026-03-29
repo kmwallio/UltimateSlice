@@ -353,6 +353,13 @@ impl Player {
         let _ = self
             .pipeline
             .state(Some(gst::ClockTime::from_mseconds(200)));
+        // Re-assert the video-filter after pipeline teardown.  Some playbin
+        // versions clear internal filter references during NULL state; also
+        // covers the case where apply_decode_mode() above early-returned
+        // (same mode as before) without calling set_property("video-filter").
+        if let Some(ref filter) = self.software_video_filter {
+            self.pipeline.set_property("video-filter", filter);
+        }
         self.pipeline.set_property("uri", uri);
         // Start async Paused preroll. Do NOT block here — gtk4paintablesink
         // needs the main loop to complete GL preroll. Blocking the main
@@ -691,6 +698,9 @@ impl Player {
         let _ = self
             .pipeline
             .state(Some(gst::ClockTime::from_mseconds(150)));
+        if let Some(ref filter) = self.software_video_filter {
+            self.pipeline.set_property("video-filter", filter);
+        }
         self.pipeline.set_property("uri", uri.as_str());
         self.pipeline.set_state(gst::State::Paused)?;
         self.set_playback_smoothness_policy(false);
