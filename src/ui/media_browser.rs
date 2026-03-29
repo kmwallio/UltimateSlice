@@ -110,6 +110,7 @@ pub fn build_media_browser(
                 &item.source_path,
                 item.duration_ns,
                 item.is_missing,
+                item.is_audio_only,
                 &thumb_cache,
             );
             flow_box.insert(&child, -1);
@@ -183,10 +184,19 @@ pub fn build_media_browser(
                 // Now that probes are done, start thumbnail extraction for newly-probed
                 // files (one at a time as probes complete, avoiding the burst of threads
                 // that occurred when all thumbnails started simultaneously on import).
+                // Skip audio-only files — they have no video frame to extract.
                 {
+                    let lib = library.borrow();
                     let mut tc = thumb_cache.borrow_mut();
                     for path in &resolved {
-                        tc.request(path, 0);
+                        let audio_only = lib
+                            .iter()
+                            .find(|i| i.source_path == *path)
+                            .map(|i| i.is_audio_only)
+                            .unwrap_or(false);
+                        if !audio_only {
+                            tc.request(path, 0);
+                        }
                     }
                 }
                 // Update drag-source payloads on existing children (avoids full rebuild).
@@ -371,12 +381,14 @@ fn make_grid_item(
     path: &str,
     duration_ns: u64,
     is_missing: bool,
+    is_audio_only: bool,
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
 ) -> FlowBoxChild {
-    // Kick off thumbnail loading — but only after the media has been probed
-    // (duration_ns > 0) so we don't flood GStreamer with many concurrent
-    // pipelines when bulk-importing files.
-    if duration_ns > 0 {
+    // Kick off thumbnail loading — only after probe (duration_ns > 0) and only
+    // for files that actually have video.  Audio-only files have no video frame
+    // to extract; trying causes noisy ffmpeg "Output file does not contain any
+    // stream" errors.
+    if duration_ns > 0 && !is_audio_only {
         thumb_cache.borrow_mut().request(path, 0);
     }
 
@@ -516,7 +528,7 @@ fn import_path_into_library(
     let label = item.label.clone();
     let is_missing = item.is_missing;
     library.borrow_mut().push(item);
-    let child = make_grid_item(&label, &path_str, duration_ns, is_missing, thumb_cache);
+    let child = make_grid_item(&label, &path_str, duration_ns, is_missing, false, thumb_cache);
     flow_box.insert(&child, -1);
     flow_box_paths
         .borrow_mut()
@@ -564,6 +576,7 @@ fn rebuild_flowbox(
             &item.source_path,
             item.duration_ns,
             item.is_missing,
+            item.is_audio_only,
             thumb_cache,
         );
         fb.insert(&child, -1);

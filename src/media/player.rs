@@ -139,6 +139,9 @@ impl Player {
 
         let pipeline = gst::ElementFactory::make("playbin")
             .property("video-sink", &safe_sink)
+            // Disable subtitle/text rendering and visualizations (not needed
+            // for a source preview, saves decoding work).
+            .property("flags", 0x0003u32) // video=0x01 | audio=0x02 only
             .build()?;
 
         let va_decoder_names = [
@@ -223,12 +226,13 @@ impl Player {
             // Leaky queue after prescale: decouples the expensive
             // decode+prescale thread from the effects chain so that slow
             // decode at 5.3K doesn't stall the sink/main thread.
-            // leaky=downstream (2) drops oldest buffers when full.
+            // Start leaky so the decoder can run ahead; set_playback_smoothness_policy
+            // tunes depth and leak mode at runtime.
             let prescale_queue = gst::ElementFactory::make("queue")
-                .property("max-size-buffers", 8u32)
+                .property("max-size-buffers", 4u32)
                 .property("max-size-bytes", 0u32)
                 .property("max-size-time", 0u64)
-                .property_from_str("leaky", "no")
+                .property_from_str("leaky", "downstream")
                 .build()
                 .expect("queue must be available");
 
