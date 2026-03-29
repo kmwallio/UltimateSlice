@@ -171,6 +171,14 @@ impl Player {
             let prescale = gst::ElementFactory::make("videoconvertscale")
                 .build()
                 .expect("videoconvertscale must be available");
+            // Use nearest-neighbour scaling for speed — source preview quality is
+            // secondary to a smooth frame rate.  Bilinear (default) adds significant
+            // cost when downscaling from 5.3K to 640×360.
+            if prescale.find_property("method").is_some() {
+                prescale.set_property_from_str("method", "nearest-neighbour");
+            }
+            // Multi-threaded prescale: each CPU tile is converted in parallel,
+            // cutting the 5.3K→640×360 cost proportionally.
             // On macOS, vtdec (VideoToolbox) outputs IOSurface-backed NV12 buffers.
             // The parallelized task runner in videoconvertscale reads them on worker
             // threads after the backing memory may be released → SIGSEGV in
@@ -178,6 +186,15 @@ impl Player {
             #[cfg(target_os = "macos")]
             if prescale.find_property("n-threads").is_some() {
                 prescale.set_property("n-threads", 1u32);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if prescale.find_property("n-threads").is_some() {
+                let threads = (std::thread::available_parallelism()
+                    .map(|n| n.get() as u32)
+                    .unwrap_or(4)
+                    / 2)
+                .clamp(2, 8);
+                prescale.set_property("n-threads", threads);
             }
             let prescale_caps = gst::ElementFactory::make("capsfilter")
                 .property(
@@ -243,16 +260,34 @@ impl Player {
             pipeline.set_property("video-filter", &bin_element);
         }
 
-        // On macOS, playbin's internal decodebin may also auto-create
-        // videoconvertscale elements (e.g., colour-space conversion after vtdec).
-        // Intercept them and force n-threads=1 for the same IOSurface reason.
-        #[cfg(target_os = "macos")]
+        // Enable multi-threaded decoding on software decoders and fast scaling
+        // on any videoconvertscale elements that playbin auto-creates internally
+        // (colour-space converters, sinks, etc.).
+        //
+        // On macOS: vtdec (VideoToolbox) outputs IOSurface-backed NV12 buffers.
+        // The parallelized task runner in videoconvertscale reads them on worker
+        // threads after the backing memory may be released → SIGSEGV in
+        // unpack_NV12.  Force single-threaded conversion on macOS only.
         pipeline.connect("deep-element-added", false, |args| {
             let child = args[2].get::<gst::Element>().ok()?;
             let factory_name = child
                 .factory()
                 .map(|f| f.name().to_string())
                 .unwrap_or_default();
+            // Enable multi-threaded libav software decoders (avdec_h265, avdec_h264, …).
+            // max-threads=0 means "auto" but in practice FFmpeg caps it conservatively;
+            // setting it explicitly to the core count gives the full thread pool.
+            if factory_name.starts_with("avdec_") {
+                if child.find_property("max-threads").is_some() {
+                    let threads = (std::thread::available_parallelism()
+                        .map(|n| n.get() as i32)
+                        .unwrap_or(4)
+                        / 2)
+                    .clamp(2, 8);
+                    child.set_property("max-threads", threads);
+                }
+            }
+            #[cfg(target_os = "macos")]
             if factory_name == "videoconvertscale" && child.find_property("n-threads").is_some() {
                 child.set_property("n-threads", 1u32);
             }
