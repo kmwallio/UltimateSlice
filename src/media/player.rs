@@ -198,9 +198,12 @@ impl Player {
         if let Some(ref vb) = videobalance {
             let bin = gst::Bin::new();
 
-            // Downscale oversized sources early. Default 640×360 matches
-            // the typical ~320×200 source preview widget (slight
-            // supersample). Updated at runtime via set_prescale_resolution().
+            // Downscale oversized sources early. Default 320×180 is a
+            // conservative initial cap — the 100ms adaptive timer in preview.rs
+            // will raise it to match the actual widget allocation shortly after
+            // first play.  Set low so the first few frames aren't decoded at
+            // 640×360 before the widget size is known.
+            // Updated at runtime via set_prescale_resolution().
             let prescale = gst::ElementFactory::make("videoconvertscale")
                 .build()
                 .expect("videoconvertscale must be available");
@@ -217,8 +220,8 @@ impl Player {
                     "caps",
                     &gst::Caps::builder("video/x-raw")
                         .field("format", "I420")
-                        .field("width", gst::IntRange::new(1i32, 640))
-                        .field("height", gst::IntRange::new(1i32, 360))
+                        .field("width", gst::IntRange::new(1i32, 320))
+                        .field("height", gst::IntRange::new(1i32, 180))
                         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                         .build(),
                 )

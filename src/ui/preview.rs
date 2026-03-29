@@ -731,8 +731,8 @@ pub fn build_preview(
         let btn_close_preview = btn_close_preview.clone();
         let picture_weak = picture.downgrade();
         // Track last prescale size to avoid redundant updates
-        let last_prescale_w: Rc<Cell<i32>> = Rc::new(Cell::new(640));
-        let last_prescale_h: Rc<Cell<i32>> = Rc::new(Cell::new(360));
+        let last_prescale_w: Rc<Cell<i32>> = Rc::new(Cell::new(320));
+        let last_prescale_h: Rc<Cell<i32>> = Rc::new(Cell::new(180));
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
             let pos = p.position();
@@ -743,9 +743,14 @@ pub fn build_preview(
                 let pw = pic.width();
                 let ph = pic.height();
                 if pw > 0 && ph > 0 {
-                    // 2× widget size for slight supersample, capped at 1920×1080
-                    let target_w = (pw * 2).min(1920);
-                    let target_h = (ph * 2).min(1080);
+                    // Target exactly the widget size (no supersample): the
+                    // safe_sink's own videoconvertscale would rescale a 2×
+                    // supersample back down to widget size anyway, wasting two
+                    // scale passes per frame.  1× keeps buffer sizes minimal
+                    // through the effects chain and eliminates the redundant
+                    // second scale.  Cap at 1920×1080 to bound worst-case cost.
+                    let target_w = pw.min(1920);
+                    let target_h = ph.min(1080);
                     let prev_w = last_prescale_w.get();
                     let prev_h = last_prescale_h.get();
                     // Only update if size changed by >10% to avoid thrashing
