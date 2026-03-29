@@ -3,8 +3,9 @@ use crate::model::project::FrameRate;
 use crate::ui::timecode;
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, AspectFrame, Box as GBox, Button, DrawingArea, EventControllerScroll,
-    EventControllerScrollFlags, Label, Orientation, Overlay, Picture, ScrolledWindow, ToggleButton,
+    self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, EventControllerScroll,
+    EventControllerScrollFlags, Label, MenuButton, Orientation, Overlay, Picture, Popover,
+    ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -102,25 +103,42 @@ pub fn build_program_monitor(
     title_bar.append(&btn_popout);
 
     let on_safe_area_changed = Rc::new(on_safe_area_changed);
-    let safe_area_btn = ToggleButton::with_label("Safe Areas");
+    let safe_area_btn = CheckButton::with_label("Safe Areas");
     safe_area_btn.set_active(initial_show_safe_areas);
-    title_bar.append(&safe_area_btn);
 
     let on_false_color_changed = Rc::new(on_false_color_changed);
-    let false_color_btn = ToggleButton::with_label("False Color");
+    let false_color_btn = CheckButton::with_label("False Color");
     false_color_btn.set_active(initial_show_false_color);
     false_color_btn.set_tooltip_text(Some(
         "False color overlay: maps luminance to a color spectrum for exposure evaluation",
     ));
-    title_bar.append(&false_color_btn);
 
     let on_zebra_changed = Rc::new(on_zebra_changed);
-    let zebra_btn = ToggleButton::with_label("Zebra");
+    let zebra_btn = CheckButton::with_label("Zebra");
     zebra_btn.set_active(initial_show_zebra);
     zebra_btn.set_tooltip_text(Some(
         "Zebra stripes: diagonal lines on regions exceeding the exposure threshold (default 90%)",
     ));
-    title_bar.append(&zebra_btn);
+
+    // "Overlays" dropdown — pops up a small panel with the three check items.
+    let overlays_popover_box = GBox::new(Orientation::Vertical, 4);
+    overlays_popover_box.set_margin_top(8);
+    overlays_popover_box.set_margin_bottom(8);
+    overlays_popover_box.set_margin_start(12);
+    overlays_popover_box.set_margin_end(12);
+    overlays_popover_box.append(&safe_area_btn);
+    overlays_popover_box.append(&false_color_btn);
+    overlays_popover_box.append(&zebra_btn);
+
+    let overlays_popover = Popover::new();
+    overlays_popover.set_child(Some(&overlays_popover_box));
+    overlays_popover.set_autohide(true);
+
+    let overlays_menu_btn = MenuButton::new();
+    overlays_menu_btn.set_label("Overlays");
+    overlays_menu_btn.set_popover(Some(&overlays_popover));
+    overlays_menu_btn.set_tooltip_text(Some("Toggle Safe Areas, False Color, and Zebra overlays"));
+    title_bar.append(&overlays_menu_btn);
 
     // Zoom controls: − / zoom% label / + / Fit
     // These are appended to the title bar AFTER we build apply_zoom (below), so we
