@@ -2354,33 +2354,20 @@ pub fn build_window(
                                 err.error(),
                                 err.debug()
                             );
-                            let mut should_fallback = false;
-                            let err_text = err.error().to_string().to_lowercase();
-                            let dbg_text = err
-                                .debug()
-                                .map(|d| d.to_string().to_lowercase())
-                                .unwrap_or_default();
-                            if err_text.contains("not-negotiated")
-                                || dbg_text.contains("not-negotiated")
-                                || dbg_text.contains("dmabuf")
-                                || dbg_text.contains("va")
-                            {
-                                should_fallback = true;
-                            }
                             let mut hw_fallback_applied = false;
-                            if should_fallback {
-                                match player_for_bus.borrow().fallback_to_software_after_error() {
-                                    Ok(true) => {
-                                        hw_fallback_applied = true;
-                                        log::warn!(
-                                            "Source preview fallback: switched to software decode mode after HW-path error"
-                                        );
-                                    }
-                                    Ok(false) => {}
-                                    Err(e) => log::error!(
-                                        "Source preview fallback failed: {e:#}"
-                                    ),
+                            // Any source-preview pipeline error while in HW mode should trigger
+                            // a software-decode retry. Restricting this to specific substrings
+                            // misses some backend-specific error messages that still manifest
+                            // as "audio plays, video black" in the source monitor.
+                            match player_for_bus.borrow().fallback_to_software_after_error() {
+                                Ok(true) => {
+                                    hw_fallback_applied = true;
+                                    log::warn!(
+                                        "Source preview fallback: switched to software decode mode after HW-path error"
+                                    );
                                 }
+                                Ok(false) => {}
+                                Err(e) => log::error!("Source preview fallback failed: {e:#}"),
                             }
                             // If proxy playback fails at runtime, retry once with
                             // the original source URI so preview does not stay black
@@ -2418,6 +2405,9 @@ pub fn build_window(
                     }
                     glib::ControlFlow::Continue
                 });
+                // BusWatchGuard removes the watch when dropped.  Intentionally
+                // leak it so the watch stays active for the entire app lifetime.
+                std::mem::forget(_watch);
             }
         }
     }

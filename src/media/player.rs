@@ -254,7 +254,16 @@ impl Player {
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let hardware_acceleration_enabled = Arc::new(Mutex::new(hardware_acceleration_enabled));
+        // Always start with HardwareFast so apply_decode_mode() below never
+        // early-returns.  The initial stored value must differ from whatever
+        // we pass to apply_decode_mode() or the early-return guard fires and
+        // the VA-API rank policy / software video-filter are never applied.
         let decode_mode = Arc::new(Mutex::new(SourceDecodeMode::HardwareFast));
+        let initial_mode = if *hardware_acceleration_enabled.lock().unwrap() && vaapi_available {
+            SourceDecodeMode::HardwareFast
+        } else {
+            SourceDecodeMode::SoftwareFiltered
+        };
         let current_uri = Arc::new(Mutex::new(None));
         let hw_failed_uri = Arc::new(Mutex::new(None));
         let source_playback_priority =
@@ -293,11 +302,11 @@ impl Player {
             pending_seek_accurate,
         };
 
-        if *player.hardware_acceleration_enabled.lock().unwrap() && player.vaapi_available {
-            player.apply_decode_mode(SourceDecodeMode::HardwareFast);
-        } else {
-            player.apply_decode_mode(SourceDecodeMode::SoftwareFiltered);
-        }
+        // Apply the correct decode mode for startup.  Because decode_mode was
+        // initialised to HardwareFast above, calling apply_decode_mode with
+        // either value is guaranteed not to early-return, so VA-API ranks and
+        // the software video-filter are always configured correctly.
+        player.apply_decode_mode(initial_mode);
 
         Ok((player, paintable))
     }

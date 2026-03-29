@@ -4,7 +4,9 @@ use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use gtk4::cairo;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
 const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
@@ -116,10 +118,32 @@ impl ThumbnailCache {
                 self.in_flight += 1;
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    let data = extract_rgba(path, time_ns).unwrap_or_else(|e| {
-                        eprintln!("[thumb] error: {e}");
-                        Vec::new()
-                    });
+                    // For image files, GStreamer is required (imagefreeze).
+                    // For video files, go straight to ffmpeg: it is faster
+                    // and handles multi-stream files (HEVC + audio + GPS)
+                    // without GStreamer multiqueue stall risks.
+                    let is_image = crate::model::clip::is_image_file(&path);
+                    let data = if is_image {
+                        extract_rgba(path.clone(), time_ns)
+                            .or_else(|gst_err| {
+                                eprintln!("[thumb] gstreamer extraction failed: {gst_err}");
+                                extract_rgba_ffmpeg(&path, time_ns)
+                            })
+                            .unwrap_or_else(|e| {
+                                eprintln!("[thumb] ffmpeg fallback failed: {e}");
+                                Vec::new()
+                            })
+                    } else {
+                        extract_rgba_ffmpeg(&path, time_ns)
+                            .or_else(|ffmpeg_err| {
+                                eprintln!("[thumb] ffmpeg extraction failed: {ffmpeg_err}");
+                                extract_rgba(path.clone(), time_ns)
+                            })
+                            .unwrap_or_else(|e| {
+                                eprintln!("[thumb] gstreamer fallback failed: {e}");
+                                Vec::new()
+                            })
+                    };
                     let _ = tx.send(RawFrame { key, data });
                 });
             } else {
@@ -157,8 +181,10 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     // pad is consumed and preroll can always complete.
     let pipeline = gst::Pipeline::new();
 
+    let uridec_video_caps = gst::Caps::builder("video/x-raw").build();
     let uridec = gst::ElementFactory::make("uridecodebin")
         .property("uri", &uri)
+        .property("caps", &uridec_video_caps)
         .build()
         .map_err(|e| anyhow::anyhow!("uridecodebin: {e}"))?;
 
@@ -216,42 +242,41 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
 
     // When uridecodebin adds a decoded pad: route video to the thumbnail
     // chain, everything else (audio, metadata) to a new fakesink.
+    let video_linked = Arc::new(AtomicBool::new(false));
     {
         let pipeline_weak = pipeline.downgrade();
         let convert_weak = convert.downgrade();
         let freeze_weak = maybe_freeze.as_ref().map(|f| f.downgrade());
+        let video_linked_for_cb = video_linked.clone();
         uridec.connect_pad_added(move |_src, pad| {
             let Some(pipeline) = pipeline_weak.upgrade() else { return };
-            let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
-            let is_video = caps.as_ref().map_or(false, |c| {
-                c.iter().any(|s| s.name().starts_with("video/"))
-            });
-
-            if is_video {
-                // Link video pad into the thumbnail chain.
-                let sink_element = if let Some(ref fw) = freeze_weak {
-                    fw.upgrade()
-                } else {
-                    convert_weak.upgrade()
-                };
-                if let Some(sink) = sink_element {
-                    if let Some(sink_pad) = sink.static_pad("sink") {
-                        if !sink_pad.is_linked() {
-                            let _ = pad.link(&sink_pad);
-                        }
+            // Prefer linking directly to the video chain sink. We cannot rely on
+            // current_caps() in pad-added: some demux/decode combinations emit
+            // pads before caps are fixed. A direct link attempt is robust here:
+            // video/raw succeeds, non-video fails and is drained to fakesink.
+            let sink_element = if let Some(ref fw) = freeze_weak {
+                fw.upgrade()
+            } else {
+                convert_weak.upgrade()
+            };
+            if let Some(sink) = sink_element {
+                if let Some(sink_pad) = sink.static_pad("sink") {
+                    if !sink_pad.is_linked() && pad.link(&sink_pad).is_ok() {
+                        video_linked_for_cb.store(true, Ordering::Relaxed);
+                        return;
                     }
                 }
-            } else {
-                // Drain audio / metadata pads to prevent multiqueue stall.
-                if let Ok(fakesink) = gst::ElementFactory::make("fakesink")
-                    .property("sync", false)
-                    .build()
-                {
-                    let _ = pipeline.add(&fakesink);
-                    let _ = fakesink.sync_state_with_parent();
-                    if let Some(sink_pad) = fakesink.static_pad("sink") {
-                        let _ = pad.link(&sink_pad);
-                    }
+            }
+            // Drain non-video pads (or extra video pads once sink is linked) to
+            // prevent any decodebin/multiqueue branch from stalling preroll.
+            if let Ok(fakesink) = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .build()
+            {
+                let _ = pipeline.add(&fakesink);
+                let _ = fakesink.sync_state_with_parent();
+                if let Some(sink_pad) = fakesink.static_pad("sink") {
+                    let _ = pad.link(&sink_pad);
                 }
             }
         });
@@ -273,6 +298,9 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     pipeline.set_state(gst::State::Paused)?;
     // Wait for pre-roll (up to 10 s — 4K HEVC files can be slow to decode).
     let _ = pipeline.state(Some(gst::ClockTime::from_seconds(10)));
+    if !video_linked.load(Ordering::Relaxed) {
+        return Err(anyhow::anyhow!("no video pad linked"));
+    }
 
     if time_ns > 0 {
         let _ = pipeline.seek_simple(
@@ -296,6 +324,56 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     drop(map);
 
     // PipelineGuard ensures pipeline is set to Null when this function returns.
+    Ok(data)
+}
+
+fn extract_rgba_ffmpeg(source_path: &str, time_ns: u64) -> Result<Vec<u8>> {
+    let ffmpeg = crate::media::export::find_ffmpeg()?;
+    let mut cmd = Command::new(ffmpeg);
+    cmd.arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error");
+    if time_ns > 0 {
+        let seek_sec = format!("{:.3}", time_ns as f64 / 1_000_000_000.0);
+        cmd.arg("-ss").arg(seek_sec);
+    }
+    let filter = format!(
+        "scale={THUMB_W}:{THUMB_H}:force_original_aspect_ratio=decrease,\
+         pad={THUMB_W}:{THUMB_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=rgba"
+    );
+    cmd.arg("-i")
+        .arg(source_path)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-an")
+        .arg("-sn")
+        .arg("-dn")
+        .arg("-vf")
+        .arg(filter)
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("rgba")
+        .arg("-")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("ffmpeg failed: {stderr}"));
+    }
+    let expected = (THUMB_W * THUMB_H * 4) as usize;
+    if output.stdout.len() < expected {
+        return Err(anyhow::anyhow!(
+            "ffmpeg output too short: {} < {}",
+            output.stdout.len(),
+            expected
+        ));
+    }
+    let mut data = output.stdout;
+    if data.len() > expected {
+        data.truncate(expected);
+    }
     Ok(data)
 }
 
