@@ -167,6 +167,28 @@ python3 tools/mcp_socket_client.py --socket /tmp/ultimateslice-mcp.sock
 The client reads JSON-RPC lines from stdin and writes responses to stdout.
 See `docs/user/python-mcp.md` for complete command examples.
 
+## Native Install
+
+After building, run `install.sh` to install the binary, desktop entry, icons, MIME type,
+and AppStream metainfo to standard XDG locations:
+
+```bash
+# Install to /usr/local (default)
+sudo ./install.sh
+
+# Install to /usr (distro-style)
+sudo ./install.sh --system
+
+# User-level install (no sudo needed)
+./install.sh --prefix=$HOME/.local
+
+# Remove all installed files
+sudo ./install.sh --uninstall
+```
+
+The script will automatically run `cargo build --release` if the binary is not yet built.
+Run `./install.sh --help` for full usage.
+
 ## Flatpak
 
 A Flatpak manifest is provided at `io.github.kmwallio.ultimateslice.yml`.
