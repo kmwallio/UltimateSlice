@@ -139,10 +139,12 @@ impl Player {
 
         let pipeline = gst::ElementFactory::make("playbin")
             .property("video-sink", &safe_sink)
-            // Disable subtitle/text rendering and visualizations (not needed
-            // for a source preview, saves decoding work).
-            .property("flags", 0x0003u32) // video=0x01 | audio=0x02 only
             .build()?;
+        // Disable subtitle/text rendering and visualisations — not needed for
+        // a source preview and saves decode work.  Use property_from_str so
+        // gstreamer-rs goes through the flags string parser instead of trying
+        // to coerce a u32 into GstPlayFlags (which panics on some builds).
+        pipeline.set_property_from_str("flags", "audio+video");
 
         let va_decoder_names = [
             "vah264dec",
