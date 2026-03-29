@@ -5595,6 +5595,7 @@ pub fn build_window(
                 if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
                     *fallback_uri = Some(original_uri.clone());
                 }
+                eprintln!("[proxy debug] source_proxy_enabled={} is_audio_only={} path={}", source_proxy_enabled, source_info.is_audio_only, path);
                 if source_proxy_enabled && !source_info.is_audio_only {
                     proxy_cache.borrow_mut().request(
                         &path,
@@ -5606,11 +5607,16 @@ pub fn build_window(
                     let cache = proxy_cache.borrow();
                     if source_proxy_enabled {
                         if let Some(proxy_path) = ready_proxy_path_for_source(&cache, &path, None) {
+                            eprintln!("[proxy debug] → using proxy: {}", proxy_path);
+                            log::info!("source preview: using proxy {}", proxy_path);
                             format!("file://{proxy_path}")
                         } else {
+                            eprintln!("[proxy debug] → proxy not ready, loading original");
+                            log::info!("source preview: proxy not ready, loading original {}", path);
                             original_uri.clone()
                         }
                     } else {
+                        eprintln!("[proxy debug] → proxy mode off, loading original");
                         original_uri
                     }
                 };
