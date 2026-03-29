@@ -91,26 +91,57 @@ impl Player {
                 .expect("gtk4paintablesink 'paintable' property must implement gdk4::Paintable")
         };
 
-        // Use paintablesink directly — do NOT wrap in glsinkbin.
+        // Wrap paintablesink in a small bin that enforces even (2×2-multiple)
+        // dimensions immediately before the sink.
         //
-        // glsinkbin advertises DMABuf sink caps (video/x-raw(memory:DMABuf)).
-        // VA-API decoders also output DMABuf, so GStreamer's greedy caps
-        // negotiation routes: VA-API decoder → [DMABuf] → glsinkbin → sink,
-        // completely BYPASSING playbin's video-filter property.  The software
-        // prescale filter (≤640×360, I420) is then silently ignored and the
-        // VA-API decoder outputs DMABuf frames directly to the sink at full
-        // resolution, causing odd-height frames (e.g. 1156×495 for a widget
-        // resized to non-even dimensions) and a torrent of per-frame
-        // "not valid for dmabuf format YU12" errors.
+        // Background: gtk4paintablesink re-negotiates its preferred display size
+        // when the GTK widget receives its final allocation (typically a few
+        // seconds after the pipeline starts).  playbin / playsink honours this
+        // by rescaling the video to the widget's physical-pixel dimensions (e.g.
+        // 1114×477 at 2× HiDPI).  If that height is odd, GDK's I420 texture
+        // builder asserts "image size is not a multiple of the block size 2x2"
+        // and the sink crashes.
         //
-        // Without glsinkbin, gtk4paintablesink only advertises system-memory
-        // caps, forcing GStreamer to insert a DMABuf→system-memory converter,
-        // which makes the video-filter reliably usable in both decode modes.
+        // Wrapping paintablesink in a bin with a `videoconvertscale` followed by
+        // a capsfilter that requires even width/height ensures the last conversion
+        // step always rounds to a 2×2-safe size.  The `video-filter` prescale
+        // (≤640×360) is still applied upstream; this is just a safety net in case
+        // playsink reconfigures and bypasses it.
+        //
+        // Do NOT use glsinkbin: it advertises DMABuf sink caps and lets playbin
+        // route the decoder output directly to the sink, bypassing video-filter.
         let gl_video_sink: Option<gst::Element> = None;
-        let video_sink = &paintablesink;
+        let safe_sink = {
+            let bin = gst::Bin::new();
+            let conv = gst::ElementFactory::make("videoconvertscale")
+                .build()
+                .expect("videoconvertscale must be available");
+            // Require even width and height (step=2) so I420/YUV420 frames
+            // are always a valid 2×2 block multiple for GDK texture creation.
+            let caps = gst::Caps::builder("video/x-raw")
+                .field(
+                    "width",
+                    gst::IntRange::<i32>::with_step(2, i32::MAX, 2),
+                )
+                .field(
+                    "height",
+                    gst::IntRange::<i32>::with_step(2, i32::MAX, 2),
+                )
+                .build();
+            let even_caps = gst::ElementFactory::make("capsfilter")
+                .property("caps", &caps)
+                .build()
+                .expect("capsfilter must be available");
+            bin.add_many([&conv, &even_caps, &paintablesink]).ok();
+            gst::Element::link_many([&conv, &even_caps, &paintablesink]).ok();
+            let sink_pad = conv.static_pad("sink").unwrap();
+            bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                .ok();
+            bin.upcast::<gst::Element>()
+        };
 
         let pipeline = gst::ElementFactory::make("playbin")
-            .property("video-sink", video_sink)
+            .property("video-sink", &safe_sink)
             .build()?;
 
         let va_decoder_names = [
