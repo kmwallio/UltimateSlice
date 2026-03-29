@@ -147,10 +147,16 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     // For still images, insert imagefreeze so the single decoded frame becomes
     // a continuous stream that pull_sample() can always grab from.
     let freeze = if is_image { "imagefreeze ! " } else { "" };
+    // Connect the secondary (audio / metadata) pads from uridecodebin to a
+    // fakesink so the multiqueue never stalls waiting for a consumer.  Without
+    // this, a video+audio file blocks during PAUSED preroll because the audio
+    // pad is unlinked and the multiqueue fills up, starving the video path.
     let pipeline_desc = format!(
-        "uridecodebin name=dec uri=\"{uri}\" ! {freeze}videoconvert ! videoscale ! \
+        "uridecodebin name=dec uri=\"{uri}\" \
+         dec. ! {freeze}videoconvert ! videoscale ! \
          video/x-raw,format=RGBA,width={THUMB_W},height={THUMB_H} ! \
-         appsink name=sink sync=false max-buffers=1 drop=false"
+         appsink name=sink sync=false max-buffers=1 drop=false \
+         dec. ! fakesink sync=false"
     );
 
     let guard = super::PipelineGuard(
@@ -190,8 +196,8 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
     let _ = pipeline.set_state(gst::State::Playing);
 
     let sample = appsink
-        .pull_sample()
-        .map_err(|_| anyhow::anyhow!("pull_sample failed"))?;
+        .try_pull_sample(gst::ClockTime::from_seconds(8))
+        .ok_or_else(|| anyhow::anyhow!("pull_sample timed out"))?;
 
     let buffer = sample
         .buffer()
