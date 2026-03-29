@@ -13,6 +13,14 @@ const NS_PER_SECOND: f64 = 1_000_000_000.0;
 /// Default frame duration at 24 fps (nanoseconds)
 const DEFAULT_FRAME_NS: u64 = 41_666_667;
 
+/// Which "add to timeline" action the split button currently performs.
+#[derive(Clone, Copy, PartialEq)]
+enum AddMode {
+    Append,
+    Insert,
+    Overwrite,
+}
+
 /// Returns `(widget, source_marks, clip_name_label, set_audio_only)`.
 /// `set_audio_only(true)` shows the audio-only banner in place of the video display.
 pub fn build_preview(
@@ -561,40 +569,58 @@ pub fn build_preview(
         });
     }
 
-    // Primary "Add" button defaults to Append.
+    // Primary "Add" button: dispatches to whichever mode was last used.
+    let add_mode: Rc<Cell<AddMode>> = Rc::new(Cell::new(AddMode::Append));
     {
         let on_append = on_append.clone();
-        btn_add.connect_clicked(move |_| {
-            on_append();
+        let on_insert = on_insert.clone();
+        let on_overwrite = on_overwrite.clone();
+        let add_mode = add_mode.clone();
+        btn_add.connect_clicked(move |_| match add_mode.get() {
+            AddMode::Append => on_append(),
+            AddMode::Insert => on_insert(),
+            AddMode::Overwrite => on_overwrite(),
         });
     }
 
-    // Popover: Append
+    // Popover: Append — updates the primary button label and mode.
     {
         let on_append = on_append.clone();
         let add_pop = add_pop.clone();
+        let add_mode = add_mode.clone();
+        let btn_add = btn_add.clone();
         btn_pop_append.connect_clicked(move |_| {
             add_pop.popdown();
+            add_mode.set(AddMode::Append);
+            btn_add.set_label("⬇ Append");
             on_append();
         });
     }
 
-    // Popover: Insert at playhead
+    // Popover: Insert — updates the primary button label and mode.
     {
         let on_insert = on_insert.clone();
         let add_pop = add_pop.clone();
+        let add_mode = add_mode.clone();
+        let btn_add = btn_add.clone();
         btn_pop_insert.connect_clicked(move |_| {
             add_pop.popdown();
+            add_mode.set(AddMode::Insert);
+            btn_add.set_label("⤵ Insert");
             on_insert();
         });
     }
 
-    // Popover: Overwrite at playhead
+    // Popover: Overwrite — updates the primary button label and mode.
     {
         let on_overwrite = on_overwrite.clone();
         let add_pop = add_pop.clone();
+        let add_mode = add_mode.clone();
+        let btn_add = btn_add.clone();
         btn_pop_overwrite.connect_clicked(move |_| {
             add_pop.popdown();
+            add_mode.set(AddMode::Overwrite);
+            btn_add.set_label("⏺ Overwrite");
             on_overwrite();
         });
     }
