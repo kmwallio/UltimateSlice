@@ -104,6 +104,60 @@ pub fn build_media_browser(
     flow_box.set_margin_end(4);
     flow_box.set_margin_top(4);
     flow_box.add_css_class("media-grid");
+    // Custom click handler: single-click selects one item only, Ctrl+click toggles.
+    {
+        let flow_box_click = flow_box.clone();
+        let click = gtk::GestureClick::new();
+        click.set_button(1); // left button
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        click.connect_pressed(move |gesture, _n_press, x, y| {
+            let mods = gesture.current_event_state();
+            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                || mods.contains(gtk::gdk::ModifierType::META_MASK);
+
+            // Find which child was clicked by walking FlowBox children
+            let clicked_child: Option<FlowBoxChild> = {
+                let mut found = None;
+                let mut child = flow_box_click.first_child();
+                while let Some(c) = child {
+                    if let Ok(fbc) = c.clone().downcast::<FlowBoxChild>() {
+                        let alloc = fbc.allocation();
+                        if x >= alloc.x() as f64
+                            && x < (alloc.x() + alloc.width()) as f64
+                            && y >= alloc.y() as f64
+                            && y < (alloc.y() + alloc.height()) as f64
+                        {
+                            found = Some(fbc);
+                            break;
+                        }
+                    }
+                    child = c.next_sibling();
+                }
+                found
+            };
+
+            if ctrl {
+                // Ctrl+click: toggle the clicked child without affecting others
+                if let Some(ref child) = clicked_child {
+                    if child.is_selected() {
+                        flow_box_click.unselect_child(child);
+                    } else {
+                        flow_box_click.select_child(child);
+                    }
+                }
+            } else {
+                // Plain click: select only the clicked child (deselect all others)
+                flow_box_click.unselect_all();
+                if let Some(ref child) = clicked_child {
+                    flow_box_click.select_child(child);
+                }
+            }
+            // Stop propagation so FlowBox's default multi-select doesn't fire
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        flow_box.add_controller(click);
+    }
+
     scroll.set_child(Some(&flow_box));
     vbox.append(&scroll);
 
