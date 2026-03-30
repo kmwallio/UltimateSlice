@@ -7237,12 +7237,11 @@ impl ProgramPlayer {
         // slider maximum (e.g. 540px wide on a 9×16 vertical timeline at
         // half-res), so crop_left + crop_right could otherwise exceed the
         // frame width, causing caps negotiation failures in GStreamer.
-        let (mut cl, mut cr, mut ct, mut cb) = (
-            crop_left.max(0),
-            crop_right.max(0),
-            crop_top.max(0),
-            crop_bottom.max(0),
-        );
+        //
+        // When the source aspect ratio differs from the project,
+        // videoconvertscale adds letterbox bars.  Offset the crop values
+        // by the letterbox size so cropping applies to the video content
+        // area, not the black bars (fixes letterbox shifting on crop).
         let (frame_w, frame_h) = slot
             .videocrop
             .as_ref()
@@ -7257,6 +7256,38 @@ impl ProgramPlayer {
                 })
             })
             .unwrap_or((9999, 9999));
+
+        // Compute letterbox offsets.  When the source aspect ratio differs
+        // from the project, videoconvertscale (add-borders: true) inserts
+        // black bars.  Offset crop values by the bar size so cropping
+        // applies to the video content, not the letterbox.
+        // We detect the source dimensions from the effects_bin's ghost sink
+        // pad (which receives the raw decoded frame before scaling).
+        let (letterbox_left, letterbox_top) = slot
+            .effects_bin
+            .static_pad("sink")
+            .and_then(|p| p.peer())
+            .and_then(|peer| peer.current_caps())
+            .and_then(|c| c.structure(0).map(|s| {
+                let src_w = s.get::<i32>("width").unwrap_or(frame_w);
+                let src_h = s.get::<i32>("height").unwrap_or(frame_h);
+                if src_w == frame_w && src_h == frame_h {
+                    return (0, 0); // same aspect ratio, no letterbox
+                }
+                let scale = (frame_w as f64 / src_w as f64)
+                    .min(frame_h as f64 / src_h as f64);
+                let scaled_w = (src_w as f64 * scale).round() as i32;
+                let scaled_h = (src_h as f64 * scale).round() as i32;
+                ((frame_w - scaled_w) / 2, (frame_h - scaled_h) / 2)
+            }))
+            .unwrap_or((0, 0));
+
+        let (mut cl, mut cr, mut ct, mut cb) = (
+            (crop_left.max(0) + letterbox_left),
+            (crop_right.max(0) + letterbox_left),
+            (crop_top.max(0) + letterbox_top),
+            (crop_bottom.max(0) + letterbox_top),
+        );
         const MIN_DIM: i32 = 2;
         if cl + cr > frame_w - MIN_DIM {
             let total = (frame_w - MIN_DIM).max(0);
@@ -8614,7 +8645,7 @@ impl ProgramPlayer {
         if let Some(ref e) = capsfilter_proj {
             chain.push(e.clone());
         }
-        // 1b. Real-time 3D LUT via buffer pad probe on capsfilter src.
+        // 2b. Real-time 3D LUT via buffer pad probe on capsfilter src.
         // Applied AFTER downscale (RGBA at processing resolution) so the
         // trilinear interpolation runs on the smaller preview buffer, and
         // BEFORE any color effects — matching export LUT placement order.
@@ -9139,6 +9170,7 @@ impl ProgramPlayer {
             colorbalance_3pt: None,
             gaussianblur: None,
             squareblur: None,
+            
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: None,
@@ -9409,6 +9441,7 @@ impl ProgramPlayer {
             coloradj_rgb: None,
             colorbalance_3pt: None,
             gaussianblur: None,
+            
             squareblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
@@ -10395,6 +10428,7 @@ impl ProgramPlayer {
                 videobalance: videobalance.clone(),
                 coloradj_rgb: coloradj_rgb.clone(),
                 colorbalance_3pt: colorbalance_3pt.clone(),
+                
                 gaussianblur: gaussianblur.clone(),
                 squareblur: squareblur.clone(),
                 videocrop: videocrop.clone(),
@@ -10832,6 +10866,7 @@ impl ProgramPlayer {
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
             coloradj_rgb: coloradj_rgb.clone(),
+            
             colorbalance_3pt: colorbalance_3pt.clone(),
             gaussianblur: gaussianblur.clone(),
             squareblur: squareblur.clone(),
