@@ -897,6 +897,20 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 asset_clip.push_attribute(("us:compound-tracks", escaped.as_str()));
                             }
                         }
+                    } else if clip.kind == crate::model::clip::ClipKind::Multicam {
+                        asset_clip.push_attribute(("us:clip-kind", "multicam"));
+                        if let Some(ref angles) = clip.multicam_angles {
+                            if let Ok(json) = serde_json::to_string(angles) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip.push_attribute(("us:multicam-angles", escaped.as_str()));
+                            }
+                        }
+                        if let Some(ref switches) = clip.multicam_switches {
+                            if let Ok(json) = serde_json::to_string(switches) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip.push_attribute(("us:multicam-switches", escaped.as_str()));
+                            }
+                        }
                     }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
@@ -2213,10 +2227,17 @@ fn patch_asset_clip_block_transform(
             crate::model::clip::ClipKind::Title => Some("title".to_string()),
             crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
             crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
+            crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
             _ => None,
         }),
         ("us:compound-tracks", if clip.kind == crate::model::clip::ClipKind::Compound {
             clip.compound_tracks.as_ref().and_then(|t| serde_json::to_string(t).ok()).map(|j| j.replace('"', "&quot;"))
+        } else { None }),
+        ("us:multicam-angles", if clip.kind == crate::model::clip::ClipKind::Multicam {
+            clip.multicam_angles.as_ref().and_then(|a| serde_json::to_string(a).ok()).map(|j| j.replace('"', "&quot;"))
+        } else { None }),
+        ("us:multicam-switches", if clip.kind == crate::model::clip::ClipKind::Multicam {
+            clip.multicam_switches.as_ref().and_then(|s| serde_json::to_string(s).ok()).map(|j| j.replace('"', "&quot;"))
         } else { None }),
     ] {
         let next = if let Some(v) = value {
@@ -2756,7 +2777,7 @@ fn write_resources(
         for clip in &track.clips {
             // Title clips have no source media — skip to avoid writing
             // broken asset references with empty file:// URIs.
-            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment || clip.kind == crate::model::clip::ClipKind::Compound {
+            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment || clip.kind == crate::model::clip::ClipKind::Compound || clip.kind == crate::model::clip::ClipKind::Multicam {
                 continue;
             }
             let export_source_path = clip

@@ -1150,19 +1150,20 @@ impl InspectorView {
                 let is_title_clip = c.kind == ClipKind::Title;
                 let is_adjustment = c.kind == ClipKind::Adjustment;
                 let is_compound = c.kind == ClipKind::Compound;
-                let is_visual = is_video || is_image || is_title_clip || is_adjustment || is_compound;
+                let is_multicam = c.kind == ClipKind::Multicam;
+                let is_visual = is_video || is_image || is_title_clip || is_adjustment || is_compound || is_multicam;
                 self.color_section.set_visible(is_video || is_image || is_adjustment);
                 self.audio_section.set_visible(is_video || is_audio);
                 self.transform_section.set_visible(is_visual);
-                self.title_section_box.set_visible(is_visual && !is_adjustment && !is_compound);
-                self.speed_section_box.set_visible(!is_title_clip && !is_adjustment && !is_compound);
+                self.title_section_box.set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam);
+                self.speed_section_box.set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam);
                 self.lut_section_box.set_visible(is_video || is_image || is_adjustment);
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
                 self.mask_section.set_visible(is_video || is_image || is_title_clip);
                 self.frei0r_effects_section
-                    .set_visible(is_visual && !is_compound);
+                    .set_visible(is_visual && !is_compound && !is_multicam);
 
                 // Populate mask section from masks[0].
                 if let Some(mask) = c.masks.first() {

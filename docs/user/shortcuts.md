@@ -67,6 +67,8 @@
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Alt+G` | Create compound clip from selected clips |
+| `Alt+M` | Create multicam clip from selected clips |
+| `1`–`9` (multicam) | Switch to angle 1–9 at playhead (when multicam clip selected) |
 | `Double-click` (compound clip) | Drill into compound clip sub-timeline |
 | `Escape` (in compound) | Exit compound clip drill-down (go back one level) |
 | `Ctrl+L` | Link selected clips |

@@ -536,6 +536,27 @@ pub enum McpCommand {
         clip_id: String,
         reply: SyncSender<Value>,
     },
+    CreateMulticamClip {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    AddAngleSwitch {
+        clip_id: String,
+        position_ns: u64,
+        angle_index: usize,
+        reply: SyncSender<Value>,
+    },
+    ListMulticamAngles {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetMulticamAngleAudio {
+        clip_id: String,
+        angle_index: usize,
+        volume: Option<f32>,
+        muted: Option<bool>,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

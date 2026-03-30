@@ -4,6 +4,10 @@ All notable project changes and progress should be recorded here.
 
 ## [Unreleased]
 
+### Added
+- **Multicam editing**: Create multicam clips from 2+ video clips synced by audio cross-correlation. `ClipKind::Multicam` with per-angle source data and angle switch list. Orange timeline visualization with segment labels and switch markers. Press 1-9 to switch angles at playhead. Multicam angle viewer panel in sidebar shows angle buttons. Preview and export flatten multicam segments to the active angle's source. FCPXML round-trip via vendor attributes. MCP tools: `create_multicam_clip`, `add_angle_switch`, `list_multicam_angles`. Full undo/redo.
+- **Multicam ClipKind propagation**: `ClipKind::Multicam` is now handled alongside `ClipKind::Compound` across the codebase — EDL export skips multicam clips, inspector hides title/speed/frei0r sections for multicam, embedded audio is suppressed, timeline skips thumbnails and missing-media badges, FCPXML round-trips via `us:clip-kind="multicam"`, and through-edit detection excludes multicam clips.
+
 ### Fixed
 - **Compound clip drill-down editing**: Ten timeline methods (`delete_selected_keyframes`, `set_selected_keyframe_interpolation`, `update_keyframe_marquee_selection`, `can_remove_silent_parts`, `join_selected_through_edit`, `create_freeze_frame_from_selected_at_playhead`, `razor_cut_at_playhead_on_track`, `keyframe_marker_hit`, `open_remove_silent_parts_dialog`) now use `resolve_editing_tracks` / `resolve_editing_tracks_mut` instead of directly accessing `proj.tracks`, so they operate on the correct sub-timeline when drilled into a compound clip.
 - **Program playback A/V sync under lag**: Smooth program-monitor playback now keeps drop-late video queueing enabled whenever video is active, so the displayed frame stays closer to the audio/playhead instead of building visible backlog. Main-pipeline `not-negotiated` recovery now tears down and re-syncs the preview audio pipelines to the recovered timeline position before resuming, preventing stale audio from continuing ahead of the playhead after a playback stall/rebuild.

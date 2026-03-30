@@ -407,6 +407,10 @@ Before declaring a task finished, agents must verify via MCP:
 | `add_adjustment_layer` | Add an adjustment layer clip at a track index and timeline position; effects apply to composited result of all tracks below |
 | `create_compound_clip` | Create a compound (nested timeline) clip from specified clip IDs; replaces selected clips with a single compound clip |
 | `break_apart_compound_clip` | Break apart a compound clip, restoring its internal clips to the timeline |
+| `create_multicam_clip` | Create a multicam clip from 2+ clip IDs synced by audio cross-correlation |
+| `add_angle_switch` | Insert an angle switch at a position within a multicam clip |
+| `list_multicam_angles` | List angles and switch points of a multicam clip |
+| `set_multicam_angle_audio` | Set volume (0.0–2.0) and/or mute state for a multicam angle's audio; unmuted angles mix together |
 
 For automation-heavy loops, MCP keeps a short-lived per-session read cache for repeated `get_project`, `list_tracks`, and `list_clips` calls. Both direct tool calls and `batch_call_tools` can reuse this cache, and it is invalidated when a mutating tool runs so subsequent reads observe the updated state.
 

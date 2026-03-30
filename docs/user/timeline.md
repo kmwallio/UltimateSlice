@@ -178,6 +178,18 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - MCP tools: `create_compound_clip` (takes `clip_ids` array), `break_apart_compound_clip` (takes `clip_id`).
 - Full undo/redo support.
 
+### Multicam Editing
+
+- **Create Multicam Clip (`Alt+M`)** — select 2+ video clips on the timeline, then press `Alt+M` or right-click → "Create Multicam Clip". The clips are synced by audio cross-correlation and combined into a single multicam clip with per-angle source data.
+- Multicam clips render with an **orange fill** on the timeline, showing segment labels and switch markers at each angle change.
+- **Switch angles (1-9)** — with a multicam clip selected, press `1`–`9` to switch to the corresponding angle at the current playhead position. A switch point is inserted (or updated) at the playhead.
+- **Angle viewer panel** — when a multicam clip is selected, the sidebar shows an angle viewer with buttons for each angle. The active angle at the playhead is highlighted. Click a button to switch angles.
+- **Audio mixing** — each angle has independent volume and mute controls. By default, only the first angle's audio plays; unmute additional angles to mix them together. Audio from all unmuted angles plays continuously regardless of which video angle is active. Control via MCP `set_multicam_angle_audio` or the angle viewer panel (audio status shown per angle).
+- Preview and export flatten multicam segments to the active angle's source media at each point in time, with audio mixed from all unmuted angles.
+- Multicam clips are saved/loaded via FCPXML (`us:clip-kind="multicam"` + `us:multicam-angles` and `us:multicam-switches` vendor attributes).
+- MCP tools: `create_multicam_clip`, `add_angle_switch`, `list_multicam_angles`, `set_multicam_angle_audio`.
+- Full undo/redo support.
+
 ### Sync Selected Clips by Audio (right-click menu)
 
 - Select 2 or more clips on the timeline, then right-click → **Sync Selected Clips by Audio**.

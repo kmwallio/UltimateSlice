@@ -348,6 +348,9 @@ pub struct TimelineState {
     pub on_match_color: Option<Rc<dyn Fn()>>,
     /// Callback fired when user presses the match-frame shortcut (F).
     pub on_match_frame: Option<Rc<dyn Fn()>>,
+    /// Callback fired to create a multicam clip (triggers audio sync in background).
+    /// Args: Vec<(clip_id, source_path, source_in, source_out, timeline_start, track_id)>
+    pub on_create_multicam: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
     /// Navigation stack for compound clip drill-down editing.
     /// Empty = editing root project timeline.
     /// Each entry is the clip ID of a compound clip being edited.
@@ -395,6 +398,7 @@ impl TimelineState {
             missing_media_paths: HashSet::new(),
             on_match_color: None,
             on_match_frame: None,
+            on_create_multicam: None,
             compound_nav_stack: Vec::new(),
         }
     }
@@ -1062,6 +1066,7 @@ impl TimelineState {
             },
             create_compound: self.can_create_compound(),
             break_apart_compound: self.can_break_apart_compound(),
+            create_multicam: self.can_create_multicam(),
         }
     }
 
@@ -2012,6 +2017,122 @@ impl TimelineState {
         ids.len() >= 2
     }
 
+    /// Returns true when 2+ video clips are selected (multicam needs multiple camera angles).
+    fn can_create_multicam(&self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() < 2 {
+            return false;
+        }
+        // All selected clips must be video (not audio, title, adjustment, etc.)
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        let video_count = editing_tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| ids.contains(&c.id))
+            .filter(|c| c.kind == ClipKind::Video || c.kind == ClipKind::Image)
+            .count();
+        video_count >= 2 && video_count == ids.len()
+    }
+
+    /// Request multicam clip creation. This fires the on_create_multicam callback
+    /// which runs audio sync in a background thread. The actual multicam clip is
+    /// created when the sync results arrive.
+    pub fn request_create_multicam(&mut self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() < 2 {
+            return false;
+        }
+        let clip_infos: Vec<(String, String, u64, u64, u64, String)> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            editing_tracks
+                .iter()
+                .flat_map(|t| {
+                    let tid = t.id.clone();
+                    t.clips.iter().map(move |c| (c.clone(), tid.clone()))
+                })
+                .filter(|(c, _)| ids.contains(&c.id))
+                .map(|(c, tid)| {
+                    (
+                        c.id.clone(),
+                        c.source_path.clone(),
+                        c.source_in,
+                        c.source_out,
+                        c.timeline_start,
+                        tid,
+                    )
+                })
+                .collect()
+        };
+        if clip_infos.len() < 2 {
+            return false;
+        }
+        if let Some(ref cb) = self.on_create_multicam {
+            cb(clip_infos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if the selected clip is a multicam clip and the playhead is within it.
+    fn selected_multicam_context(&self) -> Option<(String, u64)> {
+        let clip_id = self.selected_clip_id.as_ref()?;
+        let proj = self.project.borrow();
+        let clip = proj.clip_ref(clip_id)?;
+        if !clip.is_multicam() {
+            return None;
+        }
+        let playhead = self.playhead_ns;
+        if playhead >= clip.timeline_start && playhead < clip.timeline_end() {
+            let local = playhead.saturating_sub(clip.timeline_start);
+            Some((clip_id.clone(), local))
+        } else {
+            None
+        }
+    }
+
+    /// Insert an angle switch at the current playhead for the selected multicam clip.
+    pub fn insert_multicam_angle_switch(&mut self, angle_index: usize) -> bool {
+        let (clip_id, local_pos) = match self.selected_multicam_context() {
+            Some(ctx) => ctx,
+            None => return false,
+        };
+        let (track_id, old_clips) = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let found = editing_tracks.iter().find(|t| t.clips.iter().any(|c| c.id == clip_id));
+            match found {
+                Some(t) => (t.id.clone(), t.clips.clone()),
+                None => return false,
+            }
+        };
+        {
+            let mut proj = self.project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                let num_angles = clip.multicam_angles.as_ref().map(|a| a.len()).unwrap_or(0);
+                if angle_index >= num_angles {
+                    return false;
+                }
+                clip.insert_angle_switch(local_pos, angle_index);
+            }
+        }
+        let new_clips = {
+            let proj = self.project.borrow();
+            proj.track_ref(&track_id).map(|t| t.clips.clone()).unwrap_or_default()
+        };
+        let cmd = Box::new(crate::undo::SetTrackClipsCommand {
+            track_id,
+            old_clips,
+            new_clips,
+            label: format!("Switch to Angle {}", angle_index + 1),
+        });
+        self.history.undo_stack.push(cmd);
+        self.history.redo_stack.clear();
+        true
+    }
+
     /// Returns true when exactly one compound clip is selected.
     fn can_break_apart_compound(&self) -> bool {
         let ids = self.selected_ids_or_primary();
@@ -2853,7 +2974,7 @@ impl TimelineState {
 fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
     match kind {
         ClipKind::Audio => TrackKind::Audio,
-        ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment | ClipKind::Compound => TrackKind::Video,
+        ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment | ClipKind::Compound | ClipKind::Multicam => TrackKind::Video,
     }
 }
 
@@ -3187,6 +3308,7 @@ struct ClipContextMenuActionability {
     split_stereo: bool,
     create_compound: bool,
     break_apart_compound: bool,
+    create_multicam: bool,
 }
 
 impl ClipContextMenuActionability {
@@ -3202,6 +3324,7 @@ impl ClipContextMenuActionability {
             || self.split_stereo
             || self.create_compound
             || self.break_apart_compound
+            || self.create_multicam
     }
 }
 
@@ -3217,6 +3340,7 @@ fn apply_clip_context_menu_actionability(
     btn_split_stereo: &gtk::Button,
     btn_create_compound: &gtk::Button,
     btn_break_apart_compound: &gtk::Button,
+    btn_create_multicam: &gtk::Button,
     actionability: ClipContextMenuActionability,
 ) -> bool {
     let set_state = |button: &gtk::Button, actionable: bool| {
@@ -3234,6 +3358,7 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_split_stereo, actionability.split_stereo);
     set_state(btn_create_compound, actionability.create_compound);
     set_state(btn_break_apart_compound, actionability.break_apart_compound);
+    set_state(btn_create_multicam, actionability.create_multicam);
     actionability.any()
 }
 
@@ -3342,6 +3467,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     ));
     clip_context_box.append(&btn_create_compound);
     clip_context_box.append(&btn_break_apart_compound);
+    let btn_create_multicam = gtk::Button::with_label("Create Multicam Clip");
+    btn_create_multicam.add_css_class("flat");
+    btn_create_multicam.set_tooltip_text(Some(
+        "Sync selected clips by audio and create a multicam clip (Alt+M)",
+    ));
+    clip_context_box.append(&btn_create_multicam);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -3638,6 +3769,24 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     cb();
                 }
             }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+
+    // ── Create Multicam Clip button ──
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_create_multicam.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let mut st = state.borrow_mut();
+            let _ = st.request_create_multicam();
+            drop(st);
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();
             }
@@ -4102,6 +4251,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_split_stereo,
                                 &btn_create_compound,
                                 &btn_break_apart_compound,
+                                &btn_create_multicam,
                                 actionability,
                             ) {
                                 clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -5664,6 +5814,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     changed
                 }
+                Key::m | Key::M if alt && !ctrl => {
+                    let _ = st.request_create_multicam();
+                    false // async — project change fires when sync completes
+                }
                 Key::l | Key::L if ctrl => {
                     let changed = st.link_selected_clips();
                     if changed {
@@ -5691,35 +5845,72 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                 }
                 Key::_1 | Key::KP_1 if !ctrl => {
-                    let changed =
-                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::Linear);
-                    if changed {
-                        notify_project = true;
+                    if st.selected_multicam_context().is_some() {
+                        let changed = st.insert_multicam_angle_switch(0);
+                        if changed { notify_project = true; }
+                        changed
+                    } else {
+                        let changed = st.set_selected_keyframe_interpolation(KeyframeInterpolation::Linear);
+                        if changed { notify_project = true; }
+                        changed
                     }
-                    changed
                 }
                 Key::_2 | Key::KP_2 if !ctrl => {
-                    let changed =
-                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseIn);
-                    if changed {
-                        notify_project = true;
+                    if st.selected_multicam_context().is_some() {
+                        let changed = st.insert_multicam_angle_switch(1);
+                        if changed { notify_project = true; }
+                        changed
+                    } else {
+                        let changed = st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseIn);
+                        if changed { notify_project = true; }
+                        changed
                     }
-                    changed
                 }
                 Key::_3 | Key::KP_3 if !ctrl => {
-                    let changed =
-                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseOut);
-                    if changed {
-                        notify_project = true;
+                    if st.selected_multicam_context().is_some() {
+                        let changed = st.insert_multicam_angle_switch(2);
+                        if changed { notify_project = true; }
+                        changed
+                    } else {
+                        let changed = st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseOut);
+                        if changed { notify_project = true; }
+                        changed
                     }
-                    changed
                 }
                 Key::_4 | Key::KP_4 if !ctrl => {
-                    let changed =
-                        st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseInOut);
-                    if changed {
-                        notify_project = true;
+                    if st.selected_multicam_context().is_some() {
+                        let changed = st.insert_multicam_angle_switch(3);
+                        if changed { notify_project = true; }
+                        changed
+                    } else {
+                        let changed = st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseInOut);
+                        if changed { notify_project = true; }
+                        changed
                     }
+                }
+                Key::_5 | Key::KP_5 if !ctrl && st.selected_multicam_context().is_some() => {
+                    let changed = st.insert_multicam_angle_switch(4);
+                    if changed { notify_project = true; }
+                    changed
+                }
+                Key::_6 | Key::KP_6 if !ctrl && st.selected_multicam_context().is_some() => {
+                    let changed = st.insert_multicam_angle_switch(5);
+                    if changed { notify_project = true; }
+                    changed
+                }
+                Key::_7 | Key::KP_7 if !ctrl && st.selected_multicam_context().is_some() => {
+                    let changed = st.insert_multicam_angle_switch(6);
+                    if changed { notify_project = true; }
+                    changed
+                }
+                Key::_8 | Key::KP_8 if !ctrl && st.selected_multicam_context().is_some() => {
+                    let changed = st.insert_multicam_angle_switch(7);
+                    if changed { notify_project = true; }
+                    changed
+                }
+                Key::_9 | Key::KP_9 if !ctrl && st.selected_multicam_context().is_some() => {
+                    let changed = st.insert_multicam_angle_switch(8);
+                    if changed { notify_project = true; }
                     changed
                 }
                 Key::Right if ctrl && shift => {
@@ -6861,8 +7052,88 @@ fn draw_clip(
         cr.restore().ok();
     }
 
+    // ── Multicam clip visual ──────────────────────────────────────────────
+    if clip.kind == crate::model::clip::ClipKind::Multicam && cw > 20.0 {
+        // Badge
+        cr.save().ok();
+        let badge_size = 14.0_f64.min(ch * 0.4);
+        let bx = cx + 4.0;
+        let by = cy + 4.0;
+        cr.rectangle(bx, by, badge_size, badge_size);
+        cr.set_source_rgba(0.85, 0.45, 0.12, 0.85);
+        let _ = cr.fill();
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        let fs = badge_size * 0.55;
+        cr.set_font_size(fs);
+        let _ = cr.move_to(bx + 2.0, by + badge_size - 3.0);
+        let _ = cr.show_text("MC");
+        cr.restore().ok();
+
+        // Draw angle switch markers and segment labels
+        if let Some(ref switches) = clip.multicam_switches {
+            let pps = st.pixels_per_second;
+            for sw in switches.iter().skip(1) {
+                // Vertical marker for each switch (except the first at 0)
+                let sw_x = cx + (sw.position_ns as f64 / NS_PER_SECOND) * pps;
+                if sw_x > cx && sw_x < cx + cw {
+                    cr.save().ok();
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.6);
+                    cr.set_line_width(1.0);
+                    let _ = cr.move_to(sw_x, cy);
+                    let _ = cr.line_to(sw_x, cy + ch);
+                    let _ = cr.stroke();
+                    cr.restore().ok();
+                }
+            }
+            // Segment labels
+            let segments = clip.multicam_segments();
+            let font_sz = (ch * 0.28).clamp(7.0, 12.0);
+            for (seg_start, seg_end, angle_idx) in &segments {
+                let seg_x = cx + (*seg_start as f64 / NS_PER_SECOND) * pps;
+                let seg_w = ((*seg_end - seg_start) as f64 / NS_PER_SECOND) * pps;
+                if seg_w > 20.0 {
+                    let label = clip
+                        .multicam_angles
+                        .as_ref()
+                        .and_then(|a| a.get(*angle_idx))
+                        .map(|a| a.label.as_str())
+                        .unwrap_or("?");
+                    cr.save().ok();
+                    cr.set_font_size(font_sz);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.7);
+                    let _ = cr.move_to(seg_x + 4.0, cy + ch - 4.0);
+                    let _ = cr.show_text(label);
+                    cr.restore().ok();
+                }
+            }
+        }
+
+        // Centered label
+        cr.save().ok();
+        let font_sz = (ch * 0.35).clamp(8.0, 16.0);
+        cr.set_font_size(font_sz);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+        let label_text = &clip.label;
+        let max_label_w = (cw - 24.0).max(0.0);
+        let mut truncated = label_text.clone();
+        loop {
+            let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("…").unwrap());
+            if te.width() <= max_label_w || truncated.len() <= 1 {
+                break;
+            }
+            truncated.pop();
+            truncated.push('…');
+        }
+        let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("…").unwrap());
+        let tx = cx + (cw - te.width()) / 2.0;
+        let ty = cy + (ch + te.height()) / 2.0;
+        let _ = cr.move_to(tx, ty);
+        let _ = cr.show_text(&truncated);
+        cr.restore().ok();
+    }
+
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && clip.kind != crate::model::clip::ClipKind::Adjustment && clip.kind != crate::model::clip::ClipKind::Compound && cw > 20.0 {
+    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && clip.kind != crate::model::clip::ClipKind::Adjustment && clip.kind != crate::model::clip::ClipKind::Compound && clip.kind != crate::model::clip::ClipKind::Multicam && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -7096,6 +7367,7 @@ fn draw_clip(
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
             && clip.kind != crate::model::clip::ClipKind::Adjustment
             && clip.kind != crate::model::clip::ClipKind::Compound
+            && clip.kind != crate::model::clip::ClipKind::Multicam
             && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
@@ -7451,6 +7723,9 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
             }
             if clip.kind == crate::model::clip::ClipKind::Compound {
                 return (0.20, 0.63, 0.60); // teal for compound clips
+            }
+            if clip.kind == crate::model::clip::ClipKind::Multicam {
+                return (0.85, 0.50, 0.17); // orange for multicam clips
             }
             match track_kind {
                 TrackKind::Video => (0.17, 0.47, 0.85),

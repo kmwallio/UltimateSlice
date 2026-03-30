@@ -3384,14 +3384,52 @@ fn write_chapter_metadata(
 /// rebased to the compound clip's position on the parent timeline.
 /// Returns a new `Vec<Track>` containing only leaf (non-compound) clips.
 fn flatten_compound_tracks(tracks: &[crate::model::track::Track]) -> Vec<crate::model::track::Track> {
-    tracks
-        .iter()
-        .map(|track| {
+    let mut result: Vec<crate::model::track::Track> = Vec::new();
+    // Collect audio clips extracted from compound/multicam clips on video tracks.
+    // These need to go on audio tracks so the export pipeline picks them up.
+    let mut extracted_audio_clips: Vec<Clip> = Vec::new();
+
+    for track in tracks {
+        let flat = flatten_clips(&track.clips, 0, 0);
+        // Separate audio clips that landed on a video track (from compound/multicam expansion)
+        if track.kind == crate::model::track::TrackKind::Video {
+            let mut video_clips = Vec::new();
+            for clip in flat {
+                if clip.kind == ClipKind::Audio {
+                    extracted_audio_clips.push(clip);
+                } else {
+                    video_clips.push(clip);
+                }
+            }
             let mut flat_track = track.clone();
-            flat_track.clips = flatten_clips(&track.clips, 0, 0);
-            flat_track
-        })
-        .collect()
+            flat_track.clips = video_clips;
+            result.push(flat_track);
+        } else {
+            let mut flat_track = track.clone();
+            flat_track.clips = flat;
+            result.push(flat_track);
+        }
+    }
+
+    // Place extracted audio clips onto an audio track
+    if !extracted_audio_clips.is_empty() {
+        // Find an existing audio track or create one
+        let audio_track = result
+            .iter_mut()
+            .find(|t| t.kind == crate::model::track::TrackKind::Audio);
+        if let Some(track) = audio_track {
+            track.clips.extend(extracted_audio_clips);
+            track.clips.sort_by_key(|c| c.timeline_start);
+        } else {
+            let mut new_track =
+                crate::model::track::Track::new_audio("Compound Audio");
+            new_track.clips = extracted_audio_clips;
+            new_track.clips.sort_by_key(|c| c.timeline_start);
+            result.push(new_track);
+        }
+    }
+
+    result
 }
 
 fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip> {
@@ -3408,12 +3446,50 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         let mut rebased = inner_clip.clone();
                         rebased.timeline_start =
                             compound_offset.saturating_add(rebased.timeline_start);
-                        if rebased.kind == ClipKind::Compound {
+                        if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam {
                             result.extend(flatten_clips(&[rebased], 0, depth + 1));
                         } else {
                             result.push(rebased);
                         }
                     }
+                }
+            }
+        } else if clip.kind == ClipKind::Multicam {
+            let clip_start = timeline_offset.saturating_add(clip.timeline_start);
+            let clip_dur = clip.duration();
+            let segments = clip.multicam_segments();
+            // Video segments from angle switches
+            for (seg_start, seg_end, angle_idx) in &segments {
+                if let Some(angle) = clip.multicam_angles.as_ref().and_then(|a| a.get(*angle_idx)) {
+                    let mut seg = Clip::new(
+                        &angle.source_path,
+                        angle.source_in.saturating_add(*seg_end).min(angle.source_out),
+                        clip_start.saturating_add(*seg_start),
+                        ClipKind::Video,
+                    );
+                    seg.source_in = angle.source_in.saturating_add(*seg_start);
+                    seg.source_out = angle.source_in.saturating_add(*seg_end).min(angle.source_out);
+                    seg.id = uuid::Uuid::new_v4().to_string();
+                    result.push(seg);
+                }
+            }
+            // Audio clips: one per unmuted angle spanning full multicam duration
+            if let Some(ref angles) = clip.multicam_angles {
+                for (ai, angle) in angles.iter().enumerate() {
+                    if angle.muted {
+                        continue;
+                    }
+                    let mut audio_clip = Clip::new(
+                        &angle.source_path,
+                        angle.source_in.saturating_add(clip_dur).min(angle.source_out),
+                        clip_start,
+                        ClipKind::Audio,
+                    );
+                    audio_clip.source_in = angle.source_in;
+                    audio_clip.source_out = angle.source_in.saturating_add(clip_dur).min(angle.source_out);
+                    audio_clip.volume = angle.volume;
+                    audio_clip.id = uuid::Uuid::new_v4().to_string();
+                    result.push(audio_clip);
                 }
             }
         } else {
@@ -4452,5 +4528,185 @@ mod tests {
                 assert_ne!(clip.kind, ClipKind::Compound, "no compound clips should remain after flattening");
             }
         }
+    }
+
+    #[test]
+    fn test_flatten_compound_audio_goes_to_audio_track() {
+        use crate::model::track::Track;
+
+        // Compound clip with internal video + audio tracks
+        let mut inner_v = Track::new_video("Inner V");
+        let mut vc = Clip::new("video.mp4", 5_000, 0, ClipKind::Video);
+        vc.id = "vc".into();
+        inner_v.add_clip(vc);
+
+        let mut inner_a = Track::new_audio("Inner A");
+        let mut ac = Clip::new("audio.wav", 5_000, 0, ClipKind::Audio);
+        ac.id = "ac".into();
+        inner_a.add_clip(ac);
+
+        let mut compound = Clip::new_compound(1_000, vec![inner_v, inner_a]);
+        compound.id = "compound".into();
+
+        let mut video_track = Track::new_video("V1");
+        video_track.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[video_track]);
+
+        // Should have at least 2 tracks: original video track + audio track for extracted audio
+        let video_tracks: Vec<_> = flattened
+            .iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
+            .collect();
+        let audio_tracks: Vec<_> = flattened
+            .iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .collect();
+
+        // Video track should have the video clip, no audio clips
+        assert!(!video_tracks.is_empty());
+        for vt in &video_tracks {
+            for clip in &vt.clips {
+                assert_ne!(clip.kind, ClipKind::Audio, "audio clips should not be on video tracks");
+            }
+        }
+
+        // Audio track should have the extracted audio clip
+        assert!(!audio_tracks.is_empty(), "should have an audio track for compound internal audio");
+        let audio_clip_count: usize = audio_tracks.iter().map(|t| t.clips.len()).sum();
+        assert!(audio_clip_count >= 1, "audio track should contain the extracted audio clip");
+
+        // Verify the audio clip has the correct timeline offset (compound starts at 1000)
+        let first_audio = &audio_tracks[0].clips[0];
+        assert_eq!(first_audio.source_path, "audio.wav");
+        assert_eq!(first_audio.timeline_start, 1_000); // compound offset applied
+    }
+
+    #[test]
+    fn test_flatten_multicam_produces_video_segments_and_audio() {
+        use crate::model::track::Track;
+        use crate::model::clip::MulticamAngle;
+
+        let mut mc = Clip::new_multicam(5_000, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Cam1".into(), source_path: "cam1.mp4".into(),
+                source_in: 0, source_out: 20_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None,
+                volume: 1.0, muted: false,
+            },
+            MulticamAngle {
+                id: "a2".into(), label: "Cam2".into(), source_path: "cam2.mp4".into(),
+                source_in: 0, source_out: 20_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None,
+                volume: 0.5, muted: false,
+            },
+        ]);
+        mc.id = "mc1".into();
+        // Add a switch: angle 0 at 0, angle 1 at 10000
+        mc.insert_angle_switch(10_000, 1);
+
+        let mut root = Track::new_video("V1");
+        root.add_clip(mc);
+
+        let flattened = flatten_compound_tracks(&[root]);
+
+        // Video track: should have 2 video segments (angle 0: 5000-15000, angle 1: 15000-25000)
+        let video_tracks: Vec<_> = flattened.iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
+            .collect();
+        assert!(!video_tracks.is_empty());
+        let video_clips: Vec<_> = video_tracks.iter().flat_map(|t| &t.clips).collect();
+        assert_eq!(video_clips.len(), 2, "should have 2 video segments from angle switches");
+        assert_eq!(video_clips[0].source_path, "cam1.mp4");
+        assert_eq!(video_clips[1].source_path, "cam2.mp4");
+
+        // Audio tracks: should have 2 audio clips (one per unmuted angle, continuous)
+        let audio_tracks: Vec<_> = flattened.iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .collect();
+        let audio_clips: Vec<_> = audio_tracks.iter().flat_map(|t| &t.clips).collect();
+        assert_eq!(audio_clips.len(), 2, "should have 2 audio clips (both angles unmuted)");
+        // Both start at the multicam clip's timeline_start
+        for ac in &audio_clips {
+            assert_eq!(ac.timeline_start, 5_000);
+            assert_eq!(ac.kind, ClipKind::Audio);
+        }
+    }
+
+    #[test]
+    fn test_flatten_multicam_muted_angle_excluded_from_audio() {
+        use crate::model::track::Track;
+        use crate::model::clip::MulticamAngle;
+
+        let mc = Clip::new_multicam(0, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Cam1".into(), source_path: "cam1.mp4".into(),
+                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None,
+                volume: 1.0, muted: false,
+            },
+            MulticamAngle {
+                id: "a2".into(), label: "Cam2".into(), source_path: "cam2.mp4".into(),
+                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None,
+                volume: 0.0, muted: true, // muted
+            },
+        ]);
+
+        let mut root = Track::new_video("V1");
+        root.add_clip(mc);
+
+        let flattened = flatten_compound_tracks(&[root]);
+        let audio_clips: Vec<_> = flattened.iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .flat_map(|t| &t.clips)
+            .collect();
+        assert_eq!(audio_clips.len(), 1, "muted angle should be excluded from audio");
+        assert_eq!(audio_clips[0].source_path, "cam1.mp4");
+    }
+
+    #[test]
+    fn test_flatten_multicam_inside_compound() {
+        use crate::model::track::Track;
+        use crate::model::clip::MulticamAngle;
+
+        // Multicam clip inside a compound clip
+        let mc = Clip::new_multicam(0, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Cam1".into(), source_path: "cam1.mp4".into(),
+                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None,
+                volume: 1.0, muted: false,
+            },
+        ]);
+
+        let mut inner_track = Track::new_video("Inner V");
+        inner_track.add_clip(mc);
+
+        let mut compound = Clip::new_compound(2_000, vec![inner_track]);
+        compound.id = "compound".into();
+
+        let mut root = Track::new_video("V1");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+
+        // The multicam inside the compound should be flattened:
+        // - Video segment from cam1.mp4 at offset 2000 (compound start)
+        // - Audio clip from cam1.mp4 at offset 2000
+        let all_clips: Vec<_> = flattened.iter().flat_map(|t| &t.clips).collect();
+        assert!(!all_clips.is_empty(), "nested multicam should produce clips");
+        // No compound or multicam clips should remain
+        for clip in &all_clips {
+            assert_ne!(clip.kind, ClipKind::Compound);
+            assert_ne!(clip.kind, ClipKind::Multicam);
+        }
+        // Video clip should be at compound offset
+        let video_clips: Vec<_> = flattened.iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
+            .flat_map(|t| &t.clips)
+            .collect();
+        assert!(!video_clips.is_empty());
+        assert_eq!(video_clips[0].timeline_start, 2_000);
     }
 }

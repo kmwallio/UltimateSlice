@@ -27,6 +27,42 @@ pub enum ClipKind {
     Title,
     Adjustment,
     Compound,
+    Multicam,
+}
+
+/// A single camera angle in a multicam clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MulticamAngle {
+    pub id: String,
+    pub label: String,
+    pub source_path: String,
+    /// In-point in source file after sync offset applied (ns).
+    pub source_in: u64,
+    /// Out-point in source file (ns).
+    pub source_out: u64,
+    /// Sync offset from audio cross-correlation (ns), preserved for re-sync.
+    pub sync_offset_ns: i64,
+    pub source_timecode_base_ns: Option<u64>,
+    pub media_duration_ns: Option<u64>,
+    /// Audio volume for this angle (0.0 = silent, 1.0 = full). Default 1.0 for angle 0, 0.0 for others.
+    #[serde(default = "default_multicam_angle_volume")]
+    pub volume: f32,
+    /// When true, this angle's audio is excluded from the mix.
+    #[serde(default)]
+    pub muted: bool,
+}
+
+fn default_multicam_angle_volume() -> f32 {
+    1.0
+}
+
+/// An angle switch point within a multicam clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AngleSwitch {
+    /// Position within the multicam clip (0 = clip start), in nanoseconds.
+    pub position_ns: u64,
+    /// Index into the `multicam_angles` vec.
+    pub angle_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1104,6 +1140,12 @@ pub struct Clip {
     /// Internal tracks for compound (nested timeline) clips. `None` for all other clip kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compound_tracks: Option<Vec<Track>>,
+    /// Camera angles for multicam clips. `None` for all other clip kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicam_angles: Option<Vec<MulticamAngle>>,
+    /// Angle switch points for multicam clips, sorted by `position_ns`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicam_switches: Option<Vec<AngleSwitch>>,
 }
 
 fn default_anamorphic_desqueeze() -> f64 {
@@ -1370,6 +1412,8 @@ impl Clip {
             fcpxml_unknown_asset_children: Vec::new(),
             anamorphic_desqueeze: 1.0,
             compound_tracks: None,
+            multicam_angles: None,
+            multicam_switches: None,
         }
     }
 
@@ -1414,6 +1458,99 @@ impl Clip {
                     .unwrap_or(0)
             })
             .unwrap_or(0)
+    }
+
+    /// Returns `true` when this clip is a multicam clip.
+    pub fn is_multicam(&self) -> bool {
+        self.kind == ClipKind::Multicam
+    }
+
+    /// Create a new multicam clip from synced camera angles.
+    pub fn new_multicam(timeline_start: u64, angles: Vec<MulticamAngle>) -> Self {
+        // Duration = shortest angle range (overlap where all angles have footage)
+        let duration = angles
+            .iter()
+            .map(|a| a.source_out.saturating_sub(a.source_in))
+            .min()
+            .unwrap_or(0);
+        let mut c = Self::new("", duration, timeline_start, ClipKind::Multicam);
+        c.label = "Multicam Clip".to_string();
+        c.multicam_angles = Some(angles);
+        c.multicam_switches = Some(vec![AngleSwitch {
+            position_ns: 0,
+            angle_index: 0,
+        }]);
+        c
+    }
+
+    /// Given a position within the multicam clip (relative to clip start),
+    /// return the active angle index by finding the most recent switch.
+    pub fn active_angle_at(&self, local_pos_ns: u64) -> usize {
+        self.multicam_switches
+            .as_ref()
+            .and_then(|switches| {
+                switches
+                    .iter()
+                    .rev()
+                    .find(|s| s.position_ns <= local_pos_ns)
+                    .map(|s| s.angle_index)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Return the MulticamAngle for the active angle at a given local position.
+    pub fn active_angle_ref_at(&self, local_pos_ns: u64) -> Option<&MulticamAngle> {
+        let idx = self.active_angle_at(local_pos_ns);
+        self.multicam_angles.as_ref().and_then(|a| a.get(idx))
+    }
+
+    /// Insert an angle switch, keeping the list sorted by position.
+    /// If a switch already exists at the same position, update its angle.
+    pub fn insert_angle_switch(&mut self, position_ns: u64, angle_index: usize) {
+        let switches = self
+            .multicam_switches
+            .get_or_insert_with(Vec::new);
+        if let Some(existing) = switches.iter_mut().find(|s| s.position_ns == position_ns) {
+            existing.angle_index = angle_index;
+        } else {
+            switches.push(AngleSwitch {
+                position_ns,
+                angle_index,
+            });
+            switches.sort_by_key(|s| s.position_ns);
+        }
+    }
+
+    /// Remove the angle switch at the given position. Returns true if removed.
+    pub fn remove_angle_switch_at(&mut self, position_ns: u64) -> bool {
+        if let Some(ref mut switches) = self.multicam_switches {
+            let before = switches.len();
+            switches.retain(|s| s.position_ns != position_ns);
+            switches.len() < before
+        } else {
+            false
+        }
+    }
+
+    /// Return the multicam segments — contiguous ranges between angle switches.
+    /// Each segment is (start_ns, end_ns, angle_index) relative to clip start.
+    pub fn multicam_segments(&self) -> Vec<(u64, u64, usize)> {
+        let switches = match self.multicam_switches.as_ref() {
+            Some(s) if !s.is_empty() => s,
+            _ => return vec![(0, self.duration(), 0)],
+        };
+        let clip_dur = self.duration();
+        let mut segments = Vec::new();
+        for (i, sw) in switches.iter().enumerate() {
+            let end = switches
+                .get(i + 1)
+                .map(|next| next.position_ns)
+                .unwrap_or(clip_dur);
+            if sw.position_ns < end {
+                segments.push((sw.position_ns, end, sw.angle_index));
+            }
+        }
+        segments
     }
 
     /// Raw source material duration (source_out − source_in), unaffected by speed.
@@ -3388,5 +3525,190 @@ mod tests {
         let json = serde_json::to_string(&clip).unwrap();
         // compound_tracks should be skipped in serialization
         assert!(!json.contains("compound_tracks"));
+    }
+
+    // ── Multicam clip tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_new_multicam_basic() {
+        let angles = vec![
+            MulticamAngle {
+                id: "a1".into(),
+                label: "Camera 1".into(),
+                source_path: "cam1.mp4".into(),
+                source_in: 0,
+                source_out: 10_000_000_000,
+                sync_offset_ns: 0,
+                source_timecode_base_ns: None,
+                media_duration_ns: None, volume: 1.0, muted: false,
+            },
+            MulticamAngle {
+                id: "a2".into(),
+                label: "Camera 2".into(),
+                source_path: "cam2.mp4".into(),
+                source_in: 500_000_000,
+                source_out: 8_000_000_000,
+                sync_offset_ns: 500_000_000,
+                source_timecode_base_ns: None,
+                media_duration_ns: None, volume: 1.0, muted: false,
+            },
+        ];
+        let mc = Clip::new_multicam(1_000_000_000, angles);
+        assert_eq!(mc.kind, ClipKind::Multicam);
+        assert!(mc.is_multicam());
+        assert!(!mc.is_compound());
+        // Duration = min angle range = min(10s, 7.5s) = 7.5s
+        assert_eq!(mc.source_out, 7_500_000_000);
+        assert_eq!(mc.timeline_start, 1_000_000_000);
+        assert_eq!(mc.multicam_angles.as_ref().unwrap().len(), 2);
+        // Default switch: angle 0 at position 0
+        let switches = mc.multicam_switches.as_ref().unwrap();
+        assert_eq!(switches.len(), 1);
+        assert_eq!(switches[0].position_ns, 0);
+        assert_eq!(switches[0].angle_index, 0);
+    }
+
+    #[test]
+    fn test_active_angle_at() {
+        let mut mc = Clip::new_multicam(0, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
+                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
+            },
+            MulticamAngle {
+                id: "a2".into(), label: "Cam2".into(), source_path: "b.mp4".into(),
+                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
+            },
+        ]);
+        // Default: angle 0 at position 0
+        assert_eq!(mc.active_angle_at(0), 0);
+        assert_eq!(mc.active_angle_at(5_000_000_000), 0);
+
+        // Add switch to angle 1 at 5s
+        mc.insert_angle_switch(5_000_000_000, 1);
+        assert_eq!(mc.active_angle_at(0), 0);
+        assert_eq!(mc.active_angle_at(4_999_999_999), 0);
+        assert_eq!(mc.active_angle_at(5_000_000_000), 1);
+        assert_eq!(mc.active_angle_at(10_000_000_000), 1);
+
+        // Add switch back to angle 0 at 10s
+        mc.insert_angle_switch(10_000_000_000, 0);
+        assert_eq!(mc.active_angle_at(9_999_999_999), 1);
+        assert_eq!(mc.active_angle_at(10_000_000_000), 0);
+    }
+
+    #[test]
+    fn test_multicam_segments() {
+        let mut mc = Clip::new_multicam(0, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
+                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
+            },
+            MulticamAngle {
+                id: "a2".into(), label: "Cam2".into(), source_path: "b.mp4".into(),
+                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
+            },
+        ]);
+        mc.insert_angle_switch(5_000_000_000, 1);
+        mc.insert_angle_switch(10_000_000_000, 0);
+
+        let segments = mc.multicam_segments();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], (0, 5_000_000_000, 0));
+        assert_eq!(segments[1], (5_000_000_000, 10_000_000_000, 1));
+        assert_eq!(segments[2], (10_000_000_000, mc.duration(), 0));
+    }
+
+    #[test]
+    fn test_insert_angle_switch_updates_existing() {
+        let mut mc = Clip::new_multicam(0, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
+                source_in: 0, source_out: 10_000_000_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
+            },
+            MulticamAngle {
+                id: "a2".into(), label: "Cam2".into(), source_path: "b.mp4".into(),
+                source_in: 0, source_out: 10_000_000_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
+            },
+        ]);
+        mc.insert_angle_switch(5_000_000_000, 1);
+        assert_eq!(mc.multicam_switches.as_ref().unwrap().len(), 2);
+
+        // Insert at same position should update, not add
+        mc.insert_angle_switch(5_000_000_000, 0);
+        assert_eq!(mc.multicam_switches.as_ref().unwrap().len(), 2);
+        assert_eq!(mc.active_angle_at(5_000_000_000), 0);
+    }
+
+    #[test]
+    fn test_multicam_serde_round_trip() {
+        let mut mc = Clip::new_multicam(1_000, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
+                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
+                source_timecode_base_ns: Some(42), media_duration_ns: Some(15_000), volume: 1.0, muted: false,
+            },
+        ]);
+        mc.insert_angle_switch(5_000, 0);
+
+        let json = serde_json::to_string(&mc).unwrap();
+        let restored: Clip = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.kind, ClipKind::Multicam);
+        assert!(restored.is_multicam());
+        let angles = restored.multicam_angles.unwrap();
+        assert_eq!(angles.len(), 1);
+        assert_eq!(angles[0].label, "Cam1");
+        assert_eq!(angles[0].source_timecode_base_ns, Some(42));
+        let switches = restored.multicam_switches.unwrap();
+        assert_eq!(switches.len(), 2); // default at 0 + added at 5000
+    }
+
+    #[test]
+    fn test_multicam_fields_none_for_video_clip() {
+        let clip = Clip::new("a.mp4", 1000, 0, ClipKind::Video);
+        let json = serde_json::to_string(&clip).unwrap();
+        assert!(!json.contains("multicam_angles"));
+        assert!(!json.contains("multicam_switches"));
+    }
+
+    #[test]
+    fn test_multicam_volume_mute_serde_round_trip() {
+        let mc = Clip::new_multicam(0, vec![
+            MulticamAngle {
+                id: "a1".into(), label: "Main".into(), source_path: "a.mp4".into(),
+                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None,
+                volume: 0.75, muted: false,
+            },
+            MulticamAngle {
+                id: "a2".into(), label: "Wide".into(), source_path: "b.mp4".into(),
+                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
+                source_timecode_base_ns: None, media_duration_ns: None,
+                volume: 0.0, muted: true,
+            },
+        ]);
+        let json = serde_json::to_string(&mc).unwrap();
+        let restored: Clip = serde_json::from_str(&json).unwrap();
+        let angles = restored.multicam_angles.unwrap();
+        assert!((angles[0].volume - 0.75).abs() < f32::EPSILON);
+        assert!(!angles[0].muted);
+        assert!((angles[1].volume - 0.0).abs() < f32::EPSILON);
+        assert!(angles[1].muted);
+    }
+
+    #[test]
+    fn test_multicam_angle_volume_default_on_deserialize() {
+        // Simulate old data without volume/muted fields
+        let json = r#"{"id":"a","label":"Cam","source_path":"x.mp4","source_in":0,"source_out":1000,"sync_offset_ns":0,"source_timecode_base_ns":null,"media_duration_ns":null}"#;
+        let angle: MulticamAngle = serde_json::from_str(json).unwrap();
+        assert!((angle.volume - 1.0).abs() < f32::EPSILON, "default volume should be 1.0");
+        assert!(!angle.muted, "default muted should be false");
     }
 }

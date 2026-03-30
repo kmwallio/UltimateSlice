@@ -566,9 +566,15 @@ Tracking docs:
 - [ ] Named project snapshots (create named versions at milestones without separate files)
 
 ### Professional Workflow (The "Pro" Edge)
-- [ ] Multicam editing (sync by audio or timecode)
+- [x] Multicam editing (sync by audio or timecode)
   - [x] Audio cross-correlation sync for selected clips (FFT-based, background thread, MCP tool)
   - [x] Automatic timecode extraction from media files on import (GST_TAG_DATE_TIME)
+  - [x] Phase 1a: Multicam data model (`ClipKind::Multicam`, `MulticamAngle`, `AngleSwitch`) and ClipKind propagation (EDL/FCPXML/inspector/timeline/through-edit parity with Compound)
+  - [x] Phase 1b: Create Multicam Clip action (Alt+M / right-click menu, audio sync, undo/redo)
+  - [x] Phase 2: Timeline visualization (orange fill, segment labels, switch markers) + preview/export flattening
+  - [x] Phase 3: Angle switching (1-9 keys at playhead, insert_angle_switch, undo/redo)
+  - [x] Phase 4: Angle viewer sidebar panel (angle buttons, active highlight)
+  - [x] Phase 5: FCPXML round-trip (us:multicam-angles, us:multicam-switches), MCP tools (create_multicam_clip, add_angle_switch, list_multicam_angles), documentation
 - [x] Remove Silent Parts: right-click context menu action to detect and remove silent segments via ffmpeg `silencedetect`, with configurable threshold/duration and single-undo support
 - [x] Nested Timelines / Compound Clips
   - [x] Phase 1: Compound clip model (`ClipKind::Compound`, `compound_tracks`), create/break-apart from selection (`Alt+G`), context menu, preview/export flattening, FCPXML round-trip, MCP tools (`create_compound_clip`, `break_apart_compound_clip`), full undo/redo

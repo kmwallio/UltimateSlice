@@ -119,6 +119,8 @@ fn is_track_pair_through_edit_candidate(
 ) -> bool {
     !left.is_compound()
         && !right.is_compound()
+        && !left.is_multicam()
+        && !right.is_multicam()
         && left.source_path == right.source_path
         && left.kind == right.kind
         && left.source_out.abs_diff(right.source_in) <= options.source_contiguity_tolerance_ns

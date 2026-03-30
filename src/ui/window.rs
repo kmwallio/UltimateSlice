@@ -2352,6 +2352,82 @@ fn clip_to_program_clips(
         return Vec::new();
     }
 
+    // Multicam clips: expand into sequential ProgramClips per angle segment
+    if c.kind == ClipKind::Multicam {
+        let clip_start = timeline_offset.saturating_add(c.timeline_start);
+        let clip_dur = c.duration();
+        let segments = c.multicam_segments();
+        let mut result = Vec::new();
+
+        // Video segments: one ProgramClip per contiguous angle segment (no embedded audio)
+        for (seg_start, seg_end, angle_idx) in &segments {
+            if let Some(angle) = c.multicam_angles.as_ref().and_then(|a| a.get(*angle_idx)) {
+                let angle_source_in = angle.source_in.saturating_add(*seg_start);
+                let angle_source_out = angle.source_in.saturating_add(*seg_end)
+                    .min(angle.source_out);
+                let mut seg_clip = crate::model::clip::Clip::new(
+                    &angle.source_path,
+                    angle_source_out,
+                    0,
+                    ClipKind::Video,
+                );
+                seg_clip.source_in = angle_source_in;
+                seg_clip.source_out = angle_source_out;
+                seg_clip.timeline_start = clip_start.saturating_add(*seg_start);
+                let mut seg_results = clip_to_program_clips(
+                    &seg_clip,
+                    false, // not audio_only
+                    duck,
+                    duck_amount_db,
+                    track_index,
+                    suppress_embedded_audio_ids,
+                    0,
+                    depth + 1,
+                );
+                // Video segments have no embedded audio (audio comes from the mix below)
+                for pc in &mut seg_results {
+                    pc.has_audio = false;
+                }
+                result.extend(seg_results);
+            }
+        }
+
+        // Audio mix: one continuous audio ProgramClip per unmuted angle spanning the full multicam duration
+        if let Some(ref angles) = c.multicam_angles {
+            for (ai, angle) in angles.iter().enumerate() {
+                if angle.muted {
+                    continue;
+                }
+                let angle_source_in = angle.source_in;
+                let angle_source_out = angle.source_in.saturating_add(clip_dur)
+                    .min(angle.source_out);
+                let mut audio_clip = crate::model::clip::Clip::new(
+                    &angle.source_path,
+                    angle_source_out,
+                    clip_start,
+                    ClipKind::Audio,
+                );
+                audio_clip.source_in = angle_source_in;
+                audio_clip.source_out = angle_source_out;
+                audio_clip.volume = angle.volume;
+                audio_clip.id = format!("{}-audio-{}", c.id, ai);
+                let audio_results = clip_to_program_clips(
+                    &audio_clip,
+                    true, // audio_only
+                    duck,
+                    duck_amount_db,
+                    track_index + angles.len() + ai, // offset track index to avoid collisions
+                    suppress_embedded_audio_ids,
+                    0,
+                    depth + 1,
+                );
+                result.extend(audio_results);
+            }
+        }
+
+        return result;
+    }
+
     let effective_timeline_start = timeline_offset.saturating_add(c.timeline_start);
 
     vec![ProgramClip {
@@ -2455,6 +2531,7 @@ fn clip_to_program_clips(
             && c.kind != ClipKind::Title
             && c.kind != ClipKind::Adjustment
             && c.kind != ClipKind::Compound
+            && c.kind != ClipKind::Multicam
             && !suppress_embedded_audio_ids.contains(&c.id),
         is_image: c.kind == ClipKind::Image,
         is_adjustment: c.kind == ClipKind::Adjustment,
@@ -3668,6 +3745,27 @@ pub fn build_window(
         let cb = on_project_changed.clone();
         timeline_state.borrow_mut().on_project_changed = Some(Rc::new(move || cb()));
     }
+    // Multicam angle viewer panel widgets (created early so closures can capture them;
+    // appended to the sidebar layout later in the function).
+    let multicam_panel = gtk::Box::new(Orientation::Vertical, 4);
+    multicam_panel.set_margin_start(6);
+    multicam_panel.set_margin_end(6);
+    multicam_panel.set_margin_top(4);
+    multicam_panel.set_margin_bottom(4);
+    multicam_panel.set_visible(false);
+    {
+        let header = gtk::Label::new(Some("Multicam Angles"));
+        header.add_css_class("heading");
+        header.set_halign(gtk::Align::Start);
+        multicam_panel.append(&header);
+        let hint = gtk::Label::new(Some("Press 1-9 to switch angles"));
+        hint.set_halign(gtk::Align::Start);
+        hint.add_css_class("dim-label");
+        multicam_panel.append(&hint);
+    }
+    let multicam_angles_box = gtk::Box::new(Orientation::Vertical, 2);
+    multicam_panel.append(&multicam_angles_box);
+
     // Wire on_clip_selected: lightweight inspector sync without pipeline rebuild.
     {
         let inspector_view = inspector_view.clone();
@@ -3675,6 +3773,10 @@ pub fn build_window(
         let transform_overlay_cell = transform_overlay_cell.clone();
         let keyframe_editor_cell = keyframe_editor_cell.clone();
         let timeline_state_for_sel = timeline_state.clone();
+        let multicam_panel_for_sel = multicam_panel.clone();
+        let multicam_angles_box_for_sel = multicam_angles_box.clone();
+        let timeline_state_for_multicam_btn = timeline_state.clone();
+        let on_project_changed_for_multicam = on_project_changed.clone();
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
@@ -3692,6 +3794,60 @@ pub fn build_window(
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.clear_selection();
                     editor.queue_redraw();
+                }
+                // Update multicam angle panel visibility and contents
+                let is_multicam = clip_id.as_deref().and_then(|id| proj.clip_ref(id)).map(|c| c.is_multicam()).unwrap_or(false);
+                multicam_panel_for_sel.set_visible(is_multicam);
+                if is_multicam {
+                    // Clear old buttons
+                    while let Some(child) = multicam_angles_box_for_sel.first_child() {
+                        multicam_angles_box_for_sel.remove(&child);
+                    }
+                    if let Some(clip) = clip_id.as_deref().and_then(|id| proj.clip_ref(id)) {
+                        let active = clip.active_angle_at(playhead_ns.saturating_sub(clip.timeline_start));
+                        if let Some(ref angles) = clip.multicam_angles {
+                            for (i, angle) in angles.iter().enumerate() {
+                                let row = gtk::Box::new(Orientation::Horizontal, 4);
+                                // Angle switch button
+                                let btn = gtk::Button::with_label(&format!("[{}] {}", i + 1, angle.label));
+                                btn.add_css_class("flat");
+                                btn.set_hexpand(true);
+                                if i == active {
+                                    btn.add_css_class("suggested-action");
+                                }
+                                let ts = timeline_state_for_multicam_btn.clone();
+                                btn.connect_clicked(move |_| {
+                                    let mut st = ts.borrow_mut();
+                                    let changed = st.insert_multicam_angle_switch(i);
+                                    let proj_cb = st.on_project_changed.clone();
+                                    drop(st);
+                                    if changed {
+                                        if let Some(cb) = proj_cb {
+                                            cb();
+                                        }
+                                    }
+                                });
+                                row.append(&btn);
+                                // Audio mute indicator
+                                let audio_label = if angle.muted {
+                                    "🔇"
+                                } else if angle.volume < 0.01 {
+                                    "🔈"
+                                } else {
+                                    "🔊"
+                                };
+                                let audio_btn = gtk::Label::new(Some(audio_label));
+                                let vol_str = if angle.muted {
+                                    "Audio: muted".to_string()
+                                } else {
+                                    format!("Audio: {:.0}%", angle.volume * 100.0)
+                                };
+                                audio_btn.set_tooltip_text(Some(&vol_str));
+                                row.append(&audio_btn);
+                                multicam_angles_box_for_sel.append(&row);
+                            }
+                        }
+                    }
                 }
             }));
     }
@@ -4628,6 +4784,130 @@ pub fn build_window(
                 },
             ));
         }
+    }
+
+    // Wire on_create_multicam — spawns audio sync in background, then creates multicam clip.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window_weak.clone();
+        let multicam_sync_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<(
+            Vec<(String, String, u64, u64, u64, String)>,
+            Vec<(String, i64, f32, Option<f64>)>,
+        )>>>> = Rc::new(RefCell::new(None));
+        // Poll timer for multicam sync results
+        {
+            let multicam_sync_rx = multicam_sync_rx.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let result = {
+                    let rx_opt = multicam_sync_rx.borrow();
+                    rx_opt.as_ref().and_then(|rx| rx.try_recv().ok())
+                };
+                if let Some((clip_infos, sync_results)) = result {
+                    *multicam_sync_rx.borrow_mut() = None;
+                    // Build multicam angles from sync results
+                    let anchor_id = clip_infos.first().map(|(id, ..)| id.clone()).unwrap_or_default();
+                    let anchor_start = clip_infos.first().map(|(_, _, _, _, tl, _)| *tl).unwrap_or(0);
+                    let mut angles: Vec<crate::model::clip::MulticamAngle> = Vec::new();
+                    for (i, (id, path, src_in, src_out, _tl_start, _track_id)) in clip_infos.iter().enumerate() {
+                        let offset_ns = if *id == anchor_id {
+                            0i64
+                        } else {
+                            sync_results.iter().find(|(rid, ..)| rid == id).map(|(_, o, _, _)| *o).unwrap_or(0)
+                        };
+                        let label = format!("Angle {}", i + 1);
+                        // Compute synced source_in: anchor's source_in + offset
+                        let synced_in = (*src_in as i64 + offset_ns).max(0) as u64;
+                        let synced_out = *src_out;
+                        angles.push(crate::model::clip::MulticamAngle {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            label,
+                            source_path: path.clone(),
+                            source_in: synced_in,
+                            source_out: synced_out,
+                            sync_offset_ns: offset_ns,
+                            source_timecode_base_ns: None,
+                            media_duration_ns: None,
+                            volume: if i == 0 { 1.0 } else { 0.0 },
+                            muted: i != 0,
+                        });
+                    }
+                    if angles.len() >= 2 {
+                        let multicam = crate::model::clip::Clip::new_multicam(anchor_start, angles);
+                        let multicam_id = multicam.id.clone();
+                        // Remove original clips and add multicam clip
+                        let selected_ids: std::collections::HashSet<String> = clip_infos.iter().map(|(id, ..)| id.clone()).collect();
+                        let mut proj = project.borrow_mut();
+                        let mut changes = Vec::new();
+                        let mut placement_track_id: Option<String> = None;
+                        for track in &proj.tracks {
+                            if track.clips.iter().any(|c| selected_ids.contains(&c.id)) {
+                                let old_clips = track.clips.clone();
+                                let mut new_clips: Vec<crate::model::clip::Clip> = track.clips.iter().filter(|c| !selected_ids.contains(&c.id)).cloned().collect();
+                                if placement_track_id.is_none() {
+                                    new_clips.push(multicam.clone());
+                                    new_clips.sort_by_key(|c| c.timeline_start);
+                                    placement_track_id = Some(track.id.clone());
+                                }
+                                changes.push(crate::undo::TrackClipsChange {
+                                    track_id: track.id.clone(),
+                                    old_clips,
+                                    new_clips,
+                                });
+                            }
+                        }
+                        let cmd = Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                            changes,
+                            label: "Create Multicam Clip".to_string(),
+                        });
+                        {
+                            let mut st = timeline_state.borrow_mut();
+                            st.history.execute(cmd, &mut proj);
+                        }
+                        drop(proj);
+                        on_project_changed();
+                    }
+                    if let Some(win) = window_weak.upgrade() {
+                        let proj = project.borrow();
+                        let title = &proj.title;
+                        win.set_title(Some(&format!("UltimateSlice — {title}")));
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        timeline_state.borrow_mut().on_create_multicam = Some(Rc::new(
+            move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
+                if multicam_sync_rx.borrow().is_some() {
+                    return; // sync already in progress
+                }
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    win.set_title(Some(&format!("UltimateSlice — {} (Syncing multicam...)", proj.title)));
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *multicam_sync_rx.borrow_mut() = Some(rx);
+                let clip_infos_clone = clip_infos.clone();
+                std::thread::spawn(move || {
+                    let _ = gstreamer::init();
+                    let clips: Vec<(String, String, u64, u64)> = clip_infos_clone
+                        .iter()
+                        .map(|(id, path, src_in, src_out, _, _)| (id.clone(), path.clone(), *src_in, *src_out))
+                        .collect();
+                    let sync_results = crate::media::audio_sync::sync_clips_by_audio(&clips);
+                    let results: Vec<(String, i64, f32, Option<f64>)> = sync_results
+                        .into_iter()
+                        .map(|r| (r.clip_id, r.offset_ns, r.confidence, r.drift_speed))
+                        .collect();
+                    let _ = tx.send((clip_infos, results));
+                });
+            },
+        ));
     }
 
     // Shared flag: true while silence detection is running (read by status bar timer).
@@ -7068,6 +7348,8 @@ pub fn build_window(
     right_sidebar.set_margin_end(6);
     right_sidebar.set_margin_top(6);
     right_sidebar.set_margin_bottom(6);
+
+    right_sidebar.append(&multicam_panel);
 
     let inspector_scroll = ScrolledWindow::new();
     inspector_scroll.set_vexpand(true);
@@ -12151,6 +12433,258 @@ fn handle_mcp_command(
                 reply
                     .send(json!({"error": "Failed to break apart compound clip (not a compound clip or not found)"}))
                     .ok();
+            }
+        }
+        McpCommand::CreateMulticamClip { clip_ids, reply } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"error": "At least 2 clip IDs required"}))
+                    .ok();
+                return;
+            }
+            // Collect clip info for audio sync
+            let clip_infos: Vec<(String, String, u64, u64, u64, String)> = {
+                let proj = project.borrow();
+                clip_ids
+                    .iter()
+                    .filter_map(|id| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter().map(move |c| (t.id.clone(), c)))
+                            .find(|(_, c)| &c.id == id)
+                            .map(|(track_id, c)| {
+                                (
+                                    c.id.clone(),
+                                    c.source_path.clone(),
+                                    c.source_in,
+                                    c.source_out,
+                                    c.timeline_start,
+                                    track_id,
+                                )
+                            })
+                    })
+                    .collect()
+            };
+            if clip_infos.len() < 2 {
+                reply
+                    .send(json!({"error": "Could not find 2+ clips with the provided IDs"}))
+                    .ok();
+                return;
+            }
+            // Run audio sync synchronously (MCP is blocking)
+            let sync_clips: Vec<(String, String, u64, u64)> = clip_infos
+                .iter()
+                .map(|(id, path, src_in, src_out, _, _)| {
+                    (id.clone(), path.clone(), *src_in, *src_out)
+                })
+                .collect();
+            let sync_results = crate::media::audio_sync::sync_clips_by_audio(&sync_clips);
+            let anchor_id = clip_infos[0].0.clone();
+            let anchor_start = clip_infos[0].4;
+            // Build multicam angles from sync results
+            let mut angles: Vec<crate::model::clip::MulticamAngle> = Vec::new();
+            for (i, (id, path, src_in, src_out, _tl_start, _track_id)) in clip_infos.iter().enumerate() {
+                let offset_ns = if *id == anchor_id {
+                    0i64
+                } else {
+                    sync_results.iter().find(|r| r.clip_id == *id).map(|r| r.offset_ns).unwrap_or(0)
+                };
+                let label = format!("Angle {}", i + 1);
+                let synced_in = (*src_in as i64 + offset_ns).max(0) as u64;
+                let synced_out = *src_out;
+                angles.push(crate::model::clip::MulticamAngle {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    label,
+                    source_path: path.clone(),
+                    source_in: synced_in,
+                    source_out: synced_out,
+                    sync_offset_ns: offset_ns,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: if i == 0 { 1.0 } else { 0.0 },
+                    muted: i != 0,
+                });
+            }
+            if angles.len() >= 2 {
+                let multicam = crate::model::clip::Clip::new_multicam(anchor_start, angles);
+                let multicam_id = multicam.id.clone();
+                let selected_ids: std::collections::HashSet<String> =
+                    clip_infos.iter().map(|(id, ..)| id.clone()).collect();
+                let mut proj = project.borrow_mut();
+                let mut changes = Vec::new();
+                let mut placement_track_id: Option<String> = None;
+                for track in &proj.tracks {
+                    if track.clips.iter().any(|c| selected_ids.contains(&c.id)) {
+                        let old_clips = track.clips.clone();
+                        let mut new_clips: Vec<crate::model::clip::Clip> = track
+                            .clips
+                            .iter()
+                            .filter(|c| !selected_ids.contains(&c.id))
+                            .cloned()
+                            .collect();
+                        if placement_track_id.is_none() {
+                            new_clips.push(multicam.clone());
+                            new_clips.sort_by_key(|c| c.timeline_start);
+                            placement_track_id = Some(track.id.clone());
+                        }
+                        changes.push(crate::undo::TrackClipsChange {
+                            track_id: track.id.clone(),
+                            old_clips,
+                            new_clips,
+                        });
+                    }
+                }
+                let cmd = Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                    changes,
+                    label: "Create Multicam Clip".to_string(),
+                });
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    st.history.execute(cmd, &mut proj);
+                }
+                drop(proj);
+                on_project_changed();
+                reply
+                    .send(json!({"success": true, "multicam_clip_id": multicam_id}))
+                    .ok();
+            } else {
+                reply
+                    .send(json!({"error": "Failed to create multicam clip (audio sync produced fewer than 2 angles)"}))
+                    .ok();
+            }
+        }
+        McpCommand::AddAngleSwitch {
+            clip_id,
+            position_ns,
+            angle_index,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let clip = proj
+                .tracks
+                .iter_mut()
+                .flat_map(|t| t.clips.iter_mut())
+                .find(|c| c.id == clip_id);
+            if let Some(clip) = clip {
+                if clip.kind != crate::model::clip::ClipKind::Multicam {
+                    reply
+                        .send(json!({"error": "Clip is not a multicam clip"}))
+                        .ok();
+                } else {
+                    let num_angles = clip.multicam_angles.as_ref().map(|a| a.len()).unwrap_or(0);
+                    if angle_index >= num_angles {
+                        reply
+                            .send(json!({"error": format!("angle_index {} out of range (clip has {} angles)", angle_index, num_angles)}))
+                            .ok();
+                    } else {
+                        clip.insert_angle_switch(position_ns, angle_index);
+                        drop(proj);
+                        on_project_changed();
+                        reply.send(json!({"success": true})).ok();
+                    }
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::ListMulticamAngles { clip_id, reply } => {
+            let proj = project.borrow();
+            let clip = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id);
+            if let Some(clip) = clip {
+                if clip.kind != crate::model::clip::ClipKind::Multicam {
+                    reply
+                        .send(json!({"error": "Clip is not a multicam clip"}))
+                        .ok();
+                } else {
+                    let angles: Vec<serde_json::Value> = clip
+                        .multicam_angles
+                        .as_ref()
+                        .map(|a| {
+                            a.iter()
+                                .enumerate()
+                                .map(|(i, angle)| {
+                                    json!({
+                                        "index": i,
+                                        "id": angle.id,
+                                        "label": angle.label,
+                                        "source_path": angle.source_path,
+                                        "source_in": angle.source_in,
+                                        "source_out": angle.source_out,
+                                        "sync_offset_ns": angle.sync_offset_ns,
+                                        "volume": angle.volume,
+                                        "muted": angle.muted,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let switches: Vec<serde_json::Value> = clip
+                        .multicam_switches
+                        .as_ref()
+                        .map(|s| {
+                            s.iter()
+                                .map(|sw| {
+                                    json!({
+                                        "position_ns": sw.position_ns,
+                                        "angle_index": sw.angle_index,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    reply
+                        .send(json!({
+                            "clip_id": clip_id,
+                            "angles": angles,
+                            "switches": switches,
+                        }))
+                        .ok();
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::SetMulticamAngleAudio {
+            clip_id,
+            angle_index,
+            volume,
+            muted,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if !clip.is_multicam() {
+                    reply.send(json!({"error": "Clip is not a multicam clip"})).ok();
+                    return;
+                }
+                if let Some(ref mut angles) = clip.multicam_angles {
+                    if angle_index >= angles.len() {
+                        reply.send(json!({"error": format!("Angle index {} out of range (0..{})", angle_index, angles.len())})).ok();
+                        return;
+                    }
+                    if let Some(v) = volume {
+                        angles[angle_index].volume = v.clamp(0.0, 2.0);
+                    }
+                    if let Some(m) = muted {
+                        angles[angle_index].muted = m;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                    reply.send(json!({"success": true})).ok();
+                } else {
+                    reply.send(json!({"error": "Multicam clip has no angles"})).ok();
+                }
+            } else {
+                reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
             }
         }
     }

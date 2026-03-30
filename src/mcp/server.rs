@@ -1376,6 +1376,59 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_id"]
             }
+        },
+        {
+            "name": "create_multicam_clip",
+            "description": "Create a multicam clip from 2+ video clip IDs. Clips are synced by audio cross-correlation and combined into a single multicam clip with per-angle source data.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of clip IDs to combine into a multicam clip (minimum 2)"
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "add_angle_switch",
+            "description": "Insert an angle switch at a position within a multicam clip. If a switch already exists at that position, its angle is updated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" },
+                    "position_ns": { "type": "integer", "description": "Position within the clip (nanoseconds from clip start)" },
+                    "angle_index": { "type": "integer", "description": "Zero-based index of the angle to switch to" }
+                },
+                "required": ["clip_id", "position_ns", "angle_index"]
+            }
+        },
+        {
+            "name": "list_multicam_angles",
+            "description": "List the angles and switch points of a multicam clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_multicam_angle_audio",
+            "description": "Set volume and/or mute state for a multicam angle's audio. Unmuted angles with volume > 0 are mixed together in the audio output.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" },
+                    "angle_index": { "type": "integer", "description": "0-based angle index" },
+                    "volume": { "type": "number", "description": "Volume level 0.0 (silent) to 1.0 (full); omit to keep current" },
+                    "muted": { "type": "boolean", "description": "Whether to mute this angle's audio; omit to keep current" }
+                },
+                "required": ["clip_id", "angle_index"]
+            }
         }
     ]})
 }
@@ -2041,6 +2094,37 @@ fn dispatch_tool_payload(
         }
         "break_apart_compound_clip" => McpCommand::BreakApartCompoundClip {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "create_multicam_clip" => {
+            let clip_ids: Vec<String> = args["clip_ids"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpCommand::CreateMulticamClip {
+                clip_ids,
+                reply: tx,
+            }
+        }
+        "add_angle_switch" => McpCommand::AddAngleSwitch {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            position_ns: args["position_ns"].as_u64().unwrap_or(0),
+            angle_index: args["angle_index"].as_u64().unwrap_or(0) as usize,
+            reply: tx,
+        },
+        "list_multicam_angles" => McpCommand::ListMulticamAngles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_multicam_angle_audio" => McpCommand::SetMulticamAngleAudio {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            angle_index: args["angle_index"].as_u64().unwrap_or(0) as usize,
+            volume: args["volume"].as_f64().map(|v| v as f32),
+            muted: args["muted"].as_bool(),
             reply: tx,
         },
 

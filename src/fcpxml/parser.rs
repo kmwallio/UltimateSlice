@@ -819,7 +819,7 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment | ClipKind::Compound => {
+                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment | ClipKind::Compound | ClipKind::Multicam => {
                     lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
                 }
             };
@@ -1176,6 +1176,17 @@ fn parse_asset_clip(
                             let json_str = tracks_json.replace("&quot;", "\"");
                             clip.compound_tracks =
                                 serde_json::from_str(&json_str).ok();
+                        }
+                    }
+                    "multicam" => {
+                        clip.kind = ClipKind::Multicam;
+                        if let Some(angles_json) = attrs.get("us:multicam-angles") {
+                            let json_str = angles_json.replace("&quot;", "\"");
+                            clip.multicam_angles = serde_json::from_str(&json_str).ok();
+                        }
+                        if let Some(switches_json) = attrs.get("us:multicam-switches") {
+                            let json_str = switches_json.replace("&quot;", "\"");
+                            clip.multicam_switches = serde_json::from_str(&json_str).ok();
                         }
                     }
                     _ => {}
@@ -2546,6 +2557,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-secondary-text"
             | "us:clip-kind"
             | "us:compound-tracks"
+            | "us:multicam-angles"
+            | "us:multicam-switches"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
