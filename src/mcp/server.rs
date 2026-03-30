@@ -607,6 +607,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "save_edl",
+            "description": "Export timeline to CMX 3600 EDL (.edl) file for color grading handoff and broadcast",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for output .edl file" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "save_project_with_media",
             "description": "Export a packaged project: write .uspxml plus copy all timeline-used media into a sibling ProjectName.Library directory, with XML media paths rewritten to the packaged copies.",
             "inputSchema": {
@@ -1608,6 +1619,11 @@ fn dispatch_tool_payload(
         },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "save_edl" => McpCommand::SaveEdl {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },

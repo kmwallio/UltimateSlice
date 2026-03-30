@@ -10468,6 +10468,22 @@ fn handle_mcp_command(
             };
         }
 
+        McpCommand::SaveEdl { path, reply } => {
+            let result = {
+                let proj = project.borrow();
+                let edl_content = crate::edl::writer::write_edl(&proj);
+                std::fs::write(&path, edl_content).map_err(|e| anyhow::anyhow!(e))
+            };
+            match result {
+                Ok(_) => {
+                    let _ = reply.send(json!({"success": true, "path": path}));
+                }
+                Err(e) => {
+                    let _ = reply.send(json!({"success": false, "error": e.to_string()}));
+                }
+            }
+        }
+
         McpCommand::SaveProjectWithMedia { path, reply } => {
             let result = {
                 let proj = project.borrow();

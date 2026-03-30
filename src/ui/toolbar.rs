@@ -1708,8 +1708,50 @@ pub fn build_toolbar(
             });
         });
     }
+    let btn_export_edl = gtk::Button::with_label("Export EDL…");
+    btn_export_edl.add_css_class("flat");
+    {
+        let project = project.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_edl.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Export EDL");
+            dialog.set_initial_name(Some("timeline.edl"));
+
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.edl");
+            filter.set_name(Some("CMX 3600 EDL Files"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let edl_content = crate::edl::writer::write_edl(&project.borrow());
+                        match std::fs::write(&path, edl_content) {
+                            Ok(_) => {
+                                log::info!("EDL exported to {}", path.display());
+                            }
+                            Err(e) => {
+                                log::error!("Failed to export EDL: {e}");
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     export_pop_box.append(&btn_export_project_with_media);
     export_pop_box.append(&btn_export_frame);
+    export_pop_box.append(&btn_export_edl);
     export_pop_box.append(&btn_restore_backup);
 
     // Export Queue dialog entry

@@ -217,6 +217,24 @@ Keyframes are evaluated in clip-local timeline time and rendered directly into f
 - Projects with no markers produce export output with no chapter metadata (no change in behavior).
 - Verify chapters with: `ffprobe -show_chapters output.mp4`
 
+## EDL Export (CMX 3600)
+
+Export the timeline as a standard CMX 3600 Edit Decision List for handoff to color grading systems (DaVinci Resolve, Baselight) or broadcast.
+
+**Export → Export EDL...** opens a file dialog to save the `.edl` file.
+
+Features:
+- Non-drop frame timecode for most frame rates; drop-frame (`;` separator) for 29.97fps
+- Record timecodes start at 01:00:00:00 (broadcast standard)
+- Source timecodes reflect clip in/out points
+- Dissolve and wipe transitions preserved
+- Speed effects noted via M2 comments
+- Multi-track support (V, A, A2, A3...)
+- Source file paths in comments for relinking
+- Title and adjustment clips excluded (no source media)
+
+Also available via MCP: `save_edl` tool with `path` parameter.
+
 ## Notes
 
 - Export requires **ffmpeg** to be installed and on `$PATH`.

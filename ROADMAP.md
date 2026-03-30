@@ -463,7 +463,7 @@ Tracking docs:
   - [x] Phase 1: Full-frame adjustment layers with `ClipKind::Adjustment`. Color grading (brightness, contrast, saturation) applied to composited output via permanent GStreamer videobalance element (real-time preview). Frei0r user effects, LUTs, temperature/tint, blur applied on export via time-gated FFmpeg filter chain. Purple hatched timeline rendering, inspector visibility, FCPXML round-trip, MCP tool, undo support, right-click context menu.
   - [x] Phase 1b: Background prerender support for adjustment layer frei0r effects — when Background Render is enabled, prerender the adjustment frei0r/LUT/blur effects into temporary clips so the Program Monitor shows the full effect chain without real-time GStreamer topology changes
   - [x] Phase 2: Bounding box scoping (position, scale, crop, and rotate constrain the adjustment effect region in both preview and export; overlapping scoped adjustments stack by track order)
-- [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
+- [x] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
   - [x] Phase 1: Rectangle & ellipse masks with feathering — per-clip mask model (`Vec<ClipMask>`), SDF-based alpha computation, GStreamer preview pad probe, FFmpeg `geq` export, Inspector UI with all controls, transform overlay mask outline, keyframe property support, FCPXML round-trip, MCP `set_clip_mask` tool, full undo/redo
   - [x] Phase 2: Bezier/freeform path masks — `MaskShape::Path` with `Vec<BezierPoint>` (anchor + in/out bezier handles), closed-path SDF via polyline subdivision + winding number, feathered edges via distance-to-polyline, AABB early-out optimization, export via rasterized grayscale PGM + FFmpeg `movie`/`alphamerge`, Cairo bezier curve overlay drawing with control point visualization, Inspector point list editor, MCP `set_clip_mask` path support, serde backward-compatible persistence
 
@@ -545,7 +545,7 @@ Tracking docs:
 - [x] Batch export / render queue (queue multiple export jobs to run sequentially)
 - [x] Chapter markers in export (embed project markers as MP4/MKV chapter metadata via ffmpeg FFMETADATA)
 - [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
-- [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
+- [x] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
 - [ ] AAF export — standard interchange for audio post-production (Pro Tools)
 - [x] Export progress dialog with cancel (ProgressBar + status label)
 

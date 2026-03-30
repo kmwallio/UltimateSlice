@@ -1,5 +1,6 @@
 #![recursion_limit = "512"]
 mod app;
+mod edl;
 mod fcpxml;
 mod mcp;
 mod media;

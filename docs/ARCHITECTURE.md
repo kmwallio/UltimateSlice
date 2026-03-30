@@ -392,6 +392,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_clip_mask` | Set shape mask on a clip (rectangle or ellipse) to restrict visible area |
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.14 to a file path |
+| `save_edl` | Export timeline to CMX 3600 EDL (.edl) file |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
 | `list_export_presets` | List saved export presets from UI state |
 | `save_export_preset` | Create or overwrite a named export preset |
