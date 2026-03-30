@@ -329,6 +329,10 @@ pub struct TimelineState {
     pub on_match_color: Option<Rc<dyn Fn()>>,
     /// Callback fired when user presses the match-frame shortcut (F).
     pub on_match_frame: Option<Rc<dyn Fn()>>,
+    /// Navigation stack for compound clip drill-down editing.
+    /// Empty = editing root project timeline.
+    /// Each entry is the clip ID of a compound clip being edited.
+    pub compound_nav_stack: Vec<String>,
 }
 
 impl TimelineState {
@@ -372,6 +376,7 @@ impl TimelineState {
             missing_media_paths: HashSet::new(),
             on_match_color: None,
             on_match_frame: None,
+            compound_nav_stack: Vec::new(),
         }
     }
 
@@ -1024,6 +1029,8 @@ impl TimelineState {
                 let ids = self.selected_ids_or_primary();
                 ids.len() == 1
             },
+            create_compound: self.can_create_compound(),
+            break_apart_compound: self.can_break_apart_compound(),
         }
     }
 
@@ -1822,6 +1829,366 @@ impl TimelineState {
         ids
     }
 
+    /// Returns true when 2+ clips are selected (compound creation requires multiple clips).
+    /// Returns true when the timeline is showing a compound clip's internal tracks
+    /// (drill-down mode).
+    pub fn is_editing_compound(&self) -> bool {
+        !self.compound_nav_stack.is_empty()
+    }
+
+    /// Resolve the currently-editing tracks based on the navigation stack.
+    /// Returns project.tracks when at root level, or the innermost compound
+    /// clip's internal tracks when drilled in.
+    pub fn resolve_editing_tracks<'a>(&self, proj: &'a Project) -> &'a [crate::model::track::Track] {
+        let mut tracks: &[crate::model::track::Track] = &proj.tracks;
+        for compound_id in &self.compound_nav_stack {
+            let found = tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == *compound_id && c.is_compound());
+            if let Some(compound) = found {
+                if let Some(ref inner) = compound.compound_tracks {
+                    tracks = inner;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        tracks
+    }
+
+    /// Enter a compound clip for drill-down editing.
+    pub fn enter_compound(&mut self, clip_id: String) {
+        self.compound_nav_stack.push(clip_id);
+        self.selected_clip_id = None;
+        self.selected_clip_ids.clear();
+        self.selected_track_id = None;
+    }
+
+    /// Navigate back one level in the compound drill-down stack.
+    pub fn exit_compound(&mut self) {
+        self.compound_nav_stack.pop();
+        self.selected_clip_id = None;
+        self.selected_clip_ids.clear();
+        self.selected_track_id = None;
+    }
+
+    /// Navigate back to the root project timeline.
+    pub fn exit_compound_to_root(&mut self) {
+        self.compound_nav_stack.clear();
+        self.selected_clip_id = None;
+        self.selected_clip_ids.clear();
+        self.selected_track_id = None;
+    }
+
+    /// Get breadcrumb labels for the current navigation path.
+    pub fn compound_breadcrumb_labels(&self) -> Vec<String> {
+        let proj = self.project.borrow();
+        let mut labels = vec!["Project".to_string()];
+        let mut tracks: &[crate::model::track::Track] = &proj.tracks;
+        for compound_id in &self.compound_nav_stack {
+            let found = tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == *compound_id && c.is_compound());
+            if let Some(compound) = found {
+                labels.push(compound.label.clone());
+                if let Some(ref inner) = compound.compound_tracks {
+                    tracks = inner;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        labels
+    }
+
+    /// Set the multi-selection to the given clip IDs (used by MCP).
+    pub fn set_selected_clip_ids(&mut self, ids: HashSet<String>) {
+        self.selected_clip_id = ids.iter().next().cloned();
+        self.selected_clip_ids = ids;
+    }
+
+    fn can_create_compound(&self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        ids.len() >= 2
+    }
+
+    /// Returns true when exactly one compound clip is selected.
+    fn can_break_apart_compound(&self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() != 1 {
+            return false;
+        }
+        let clip_id = ids.iter().next().unwrap();
+        let proj = self.project.borrow();
+        proj.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .any(|c| c.id == *clip_id && c.is_compound())
+    }
+
+    /// Create a compound clip from the current selection.
+    /// Returns `true` if the compound was created successfully.
+    pub fn create_compound_from_selection(&mut self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() < 2 {
+            return false;
+        }
+
+        let proj = self.project.borrow();
+
+        // Collect selected clips with their track info
+        let mut selected_clips: Vec<(Clip, String, usize, crate::model::track::TrackKind)> =
+            Vec::new();
+        for (t_idx, track) in proj.tracks.iter().enumerate() {
+            for clip in &track.clips {
+                if ids.contains(&clip.id) {
+                    selected_clips.push((
+                        clip.clone(),
+                        track.id.clone(),
+                        t_idx,
+                        track.kind,
+                    ));
+                }
+            }
+        }
+        if selected_clips.len() < 2 {
+            return false;
+        }
+
+        // Compute bounding time range
+        let earliest_start = selected_clips
+            .iter()
+            .map(|(c, _, _, _)| c.timeline_start)
+            .min()
+            .unwrap_or(0);
+        let latest_end = selected_clips
+            .iter()
+            .map(|(c, _, _, _)| c.timeline_end())
+            .max()
+            .unwrap_or(0);
+
+        // Build internal tracks for the compound clip.
+        // Group clips by their original track kind and index.
+        use std::collections::BTreeMap;
+        let mut track_groups: BTreeMap<usize, Vec<Clip>> = BTreeMap::new();
+        let mut track_meta: std::collections::HashMap<usize, (String, crate::model::track::TrackKind)> =
+            std::collections::HashMap::new();
+        for (mut clip, _track_id, t_idx, t_kind) in selected_clips.iter().cloned() {
+            // Rebase clip timeline_start relative to compound start
+            clip.timeline_start = clip.timeline_start.saturating_sub(earliest_start);
+            track_groups.entry(t_idx).or_default().push(clip);
+            track_meta.entry(t_idx).or_insert((String::new(), t_kind));
+        }
+
+        let mut internal_tracks = Vec::new();
+        for (t_idx, clips) in &track_groups {
+            let (_, t_kind) = track_meta[t_idx];
+            let label = format!(
+                "{} {}",
+                if t_kind == crate::model::track::TrackKind::Video {
+                    "Video"
+                } else {
+                    "Audio"
+                },
+                internal_tracks
+                    .iter()
+                    .filter(|t: &&crate::model::track::Track| t.kind == t_kind)
+                    .count()
+                    + 1
+            );
+            let mut track = if t_kind == crate::model::track::TrackKind::Video {
+                crate::model::track::Track::new_video(label)
+            } else {
+                crate::model::track::Track::new_audio(label)
+            };
+            track.clips = clips.clone();
+            internal_tracks.push(track);
+        }
+
+        // Find the topmost affected video track for compound clip placement
+        let placement_track_idx = selected_clips
+            .iter()
+            .filter(|(_, _, _, k)| *k == crate::model::track::TrackKind::Video)
+            .map(|(_, _, idx, _)| *idx)
+            .min()
+            .unwrap_or_else(|| selected_clips.iter().map(|(_, _, idx, _)| *idx).min().unwrap_or(0));
+
+        let placement_track_id = proj.tracks[placement_track_idx].id.clone();
+
+        // Build undo changes: snapshot old clips for each affected track, then new clips
+        let affected_track_ids: std::collections::HashSet<String> =
+            selected_clips.iter().map(|(_, tid, _, _)| tid.clone()).collect();
+
+        let mut changes = Vec::new();
+        for track in &proj.tracks {
+            if !affected_track_ids.contains(&track.id) {
+                continue;
+            }
+            let old_clips = track.clips.clone();
+            let mut new_clips: Vec<Clip> = track
+                .clips
+                .iter()
+                .filter(|c| !ids.contains(&c.id))
+                .cloned()
+                .collect();
+            // Add the compound clip to the placement track
+            if track.id == placement_track_id {
+                let compound = Clip::new_compound(earliest_start, internal_tracks.clone());
+                new_clips.push(compound);
+                new_clips.sort_by_key(|c| c.timeline_start);
+            }
+            changes.push(TrackClipsChange {
+                track_id: track.id.clone(),
+                old_clips,
+                new_clips,
+            });
+        }
+
+        drop(proj);
+
+        // Execute via undo system
+        let cmd = Box::new(SetMultipleTracksClipsCommand {
+            changes,
+            label: "Create Compound Clip".to_string(),
+        });
+        {
+            let mut proj = self.project.borrow_mut();
+            self.history.execute(cmd, &mut proj);
+        }
+
+        // Clear selection
+        self.selected_clip_id = None;
+        self.selected_clip_ids.clear();
+        self.selected_track_id = None;
+
+        true
+    }
+
+    /// Break apart the selected compound clip, restoring its internal clips
+    /// to the timeline. Returns `true` if successful.
+    pub fn break_apart_compound(&mut self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() != 1 {
+            return false;
+        }
+        let compound_id = ids.iter().next().unwrap().clone();
+
+        let proj = self.project.borrow();
+
+        // Find the compound clip and its track
+        let mut compound_clip: Option<Clip> = None;
+        let mut compound_track_id: Option<String> = None;
+        let mut compound_track_idx: Option<usize> = None;
+        for (t_idx, track) in proj.tracks.iter().enumerate() {
+            if let Some(clip) = track.clips.iter().find(|c| c.id == compound_id) {
+                if !clip.is_compound() {
+                    return false;
+                }
+                compound_clip = Some(clip.clone());
+                compound_track_id = Some(track.id.clone());
+                compound_track_idx = Some(t_idx);
+                break;
+            }
+        }
+        let Some(compound) = compound_clip else {
+            return false;
+        };
+        let compound_track_id = compound_track_id.unwrap();
+        let _compound_track_idx = compound_track_idx.unwrap();
+        let compound_start = compound.timeline_start;
+        let internal_tracks = match compound.compound_tracks {
+            Some(ref t) => t.clone(),
+            None => return false,
+        };
+
+        // Determine which project tracks to place internal clips on.
+        // Strategy: map internal video tracks to the compound's video track,
+        // and internal audio tracks to adjacent audio tracks (create if needed).
+        // For simplicity in v1: place all internal clips on the compound's track
+        // (video clips on compound track, audio clips need an audio track).
+
+        // Build changes: remove compound from its track, add internal clips back
+        let mut changes = Vec::new();
+
+        // First, handle the compound's own track
+        let track = proj.tracks.iter().find(|t| t.id == compound_track_id).unwrap();
+        let old_clips = track.clips.clone();
+        let mut new_clips: Vec<Clip> = track
+            .clips
+            .iter()
+            .filter(|c| c.id != compound_id)
+            .cloned()
+            .collect();
+
+        // Add rebased internal video clips to compound's track
+        for int_track in &internal_tracks {
+            if int_track.kind == crate::model::track::TrackKind::Video {
+                for mut clip in int_track.clips.clone() {
+                    clip.timeline_start = clip.timeline_start.saturating_add(compound_start);
+                    new_clips.push(clip);
+                }
+            }
+        }
+        new_clips.sort_by_key(|c| c.timeline_start);
+        changes.push(TrackClipsChange {
+            track_id: compound_track_id.clone(),
+            old_clips,
+            new_clips,
+        });
+
+        // Handle internal audio clips — find first audio track or skip
+        let audio_clips: Vec<Clip> = internal_tracks
+            .iter()
+            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .flat_map(|t| t.clips.clone())
+            .map(|mut c| {
+                c.timeline_start = c.timeline_start.saturating_add(compound_start);
+                c
+            })
+            .collect();
+
+        if !audio_clips.is_empty() {
+            if let Some(audio_track) = proj
+                .tracks
+                .iter()
+                .find(|t| t.kind == crate::model::track::TrackKind::Audio)
+            {
+                let old_clips = audio_track.clips.clone();
+                let mut new_clips = old_clips.clone();
+                new_clips.extend(audio_clips);
+                new_clips.sort_by_key(|c| c.timeline_start);
+                changes.push(TrackClipsChange {
+                    track_id: audio_track.id.clone(),
+                    old_clips,
+                    new_clips,
+                });
+            }
+        }
+
+        drop(proj);
+
+        let cmd = Box::new(SetMultipleTracksClipsCommand {
+            changes,
+            label: "Break Apart Compound Clip".to_string(),
+        });
+        {
+            let mut proj = self.project.borrow_mut();
+            self.history.execute(cmd, &mut proj);
+        }
+
+        self.selected_clip_id = None;
+        self.selected_clip_ids.clear();
+        self.selected_track_id = None;
+
+        true
+    }
+
     fn expand_with_link_members(&self, ids: &HashSet<String>) -> HashSet<String> {
         if ids.is_empty() {
             return HashSet::new();
@@ -2378,7 +2745,7 @@ impl TimelineState {
 fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
     match kind {
         ClipKind::Audio => TrackKind::Audio,
-        ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment => TrackKind::Video,
+        ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment | ClipKind::Compound => TrackKind::Video,
     }
 }
 
@@ -2709,6 +3076,8 @@ struct ClipContextMenuActionability {
     sync_replace_audio: bool,
     remove_silent_parts: bool,
     split_stereo: bool,
+    create_compound: bool,
+    break_apart_compound: bool,
 }
 
 impl ClipContextMenuActionability {
@@ -2722,6 +3091,8 @@ impl ClipContextMenuActionability {
             || self.sync_replace_audio
             || self.remove_silent_parts
             || self.split_stereo
+            || self.create_compound
+            || self.break_apart_compound
     }
 }
 
@@ -2735,6 +3106,8 @@ fn apply_clip_context_menu_actionability(
     btn_sync_replace_audio: &gtk::Button,
     btn_remove_silent_parts: &gtk::Button,
     btn_split_stereo: &gtk::Button,
+    btn_create_compound: &gtk::Button,
+    btn_break_apart_compound: &gtk::Button,
     actionability: ClipContextMenuActionability,
 ) -> bool {
     let set_state = |button: &gtk::Button, actionable: bool| {
@@ -2750,6 +3123,8 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
     set_state(btn_split_stereo, actionability.split_stereo);
+    set_state(btn_create_compound, actionability.create_compound);
+    set_state(btn_break_apart_compound, actionability.break_apart_compound);
     actionability.any()
 }
 
@@ -2846,6 +3221,18 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         "Create left and right mono clips from selected stereo audio on separate tracks",
     ));
     clip_context_box.append(&btn_split_stereo);
+    let btn_create_compound = gtk::Button::with_label("Create Compound Clip");
+    btn_create_compound.add_css_class("flat");
+    btn_create_compound.set_tooltip_text(Some(
+        "Nest selected clips into a single compound clip (Alt+G)",
+    ));
+    let btn_break_apart_compound = gtk::Button::with_label("Break Apart Compound Clip");
+    btn_break_apart_compound.add_css_class("flat");
+    btn_break_apart_compound.set_tooltip_text(Some(
+        "Expand compound clip back into its constituent clips",
+    ));
+    clip_context_box.append(&btn_create_compound);
+    clip_context_box.append(&btn_break_apart_compound);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -3087,6 +3474,54 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     false
                 }
             };
+            let proj_cb = st.on_project_changed.clone();
+            drop(st);
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+
+    // ── Create Compound Clip button ──
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_create_compound.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let mut st = state.borrow_mut();
+            let changed = st.create_compound_from_selection();
+            let proj_cb = st.on_project_changed.clone();
+            drop(st);
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+
+    // ── Break Apart Compound Clip button ──
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_break_apart_compound.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let mut st = state.borrow_mut();
+            let changed = st.break_apart_compound();
             let proj_cb = st.on_project_changed.clone();
             drop(st);
             if changed {
@@ -3528,6 +3963,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_sync_replace_audio,
                                 &btn_remove_silent_parts,
                                 &btn_split_stereo,
+                                &btn_create_compound,
+                                &btn_break_apart_compound,
                                 actionability,
                             ) {
                                 clip_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -5125,6 +5562,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     changed
                 }
+                Key::g | Key::G if alt => {
+                    let changed = st.create_compound_from_selection();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
                 Key::l | Key::L if ctrl => {
                     let changed = st.link_selected_clips();
                     if changed {
@@ -6249,8 +6693,53 @@ fn draw_clip(
         cr.restore().ok();
     }
 
+    // ── Compound clip visual ──────────────────────────────────────────────
+    if clip.kind == crate::model::clip::ClipKind::Compound && cw > 20.0 {
+        // Badge
+        cr.save().ok();
+        let badge_size = 14.0_f64.min(ch * 0.4);
+        let bx = cx + 4.0;
+        let by = cy + 4.0;
+        cr.rectangle(bx, by, badge_size, badge_size);
+        cr.set_source_rgba(0.12, 0.53, 0.50, 0.85);
+        let _ = cr.fill();
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        let fs = badge_size * 0.6;
+        cr.set_font_size(fs);
+        let te = cr.text_extents("⊞").unwrap_or_else(|_| cr.text_extents("C").unwrap());
+        let _ = cr.move_to(
+            bx + (badge_size - te.width()) / 2.0 - te.x_bearing(),
+            by + (badge_size + te.height()) / 2.0,
+        );
+        let _ = cr.show_text("⊞");
+        cr.restore().ok();
+
+        // Centered label
+        cr.save().ok();
+        let font_sz = (ch * 0.35).clamp(8.0, 16.0);
+        cr.set_font_size(font_sz);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+        let label_text = &clip.label;
+        let max_label_w = (cw - 24.0).max(0.0);
+        let mut truncated = label_text.clone();
+        loop {
+            let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("…").unwrap());
+            if te.width() <= max_label_w || truncated.len() <= 1 {
+                break;
+            }
+            truncated.pop();
+            truncated.push('…');
+        }
+        let te = cr.text_extents(&truncated).unwrap_or_else(|_| cr.text_extents("…").unwrap());
+        let tx = cx + (cw - te.width()) / 2.0;
+        let ty = cy + (ch + te.height()) / 2.0;
+        let _ = cr.move_to(tx, ty);
+        let _ = cr.show_text(&truncated);
+        cr.restore().ok();
+    }
+
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && clip.kind != crate::model::clip::ClipKind::Adjustment && cw > 20.0 {
+    if track.kind == TrackKind::Video && clip.kind != crate::model::clip::ClipKind::Title && clip.kind != crate::model::clip::ClipKind::Adjustment && clip.kind != crate::model::clip::ClipKind::Compound && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -6483,6 +6972,7 @@ fn draw_clip(
         let has_lut_badge = !clip.lut_paths.is_empty();
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
             && clip.kind != crate::model::clip::ClipKind::Adjustment
+            && clip.kind != crate::model::clip::ClipKind::Compound
             && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
@@ -6835,6 +7325,9 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
             }
             if clip.kind == crate::model::clip::ClipKind::Adjustment {
                 return (0.55, 0.35, 0.75); // purple for adjustment layers
+            }
+            if clip.kind == crate::model::clip::ClipKind::Compound {
+                return (0.20, 0.63, 0.60); // teal for compound clips
             }
             match track_kind {
                 TrackKind::Video => (0.17, 0.47, 0.85),

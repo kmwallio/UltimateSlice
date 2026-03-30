@@ -167,6 +167,16 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Source timecode metadata is automatically extracted from media files on import (camera creation timestamps) and also preserved for FCPXML-imported clips and UltimateSlice-saved projects.
 - First pass scope: grouped trim behavior is not yet enabled.
 
+### Compound Clips (Nested Timelines)
+
+- **Create Compound Clip (`Alt+G`)** — select 2+ clips, then press `Alt+G` or right-click → "Create Compound Clip". The selected clips are replaced by a single compound clip containing them as an internal sub-timeline.
+- **Break Apart Compound Clip** — right-click a compound clip → "Break Apart Compound Clip" to restore the internal clips to the timeline.
+- Compound clips render with a teal fill color and a stacked-layers badge.
+- Preview and export correctly flatten compound clips, rendering all internal clips at the right timeline positions.
+- Compound clips are saved/loaded via FCPXML (`us:clip-kind="compound"` + `us:compound-tracks` vendor attribute).
+- MCP tools: `create_compound_clip` (takes `clip_ids` array), `break_apart_compound_clip` (takes `clip_id`).
+- Full undo/redo support.
+
 ### Sync Selected Clips by Audio (right-click menu)
 
 - Select 2 or more clips on the timeline, then right-click → **Sync Selected Clips by Audio**.

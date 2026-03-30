@@ -889,6 +889,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         asset_clip.push_attribute(("us:clip-kind", "title"));
                     } else if clip.kind == crate::model::clip::ClipKind::Adjustment {
                         asset_clip.push_attribute(("us:clip-kind", "adjustment"));
+                    } else if clip.kind == crate::model::clip::ClipKind::Compound {
+                        asset_clip.push_attribute(("us:clip-kind", "compound"));
+                        if let Some(ref tracks) = clip.compound_tracks {
+                            if let Ok(json) = serde_json::to_string(tracks) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip.push_attribute(("us:compound-tracks", escaped.as_str()));
+                            }
+                        }
                     }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
@@ -2204,8 +2212,12 @@ fn patch_asset_clip_block_transform(
         ("us:clip-kind", match clip.kind {
             crate::model::clip::ClipKind::Title => Some("title".to_string()),
             crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
+            crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
             _ => None,
         }),
+        ("us:compound-tracks", if clip.kind == crate::model::clip::ClipKind::Compound {
+            clip.compound_tracks.as_ref().and_then(|t| serde_json::to_string(t).ok()).map(|j| j.replace('"', "&quot;"))
+        } else { None }),
     ] {
         let next = if let Some(v) = value {
             replace_or_insert_attr(&updated_start, attr, &v)?
@@ -2744,7 +2756,7 @@ fn write_resources(
         for clip in &track.clips {
             // Title clips have no source media — skip to avoid writing
             // broken asset references with empty file:// URIs.
-            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment {
+            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment || clip.kind == crate::model::clip::ClipKind::Compound {
                 continue;
             }
             let export_source_path = clip

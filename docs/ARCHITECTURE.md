@@ -34,7 +34,7 @@ src/
   style.css                 Dark theme CSS for all GTK widgets
 
   model/
-    clip.rs                 Clip struct — source path, source_in/out (ns), timeline_start, label, ClipKind
+    clip.rs                 Clip struct — source path, source_in/out (ns), timeline_start, label, ClipKind (Video/Audio/Image/Title/Adjustment/Compound)
     track.rs                Track struct — id, TrackKind, Vec<Clip>, muted, locked
     project.rs              Project struct — title, FrameRate, resolution, Vec<Track>, dirty flag
     media_library.rs        MediaItem (library entry) + SourceMarks (source in/out state)
@@ -405,6 +405,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
 | `create_project` | Discard the current project and start a new empty one (optional title) |
 | `add_adjustment_layer` | Add an adjustment layer clip at a track index and timeline position; effects apply to composited result of all tracks below |
+| `create_compound_clip` | Create a compound (nested timeline) clip from specified clip IDs; replaces selected clips with a single compound clip |
+| `break_apart_compound_clip` | Break apart a compound clip, restoring its internal clips to the timeline |
 
 For automation-heavy loops, MCP keeps a short-lived per-session read cache for repeated `get_project`, `list_tracks`, and `list_clips` calls. Both direct tool calls and `batch_call_tools` can reuse this cache, and it is invalidated when a mutating tool runs so subsequent reads observe the updated state.
 

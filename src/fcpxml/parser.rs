@@ -819,7 +819,7 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment => {
+                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment | ClipKind::Compound => {
                     lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
                 }
             };
@@ -1170,6 +1170,14 @@ fn parse_asset_clip(
                 match v.as_str() {
                     "title" => clip.kind = ClipKind::Title,
                     "adjustment" => clip.kind = ClipKind::Adjustment,
+                    "compound" => {
+                        clip.kind = ClipKind::Compound;
+                        if let Some(tracks_json) = attrs.get("us:compound-tracks") {
+                            let json_str = tracks_json.replace("&quot;", "\"");
+                            clip.compound_tracks =
+                                serde_json::from_str(&json_str).ok();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2537,6 +2545,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:compound-tracks"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"

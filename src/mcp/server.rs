@@ -1350,6 +1350,32 @@ fn tools_list() -> Value {
                 "type": "object",
                 "properties": {}
             }
+        },
+        {
+            "name": "create_compound_clip",
+            "description": "Create a compound (nested timeline) clip from the specified clip IDs. The selected clips are replaced by a single compound clip that contains them as an internal sub-timeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of clip IDs to nest into a compound clip (minimum 2)"
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "break_apart_compound_clip",
+            "description": "Break apart a compound clip, restoring its internal clips to the timeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the compound clip to break apart" }
+                },
+                "required": ["clip_id"]
+            }
         }
     ]})
 }
@@ -1999,6 +2025,24 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "run_export_queue" => McpCommand::RunExportQueue { reply: tx },
+        "create_compound_clip" => {
+            let clip_ids: Vec<String> = args["clip_ids"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpCommand::CreateCompoundClip {
+                clip_ids,
+                reply: tx,
+            }
+        }
+        "break_apart_compound_clip" => McpCommand::BreakApartCompoundClip {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
 
         _ => {
             return Err(tool_error_payload(

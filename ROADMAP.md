@@ -571,6 +571,8 @@ Tracking docs:
   - [x] Automatic timecode extraction from media files on import (GST_TAG_DATE_TIME)
 - [x] Remove Silent Parts: right-click context menu action to detect and remove silent segments via ffmpeg `silencedetect`, with configurable threshold/duration and single-undo support
 - [ ] Nested Timelines / Compound Clips
+  - [x] Phase 1: Compound clip model (`ClipKind::Compound`, `compound_tracks`), create/break-apart from selection (Ctrl+Shift+G), context menu, preview/export flattening, FCPXML round-trip, MCP tools (`create_compound_clip`, `break_apart_compound_clip`), full undo/redo
+  - [ ] Phase 2: Drill-down sub-timeline editing (double-click to enter compound, breadcrumb navigation, editing scope resolution)
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)

@@ -66,6 +66,7 @@
 | `Ctrl+Alt+M` | Match selected clip's color to a reference clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
+| `Alt+G` | Create compound clip from selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |

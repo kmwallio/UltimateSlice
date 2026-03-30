@@ -1,3 +1,4 @@
+use super::track::Track;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -25,6 +26,7 @@ pub enum ClipKind {
     Image,
     Title,
     Adjustment,
+    Compound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1099,6 +1101,9 @@ pub struct Clip {
     /// Anamorphic desqueeze factor: 1.0 (none), 1.33, 1.5, 1.8, 2.0.
     #[serde(default = "default_anamorphic_desqueeze")]
     pub anamorphic_desqueeze: f64,
+    /// Internal tracks for compound (nested timeline) clips. `None` for all other clip kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compound_tracks: Option<Vec<Track>>,
 }
 
 fn default_anamorphic_desqueeze() -> f64 {
@@ -1364,7 +1369,22 @@ impl Clip {
             fcpxml_unknown_asset_attrs: Vec::new(),
             fcpxml_unknown_asset_children: Vec::new(),
             anamorphic_desqueeze: 1.0,
+            compound_tracks: None,
         }
+    }
+
+    /// Create a new compound (nested timeline) clip from internal tracks.
+    pub fn new_compound(timeline_start: u64, tracks: Vec<Track>) -> Self {
+        let duration = tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| c.timeline_end())
+            .max()
+            .unwrap_or(0);
+        let mut c = Self::new("", duration, timeline_start, ClipKind::Compound);
+        c.label = "Compound Clip".to_string();
+        c.compound_tracks = Some(tracks);
+        c
     }
 
     /// Create a new adjustment layer clip (no source media; effects apply to
@@ -1373,6 +1393,27 @@ impl Clip {
         let mut c = Self::new("", duration_ns, timeline_start, ClipKind::Adjustment);
         c.label = "Adjustment".to_string();
         c
+    }
+
+    /// Returns `true` when this clip is a compound (nested timeline) clip.
+    pub fn is_compound(&self) -> bool {
+        self.kind == ClipKind::Compound
+    }
+
+    /// Compute the duration of the compound clip's internal timeline.
+    /// Returns 0 if this is not a compound clip or has no internal clips.
+    pub fn compound_duration(&self) -> u64 {
+        self.compound_tracks
+            .as_ref()
+            .map(|tracks| {
+                tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .map(|c| c.timeline_end())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
     }
 
     /// Raw source material duration (source_out − source_in), unaffected by speed.

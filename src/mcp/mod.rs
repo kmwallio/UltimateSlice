@@ -528,6 +528,14 @@ pub enum McpCommand {
     RunExportQueue {
         reply: SyncSender<Value>,
     },
+    CreateCompoundClip {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    BreakApartCompoundClip {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

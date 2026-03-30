@@ -117,7 +117,9 @@ fn is_track_pair_through_edit_candidate(
     right: &Clip,
     options: ThroughEditDetectionOptions,
 ) -> bool {
-    left.source_path == right.source_path
+    !left.is_compound()
+        && !right.is_compound()
+        && left.source_path == right.source_path
         && left.kind == right.kind
         && left.source_out.abs_diff(right.source_in) <= options.source_contiguity_tolerance_ns
         && left.timeline_end().abs_diff(right.timeline_start)

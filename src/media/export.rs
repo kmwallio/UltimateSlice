@@ -115,10 +115,19 @@ pub fn export_project(
         1.0 / 30.0
     };
 
+    // Flatten compound clips before building the filter graph.
+    // This produces a modified track list where every compound clip has been
+    // recursively expanded into its constituent leaf clips with rebased
+    // timeline positions. The rest of the export pipeline operates on this
+    // flat representation unchanged.
+    let flattened_tracks = flatten_compound_tracks(&project.tracks);
+    let flattened_project_tracks = &flattened_tracks;
+
     // Primary video track (first active video track) — forms the base concat sequence.
     // Secondary active video tracks are composited on top with overlay.
-    let active_video_tracks: Vec<_> = project
-        .video_tracks()
+    let active_video_tracks: Vec<_> = flattened_project_tracks
+        .iter()
+        .filter(|t| t.kind == crate::model::track::TrackKind::Video)
         .filter(|t| project.track_is_active_for_output(t))
         .collect();
     let mut primary_clips: Vec<&crate::model::clip::Clip> = active_video_tracks
@@ -150,8 +159,9 @@ pub fn export_project(
     }
 
     // Collect audio-only clips from active audio tracks.
-    let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = project
-        .audio_tracks()
+    let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = flattened_project_tracks
+        .iter()
+        .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
         .filter(|t| project.track_is_active_for_output(t))
         .map(|t| {
             let mut clips: Vec<&Clip> = t.clips.iter().collect();
@@ -3367,6 +3377,53 @@ fn write_chapter_metadata(
     }
     file.flush()?;
     Ok(Some(file))
+}
+
+/// Recursively flatten compound clips in a track list.
+/// Each compound clip is replaced by its internal clips with timeline positions
+/// rebased to the compound clip's position on the parent timeline.
+/// Returns a new `Vec<Track>` containing only leaf (non-compound) clips.
+fn flatten_compound_tracks(tracks: &[crate::model::track::Track]) -> Vec<crate::model::track::Track> {
+    tracks
+        .iter()
+        .map(|track| {
+            let mut flat_track = track.clone();
+            flat_track.clips = flatten_clips(&track.clips, 0, 0);
+            flat_track
+        })
+        .collect()
+}
+
+fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip> {
+    if depth > 16 {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    for clip in clips {
+        if clip.kind == ClipKind::Compound {
+            if let Some(ref internal_tracks) = clip.compound_tracks {
+                let compound_offset = timeline_offset.saturating_add(clip.timeline_start);
+                for inner_track in internal_tracks {
+                    for inner_clip in &inner_track.clips {
+                        let mut rebased = inner_clip.clone();
+                        rebased.timeline_start =
+                            compound_offset.saturating_add(rebased.timeline_start);
+                        if rebased.kind == ClipKind::Compound {
+                            result.extend(flatten_clips(&[rebased], 0, depth + 1));
+                        } else {
+                            result.push(rebased);
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut c = clip.clone();
+            c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
+            result.push(c);
+        }
+    }
+    result.sort_by_key(|c| c.timeline_start);
+    result
 }
 
 #[cfg(test)]

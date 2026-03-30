@@ -2310,6 +2310,165 @@ fn schedule_title_flush(
     timer_raw.set(new_id.as_raw());
 }
 
+/// Convert a single `Clip` into one or more `ProgramClip` entries.
+/// For regular clips this returns a single-element Vec; for compound clips it
+/// recursively flattens internal tracks into program clips with adjusted
+/// timeline positions and track indices.
+fn clip_to_program_clips(
+    c: &crate::model::clip::Clip,
+    audio_only: bool,
+    duck: bool,
+    duck_amount_db: f64,
+    track_index: usize,
+    suppress_embedded_audio_ids: &std::collections::HashSet<String>,
+    timeline_offset: u64,
+    depth: usize,
+) -> Vec<ProgramClip> {
+    use crate::model::clip::ClipKind;
+
+    // Compound clips: recursively flatten internal clips
+    if c.kind == ClipKind::Compound && depth < 16 {
+        if let Some(ref internal_tracks) = c.compound_tracks {
+            let compound_offset = timeline_offset.saturating_add(c.timeline_start);
+            let mut result = Vec::new();
+            for (inner_idx, inner_track) in internal_tracks.iter().enumerate() {
+                let inner_audio = inner_track.kind == crate::model::track::TrackKind::Audio;
+                for inner_clip in &inner_track.clips {
+                    let inner_track_idx = track_index + inner_idx;
+                    result.extend(clip_to_program_clips(
+                        inner_clip,
+                        inner_audio,
+                        inner_track.duck,
+                        inner_track.duck_amount_db,
+                        inner_track_idx,
+                        suppress_embedded_audio_ids,
+                        compound_offset,
+                        depth + 1,
+                    ));
+                }
+            }
+            return result;
+        }
+        return Vec::new();
+    }
+
+    let effective_timeline_start = timeline_offset.saturating_add(c.timeline_start);
+
+    vec![ProgramClip {
+        id: c.id.clone(),
+        source_path: c.source_path.clone(),
+        source_in_ns: c.source_in,
+        source_out_ns: c.source_out,
+        timeline_start_ns: effective_timeline_start,
+        brightness: c.brightness as f64,
+        contrast: c.contrast as f64,
+        saturation: c.saturation as f64,
+        temperature: c.temperature as f64,
+        tint: c.tint as f64,
+        brightness_keyframes: c.brightness_keyframes.clone(),
+        contrast_keyframes: c.contrast_keyframes.clone(),
+        saturation_keyframes: c.saturation_keyframes.clone(),
+        temperature_keyframes: c.temperature_keyframes.clone(),
+        tint_keyframes: c.tint_keyframes.clone(),
+        denoise: c.denoise as f64,
+        sharpness: c.sharpness as f64,
+        blur: c.blur as f64,
+        blur_keyframes: c.blur_keyframes.clone(),
+        vidstab_enabled: c.vidstab_enabled,
+        vidstab_smoothing: c.vidstab_smoothing,
+        volume: c.volume as f64,
+        volume_keyframes: c.volume_keyframes.clone(),
+        pan: c.pan as f64,
+        pan_keyframes: c.pan_keyframes.clone(),
+        eq_bands: c.eq_bands,
+        eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
+        eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),
+        eq_high_gain_keyframes: c.eq_high_gain_keyframes.clone(),
+        crop_left: c.crop_left,
+        crop_left_keyframes: c.crop_left_keyframes.clone(),
+        crop_right: c.crop_right,
+        crop_right_keyframes: c.crop_right_keyframes.clone(),
+        crop_top: c.crop_top,
+        crop_top_keyframes: c.crop_top_keyframes.clone(),
+        crop_bottom: c.crop_bottom,
+        crop_bottom_keyframes: c.crop_bottom_keyframes.clone(),
+        rotate: c.rotate,
+        rotate_keyframes: c.rotate_keyframes.clone(),
+        flip_h: c.flip_h,
+        flip_v: c.flip_v,
+        title_text: c.title_text.clone(),
+        title_font: c.title_font.clone(),
+        title_color: c.title_color,
+        title_x: c.title_x,
+        title_y: c.title_y,
+        title_outline_color: c.title_outline_color,
+        title_outline_width: c.title_outline_width,
+        title_shadow: c.title_shadow,
+        title_shadow_color: c.title_shadow_color,
+        title_shadow_offset_x: c.title_shadow_offset_x,
+        title_shadow_offset_y: c.title_shadow_offset_y,
+        title_bg_box: c.title_bg_box,
+        title_bg_box_color: c.title_bg_box_color,
+        title_bg_box_padding: c.title_bg_box_padding,
+        title_clip_bg_color: c.title_clip_bg_color,
+        title_secondary_text: c.title_secondary_text.clone(),
+        is_title: c.kind == ClipKind::Title,
+        speed: c.speed,
+        speed_keyframes: c.speed_keyframes.clone(),
+        slow_motion_interp: c.slow_motion_interp,
+        reverse: c.reverse,
+        freeze_frame: c.freeze_frame,
+        freeze_frame_source_ns: c.freeze_frame_source_ns,
+        freeze_frame_hold_duration_ns: c.freeze_frame_hold_duration_ns,
+        is_audio_only: audio_only,
+        duck,
+        duck_amount_db,
+        ladspa_effects: c.ladspa_effects.clone(),
+        pitch_shift_semitones: c.pitch_shift_semitones,
+        pitch_preserve: c.pitch_preserve,
+        anamorphic_desqueeze: c.anamorphic_desqueeze,
+        track_index,
+        transition_after: c.transition_after.clone(),
+        transition_after_ns: c.transition_after_ns,
+        lut_paths: c.lut_paths.clone(),
+        scale: c.scale,
+        scale_keyframes: c.scale_keyframes.clone(),
+        opacity: c.opacity,
+        opacity_keyframes: c.opacity_keyframes.clone(),
+        blend_mode: c.blend_mode,
+        position_x: c.position_x,
+        position_x_keyframes: c.position_x_keyframes.clone(),
+        position_y: c.position_y,
+        position_y_keyframes: c.position_y_keyframes.clone(),
+        shadows: c.shadows as f64,
+        midtones: c.midtones as f64,
+        highlights: c.highlights as f64,
+        exposure: c.exposure as f64,
+        black_point: c.black_point as f64,
+        highlights_warmth: c.highlights_warmth as f64,
+        highlights_tint: c.highlights_tint as f64,
+        midtones_warmth: c.midtones_warmth as f64,
+        midtones_tint: c.midtones_tint as f64,
+        shadows_warmth: c.shadows_warmth as f64,
+        shadows_tint: c.shadows_tint as f64,
+        has_audio: !c.is_freeze_frame()
+            && c.kind != ClipKind::Title
+            && c.kind != ClipKind::Adjustment
+            && c.kind != ClipKind::Compound
+            && !suppress_embedded_audio_ids.contains(&c.id),
+        is_image: c.kind == ClipKind::Image,
+        is_adjustment: c.kind == ClipKind::Adjustment,
+        chroma_key_enabled: c.chroma_key_enabled,
+        chroma_key_color: c.chroma_key_color,
+        chroma_key_tolerance: c.chroma_key_tolerance,
+        chroma_key_softness: c.chroma_key_softness,
+        bg_removal_enabled: c.bg_removal_enabled,
+        bg_removal_threshold: c.bg_removal_threshold,
+        frei0r_effects: c.frei0r_effects.clone(),
+        masks: c.masks.clone(),
+    }]
+}
+
 /// Build and show the main application window.
 pub fn build_window(
     app: &gtk::Application,
@@ -6636,118 +6795,9 @@ pub fn build_window(
                     .filter(|(_, t)| proj.track_is_active_for_output(t))
                     .flat_map(|(t_idx, t)| {
                         let audio_only = t.kind == TrackKind::Audio;
-                        let suppress_embedded_audio_ids = suppress_embedded_audio_ids.clone();
-                        t.clips.iter().map(move |c| ProgramClip {
-                            id: c.id.clone(),
-                            source_path: c.source_path.clone(),
-                            source_in_ns: c.source_in,
-                            source_out_ns: c.source_out,
-                            timeline_start_ns: c.timeline_start,
-                            brightness: c.brightness as f64,
-                            contrast: c.contrast as f64,
-                            saturation: c.saturation as f64,
-                            temperature: c.temperature as f64,
-                            tint: c.tint as f64,
-                            brightness_keyframes: c.brightness_keyframes.clone(),
-                            contrast_keyframes: c.contrast_keyframes.clone(),
-                            saturation_keyframes: c.saturation_keyframes.clone(),
-                            temperature_keyframes: c.temperature_keyframes.clone(),
-                            tint_keyframes: c.tint_keyframes.clone(),
-                            denoise: c.denoise as f64,
-                            sharpness: c.sharpness as f64,
-                            blur: c.blur as f64,
-                            blur_keyframes: c.blur_keyframes.clone(),
-                            vidstab_enabled: c.vidstab_enabled,
-                            vidstab_smoothing: c.vidstab_smoothing,
-                            volume: c.volume as f64,
-                            volume_keyframes: c.volume_keyframes.clone(),
-                            pan: c.pan as f64,
-                            pan_keyframes: c.pan_keyframes.clone(),
-                            eq_bands: c.eq_bands,
-                            eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
-                            eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),
-                            eq_high_gain_keyframes: c.eq_high_gain_keyframes.clone(),
-                            crop_left: c.crop_left,
-                            crop_left_keyframes: c.crop_left_keyframes.clone(),
-                            crop_right: c.crop_right,
-                            crop_right_keyframes: c.crop_right_keyframes.clone(),
-                            crop_top: c.crop_top,
-                            crop_top_keyframes: c.crop_top_keyframes.clone(),
-                            crop_bottom: c.crop_bottom,
-                            crop_bottom_keyframes: c.crop_bottom_keyframes.clone(),
-                            rotate: c.rotate,
-                            rotate_keyframes: c.rotate_keyframes.clone(),
-                            flip_h: c.flip_h,
-                            flip_v: c.flip_v,
-                            title_text: c.title_text.clone(),
-                            title_font: c.title_font.clone(),
-                            title_color: c.title_color,
-                            title_x: c.title_x,
-                            title_y: c.title_y,
-                            title_outline_color: c.title_outline_color,
-                            title_outline_width: c.title_outline_width,
-                            title_shadow: c.title_shadow,
-                            title_shadow_color: c.title_shadow_color,
-                            title_shadow_offset_x: c.title_shadow_offset_x,
-                            title_shadow_offset_y: c.title_shadow_offset_y,
-                            title_bg_box: c.title_bg_box,
-                            title_bg_box_color: c.title_bg_box_color,
-                            title_bg_box_padding: c.title_bg_box_padding,
-                            title_clip_bg_color: c.title_clip_bg_color,
-                            title_secondary_text: c.title_secondary_text.clone(),
-                            is_title: c.kind == ClipKind::Title,
-                            speed: c.speed,
-                            speed_keyframes: c.speed_keyframes.clone(),
-                            slow_motion_interp: c.slow_motion_interp,
-                            reverse: c.reverse,
-                            freeze_frame: c.freeze_frame,
-                            freeze_frame_source_ns: c.freeze_frame_source_ns,
-                            freeze_frame_hold_duration_ns: c.freeze_frame_hold_duration_ns,
-                            is_audio_only: audio_only,
-                            duck: t.duck,
-                            duck_amount_db: t.duck_amount_db,
-                            ladspa_effects: c.ladspa_effects.clone(),
-                            pitch_shift_semitones: c.pitch_shift_semitones,
-                            pitch_preserve: c.pitch_preserve,
-                            anamorphic_desqueeze: c.anamorphic_desqueeze,
-                            track_index: t_idx,
-                            transition_after: c.transition_after.clone(),
-                            transition_after_ns: c.transition_after_ns,
-                            lut_paths: c.lut_paths.clone(),
-                            scale: c.scale,
-                            scale_keyframes: c.scale_keyframes.clone(),
-                            opacity: c.opacity,
-                            opacity_keyframes: c.opacity_keyframes.clone(),
-                            blend_mode: c.blend_mode,
-                            position_x: c.position_x,
-                            position_x_keyframes: c.position_x_keyframes.clone(),
-                            position_y: c.position_y,
-                            position_y_keyframes: c.position_y_keyframes.clone(),
-                            shadows: c.shadows as f64,
-                            midtones: c.midtones as f64,
-                            highlights: c.highlights as f64,
-                            exposure: c.exposure as f64,
-                            black_point: c.black_point as f64,
-                            highlights_warmth: c.highlights_warmth as f64,
-                            highlights_tint: c.highlights_tint as f64,
-                            midtones_warmth: c.midtones_warmth as f64,
-                            midtones_tint: c.midtones_tint as f64,
-                            shadows_warmth: c.shadows_warmth as f64,
-                            shadows_tint: c.shadows_tint as f64,
-                            has_audio: !c.is_freeze_frame()
-                                && c.kind != ClipKind::Title
-                                && c.kind != ClipKind::Adjustment
-                                && !suppress_embedded_audio_ids.contains(&c.id),
-                            is_image: c.kind == ClipKind::Image,
-                            is_adjustment: c.kind == ClipKind::Adjustment,
-                            chroma_key_enabled: c.chroma_key_enabled,
-                            chroma_key_color: c.chroma_key_color,
-                            chroma_key_tolerance: c.chroma_key_tolerance,
-                            chroma_key_softness: c.chroma_key_softness,
-                            bg_removal_enabled: c.bg_removal_enabled,
-                            bg_removal_threshold: c.bg_removal_threshold,
-                            frei0r_effects: c.frei0r_effects.clone(),
-                            masks: c.masks.clone(),
+                        let suppress = suppress_embedded_audio_ids.clone();
+                        t.clips.iter().flat_map(move |c| {
+                            clip_to_program_clips(c, audio_only, t.duck, t.duck_amount_db, t_idx, &suppress, 0, 0)
                         })
                     })
                     .collect();
@@ -12046,6 +12096,60 @@ fn handle_mcp_command(
                 }
                 reply.send(json!({"success": true, "results": results})).ok();
             });
+        }
+        McpCommand::CreateCompoundClip { clip_ids, reply } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"error": "At least 2 clip IDs required"}))
+                    .ok();
+                return;
+            }
+            // Select the specified clips in the timeline state, then create compound
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.set_selected_clip_ids(clip_ids.iter().cloned().collect());
+                let changed = st.create_compound_from_selection();
+                let proj_cb = st.on_project_changed.clone();
+                drop(st);
+                if changed {
+                    if let Some(cb) = proj_cb {
+                        cb();
+                    }
+                    // Find the compound clip ID (most recently added compound clip)
+                    let proj = project.borrow();
+                    let compound_id = proj
+                        .tracks
+                        .iter()
+                        .flat_map(|t| t.clips.iter())
+                        .find(|c| c.is_compound())
+                        .map(|c| c.id.clone())
+                        .unwrap_or_default();
+                    reply
+                        .send(json!({"success": true, "compound_clip_id": compound_id}))
+                        .ok();
+                } else {
+                    reply
+                        .send(json!({"error": "Failed to create compound clip"}))
+                        .ok();
+                }
+            }
+        }
+        McpCommand::BreakApartCompoundClip { clip_id, reply } => {
+            let mut st = timeline_state.borrow_mut();
+            st.set_selected_clip_ids([clip_id.clone()].into_iter().collect());
+            let changed = st.break_apart_compound();
+            let proj_cb = st.on_project_changed.clone();
+            drop(st);
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+                reply.send(json!({"success": true})).ok();
+            } else {
+                reply
+                    .send(json!({"error": "Failed to break apart compound clip (not a compound clip or not found)"}))
+                    .ok();
+            }
         }
     }
 }

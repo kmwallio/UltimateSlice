@@ -136,7 +136,7 @@ pub fn write_edl(project: &Project) -> String {
 
         for (clip_idx, clip) in track.clips.iter().enumerate() {
             // Skip clips without source media.
-            if clip.kind == ClipKind::Title || clip.kind == ClipKind::Adjustment {
+            if clip.kind == ClipKind::Title || clip.kind == ClipKind::Adjustment || clip.kind == ClipKind::Compound {
                 continue;
             }
 
