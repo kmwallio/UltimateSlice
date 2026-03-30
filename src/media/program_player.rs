@@ -8637,7 +8637,6 @@ impl ProgramPlayer {
             .build()
             .ok();
         if let Some(ref e) = videocrop_src {
-            bin.add(e).ok();
             chain.push(e.clone());
         }
         // 1b. Convert + downscale to project resolution in a single pass.
