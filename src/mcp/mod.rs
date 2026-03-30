@@ -189,6 +189,7 @@ pub enum McpCommand {
         feather: Option<f64>,
         expansion: Option<f64>,
         invert: Option<bool>,
+        path: Option<serde_json::Value>,
         reply: SyncSender<Value>,
     },
     SetTitle {

@@ -177,6 +177,8 @@ pub struct InspectorView {
     pub mask_feather_slider: Scale,
     pub mask_expansion_slider: Scale,
     pub mask_invert_check: CheckButton,
+    pub mask_path_editor_box: GBox,
+    pub mask_rect_ellipse_controls: GBox,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -1167,7 +1169,11 @@ impl InspectorView {
                     self.mask_shape_dropdown.set_selected(match mask.shape {
                         crate::model::clip::MaskShape::Rectangle => 0,
                         crate::model::clip::MaskShape::Ellipse => 1,
+                        crate::model::clip::MaskShape::Path => 2,
                     });
+                    let is_path = matches!(mask.shape, crate::model::clip::MaskShape::Path);
+                    self.mask_rect_ellipse_controls.set_visible(!is_path);
+                    self.mask_path_editor_box.set_visible(is_path);
                     self.mask_center_x_slider.set_value(mask.center_x);
                     self.mask_center_y_slider.set_value(mask.center_y);
                     self.mask_width_slider.set_value(mask.width);
@@ -1179,6 +1185,8 @@ impl InspectorView {
                 } else {
                     self.mask_enable.set_active(false);
                     self.mask_shape_dropdown.set_selected(0);
+                    self.mask_rect_ellipse_controls.set_visible(true);
+                    self.mask_path_editor_box.set_visible(false);
                     self.mask_center_x_slider.set_value(0.5);
                     self.mask_center_y_slider.set_value(0.5);
                     self.mask_width_slider.set_value(0.25);
@@ -2327,64 +2335,81 @@ pub fn build_inspector(
     mask_inner.append(&mask_enable);
 
     row_label(&mask_inner, "Shape");
-    let mask_shape_model = gtk4::StringList::new(&["Rectangle", "Ellipse"]);
+    let mask_shape_model = gtk4::StringList::new(&["Rectangle", "Ellipse", "Path"]);
     let mask_shape_dropdown = gtk4::DropDown::new(Some(mask_shape_model), Option::<gtk4::Expression>::None);
     mask_shape_dropdown.set_selected(0);
     mask_inner.append(&mask_shape_dropdown);
 
-    row_label(&mask_inner, "Center X");
+    // Rect/Ellipse controls container
+    let mask_rect_ellipse_controls = GBox::new(Orientation::Vertical, 8);
+    mask_inner.append(&mask_rect_ellipse_controls);
+
+    row_label(&mask_rect_ellipse_controls, "Center X");
     let mask_center_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     mask_center_x_slider.set_value(0.5);
     mask_center_x_slider.set_draw_value(true);
     mask_center_x_slider.set_digits(2);
     mask_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    mask_inner.append(&mask_center_x_slider);
+    mask_rect_ellipse_controls.append(&mask_center_x_slider);
 
-    row_label(&mask_inner, "Center Y");
+    row_label(&mask_rect_ellipse_controls, "Center Y");
     let mask_center_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
     mask_center_y_slider.set_value(0.5);
     mask_center_y_slider.set_draw_value(true);
     mask_center_y_slider.set_digits(2);
     mask_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    mask_inner.append(&mask_center_y_slider);
+    mask_rect_ellipse_controls.append(&mask_center_y_slider);
 
-    row_label(&mask_inner, "Width");
+    row_label(&mask_rect_ellipse_controls, "Width");
     let mask_width_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
     mask_width_slider.set_value(0.25);
     mask_width_slider.set_draw_value(true);
     mask_width_slider.set_digits(2);
-    mask_inner.append(&mask_width_slider);
+    mask_rect_ellipse_controls.append(&mask_width_slider);
 
-    row_label(&mask_inner, "Height");
+    row_label(&mask_rect_ellipse_controls, "Height");
     let mask_height_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
     mask_height_slider.set_value(0.25);
     mask_height_slider.set_draw_value(true);
     mask_height_slider.set_digits(2);
-    mask_inner.append(&mask_height_slider);
+    mask_rect_ellipse_controls.append(&mask_height_slider);
 
-    row_label(&mask_inner, "Rotation");
+    row_label(&mask_rect_ellipse_controls, "Rotation");
     let mask_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
     mask_rotation_spin.set_value(0.0);
     mask_rotation_spin.set_digits(0);
-    mask_inner.append(&mask_rotation_spin);
+    mask_rect_ellipse_controls.append(&mask_rotation_spin);
 
-    row_label(&mask_inner, "Feather");
+    row_label(&mask_rect_ellipse_controls, "Feather");
     let mask_feather_slider = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
     mask_feather_slider.set_value(0.0);
     mask_feather_slider.set_draw_value(true);
     mask_feather_slider.set_digits(2);
-    mask_inner.append(&mask_feather_slider);
+    mask_rect_ellipse_controls.append(&mask_feather_slider);
 
-    row_label(&mask_inner, "Expansion");
+    row_label(&mask_rect_ellipse_controls, "Expansion");
     let mask_expansion_slider = Scale::with_range(Orientation::Horizontal, -0.5, 0.5, 0.01);
     mask_expansion_slider.set_value(0.0);
     mask_expansion_slider.set_draw_value(true);
     mask_expansion_slider.set_digits(2);
     mask_expansion_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    mask_inner.append(&mask_expansion_slider);
+    mask_rect_ellipse_controls.append(&mask_expansion_slider);
 
     let mask_invert_check = CheckButton::with_label("Invert Mask");
-    mask_inner.append(&mask_invert_check);
+    mask_rect_ellipse_controls.append(&mask_invert_check);
+
+    // Path editor controls container (initially hidden)
+    let mask_path_editor_box = GBox::new(Orientation::Vertical, 8);
+    mask_path_editor_box.set_visible(false);
+    mask_inner.append(&mask_path_editor_box);
+
+    let path_points_label = Label::new(Some("Path Points"));
+    path_points_label.set_halign(gtk4::Align::Start);
+    path_points_label.add_css_class("clip-path");
+    mask_path_editor_box.append(&path_points_label);
+
+    let add_point_btn = Button::with_label("Add Point");
+    mask_path_editor_box.append(&add_point_btn);
 
     // Create shared state needed by effects and later sections.
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
@@ -6651,10 +6676,6 @@ pub fn build_inspector(
         let on_mask_changed = on_frei0r_changed.clone();
         mask_shape_dropdown.connect_selected_notify(move |dd| {
             if *updating.borrow() { return; }
-            let shape = match dd.selected() {
-                1 => crate::model::clip::MaskShape::Ellipse,
-                _ => crate::model::clip::MaskShape::Rectangle,
-            };
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -6662,7 +6683,16 @@ pub fn build_inspector(
                     for track in &mut proj.tracks {
                         if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                             if let Some(m) = clip.masks.first_mut() {
-                                m.shape = shape;
+                                match dd.selected() {
+                                    1 => { m.shape = crate::model::clip::MaskShape::Ellipse; }
+                                    2 => {
+                                        m.shape = crate::model::clip::MaskShape::Path;
+                                        if m.path.is_none() {
+                                            m.path = Some(crate::model::clip::default_diamond_path());
+                                        }
+                                    }
+                                    _ => { m.shape = crate::model::clip::MaskShape::Rectangle; }
+                                }
                                 proj.dirty = true;
                             }
                             break;
@@ -6874,6 +6904,8 @@ pub fn build_inspector(
         mask_feather_slider,
         mask_expansion_slider,
         mask_invert_check,
+        mask_path_editor_box,
+        mask_rect_ellipse_controls,
         frei0r_effects_section,
         frei0r_effects_list,
         frei0r_effects_clipboard: frei0r_effects_clipboard.clone(),

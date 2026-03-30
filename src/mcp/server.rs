@@ -564,13 +564,13 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_mask",
-            "description": "Set shape mask on a clip (rectangle or ellipse) to restrict visible area. Creates mask if absent.",
+            "description": "Set shape mask on a clip (rectangle, ellipse, or bezier path) to restrict visible area. Creates mask if absent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id":   { "type": "string",  "description": "Clip id" },
                     "enabled":   { "type": "boolean", "description": "Enable/disable mask" },
-                    "shape":     { "type": "string",  "enum": ["rectangle", "ellipse"], "description": "Mask shape type" },
+                    "shape":     { "type": "string",  "enum": ["rectangle", "ellipse", "path"], "description": "Mask shape type" },
                     "center_x":  { "type": "number",  "description": "Mask center X (0.0-1.0, default 0.5)" },
                     "center_y":  { "type": "number",  "description": "Mask center Y (0.0-1.0, default 0.5)" },
                     "width":     { "type": "number",  "description": "Mask half-width (0.01-0.5, default 0.25)" },
@@ -578,7 +578,8 @@ fn tools_list() -> Value {
                     "rotation":  { "type": "number",  "description": "Mask rotation in degrees (-180 to 180)" },
                     "feather":   { "type": "number",  "description": "Edge feather (0.0-0.5, default 0.0)" },
                     "expansion": { "type": "number",  "description": "Expand/contract mask (-0.5 to 0.5)" },
-                    "invert":    { "type": "boolean", "description": "Invert mask (show outside, hide inside)" }
+                    "invert":    { "type": "boolean", "description": "Invert mask (show outside, hide inside)" },
+                    "path":      { "type": "array",   "description": "Bezier path points (for shape='path'). Each: {x, y, handle_in_x, handle_in_y, handle_out_x, handle_out_y}", "items": {"type": "object"} }
                 },
                 "required": ["clip_id"]
             }
@@ -1597,6 +1598,7 @@ fn dispatch_tool_payload(
             feather: args.get("feather").and_then(|v| v.as_f64()),
             expansion: args.get("expansion").and_then(|v| v.as_f64()),
             invert: args.get("invert").and_then(|v| v.as_bool()),
+            path: args.get("path").cloned(),
             reply: tx,
         },
 

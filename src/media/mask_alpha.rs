@@ -1,4 +1,4 @@
-use crate::model::clip::{ClipMask, MaskShape, NumericKeyframe};
+use crate::model::clip::{ClipMask, MaskPath, MaskShape, NumericKeyframe};
 
 /// Evaluate a keyframed f64 property at a given local time, falling back to
 /// the static default when no keyframes are present.
@@ -118,6 +118,264 @@ pub fn compute_ellipse_sdf(
     (r - 1.0) * hw.min(hh)
 }
 
+// ── Bezier path SDF ──────────────────────────────────────────────────────
+
+/// Subdivide a single cubic bezier segment into `steps` line segments.
+fn subdivide_bezier_segment(
+    p0: (f64, f64), cp1: (f64, f64), cp2: (f64, f64), p3: (f64, f64),
+    steps: usize,
+) -> Vec<(f64, f64)> {
+    let mut pts = Vec::with_capacity(steps + 1);
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        let mt = 1.0 - t;
+        let mt2 = mt * mt;
+        let mt3 = mt2 * mt;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let x = mt3 * p0.0 + 3.0 * mt2 * t * cp1.0 + 3.0 * mt * t2 * cp2.0 + t3 * p3.0;
+        let y = mt3 * p0.1 + 3.0 * mt2 * t * cp1.1 + 3.0 * mt * t2 * cp2.1 + t3 * p3.1;
+        pts.push((x, y));
+    }
+    pts
+}
+
+/// Subdivide a closed bezier path into a polyline with `steps_per_segment`
+/// subdivisions per curve segment.
+pub fn subdivide_path(path: &MaskPath, steps_per_segment: usize) -> Vec<(f64, f64)> {
+    let n = path.points.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let steps = steps_per_segment.max(2);
+    let mut polyline = Vec::with_capacity(n * steps + 1);
+    for i in 0..n {
+        let a = &path.points[i];
+        let b = &path.points[(i + 1) % n];
+        let p0 = (a.x, a.y);
+        let cp1 = (a.x + a.handle_out_x, a.y + a.handle_out_y);
+        let cp2 = (b.x + b.handle_in_x, b.y + b.handle_in_y);
+        let p3 = (b.x, b.y);
+        let seg = subdivide_bezier_segment(p0, cp1, cp2, p3, steps);
+        // Skip the last point of each segment (it's the first of the next).
+        let end = if i < n - 1 { seg.len() - 1 } else { seg.len() };
+        polyline.extend_from_slice(&seg[..end]);
+    }
+    polyline
+}
+
+/// Winding number of point (px, py) with respect to a closed polyline.
+/// Non-zero means inside.
+fn winding_number(px: f64, py: f64, polyline: &[(f64, f64)]) -> i32 {
+    let n = polyline.len();
+    if n < 3 {
+        return 0;
+    }
+    let mut wn = 0i32;
+    for i in 0..n {
+        let (x1, y1) = polyline[i];
+        let (x2, y2) = polyline[(i + 1) % n];
+        if y1 <= py {
+            if y2 > py {
+                // Upward crossing.
+                let cross = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1);
+                if cross > 0.0 {
+                    wn += 1;
+                }
+            }
+        } else if y2 <= py {
+            // Downward crossing.
+            let cross = (x2 - x1) * (py - y1) - (px - x1) * (y2 - y1);
+            if cross < 0.0 {
+                wn -= 1;
+            }
+        }
+    }
+    wn
+}
+
+/// Minimum distance from point (px, py) to any segment in the polyline.
+fn distance_to_polyline(px: f64, py: f64, polyline: &[(f64, f64)]) -> f64 {
+    let n = polyline.len();
+    if n < 2 {
+        return f64::MAX;
+    }
+    let mut min_d = f64::MAX;
+    for i in 0..n {
+        let (x1, y1) = polyline[i];
+        let (x2, y2) = polyline[(i + 1) % n];
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len_sq = dx * dx + dy * dy;
+        let t = if len_sq < 1e-18 {
+            0.0
+        } else {
+            ((px - x1) * dx + (py - y1) * dy) / len_sq
+        }
+        .clamp(0.0, 1.0);
+        let proj_x = x1 + t * dx;
+        let proj_y = y1 + t * dy;
+        let d = ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt();
+        if d < min_d {
+            min_d = d;
+        }
+    }
+    min_d
+}
+
+/// Compute signed distance for a point relative to a polyline (closed path).
+/// Negative = inside, positive = outside.
+pub fn compute_path_sdf(
+    px: f64, py: f64,
+    polyline: &[(f64, f64)],
+    expansion: f64,
+) -> f64 {
+    let inside = winding_number(px, py, polyline) != 0;
+    let dist = distance_to_polyline(px, py, polyline);
+    let signed = if inside { -dist } else { dist };
+    signed - expansion
+}
+
+/// Compute the axis-aligned bounding box of a polyline.
+/// Returns (min_x, min_y, max_x, max_y).
+fn polyline_aabb(polyline: &[(f64, f64)]) -> (f64, f64, f64, f64) {
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    for &(x, y) in polyline {
+        if x < min_x { min_x = x; }
+        if y < min_y { min_y = y; }
+        if x > max_x { max_x = x; }
+        if y > max_y { max_y = y; }
+    }
+    (min_x, min_y, max_x, max_y)
+}
+
+/// Evaluate mask alpha for a path mask using a pre-computed polyline.
+/// Used by the optimized `apply_masks_to_rgba_buffer` to avoid
+/// re-subdividing the bezier path for every pixel.
+fn path_mask_alpha(
+    polyline: &[(f64, f64)],
+    aabb: (f64, f64, f64, f64),
+    npx: f64, npy: f64,
+    feather: f64, expansion: f64, invert: bool,
+) -> f64 {
+    let (min_x, min_y, max_x, max_y) = aabb;
+    let margin = feather + expansion.abs() + 0.01;
+    // AABB early-out: if pixel is well outside the path bounding box, return 0 (or 1 if inverted).
+    if npx < min_x - margin || npx > max_x + margin || npy < min_y - margin || npy > max_y + margin {
+        return if invert { 1.0 } else { 0.0 };
+    }
+    // If pixel is well inside the contracted AABB, return 1 (or 0 if inverted).
+    if npx > min_x + margin && npx < max_x - margin && npy > min_y + margin && npy < max_y - margin {
+        // Still need to check winding number for concave shapes, so skip this optimization.
+    }
+
+    let sdf = compute_path_sdf(npx, npy, polyline, expansion);
+
+    let alpha = if feather < 1e-9 {
+        if sdf <= 0.0 { 1.0 } else { 0.0 }
+    } else {
+        1.0 - smoothstep(-feather, 0.0, sdf)
+    };
+
+    if invert { 1.0 - alpha } else { alpha }
+}
+
+/// Rasterize combined mask alpha to a grayscale buffer (one byte per pixel).
+/// Used by the export pipeline for path masks that cannot be expressed as
+/// FFmpeg `geq` expressions.
+pub fn rasterize_masks_to_grayscale(
+    masks: &[ClipMask],
+    width: usize,
+    height: usize,
+    local_time_ns: u64,
+    clip_scale: f64,
+    clip_pos_x: f64,
+    clip_pos_y: f64,
+) -> Vec<u8> {
+    let active: Vec<&ClipMask> = masks.iter().filter(|m| m.enabled).collect();
+    let mut buf = vec![255u8; width * height];
+    if active.is_empty() {
+        return buf;
+    }
+
+    // Pre-compute polylines for path masks.
+    let polylines: Vec<Option<(Vec<(f64, f64)>, (f64, f64, f64, f64))>> = active
+        .iter()
+        .map(|m| {
+            if m.shape == MaskShape::Path {
+                if let Some(ref path) = m.path {
+                    let poly = subdivide_path(path, 20);
+                    let aabb = polyline_aabb(&poly);
+                    return Some((poly, aabb));
+                }
+            }
+            None
+        })
+        .collect();
+
+    // The rasterized mask is used in the export `geq` context, which operates
+    // on the output canvas (post-zoom/position).  Map pixel coords back to
+    // clip-local normalized space, matching the preview probe coordinate system.
+    let fw = width as f64;
+    let fh = height as f64;
+    let clip_cx_canvas = fw / 2.0 + clip_pos_x * fw * (1.0 - clip_scale) / 2.0;
+    let clip_cy_canvas = fh / 2.0 + clip_pos_y * fh * (1.0 - clip_scale) / 2.0;
+    let clip_w = fw * clip_scale;
+    let clip_h = fh * clip_scale;
+    let clip_left = clip_cx_canvas - clip_w / 2.0;
+    let clip_top = clip_cy_canvas - clip_h / 2.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            // Map canvas pixel to clip-local normalized coords.
+            let npx = (x as f64 + 0.5 - clip_left) / clip_w;
+            let npy = (y as f64 + 0.5 - clip_top) / clip_h;
+
+            let mut combined = 1.0f64;
+            for (i, mask) in active.iter().enumerate() {
+                let feather = interpolate_keyframed(&mask.feather_keyframes, local_time_ns, mask.feather).max(0.0);
+                let expansion = interpolate_keyframed(&mask.expansion_keyframes, local_time_ns, mask.expansion);
+
+                let alpha = match mask.shape {
+                    MaskShape::Path => {
+                        if let Some((ref poly, aabb)) = polylines[i] {
+                            path_mask_alpha(poly, aabb, npx, npy, feather, expansion, mask.invert)
+                        } else {
+                            1.0
+                        }
+                    }
+                    MaskShape::Rectangle => {
+                        let cx = interpolate_keyframed(&mask.center_x_keyframes, local_time_ns, mask.center_x);
+                        let cy = interpolate_keyframed(&mask.center_y_keyframes, local_time_ns, mask.center_y);
+                        let hw = (interpolate_keyframed(&mask.width_keyframes, local_time_ns, mask.width) + expansion).max(0.0);
+                        let hh = (interpolate_keyframed(&mask.height_keyframes, local_time_ns, mask.height) + expansion).max(0.0);
+                        let rot = interpolate_keyframed(&mask.rotation_keyframes, local_time_ns, mask.rotation).to_radians();
+                        let sdf = compute_rect_sdf(npx, npy, cx, cy, hw, hh, rot);
+                        let a = if feather < 1e-9 { if sdf <= 0.0 { 1.0 } else { 0.0 } } else { 1.0 - smoothstep(-feather, 0.0, sdf) };
+                        if mask.invert { 1.0 - a } else { a }
+                    }
+                    MaskShape::Ellipse => {
+                        let cx = interpolate_keyframed(&mask.center_x_keyframes, local_time_ns, mask.center_x);
+                        let cy = interpolate_keyframed(&mask.center_y_keyframes, local_time_ns, mask.center_y);
+                        let hw = (interpolate_keyframed(&mask.width_keyframes, local_time_ns, mask.width) + expansion).max(0.0);
+                        let hh = (interpolate_keyframed(&mask.height_keyframes, local_time_ns, mask.height) + expansion).max(0.0);
+                        let rot = interpolate_keyframed(&mask.rotation_keyframes, local_time_ns, mask.rotation).to_radians();
+                        let sdf = compute_ellipse_sdf(npx, npy, cx, cy, hw, hh, rot);
+                        let a = if feather < 1e-9 { if sdf <= 0.0 { 1.0 } else { 0.0 } } else { 1.0 - smoothstep(-feather, 0.0, sdf) };
+                        if mask.invert { 1.0 - a } else { a }
+                    }
+                };
+                combined *= alpha;
+            }
+            buf[y * width + x] = (combined * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    buf
+}
+
 /// Evaluate the mask alpha for a single pixel.
 /// Returns 0.0 (fully transparent) to 1.0 (fully opaque).
 pub fn mask_alpha_at_pixel(
@@ -151,6 +409,20 @@ pub fn mask_alpha_at_pixel(
     let sdf = match mask.shape {
         MaskShape::Rectangle => compute_rect_sdf(npx, npy, cx, cy, hw, hh, rot_rad),
         MaskShape::Ellipse => compute_ellipse_sdf(npx, npy, cx, cy, hw, hh, rot_rad),
+        MaskShape::Path => {
+            // Path SDF computed via polyline approximation (see apply_masks_to_rgba_buffer
+            // for the cached path). Fallback for single-pixel calls: subdivide inline.
+            if let Some(ref path) = mask.path {
+                if path.points.len() >= 3 {
+                    let polyline = subdivide_path(path, 20);
+                    compute_path_sdf(npx, npy, &polyline, expansion)
+                } else {
+                    return 1.0; // degenerate path
+                }
+            } else {
+                return 1.0; // no path data
+            }
+        }
     };
 
     // sdf < 0 means inside, > 0 means outside.
@@ -181,13 +453,43 @@ pub fn apply_masks_to_rgba_buffer(
         return;
     }
 
+    // Pre-compute polylines for path masks (avoid re-subdividing per pixel).
+    let polylines: Vec<Option<(Vec<(f64, f64)>, (f64, f64, f64, f64))>> = active
+        .iter()
+        .map(|m| {
+            if m.shape == MaskShape::Path {
+                if let Some(ref path) = m.path {
+                    if path.points.len() >= 3 {
+                        let poly = subdivide_path(path, 20);
+                        let aabb = polyline_aabb(&poly);
+                        return Some((poly, aabb));
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
     let stride = width * 4;
     for y in 0..height {
         let row_offset = y * stride;
         for x in 0..width {
+            let npx = (x as f64 + 0.5) / width as f64;
+            let npy = (y as f64 + 0.5) / height as f64;
             let mut combined_alpha = 1.0f64;
-            for mask in &active {
-                combined_alpha *= mask_alpha_at_pixel(mask, x, y, width, height, local_time_ns);
+            for (i, mask) in active.iter().enumerate() {
+                let alpha = if mask.shape == MaskShape::Path {
+                    if let Some((ref poly, aabb)) = polylines[i] {
+                        let feather = interpolate_keyframed(&mask.feather_keyframes, local_time_ns, mask.feather).max(0.0);
+                        let expansion = interpolate_keyframed(&mask.expansion_keyframes, local_time_ns, mask.expansion);
+                        path_mask_alpha(poly, aabb, npx, npy, feather, expansion, mask.invert)
+                    } else {
+                        1.0
+                    }
+                } else {
+                    mask_alpha_at_pixel(mask, x, y, width, height, local_time_ns)
+                };
+                combined_alpha *= alpha;
             }
             if combined_alpha >= 1.0 {
                 continue;
@@ -259,6 +561,11 @@ pub fn build_mask_ffmpeg_geq_alpha(
         }
         MaskShape::Ellipse => {
             build_ellipse_geq_expr(pcx, pcy, phw, phh, rot_rad, pfeather, mask.invert)
+        }
+        MaskShape::Path => {
+            // Path masks use rasterized PNG in the export pipeline.
+            // Return "1" here; the caller detects path masks and uses the raster path.
+            "1".to_string()
         }
     }
 }
@@ -360,7 +667,7 @@ fn build_ellipse_geq_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::clip::MaskShape;
+    use crate::model::clip::{BezierPoint, MaskPath, MaskShape};
 
     fn default_rect_mask() -> ClipMask {
         ClipMask::new(MaskShape::Rectangle)
@@ -468,5 +775,96 @@ mod tests {
         let mask = default_ellipse_mask();
         let expr = build_mask_ffmpeg_geq_alpha(&mask, 1920, 1080, 1.0, 0.0, 0.0, "T");
         assert!(expr.contains("lte"), "should use lte for hard-edge ellipse: {expr}");
+    }
+
+    // ── Path SDF tests ──────────────────────────────────────────────
+
+    fn square_path() -> MaskPath {
+        // A simple square path from (0.25,0.25) to (0.75,0.75) with straight edges.
+        MaskPath {
+            points: vec![
+                BezierPoint { x: 0.25, y: 0.25, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+                BezierPoint { x: 0.75, y: 0.25, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+                BezierPoint { x: 0.75, y: 0.75, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+                BezierPoint { x: 0.25, y: 0.75, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+            ],
+        }
+    }
+
+    #[test]
+    fn subdivide_path_produces_polyline() {
+        let path = square_path();
+        let poly = subdivide_path(&path, 10);
+        assert!(poly.len() >= 40, "expected at least 40 points, got {}", poly.len());
+    }
+
+    #[test]
+    fn winding_number_inside_square() {
+        let path = square_path();
+        let poly = subdivide_path(&path, 10);
+        let wn = winding_number(0.5, 0.5, &poly);
+        assert_ne!(wn, 0, "center of square should be inside");
+    }
+
+    #[test]
+    fn winding_number_outside_square() {
+        let path = square_path();
+        let poly = subdivide_path(&path, 10);
+        let wn = winding_number(0.1, 0.1, &poly);
+        assert_eq!(wn, 0, "corner should be outside");
+    }
+
+    #[test]
+    fn path_sdf_inside_negative() {
+        let path = square_path();
+        let poly = subdivide_path(&path, 10);
+        let sdf = compute_path_sdf(0.5, 0.5, &poly, 0.0);
+        assert!(sdf < 0.0, "center should have negative SDF, got {sdf}");
+    }
+
+    #[test]
+    fn path_sdf_outside_positive() {
+        let path = square_path();
+        let poly = subdivide_path(&path, 10);
+        let sdf = compute_path_sdf(0.1, 0.1, &poly, 0.0);
+        assert!(sdf > 0.0, "outside should have positive SDF, got {sdf}");
+    }
+
+    #[test]
+    fn path_mask_alpha_inside() {
+        let mut mask = ClipMask::new_path(square_path().points);
+        mask.enabled = true;
+        let alpha = mask_alpha_at_pixel(&mask, 50, 50, 100, 100, 0);
+        assert!(alpha > 0.99, "center should be opaque, got {alpha}");
+    }
+
+    #[test]
+    fn path_mask_alpha_outside() {
+        let mut mask = ClipMask::new_path(square_path().points);
+        mask.enabled = true;
+        let alpha = mask_alpha_at_pixel(&mask, 5, 5, 100, 100, 0);
+        assert!(alpha < 0.01, "outside should be transparent, got {alpha}");
+    }
+
+    #[test]
+    fn path_mask_serde_round_trip() {
+        let mask = ClipMask::new_path(crate::model::clip::default_diamond_path().points);
+        let json = serde_json::to_string(&mask).unwrap();
+        let deserialized: ClipMask = serde_json::from_str(&json).unwrap();
+        assert_eq!(mask.shape, deserialized.shape);
+        assert!(deserialized.path.is_some());
+        assert_eq!(deserialized.path.unwrap().points.len(), 4);
+    }
+
+    #[test]
+    fn rasterize_masks_grayscale_basic() {
+        let mask = ClipMask::new_path(square_path().points);
+        let masks = vec![mask];
+        let buf = rasterize_masks_to_grayscale(&masks, 100, 100, 0, 1.0, 0.0, 0.0);
+        assert_eq!(buf.len(), 10000);
+        // Center pixel should be opaque (255).
+        assert_eq!(buf[50 * 100 + 50], 255);
+        // Corner pixel should be transparent (0).
+        assert_eq!(buf[5 * 100 + 5], 0);
     }
 }

@@ -466,6 +466,48 @@ pub enum MaskShape {
     #[default]
     Rectangle,
     Ellipse,
+    Path,
+}
+
+/// A single anchor point on a bezier mask path.
+/// All coordinates are in normalized 0..1 clip-local space.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BezierPoint {
+    /// Anchor X position (0.0 = left, 1.0 = right).
+    pub x: f64,
+    /// Anchor Y position (0.0 = top, 1.0 = bottom).
+    pub y: f64,
+    /// Incoming tangent handle X offset (relative to anchor).
+    #[serde(default)]
+    pub handle_in_x: f64,
+    /// Incoming tangent handle Y offset (relative to anchor).
+    #[serde(default)]
+    pub handle_in_y: f64,
+    /// Outgoing tangent handle X offset (relative to anchor).
+    #[serde(default)]
+    pub handle_out_x: f64,
+    /// Outgoing tangent handle Y offset (relative to anchor).
+    #[serde(default)]
+    pub handle_out_y: f64,
+}
+
+/// A closed bezier path for freeform mask shapes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaskPath {
+    /// Ordered control points forming a closed bezier path (minimum 3).
+    pub points: Vec<BezierPoint>,
+}
+
+/// Create a default 4-point diamond path centered in the frame.
+pub fn default_diamond_path() -> MaskPath {
+    MaskPath {
+        points: vec![
+            BezierPoint { x: 0.5, y: 0.25, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+            BezierPoint { x: 0.75, y: 0.5, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+            BezierPoint { x: 0.5, y: 0.75, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+            BezierPoint { x: 0.25, y: 0.5, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+        ],
+    }
 }
 
 fn default_mask_enabled() -> bool {
@@ -527,6 +569,9 @@ pub struct ClipMask {
     /// When true, the mask is inverted (visible outside, transparent inside).
     #[serde(default)]
     pub invert: bool,
+    /// Bezier path data (only used when `shape == MaskShape::Path`).
+    #[serde(default)]
+    pub path: Option<MaskPath>,
 }
 
 impl ClipMask {
@@ -551,7 +596,16 @@ impl ClipMask {
             expansion: 0.0,
             expansion_keyframes: Vec::new(),
             invert: false,
+            path: None,
         }
+    }
+
+    /// Create a new mask with a bezier path shape.
+    pub fn new_path(points: Vec<BezierPoint>) -> Self {
+        let mut m = Self::new(MaskShape::Path);
+        m.shape = MaskShape::Path;
+        m.path = Some(MaskPath { points });
+        m
     }
 
     /// Retain and rebase all keyframe lanes within a local time range.

@@ -355,7 +355,7 @@ Restricts the visible area of a clip using a geometric shape. Pixels outside the
 | Control | Range | Default | Description |
 |---|---|---|---|
 | **Enable Mask** | on/off | off | Activates/deactivates shape masking |
-| **Shape** | Rectangle / Ellipse | Rectangle | Shape type for the mask region |
+| **Shape** | Rectangle / Ellipse / Path | Rectangle | Shape type for the mask region |
 | **Center X** | 0.0 → 1.0 | 0.5 | Horizontal mask center (0 = left, 1 = right) |
 | **Center Y** | 0.0 → 1.0 | 0.5 | Vertical mask center (0 = top, 1 = bottom) |
 | **Width** | 0.01 → 0.5 | 0.25 | Half-width of the mask (normalized) |
@@ -365,11 +365,26 @@ Restricts the visible area of a clip using a geometric shape. Pixels outside the
 | **Expansion** | −0.5 → 0.5 | 0.0 | Grow or shrink the mask boundary |
 | **Invert Mask** | on/off | off | Show area outside the mask instead of inside |
 
-> **Pipeline placement** — The mask is applied after crop and LUT but before color effects and chroma key. It operates in pre-transform clip space, so the mask moves with the clip's scale/position/rotation. Preview uses a GStreamer RGBA pad probe with SDF alpha computation; export uses FFmpeg `geq` filter expressions for parity.
+> **Pipeline placement** — The mask is applied after crop and LUT but before color effects and chroma key. It operates in pre-transform clip space, so the mask moves with the clip's scale/position/rotation. Preview uses a GStreamer RGBA pad probe with SDF alpha computation; export uses FFmpeg `geq` expressions (rect/ellipse) or rasterized grayscale PGM with `movie`/`alphamerge` (path).
 
-All numeric mask properties support keyframe animation via the Phase 1 keyframe system.
+All numeric mask properties (rect/ellipse) support keyframe animation via the Phase 1 keyframe system.
 
 The Program Monitor transform overlay shows a cyan dashed outline of the active mask shape with a center crosshair.
+
+### Path (Bezier) Masks
+
+When **Path** is selected, the Center/Width/Height/Rotation sliders are hidden and replaced by a **path point editor**:
+
+- Each point has X/Y coordinates (normalized 0.0–1.0) defining the anchor position
+- Each point has incoming and outgoing bezier tangent handles (relative offsets)
+- The path is always closed (last point connects back to first)
+- Minimum 3 points required for a valid path
+- **Add Point** button appends a new anchor at (0.5, 0.5)
+- **×** button on each point removes it (if more than 3 points remain)
+
+A default 4-point diamond shape is created when Path is first selected. Zero tangent handles produce straight line segments; drag handles in the overlay to add curvature.
+
+Feather, expansion, and invert controls apply to path masks the same as rect/ellipse masks.
 
 ---
 

@@ -465,7 +465,7 @@ Tracking docs:
   - [x] Phase 2: Bounding box scoping (position, scale, crop, and rotate constrain the adjustment effect region in both preview and export; overlapping scoped adjustments stack by track order)
 - [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
   - [x] Phase 1: Rectangle & ellipse masks with feathering — per-clip mask model (`Vec<ClipMask>`), SDF-based alpha computation, GStreamer preview pad probe, FFmpeg `geq` export, Inspector UI with all controls, transform overlay mask outline, keyframe property support, FCPXML round-trip, MCP `set_clip_mask` tool, full undo/redo
-  - [ ] Phase 2: Bezier/freeform path masks with draggable control points
+  - [x] Phase 2: Bezier/freeform path masks — `MaskShape::Path` with `Vec<BezierPoint>` (anchor + in/out bezier handles), closed-path SDF via polyline subdivision + winding number, feathered edges via distance-to-polyline, AABB early-out optimization, export via rasterized grayscale PGM + FFmpeg `movie`/`alphamerge`, Cairo bezier curve overlay drawing with control point visualization, Inspector point list editor, MCP `set_clip_mask` path support, serde backward-compatible persistence
 
 ### Video Transform (per clip)
 - [x] Scale / resize clip (zoom in/out within frame) via GStreamer `videoscale` + `videobox`
@@ -508,9 +508,9 @@ Tracking docs:
 
 ### Monitoring
 - [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state
-- [ ] False color overlay — map luminance to color spectrum for exposure evaluation
-- [ ] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
-- [ ] Focus peaking — highlight in-focus edges with colored overlay
+- [x] False color overlay — map luminance to color spectrum for exposure evaluation
+- [x] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
+- [x] Focus peaking — highlight in-focus edges with colored overlay
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)

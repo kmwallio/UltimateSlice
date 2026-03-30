@@ -176,6 +176,8 @@ pub fn export_project(
     let crossfade_duration_ns = preferences.crossfade_duration_ns;
     let crossfade_curve = audio_crossfade_curve_name(&preferences.crossfade_curve);
     let mut audio_presence_cache: HashMap<String, bool> = HashMap::new();
+    // Hold rasterized mask temp files alive for the duration of the export.
+    let mut _mask_temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
     let mut cmd = Command::new(&ffmpeg);
     cmd.arg("-y")
         .arg("-hide_banner")
@@ -342,9 +344,14 @@ pub fn export_project(
                 1.0,
                 "T",
             );
-            let mask_alpha_expr = build_combined_mask_geq_alpha(clip, out_w, out_h);
+            let mask_result = build_combined_mask_alpha(clip, out_w, out_h);
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             let anamorphic_filter = build_anamorphic_filter(clip);
+            // Determine mask alpha expression or rasterized file path.
+            let mask_alpha_expr = match &mask_result {
+                Some(MaskAlphaResult::GeqExpression(expr)) => expr.clone(),
+                Some(MaskAlphaResult::RasterFile(_)) | None => "1".to_string(),
+            };
             filter.push_str(&format!(
                 "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
@@ -355,6 +362,22 @@ pub fn export_project(
                 project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
+            // For rasterized path masks, apply alphamerge with the mask PGM.
+            if let Some(MaskAlphaResult::RasterFile(mask_file)) = mask_result {
+                let mask_path_str = mask_file.path().display().to_string();
+                _mask_temp_files.push(mask_file);
+                let old_tail = format!("[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];", i = i);
+                let new_tail = format!(
+                    "[pv{i}raw];movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[pv{i}mask];\
+                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p[pv{i}];",
+                    i = i, out_w = out_w, out_h = out_h,
+                );
+                let current = filter.clone();
+                if let Some(pos) = current.rfind(&old_tail) {
+                    filter.truncate(pos);
+                    filter.push_str(&new_tail);
+                }
+            }
         } else if clip.chroma_key_enabled || clip.bg_removal_enabled {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
@@ -464,6 +487,7 @@ pub fn export_project(
         let ov_has_mask = clip.has_mask();
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
+        let ov_mask_is_raster = clip.masks.iter().any(|m| m.enabled && m.shape == crate::model::clip::MaskShape::Path);
         if has_transform_keyframes || has_opacity_keyframes || ov_has_mask {
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
@@ -493,7 +517,11 @@ pub fn export_project(
                 1.0,
                 "T",
             );
-            let mask_alpha_expr = build_combined_mask_geq_alpha(clip, out_w, out_h);
+            let ov_mask_result = build_combined_mask_alpha(clip, out_w, out_h);
+            let mask_alpha_expr = match &ov_mask_result {
+                Some(MaskAlphaResult::GeqExpression(expr)) => expr.clone(),
+                Some(MaskAlphaResult::RasterFile(_)) | None => "1".to_string(),
+            };
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
@@ -505,6 +533,16 @@ pub fn export_project(
                 , project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
+            // For rasterized path masks on overlay clips, insert alphamerge.
+            if let Some(MaskAlphaResult::RasterFile(mask_file)) = ov_mask_result {
+                let mask_path_str = mask_file.path().display().to_string();
+                _mask_temp_files.push(mask_file);
+                filter.push_str(&format!(
+                    ";movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[ov{k}mask];\
+                     [{ov_label}raw][ov{k}mask]alphamerge[{ov_label}raw2]",
+                ));
+                // ov_mask_result is now consumed; ov_raw_label below picks up "raw2".
+            }
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, true);
             let opacity = clip.opacity.clamp(0.0, 1.0);
@@ -514,11 +552,17 @@ pub fn export_project(
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
+        // For rasterized overlay masks, use the masked label.
+        let ov_raw_label = if ov_mask_is_raster {
+            format!("{ov_label}raw2")
+        } else {
+            format!("{ov_label}raw")
+        };
         // Normalize PTS to zero (removes any residual offset from keyframe
         // seeking), then delay to the correct timeline position.
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
         filter.push_str(&format!(
-            ";[{ov_label}raw]setpts=PTS-STARTPTS+{start_s:.6}/TB[{ov_label}]"
+            ";[{ov_raw_label}]setpts=PTS-STARTPTS+{start_s:.6}/TB[{ov_label}]"
         ));
         let next_label = format!("vcomp{k}");
         let end_s = (clip.timeline_start + clip.duration()) as f64 / 1_000_000_000.0;
@@ -2128,27 +2172,58 @@ pub(crate) fn compute_export_coloradj_params(
 }
 
 
-/// Build a combined mask alpha expression for all enabled masks on a clip.
-/// The `geq` runs on the composited output canvas (post-zoom/position), so
-/// the clip's scale and position are passed through to map mask coordinates
-/// from clip-local space to canvas pixel space.
-/// Returns "1" when no masks are active.
-fn build_combined_mask_geq_alpha(clip: &crate::model::clip::Clip, out_w: u32, out_h: u32) -> String {
+/// Result of mask alpha computation for the export pipeline.
+enum MaskAlphaResult {
+    /// All masks are rect/ellipse — use inline geq expression.
+    GeqExpression(String),
+    /// At least one mask is a bezier path — rasterized grayscale PGM temp file.
+    RasterFile(tempfile::NamedTempFile),
+}
+
+/// Build a combined mask alpha for all enabled masks on a clip.
+/// Returns either a geq expression (for rect/ellipse only) or a rasterized
+/// grayscale temp file (when any path mask is present).
+fn build_combined_mask_alpha(
+    clip: &crate::model::clip::Clip,
+    out_w: u32, out_h: u32,
+) -> Option<MaskAlphaResult> {
     let active: Vec<_> = clip.masks.iter().filter(|m| m.enabled).collect();
     if active.is_empty() {
-        return "1".to_string();
+        return None;
     }
-    let exprs: Vec<String> = active
-        .iter()
-        .map(|m| crate::media::mask_alpha::build_mask_ffmpeg_geq_alpha(
-            m, out_w, out_h, clip.scale, clip.position_x, clip.position_y, "T",
-        ))
-        .collect();
-    if exprs.len() == 1 {
-        exprs.into_iter().next().unwrap()
+
+    let has_path = active.iter().any(|m| m.shape == crate::model::clip::MaskShape::Path);
+
+    if has_path {
+        // Rasterize ALL masks to a combined grayscale image.
+        use std::io::Write;
+        let buf = crate::media::mask_alpha::rasterize_masks_to_grayscale(
+            &clip.masks, out_w as usize, out_h as usize, 0,
+            clip.scale, clip.position_x, clip.position_y,
+        );
+        // Write as PGM (Portable GrayMap) — simplest format, no external deps.
+        if let Ok(mut file) = tempfile::NamedTempFile::new() {
+            let header = format!("P5\n{} {}\n255\n", out_w, out_h);
+            if file.write_all(header.as_bytes()).is_ok() && file.write_all(&buf).is_ok() {
+                return Some(MaskAlphaResult::RasterFile(file));
+            }
+        }
+        // Fallback: return "1" expression (no mask effect).
+        Some(MaskAlphaResult::GeqExpression("1".to_string()))
     } else {
-        // Multiplicative combination (intersection).
-        exprs.join("*")
+        // All masks are rect/ellipse — use geq expressions.
+        let exprs: Vec<String> = active
+            .iter()
+            .map(|m| crate::media::mask_alpha::build_mask_ffmpeg_geq_alpha(
+                m, out_w, out_h, clip.scale, clip.position_x, clip.position_y, "T",
+            ))
+            .collect();
+        let combined = if exprs.len() == 1 {
+            exprs.into_iter().next().unwrap()
+        } else {
+            exprs.join("*")
+        };
+        Some(MaskAlphaResult::GeqExpression(combined))
     }
 }
 

@@ -133,13 +133,15 @@ fn sync_transform_overlay_to_playhead(
                             match mask.shape {
                                 crate::model::clip::MaskShape::Rectangle => 0,
                                 crate::model::clip::MaskShape::Ellipse => 1,
+                                crate::model::clip::MaskShape::Path => 2,
                             },
                             mask.center_x, mask.center_y,
                             mask.width, mask.height,
                             mask.rotation,
+                            mask.path.as_ref().map(|p| p.points.as_slice()),
                         );
                     } else {
-                        transform_overlay.set_mask(false, 0, 0.5, 0.5, 0.25, 0.25, 0.0);
+                        transform_overlay.set_mask(false, 0, 0.5, 0.5, 0.25, 0.25, 0.0, None);
                     }
                     transform_overlay.set_clip_selected(true);
                 } else {
@@ -4835,6 +4837,73 @@ pub fn build_window(
                                 on_project_changed();
                             }
                         }
+                    }
+                }
+            },
+            // on_mask_path_change: live update during drag
+            {
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let prog_player = prog_player.clone();
+                move |points: &[crate::model::clip::BezierPoint]| {
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(ref clip_id) = selected {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                if let Some(ref mut mask) = clip.masks.first_mut() {
+                                    mask.path = Some(crate::model::clip::MaskPath { points: points.to_vec() });
+                                    proj.dirty = true;
+                                }
+                                break;
+                            }
+                        }
+                        drop(proj);
+                        // Push live mask update to preview pipeline.
+                        let masks = {
+                            let proj = project.borrow();
+                            proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| &c.id == clip_id)
+                                .map(|c| c.masks.clone())
+                                .unwrap_or_default()
+                        };
+                        prog_player.borrow_mut().update_current_masks(&masks);
+                    }
+                }
+            },
+            // on_mask_path_dbl_click: add/delete point (commits as undo snapshot)
+            {
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let prog_player = prog_player.clone();
+                let on_project_changed = on_project_changed.clone();
+                move |points: &[crate::model::clip::BezierPoint]| {
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(ref clip_id) = selected {
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                    if let Some(ref mut mask) = clip.masks.first_mut() {
+                                        mask.path = Some(crate::model::clip::MaskPath { points: points.to_vec() });
+                                        proj.dirty = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        // Push to preview + trigger full project change for inspector sync.
+                        let masks = {
+                            let proj = project.borrow();
+                            proj.tracks.iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| &c.id == clip_id)
+                                .map(|c| c.masks.clone())
+                                .unwrap_or_default()
+                        };
+                        prog_player.borrow_mut().update_current_masks(&masks);
+                        on_project_changed();
                     }
                 }
             },
@@ -9815,7 +9884,7 @@ fn handle_mcp_command(
         }
 
         McpCommand::SetClipMask {
-            clip_id, enabled, shape, center_x, center_y, width, height, rotation, feather, expansion, invert, reply,
+            clip_id, enabled, shape, center_x, center_y, width, height, rotation, feather, expansion, invert, path, reply,
         } => {
             let mut proj = project.borrow_mut();
             let mut found = false;
@@ -9831,8 +9900,22 @@ fn handle_mcp_command(
                             if let Some(ref s) = shape {
                                 mask.shape = match s.as_str() {
                                     "ellipse" => crate::model::clip::MaskShape::Ellipse,
+                                    "path" => crate::model::clip::MaskShape::Path,
                                     _ => crate::model::clip::MaskShape::Rectangle,
                                 };
+                            }
+                            // Handle path data for bezier path masks
+                            if let Some(ref s) = shape {
+                                if s == "path" {
+                                    if let Some(ref path_val) = path {
+                                        if let Ok(points) = serde_json::from_value::<Vec<crate::model::clip::BezierPoint>>(path_val.clone()) {
+                                            mask.path = Some(crate::model::clip::MaskPath { points });
+                                        }
+                                    }
+                                    if mask.path.is_none() {
+                                        mask.path = Some(crate::model::clip::default_diamond_path());
+                                    }
+                                }
                             }
                             if let Some(v) = center_x { mask.center_x = v.clamp(0.0, 1.0); }
                             if let Some(v) = center_y { mask.center_y = v.clamp(0.0, 1.0); }
