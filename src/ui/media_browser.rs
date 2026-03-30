@@ -27,6 +27,7 @@ pub fn build_media_browser(
     library: Rc<RefCell<Vec<MediaItem>>>,
     on_source_selected: Rc<dyn Fn(String, u64)>,
     on_relink_media: Rc<dyn Fn()>,
+    on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)>,
     proxy_cache: Rc<RefCell<ProxyCache>>,
     preferences_state: Rc<RefCell<PreferencesState>>,
 ) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
@@ -93,7 +94,7 @@ pub fn build_media_browser(
 
     // Grid of thumbnail cells.
     let flow_box = FlowBox::new();
-    flow_box.set_selection_mode(gtk::SelectionMode::Single);
+    flow_box.set_selection_mode(gtk::SelectionMode::Multiple);
     flow_box.set_homogeneous(true);
     flow_box.set_max_children_per_line(u32::MAX); // auto-wrap based on available width
     flow_box.set_min_children_per_line(1);
@@ -105,6 +106,19 @@ pub fn build_media_browser(
     flow_box.add_css_class("media-grid");
     scroll.set_child(Some(&flow_box));
     vbox.append(&scroll);
+
+    // "Create Multicam Clip" button — visible when 2+ media items are selected.
+    let multicam_btn = Button::with_label("Create Multicam Clip");
+    multicam_btn.add_css_class("suggested-action");
+    multicam_btn.set_margin_start(8);
+    multicam_btn.set_margin_end(8);
+    multicam_btn.set_margin_bottom(4);
+    multicam_btn.set_visible(false);
+    multicam_btn.set_tooltip_text(Some(
+        "Sync selected media by audio and create a multicam clip on the timeline",
+    ));
+    vbox.append(&multicam_btn);
+
     let flow_box_paths = Rc::new(RefCell::new(Vec::<(String, bool, bool)>::new()));
 
     // Populate from existing library items (e.g. after project load).
@@ -126,13 +140,17 @@ pub fn build_media_browser(
         }
     }
 
-    // Selection → fire on_source_selected + toggle relink button.
+    // Selection → fire on_source_selected + toggle relink/multicam buttons.
     {
         let library = library.clone();
         let on_source_selected = on_source_selected.clone();
         let header_relink_btn = header_relink_btn.clone();
+        let multicam_btn = multicam_btn.clone();
         flow_box.connect_selected_children_changed(move |fb| {
             let selected = fb.selected_children();
+            let count = selected.len();
+            // Show multicam button when 2+ items selected
+            multicam_btn.set_visible(count >= 2);
             if let Some(child) = selected.first() {
                 let idx = child.index() as usize;
                 let lib = library.borrow();
@@ -146,6 +164,28 @@ pub fn build_media_browser(
                 }
             } else {
                 header_relink_btn.set_visible(false);
+            }
+        });
+    }
+
+    // "Create Multicam Clip" button click handler.
+    {
+        let library = library.clone();
+        let flow_box = flow_box.clone();
+        let on_create_multicam = on_create_multicam_from_browser.clone();
+        multicam_btn.connect_clicked(move |_| {
+            let selected = flow_box.selected_children();
+            let lib = library.borrow();
+            let paths: Vec<String> = selected
+                .iter()
+                .filter_map(|child| {
+                    let idx = child.index() as usize;
+                    lib.get(idx).map(|item| item.source_path.clone())
+                })
+                .collect();
+            drop(lib);
+            if paths.len() >= 2 {
+                on_create_multicam(paths);
             }
         });
     }

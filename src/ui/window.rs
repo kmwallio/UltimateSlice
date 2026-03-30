@@ -6303,11 +6303,66 @@ pub fn build_window(
     }
 
     // ── Media browser ─────────────────────────────────────────────────────
+    // Callback for "Create Multicam Clip" from media browser.
+    // Places selected media files on the first video track, then triggers multicam creation.
+    let on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)> = {
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        Rc::new(move |source_paths: Vec<String>| {
+            if source_paths.len() < 2 {
+                return;
+            }
+            // Place clips on the first video track at timeline end
+            let mut clip_ids = Vec::new();
+            {
+                let mut proj = project.borrow_mut();
+                let video_track = proj.tracks.iter_mut().find(|t| {
+                    t.kind == crate::model::track::TrackKind::Video
+                });
+                let Some(track) = video_track else { return };
+                let mut pos = track
+                    .clips
+                    .iter()
+                    .map(|c| c.timeline_end())
+                    .max()
+                    .unwrap_or(0);
+                let lib = library.borrow();
+                for path in &source_paths {
+                    let dur = lib
+                        .iter()
+                        .find(|item| item.source_path == *path)
+                        .map(|item| item.duration_ns)
+                        .unwrap_or(5_000_000_000);
+                    let clip = crate::model::clip::Clip::new(
+                        path,
+                        dur,
+                        pos,
+                        crate::model::clip::ClipKind::Video,
+                    );
+                    clip_ids.push(clip.id.clone());
+                    track.add_clip(clip);
+                    pos += dur;
+                }
+                proj.dirty = true;
+            }
+            // Select the placed clips and trigger multicam creation
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.set_selected_clip_ids(clip_ids.into_iter().collect());
+                let _ = st.request_create_multicam();
+            }
+            on_project_changed();
+        })
+    };
+
     let (browser, clear_media_selection, force_rebuild_media_browser) =
         media_browser::build_media_browser(
             library.clone(),
             on_source_selected.clone(),
             on_relink_media_gui.clone(),
+            on_create_multicam_from_browser,
             proxy_cache.clone(),
             preferences_state.clone(),
         );

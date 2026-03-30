@@ -180,7 +180,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 
 ### Multicam Editing
 
-- **Create Multicam Clip (`Alt+M`)** — select 2+ video clips on the timeline, then press `Alt+M` or right-click → "Create Multicam Clip". The clips are synced by audio cross-correlation and combined into a single multicam clip with per-angle source data.
+- **Create Multicam Clip (`Alt+M`)** — select 2+ video clips on the timeline, then press `Alt+M` or right-click → "Create Multicam Clip". Alternatively, select 2+ items in the **Media Library** (Ctrl+click) and click the "Create Multicam Clip" button — the clips are placed on the timeline and converted in one step. The clips are synced by audio cross-correlation and combined into a single multicam clip with per-angle source data.
 - Multicam clips render with an **orange fill** on the timeline, showing segment labels and switch markers at each angle change.
 - **Switch angles (1-9)** — with a multicam clip selected, press `1`–`9` to switch to the corresponding angle at the current playhead position. A switch point is inserted (or updated) at the playhead.
 - **Angle viewer panel** — when a multicam clip is selected, the sidebar shows an angle viewer with buttons for each angle. The active angle at the playhead is highlighted. Click a button to switch angles.
