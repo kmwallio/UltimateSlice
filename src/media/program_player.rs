@@ -880,6 +880,9 @@ struct VideoSlot {
     gaussianblur: Option<gst::Element>,
     /// frei0r squareblur for creative blur effect (RGBA-native, no format conversion needed).
     squareblur: Option<gst::Element>,
+    /// User crop element at source resolution (before convertscale).
+    videocrop_src: Option<gst::Element>,
+    /// Wipe transition crop element at project resolution (after convertscale).
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
     imagefreeze: Option<gst::Element>,
@@ -7242,8 +7245,9 @@ impl ProgramPlayer {
         // videoconvertscale adds letterbox bars.  Offset the crop values
         // by the letterbox size so cropping applies to the video content
         // area, not the black bars (fixes letterbox shifting on crop).
+        // Use videocrop_src (source-resolution crop) for user crop values.
         let (frame_w, frame_h) = slot
-            .videocrop
+            .videocrop_src
             .as_ref()
             .and_then(|vc| vc.static_pad("sink"))
             .and_then(|p| p.current_caps())
@@ -7257,36 +7261,14 @@ impl ProgramPlayer {
             })
             .unwrap_or((9999, 9999));
 
-        // Compute letterbox offsets.  When the source aspect ratio differs
-        // from the project, videoconvertscale (add-borders: true) inserts
-        // black bars.  Offset crop values by the bar size so cropping
-        // applies to the video content, not the letterbox.
-        // We detect the source dimensions from the effects_bin's ghost sink
-        // pad (which receives the raw decoded frame before scaling).
-        let (letterbox_left, letterbox_top) = slot
-            .effects_bin
-            .static_pad("sink")
-            .and_then(|p| p.peer())
-            .and_then(|peer| peer.current_caps())
-            .and_then(|c| c.structure(0).map(|s| {
-                let src_w = s.get::<i32>("width").unwrap_or(frame_w);
-                let src_h = s.get::<i32>("height").unwrap_or(frame_h);
-                if src_w == frame_w && src_h == frame_h {
-                    return (0, 0); // same aspect ratio, no letterbox
-                }
-                let scale = (frame_w as f64 / src_w as f64)
-                    .min(frame_h as f64 / src_h as f64);
-                let scaled_w = (src_w as f64 * scale).round() as i32;
-                let scaled_h = (src_h as f64 * scale).round() as i32;
-                ((frame_w - scaled_w) / 2, (frame_h - scaled_h) / 2)
-            }))
-            .unwrap_or((0, 0));
-
+        // videocrop now operates at source resolution (before convertscale).
+        // Scale crop values from project pixels to source pixels.
+        // frame_w/frame_h = source dimensions from videocrop sink caps.
         let (mut cl, mut cr, mut ct, mut cb) = (
-            (crop_left.max(0) + letterbox_left),
-            (crop_right.max(0) + letterbox_left),
-            (crop_top.max(0) + letterbox_top),
-            (crop_bottom.max(0) + letterbox_top),
+            crop_left.max(0),
+            crop_right.max(0),
+            crop_top.max(0),
+            crop_bottom.max(0),
         );
         const MIN_DIM: i32 = 2;
         if cl + cr > frame_w - MIN_DIM {
@@ -7309,20 +7291,28 @@ impl ProgramPlayer {
             ct = (ct as f64 * ratio) as i32;
             cb = total - ct;
         }
-        if let Some(ref vc) = slot.videocrop {
+        // Apply user crop to the source-resolution videocrop element.
+        if let Some(ref vc) = slot.videocrop_src {
             vc.set_property("left", cl);
             vc.set_property("right", cr);
             vc.set_property("top", ct);
             vc.set_property("bottom", cb);
         }
-        // Re-pad cropped edges with transparent borders so the compositor
-        // reveals lower tracks through the cropped area.
+        // Reset wipe-transition videocrop to no-crop (wipe code sets it during transitions).
+        if let Some(ref vc) = slot.videocrop {
+            vc.set_property("left", 0i32);
+            vc.set_property("right", 0i32);
+            vc.set_property("top", 0i32);
+            vc.set_property("bottom", 0i32);
+        }
+        // videobox_crop_alpha: crop is now applied at source resolution
+        // (before convertscale), so we don't need to re-pad here.
+        // The convertscale with add-borders handles the display.
         if let Some(ref vb) = slot.videobox_crop_alpha {
-            vb.set_property("left", -cl);
-            vb.set_property("right", -cr);
-            vb.set_property("top", -ct);
-            vb.set_property("bottom", -cb);
-            vb.set_property("border-alpha", 0.0_f64);
+            vb.set_property("left", 0i32);
+            vb.set_property("right", 0i32);
+            vb.set_property("top", 0i32);
+            vb.set_property("bottom", 0i32);
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
             if vfr.find_property("angle").is_some() {
@@ -8638,14 +8628,26 @@ impl ProgramPlayer {
                 chain.push(cs);
             }
         }
-        // 1. Convert + downscale to project resolution in a single pass.
+        // 1. User crop at source resolution BEFORE scaling, so crop
+        //    operates on video content (not letterbox bars).
+        //    A separate videocrop_src element handles this; the existing
+        //    videocrop stays at project resolution for wipe transitions.
+        let videocrop_src = gst::ElementFactory::make("videocrop")
+            .name("videocrop_src")
+            .build()
+            .ok();
+        if let Some(ref e) = videocrop_src {
+            bin.add(e).ok();
+            chain.push(e.clone());
+        }
+        // 1b. Convert + downscale to project resolution in a single pass.
         if let Some(ref e) = convertscale {
             chain.push(e.clone());
         }
         if let Some(ref e) = capsfilter_proj {
             chain.push(e.clone());
         }
-        // 2b. Real-time 3D LUT via buffer pad probe on capsfilter src.
+        // 1c. Real-time 3D LUT via buffer pad probe on capsfilter src.
         // Applied AFTER downscale (RGBA at processing resolution) so the
         // trilinear interpolation runs on the smaller preview buffer, and
         // BEFORE any color effects — matching export LUT placement order.
@@ -8664,11 +8666,8 @@ impl ProgramPlayer {
                 },
             );
         }
-        // 2. Crop at project resolution (RGBA) then re-pad with transparent
-        //    borders so the compositor reveals lower tracks through cropped areas.
-        if let Some(ref e) = videocrop {
-            chain.push(e.clone());
-        }
+        // 2. Re-pad cropped edges with transparent borders (at project resolution)
+        //    so the compositor reveals lower tracks through cropped areas.
         if let Some(ref e) = videobox_crop_alpha {
             chain.push(e.clone());
         }
@@ -9171,6 +9170,7 @@ impl ProgramPlayer {
             gaussianblur: None,
             squareblur: None,
             
+            videocrop_src: None,
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: None,
@@ -9442,6 +9442,7 @@ impl ProgramPlayer {
             colorbalance_3pt: None,
             gaussianblur: None,
             
+            videocrop_src: None,
             squareblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
@@ -10413,6 +10414,7 @@ impl ProgramPlayer {
             let video_linked = Arc::new(AtomicBool::new(true));
             let audio_linked = Arc::new(AtomicBool::new(false));
 
+            let videocrop_src_elem = effects_bin.by_name("videocrop_src");
             let slot_ref_for_transform = VideoSlot {
                 clip_idx,
                 decoder: src.clone(),
@@ -10431,6 +10433,7 @@ impl ProgramPlayer {
                 
                 gaussianblur: gaussianblur.clone(),
                 squareblur: squareblur.clone(),
+                videocrop_src: videocrop_src_elem,
                 videocrop: videocrop.clone(),
                 videobox_crop_alpha: videobox_crop_alpha.clone(),
                 imagefreeze: imagefreeze.clone(),
@@ -10474,6 +10477,7 @@ impl ProgramPlayer {
             let _ = capsfilter.sync_state_with_parent();
             let _ = effects_bin.sync_state_with_parent();
             let _ = slot_queue.sync_state_with_parent();
+            let videocrop_src_elem = effects_bin.by_name("videocrop_src");
 
             return Some(VideoSlot {
                 clip_idx,
@@ -10492,6 +10496,7 @@ impl ProgramPlayer {
                 colorbalance_3pt,
                 gaussianblur,
                 squareblur,
+                videocrop_src: videocrop_src_elem.clone(),
                 videocrop,
                 videobox_crop_alpha,
                 imagefreeze,
@@ -10871,6 +10876,7 @@ impl ProgramPlayer {
             gaussianblur: gaussianblur.clone(),
             squareblur: squareblur.clone(),
             videocrop: videocrop.clone(),
+            videocrop_src: effects_bin.by_name("videocrop_src"),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
             imagefreeze: imagefreeze.clone(),
             videoflip_rotate: videoflip_rotate.clone(),
@@ -10922,6 +10928,7 @@ impl ProgramPlayer {
             proc_w,
             proc_h,
         );
+        let videocrop_src_elem = effects_bin.by_name("videocrop_src");
 
         Some(VideoSlot {
             clip_idx,
@@ -10940,6 +10947,7 @@ impl ProgramPlayer {
             colorbalance_3pt,
             gaussianblur,
             squareblur,
+            videocrop_src: videocrop_src_elem,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -14446,6 +14454,7 @@ mod tests {
             } else {
                 None
             },
+            videocrop_src: None,
             gaussianblur: if has_gaussianblur { identity() } else { None },
             squareblur: None, // no squareblur in test slots
             videocrop: None,
