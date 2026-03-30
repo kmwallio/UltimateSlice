@@ -12,7 +12,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 /// A parsed 3D LUT.
 #[derive(Debug, Clone)]
@@ -192,6 +191,11 @@ impl CubeLut {
             pixel[2] = b_out;
             // pixel[3] (alpha) unchanged.
         }
+    }
+
+    /// Apply this LUT to a single RGB pixel and return the transformed values.
+    pub fn apply_rgb(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        self.interpolate(r, g, b)
     }
 
     /// Write this LUT to a `.cube` file at the given path.

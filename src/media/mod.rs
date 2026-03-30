@@ -1,4 +1,5 @@
 pub mod audio_sync;
+pub mod adjustment_scope;
 pub mod ladspa_registry;
 pub mod voiceover;
 pub mod bg_removal_cache;

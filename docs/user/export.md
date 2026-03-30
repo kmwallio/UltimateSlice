@@ -91,6 +91,12 @@ When enabled, export applies automatic fades at adjacent same-track audio edit p
 
 Fade lengths are clamped safely for very short clips and overlap boundaries so exports remain stable.
 
+### Frei0r effect export compatibility
+
+When UltimateSlice cannot discover native frei0r plugin metadata on the local system, export falls back to built-in native parameter schemas for supported plugins instead of guessing from unordered numeric parameters.
+
+This keeps FFmpeg frei0r exports more consistent across machines for effects such as **3-point color balance**, including correct bool formatting and grouped color values.
+
 ## Export Presets
 
 Use the **Preset** row in the Export dialog to save and reuse named export configurations:
@@ -189,6 +195,13 @@ Export evaluates phase-1 clip keyframes with interpolation-aware curves:
 - **Audio:** `volume`
 
 Keyframes are evaluated in clip-local timeline time and rendered directly into ffmpeg filter chains so exported animation follows the same keyframe timing model used by Program Monitor preview. Dopesheet custom Bezier handle shapes are exported through a piecewise cubic-bezier approximation.
+
+## Adjustment Layers
+
+- Adjustment layers export as post-compositor effect passes over the assembled timeline image.
+- The exported effect region uses the same **scale / position / crop / rotate / opacity** scope model as the Program Monitor overlay for adjustment clips.
+- Each adjustment layer is trimmed to its own clip-local time before FFmpeg evaluates keyframed effect expressions, so adjustment-layer keyframes animate relative to the adjustment clip instead of the global timeline.
+- Overlapping adjustment layers stack in track order, matching Program Monitor preview.
 
 ## Freeze-Frame Clips
 

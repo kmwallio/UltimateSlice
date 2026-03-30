@@ -42,7 +42,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 ## Program Monitor Playback Priority
 
 - **Program monitor playback priority** controls how playback trades off smoothness vs precision:
-  - `Smooth` (default): favors continuity and lower stutter during active playback.
+  - `Smooth` (default): favors continuity and lower stutter during active playback. Under load, Program Monitor may drop late video frames to stay closer to the audio clock/playhead instead of building preview latency.
   - `Balanced`: middle ground.
   - `Accurate`: favors precise seeks/frame placement.
 - The setting is persisted across launches.

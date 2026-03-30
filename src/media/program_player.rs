@@ -1,3 +1,4 @@
+use crate::media::adjustment_scope::AdjustmentScopeShape;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
 use crate::model::clip::{Clip as ModelClip, NumericKeyframe};
@@ -173,6 +174,7 @@ impl ShortFrameCache {
 /// Calibrated videobalance output parameters (brightness, contrast,
 /// saturation, hue) computed from clip colour settings by
 /// `ProgramPlayer::compute_videobalance_params`.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct VBParams {
     pub(crate) brightness: f64,
     pub(crate) contrast: f64,
@@ -182,6 +184,7 @@ pub(crate) struct VBParams {
 
 /// Per-channel RGB gains for frei0r `coloradj_RGB` element.
 /// Values are in frei0r's [0,1] range where 0.5 = neutral (gain 1.0).
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ColorAdjRGBParams {
     pub(crate) r: f64,
     pub(crate) g: f64,
@@ -1047,6 +1050,94 @@ fn blend_pixel(
     }
 }
 
+#[inline]
+fn coloradj_param_to_gain(param: f64) -> f64 {
+    (param.clamp(0.0, 1.0) * 2.0).clamp(0.0, 2.0)
+}
+
+#[inline]
+fn apply_videobalance_rgb(r: f64, g: f64, b: f64, params: VBParams) -> (f64, f64, f64) {
+    let y = 0.299 * r + 0.587 * g + 0.114 * b;
+    let mut u = 0.492 * (b - y);
+    let mut v = 0.877 * (r - y);
+    let y = ((y - 0.5) * params.contrast + 0.5 + params.brightness).clamp(0.0, 1.0);
+    let hue_rad = params.hue * std::f64::consts::PI;
+    let (sin_h, cos_h) = hue_rad.sin_cos();
+    let rot_u = u * cos_h - v * sin_h;
+    let rot_v = u * sin_h + v * cos_h;
+    u = rot_u * params.saturation;
+    v = rot_v * params.saturation;
+    let r = (y + v / 0.877).clamp(0.0, 1.0);
+    let b = (y + u / 0.492).clamp(0.0, 1.0);
+    let g = ((y - 0.299 * r - 0.114 * b) / 0.587).clamp(0.0, 1.0);
+    (r, g, b)
+}
+
+#[inline]
+fn apply_three_point_channel(v: f64, coeffs: &ThreePointParabolaCoeffs) -> f64 {
+    (coeffs.a * v * v + coeffs.b * v + coeffs.c).clamp(0.0, 1.0)
+}
+
+fn apply_adjustment_overlays_rgba(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    overlays: &[AdjustmentOverlay],
+) {
+    if width == 0 || height == 0 || data.len() < width.saturating_mul(height).saturating_mul(4) {
+        return;
+    }
+    for overlay in overlays {
+        if overlay.opacity <= f64::EPSILON {
+            continue;
+        }
+        let Some((x0, y0, x1, y1)) = overlay.scope.pixel_bounds(width, height) else {
+            continue;
+        };
+        for y in y0..y1 {
+            let row_start = y * width * 4;
+            for x in x0..x1 {
+                if !overlay.scope.contains_pixel(x, y) {
+                    continue;
+                }
+                let idx = row_start + x * 4;
+                let pixel = &mut data[idx..idx + 4];
+                let base_r = pixel[0] as f64 / 255.0;
+                let base_g = pixel[1] as f64 / 255.0;
+                let base_b = pixel[2] as f64 / 255.0;
+                let mut out_r = base_r;
+                let mut out_g = base_g;
+                let mut out_b = base_b;
+                if let Some(ref lut) = overlay.lut {
+                    let (r, g, b) = lut.apply_rgb(pixel[0], pixel[1], pixel[2]);
+                    out_r = r as f64 / 255.0;
+                    out_g = g as f64 / 255.0;
+                    out_b = b as f64 / 255.0;
+                }
+                if let Some(vb) = overlay.vb_params {
+                    (out_r, out_g, out_b) = apply_videobalance_rgb(out_r, out_g, out_b, vb);
+                }
+                if let Some(coloradj) = overlay.coloradj_params {
+                    out_r = (out_r * coloradj_param_to_gain(coloradj.r)).clamp(0.0, 1.0);
+                    out_g = (out_g * coloradj_param_to_gain(coloradj.g)).clamp(0.0, 1.0);
+                    out_b = (out_b * coloradj_param_to_gain(coloradj.b)).clamp(0.0, 1.0);
+                }
+                if let Some(ref parabola) = overlay.three_point {
+                    out_r = apply_three_point_channel(out_r, &parabola.r);
+                    out_g = apply_three_point_channel(out_g, &parabola.g);
+                    out_b = apply_three_point_channel(out_b, &parabola.b);
+                }
+                pixel[0] = ((base_r + (out_r - base_r) * overlay.opacity).clamp(0.0, 1.0) * 255.0)
+                    .round() as u8;
+                pixel[1] = ((base_g + (out_g - base_g) * overlay.opacity).clamp(0.0, 1.0) * 255.0)
+                    .round() as u8;
+                pixel[2] = ((base_b + (out_b - base_b) * overlay.opacity).clamp(0.0, 1.0) * 255.0)
+                    .round() as u8;
+            }
+        }
+    }
+}
+
 /// Captured overlay frame for blend-mode compositing in the preview pipeline.
 /// The blend probe on the compositor output reads these to apply pixel-accurate
 /// blend math against the real base layers.
@@ -1059,14 +1150,16 @@ struct BlendOverlay {
     zorder: u32,
 }
 
-/// Adjustment layer time-range metadata (kept for potential future use).
+/// Resolved live adjustment-layer preview state at the current playhead.
+#[derive(Clone)]
 struct AdjustmentOverlay {
-    #[allow(dead_code)]
     track_index: usize,
-    #[allow(dead_code)]
-    timeline_start_ns: u64,
-    #[allow(dead_code)]
-    timeline_end_ns: u64,
+    scope: AdjustmentScopeShape,
+    opacity: f64,
+    vb_params: Option<VBParams>,
+    coloradj_params: Option<ColorAdjRGBParams>,
+    three_point: Option<ThreePointParabola>,
+    lut: Option<Arc<CubeLut>>,
 }
 
 pub struct ProgramPlayer {
@@ -1092,6 +1185,10 @@ pub struct ProgramPlayer {
     audio_multi_pads: HashMap<usize, gst::Pad>,
     /// Audiopanorama elements in the multi pipeline, keyed by audio_clip index.
     audio_multi_pan_elems: HashMap<usize, gst::Element>,
+    /// Decoder elements in the multi pipeline, keyed by audio_clip index.
+    /// Retained so same-active-set boundary resyncs can seek in place without
+    /// tearing down the whole multi-audio pipeline.
+    audio_multi_decoders: HashMap<usize, gst::Element>,
     /// Clip index whose audiomixer pad is temporarily forced to 0.0 while
     /// reverse audio for that clip is routed through `audio_pipeline`.
     reverse_video_ducked_clip_idx: Option<usize>,
@@ -1208,10 +1305,11 @@ pub struct ProgramPlayer {
     /// Display queue between tee and gtk4paintablesink.  Switched to leaky
     /// during transform live mode to prevent backpressure blocking.
     display_queue: Option<gst::Element>,
-    /// True when heavy-overlap playback is using drop-late display policy to
-    /// keep displayed video aligned to the audio clock.
+    /// True when playback is using drop-late display policy to keep displayed
+    /// video aligned to the audio clock.
     playback_drop_late_active: bool,
-    /// True when per-slot queues are in drop-late mode during heavy overlap playback.
+    /// True when per-slot queues are in drop-late mode to avoid backlog during
+    /// continuity-prioritized playback.
     slot_queue_drop_late_active: bool,
     /// True when the transform tool has temporarily set the pipeline to live
     /// mode for interactive preview during drag.
@@ -1692,20 +1790,45 @@ impl ProgramPlayer {
             }
         }
 
-        // NOTE: Adjustment layer effects are handled by the permanent
-        // adj_effects_bin (GStreamer elements between compositor and display),
-        // NOT by a buffer probe.  The bin is rebuilt in rebuild_pipeline_at()
-        // and on slider changes via rebuild_adjustment_effects_chain().
+        // Adjustment-layer preview scopes are applied by a compositor-output
+        // buffer probe so overlapping regions can stack without mutating live
+        // pipeline topology.
 
         // Probe on compositor output: always increments cseq (cheap) but only
         // copies the full-res frame when compositor_capture_enabled is set (during
         // MCP frame export).  This avoids ~250 MB/s of unnecessary memcpy during
         // normal playback.
         if let Some(comp_src_pad) = comp_capsfilter.static_pad("src") {
+            let adjustment_ov = adjustment_overlays.clone();
             let lcf = latest_compositor_frame.clone();
             let cseq = compositor_frame_seq.clone();
             let capture_en = compositor_capture_enabled.clone();
-            let caps_pad = comp_src_pad.clone();
+            let adjustment_caps_pad = comp_src_pad.clone();
+            comp_src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                let overlays = match adjustment_ov.try_lock() {
+                    Ok(guard) if !guard.is_empty() => guard.clone(),
+                    _ => return gst::PadProbeReturn::Ok,
+                };
+                if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                    let buf = buffer.make_mut();
+                    if let Ok(mut map) = buf.map_writable() {
+                        let (w, h) = adjustment_caps_pad
+                            .current_caps()
+                            .and_then(|caps| {
+                                let s = caps.structure(0)?;
+                                let w = s.get::<i32>("width").ok().unwrap_or(0).max(0) as usize;
+                                let h = s.get::<i32>("height").ok().unwrap_or(0).max(0) as usize;
+                                Some((w, h))
+                            })
+                            .unwrap_or((0, 0));
+                        if w > 0 && h > 0 {
+                            apply_adjustment_overlays_rgba(map.as_mut_slice(), w, h, &overlays);
+                        }
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+            let capture_caps_pad = comp_src_pad.clone();
             comp_src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
                 cseq.fetch_add(1, Ordering::Relaxed);
                 if !capture_en.load(Ordering::Relaxed) {
@@ -1713,7 +1836,7 @@ impl ProgramPlayer {
                 }
                 if let Some(buffer) = info.buffer() {
                     if let Ok(map) = buffer.map_readable() {
-                        let (w, h) = caps_pad
+                        let (w, h) = capture_caps_pad
                             .current_caps()
                             .and_then(|caps| {
                                 let s = caps.structure(0)?;
@@ -1867,6 +1990,7 @@ impl ProgramPlayer {
                 audio_multi_pipeline: None,
                 audio_multi_pads: HashMap::new(),
                 audio_multi_pan_elems: HashMap::new(),
+                audio_multi_decoders: HashMap::new(),
                 reverse_video_ducked_clip_idx: None,
                 slots: Vec::new(),
                 timeline_pos_ns: 0,
@@ -2633,103 +2757,148 @@ impl ProgramPlayer {
         self.rebuild_adjustment_overlays();
     }
 
-    /// Update the adjustment overlay time-range metadata from the current clip set.
-    fn rebuild_adjustment_overlays(&self) {
-        if let Ok(mut overlays) = self.adjustment_overlays.lock() {
-            overlays.clear();
-            for clip in &self.clips {
-                if clip.is_adjustment {
-                    overlays.push(AdjustmentOverlay {
-                        track_index: clip.track_index,
-                        timeline_start_ns: clip.timeline_start_ns,
-                        timeline_end_ns: clip.timeline_start_ns + clip.source_out_ns.saturating_sub(clip.source_in_ns),
-                    });
-                }
+    /// Resolve the currently active adjustment-layer scopes and supported
+    /// preview effects at the current playhead.
+    fn rebuild_adjustment_overlays(&mut self) {
+        let pos = self.timeline_pos_ns;
+        let mut rebuilt: Vec<AdjustmentOverlay> = Vec::new();
+        for idx in 0..self.clips.len() {
+            let clip = self.clips[idx].clone();
+            if !clip.is_adjustment || pos < clip.timeline_start_ns || pos >= clip.timeline_end_ns() {
+                continue;
             }
+
+            let brightness = clip.brightness_at_timeline_ns(pos);
+            let contrast = clip.contrast_at_timeline_ns(pos);
+            let saturation = clip.saturation_at_timeline_ns(pos);
+            let temperature = clip.temperature_at_timeline_ns(pos);
+            let tint = clip.tint_at_timeline_ns(pos);
+            let opacity = clip.opacity_at_timeline_ns(pos).clamp(0.0, 1.0);
+            if opacity <= f64::EPSILON {
+                continue;
+            }
+
+            let has_coloradj = (temperature - 6500.0).abs() > 1.0 || tint.abs() > 0.001;
+            let has_3point = clip.shadows != 0.0
+                || clip.midtones != 0.0
+                || clip.highlights != 0.0
+                || clip.black_point != 0.0
+                || clip.highlights_warmth != 0.0
+                || clip.highlights_tint != 0.0
+                || clip.midtones_warmth != 0.0
+                || clip.midtones_tint != 0.0
+                || clip.shadows_warmth != 0.0
+                || clip.shadows_tint != 0.0;
+            let vb = Self::compute_videobalance_params(
+                brightness,
+                contrast,
+                saturation,
+                temperature,
+                tint,
+                clip.shadows,
+                clip.midtones,
+                clip.highlights,
+                clip.exposure,
+                clip.black_point,
+                clip.highlights_warmth,
+                clip.highlights_tint,
+                clip.midtones_warmth,
+                clip.midtones_tint,
+                clip.shadows_warmth,
+                clip.shadows_tint,
+                has_coloradj,
+                has_3point,
+            );
+            let vb_params = if vb.brightness.abs() > f64::EPSILON
+                || (vb.contrast - 1.0).abs() > f64::EPSILON
+                || (vb.saturation - 1.0).abs() > f64::EPSILON
+                || vb.hue.abs() > f64::EPSILON
+            {
+                Some(vb)
+            } else {
+                None
+            };
+            let coloradj_params = has_coloradj.then(|| Self::compute_coloradj_params(temperature, tint));
+            let three_point = if has_3point {
+                let params = Self::compute_3point_params(
+                    clip.shadows,
+                    clip.midtones,
+                    clip.highlights,
+                    clip.black_point,
+                    clip.highlights_warmth,
+                    clip.highlights_tint,
+                    clip.midtones_warmth,
+                    clip.midtones_tint,
+                    clip.shadows_warmth,
+                    clip.shadows_tint,
+                );
+                Some(ThreePointParabola::from_params(&params))
+            } else {
+                None
+            };
+            let lut = if self.preview_luts {
+                clip.lut_paths
+                    .first()
+                    .filter(|path| !path.is_empty())
+                    .and_then(|path| self.get_or_parse_lut(path))
+            } else {
+                None
+            };
+            if vb_params.is_none() && coloradj_params.is_none() && three_point.is_none() && lut.is_none() {
+                continue;
+            }
+
+            rebuilt.push(AdjustmentOverlay {
+                track_index: clip.track_index,
+                scope: AdjustmentScopeShape::from_transform(
+                    self.project_width,
+                    self.project_height,
+                    clip.scale_at_timeline_ns(pos),
+                    clip.position_x_at_timeline_ns(pos),
+                    clip.position_y_at_timeline_ns(pos),
+                    clip.rotate_at_timeline_ns(pos) as f64,
+                    clip.crop_left_at_timeline_ns(pos),
+                    clip.crop_right_at_timeline_ns(pos),
+                    clip.crop_top_at_timeline_ns(pos),
+                    clip.crop_bottom_at_timeline_ns(pos),
+                ),
+                opacity,
+                vb_params,
+                coloradj_params,
+                three_point,
+                lut,
+            });
+        }
+        rebuilt.sort_by_key(|overlay| overlay.track_index);
+        if let Ok(mut overlays) = self.adjustment_overlays.lock() {
+            *overlays = rebuilt;
         }
     }
 
-    /// Rebuild the GStreamer effects chain inside the permanent adjustment
-    /// effects bin.  Called from `rebuild_pipeline_at()` and slider callbacks.
-    /// Uses a signature to skip rebuilds when nothing changed.
-    /// Update the permanent adjustment layer elements with values from the
-    /// active adjustment layers at the current playhead.  Only sets GStreamer
-    /// element properties — never modifies pipeline topology (which would
-    /// deadlock during live state transitions).
+    /// Keep the permanent adjustment elements neutral; scoped adjustment
+    /// preview now runs via the compositor-output probe.
     fn rebuild_adjustment_effects_chain(&mut self) {
-        let pos = self.timeline_pos_ns;
-        let active_adj: Vec<&ProgramClip> = self.clips.iter()
-            .filter(|c| c.is_adjustment && pos >= c.timeline_start_ns && pos < c.timeline_end_ns())
-            .collect();
-
-        if active_adj.is_empty() {
-            // Reset to neutral (identity transform).
-            self.adj_videobalance.set_property("brightness", 0.0_f64);
-            self.adj_videobalance.set_property("contrast", 1.0_f64);
-            self.adj_videobalance.set_property("saturation", 1.0_f64);
-            self.adj_videobalance.set_property("hue", 0.0_f64);
-            if let Some(ref ca) = self.adj_coloradj {
-                ca.set_property("r", 0.5_f64);
-                ca.set_property("g", 0.5_f64);
-                ca.set_property("b", 0.5_f64);
-            }
-            if let Some(ref cb) = self.adj_3point {
-                cb.set_property("black-color-r", 0.5_f64);
-                cb.set_property("black-color-g", 0.5_f64);
-                cb.set_property("black-color-b", 0.5_f64);
-                cb.set_property("gray-color-r", 0.5_f64);
-                cb.set_property("gray-color-g", 0.5_f64);
-                cb.set_property("gray-color-b", 0.5_f64);
-                cb.set_property("white-color-r", 0.5_f64);
-                cb.set_property("white-color-g", 0.5_f64);
-                cb.set_property("white-color-b", 0.5_f64);
-            }
-            return;
-        }
-
-        // Use the first active adjustment layer (future: merge multiple).
-        let clip = active_adj[0];
-        let has_coloradj = self.adj_coloradj.is_some();
-        let has_3point = self.adj_3point.is_some();
-        let p = Self::compute_videobalance_params(
-            clip.brightness, clip.contrast, clip.saturation,
-            clip.temperature, clip.tint,
-            clip.shadows, clip.midtones, clip.highlights,
-            clip.exposure, clip.black_point,
-            clip.highlights_warmth, clip.highlights_tint,
-            clip.midtones_warmth, clip.midtones_tint,
-            clip.shadows_warmth, clip.shadows_tint,
-            has_coloradj, has_3point,
-        );
-        self.adj_videobalance.set_property("brightness", p.brightness);
-        self.adj_videobalance.set_property("contrast", p.contrast);
-        self.adj_videobalance.set_property("saturation", p.saturation);
-        self.adj_videobalance.set_property("hue", p.hue);
+        self.adj_videobalance.set_property("brightness", 0.0_f64);
+        self.adj_videobalance.set_property("contrast", 1.0_f64);
+        self.adj_videobalance.set_property("saturation", 1.0_f64);
+        self.adj_videobalance.set_property("hue", 0.0_f64);
 
         if let Some(ref ca) = self.adj_coloradj {
-            let cp = Self::compute_coloradj_params(clip.temperature, clip.tint);
-            ca.set_property("r", cp.r);
-            ca.set_property("g", cp.g);
-            ca.set_property("b", cp.b);
+            ca.set_property("r", 0.5_f64);
+            ca.set_property("g", 0.5_f64);
+            ca.set_property("b", 0.5_f64);
         }
 
         if let Some(ref cb) = self.adj_3point {
-            let tp = Self::compute_3point_params(
-                clip.shadows, clip.midtones, clip.highlights,
-                clip.black_point,
-                clip.highlights_warmth, clip.highlights_tint,
-                clip.midtones_warmth, clip.midtones_tint,
-                clip.shadows_warmth, clip.shadows_tint,
-            );
-            cb.set_property("black-color-r", tp.black_r);
-            cb.set_property("black-color-g", tp.black_g);
-            cb.set_property("black-color-b", tp.black_b);
-            cb.set_property("gray-color-r", tp.gray_r);
-            cb.set_property("gray-color-g", tp.gray_g);
-            cb.set_property("gray-color-b", tp.gray_b);
-            cb.set_property("white-color-r", tp.white_r);
-            cb.set_property("white-color-g", tp.white_g);
-            cb.set_property("white-color-b", tp.white_b);
+            cb.set_property("black-color-r", 0.5_f64);
+            cb.set_property("black-color-g", 0.5_f64);
+            cb.set_property("black-color-b", 0.5_f64);
+            cb.set_property("gray-color-r", 0.5_f64);
+            cb.set_property("gray-color-g", 0.5_f64);
+            cb.set_property("gray-color-b", 0.5_f64);
+            cb.set_property("white-color-r", 0.5_f64);
+            cb.set_property("white-color-g", 0.5_f64);
+            cb.set_property("white-color-b", 0.5_f64);
         }
     }
 
@@ -2839,8 +3008,13 @@ impl ProgramPlayer {
         self.rebuild_pipeline_at(timeline_pos_ns);
         self.apply_keyframed_video_slot_properties(timeline_pos_ns);
         self.apply_transition_effects(timeline_pos_ns);
-        // Sync audio-only pipeline
-        self.sync_audio_to(timeline_pos_ns);
+        // Sync audio-only pipeline. While paused/stopped, avoid forcing the
+        // multi-audio mixer to rebuild on every scrub if the active set is unchanged.
+        if resume_playback {
+            self.force_sync_audio_to(timeline_pos_ns);
+        } else {
+            self.sync_audio_to(timeline_pos_ns);
+        }
         let needs_async = if resume_playback {
             self.play_start = Some(Instant::now());
             false
@@ -2920,7 +3094,7 @@ impl ProgramPlayer {
         self.apply_keyframed_video_slot_properties(pos);
         self.apply_transition_effects(pos);
         let _ = self.pipeline.set_state(gst::State::Playing);
-        self.sync_audio_to(pos);
+        self.force_sync_audio_to(pos);
         match self.audio_current_source {
             Some(AudioCurrentSource::AudioClip(aidx)) => {
                 let aclip = &self.audio_clips[aidx];
@@ -2948,16 +3122,7 @@ impl ProgramPlayer {
             }
             None => {}
         }
-        if self.audio_current_source.is_some() {
-            let _ = self.audio_pipeline.set_state(gst::State::Playing);
-        }
-        if let Some(ref mp) = self.audio_multi_pipeline {
-            // Re-sync clock before resuming.
-            if let Some(base) = self.pipeline.base_time() {
-                mp.set_base_time(base);
-            }
-            let _ = mp.set_state(gst::State::Playing);
-        }
+        self.resume_synced_audio_playback();
         self.state = PlayerState::Playing;
         self.base_timeline_ns = pos;
         self.play_start = Some(Instant::now());
@@ -3109,6 +3274,18 @@ impl ProgramPlayer {
                 self.clips.get(idx).map(|c| c.track_index)
             }
             None => None,
+        }
+    }
+
+    fn resume_synced_audio_playback(&mut self) {
+        if self.audio_current_source.is_some() {
+            let _ = self.audio_pipeline.set_state(gst::State::Playing);
+        }
+        if let Some(ref mp) = self.audio_multi_pipeline {
+            if let Some(base) = self.pipeline.base_time() {
+                mp.set_base_time(base);
+            }
+            let _ = mp.set_state(gst::State::Playing);
         }
     }
 
@@ -3561,6 +3738,9 @@ impl ProgramPlayer {
         let changed = new_pos != self.timeline_pos_ns;
         self.timeline_pos_ns = new_pos;
         self.sync_adjustment_timeline_pos();
+        if changed {
+            self.rebuild_adjustment_overlays();
+        }
         self.prewarm_upcoming_boundary(new_pos);
 
         // Timeline end reached after update?
@@ -3677,10 +3857,8 @@ impl ProgramPlayer {
                     }
                     self.rebuild_pipeline_at(new_pos);
                     let _ = self.pipeline.set_state(gst::State::Playing);
-                    self.sync_audio_to(new_pos);
-                    if self.audio_current_source.is_some() {
-                        let _ = self.audio_pipeline.set_state(gst::State::Playing);
-                    }
+                    self.force_sync_audio_to(new_pos);
+                    self.resume_synced_audio_playback();
                     // Reset wall-clock base after rebuild.
                     self.base_timeline_ns = new_pos;
                     self.play_start = Some(Instant::now());
@@ -3693,10 +3871,8 @@ impl ProgramPlayer {
                         if let Some(ref _src) = audio_wanted {
                             let _ = self.audio_pipeline.set_state(gst::State::Paused);
                         }
-                        self.sync_audio_to(new_pos);
-                        if self.audio_current_source.is_some() {
-                            let _ = self.audio_pipeline.set_state(gst::State::Playing);
-                        }
+                        self.force_sync_audio_to(new_pos);
+                        self.resume_synced_audio_playback();
                     }
                 }
             }
@@ -4181,8 +4357,6 @@ impl ProgramPlayer {
             if self.audio_multi_pipeline.is_some() && self.audio_multi_active.contains(&i) {
                 let active = self.audio_multi_active.clone();
                 let pos = self.timeline_pos_ns;
-                // Force rebuild by clearing the active list.
-                self.audio_multi_active.clear();
                 self.rebuild_audio_multi_pipeline(&active, pos);
             }
             log::info!("update_eq_for_clip: stored EQ for audio-only clip={}", clip_id);
@@ -4348,8 +4522,10 @@ impl ProgramPlayer {
         position_x: f64,
         position_y: f64,
     ) {
+        let mut is_adjustment = false;
         if let Some(idx) = self.current_idx {
             if let Some(clip) = self.clips.get_mut(idx) {
+                is_adjustment = clip.is_adjustment;
                 clip.crop_left = crop_left;
                 clip.crop_right = crop_right;
                 clip.crop_top = crop_top;
@@ -4361,6 +4537,13 @@ impl ProgramPlayer {
                 clip.position_x = position_x;
                 clip.position_y = position_y;
             }
+        }
+        if is_adjustment {
+            self.rebuild_adjustment_overlays();
+            if self.state != PlayerState::Playing {
+                self.reseek_slot_for_current();
+            }
+            return;
         }
         self.set_transform(
             crop_left,
@@ -4395,7 +4578,9 @@ impl ProgramPlayer {
     ) {
         let idx = self.clips.iter().position(|c| c.id == clip_id);
         if let Some(i) = idx {
+            let mut is_adjustment = false;
             if let Some(clip) = self.clips.get_mut(i) {
+                is_adjustment = clip.is_adjustment;
                 clip.crop_left = crop_left;
                 clip.crop_right = crop_right;
                 clip.crop_top = crop_top;
@@ -4406,6 +4591,13 @@ impl ProgramPlayer {
                 clip.scale = scale;
                 clip.position_x = position_x;
                 clip.position_y = position_y;
+            }
+            if is_adjustment {
+                self.rebuild_adjustment_overlays();
+                if self.state != PlayerState::Playing {
+                    self.reseek_slot_by_clip_idx(i);
+                }
+                return;
             }
             // Apply to the slot for this clip (any track, not just top).
             if let Some(slot) = self.slot_for_clip(i) {
@@ -4455,7 +4647,9 @@ impl ProgramPlayer {
             None => self.current_idx,
         };
         if let Some(i) = idx {
+            let mut is_adjustment = false;
             if let Some(clip) = self.clips.get_mut(i) {
+                is_adjustment = clip.is_adjustment;
                 clip.crop_left = crop_left;
                 clip.crop_right = crop_right;
                 clip.crop_top = crop_top;
@@ -4466,6 +4660,10 @@ impl ProgramPlayer {
                 clip.scale = scale;
                 clip.position_x = position_x;
                 clip.position_y = position_y;
+            }
+            if is_adjustment {
+                self.rebuild_adjustment_overlays();
+                return;
             }
             if let Some(slot) = self.slot_for_clip(i) {
                 Self::apply_transform_to_slot(
@@ -4582,8 +4780,17 @@ impl ProgramPlayer {
     pub fn update_opacity_for_clip(&mut self, clip_id: &str, opacity: f64) {
         let opacity = opacity.clamp(0.0, 1.0);
         if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
+            let mut is_adjustment = false;
             if let Some(clip) = self.clips.get_mut(i) {
+                is_adjustment = clip.is_adjustment;
                 clip.opacity = opacity;
+            }
+            if is_adjustment {
+                self.rebuild_adjustment_overlays();
+                if self.current_idx == Some(i) && self.state != PlayerState::Playing {
+                    self.reseek_slot_for_current();
+                }
+                return;
             }
             if let Some(slot) = self.slot_for_clip(i) {
                 if slot.is_blend_mode {
@@ -5521,6 +5728,27 @@ impl ProgramPlayer {
         timeline_pos_ns: u64,
         active: &[usize],
     ) -> bool {
+        let has_scoped_adjustment = self.clips.iter().any(|clip| {
+            clip.is_adjustment
+                && timeline_pos_ns >= clip.timeline_start_ns
+                && timeline_pos_ns < clip.timeline_end_ns()
+                && !AdjustmentScopeShape::from_transform(
+                    self.project_width,
+                    self.project_height,
+                    clip.scale_at_timeline_ns(timeline_pos_ns),
+                    clip.position_x_at_timeline_ns(timeline_pos_ns),
+                    clip.position_y_at_timeline_ns(timeline_pos_ns),
+                    clip.rotate_at_timeline_ns(timeline_pos_ns) as f64,
+                    clip.crop_left_at_timeline_ns(timeline_pos_ns),
+                    clip.crop_right_at_timeline_ns(timeline_pos_ns),
+                    clip.crop_top_at_timeline_ns(timeline_pos_ns),
+                    clip.crop_bottom_at_timeline_ns(timeline_pos_ns),
+                )
+                .is_full_frame(self.project_width, self.project_height)
+        });
+        if has_scoped_adjustment {
+            return false;
+        }
         if active.len() >= 3 {
             return true;
         }
@@ -6313,15 +6541,30 @@ impl ProgramPlayer {
     }
 
     fn should_drop_late_for_playback(&self) -> bool {
-        if self.state != PlayerState::Playing || self.transform_live {
+        Self::should_drop_late_for_playback_mode(
+            self.state == PlayerState::Playing,
+            self.transform_live,
+            &self.playback_priority,
+            self.slots.len(),
+            self.transition_overlap_active_now(),
+        )
+    }
+
+    fn should_drop_late_for_playback_mode(
+        is_playing: bool,
+        transform_live: bool,
+        playback_priority: &PlaybackPriority,
+        slot_count: usize,
+        transition_overlap_active: bool,
+    ) -> bool {
+        if !is_playing || transform_live {
             return false;
         }
-        if self.slots.len() >= 3 {
+        if slot_count >= 3 {
             return true;
         }
-        self.slots.len() >= 2
-            && matches!(self.playback_priority, PlaybackPriority::Smooth)
-            && self.transition_overlap_active_now()
+        matches!(playback_priority, PlaybackPriority::Smooth)
+            && (slot_count > 0 || transition_overlap_active)
     }
 
     fn update_drop_late_policy(&mut self) {
@@ -11840,6 +12083,7 @@ impl ProgramPlayer {
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         self.timeline_pos_ns = timeline_pos;
         self.sync_adjustment_timeline_pos();
+        self.rebuild_adjustment_overlays();
         let rebuild_started = Instant::now();
         let was_playing = self.state == PlayerState::Playing;
         let had_existing_slots = !self.slots.is_empty();
@@ -12290,10 +12534,14 @@ impl ProgramPlayer {
         );
         self.teardown_slots();
         self.rebuild_pipeline_at(target_pos);
+        self.teardown_audio_multi_pipeline();
+        let _ = self.audio_pipeline.set_state(gst::State::Ready);
         self.audio_current_source = None;
         self.apply_reverse_video_main_audio_ducking(None);
+        self.force_sync_audio_to(target_pos);
         if was_playing {
             let _ = self.pipeline.set_state(gst::State::Playing);
+            self.resume_synced_audio_playback();
             self.base_timeline_ns = target_pos;
             self.play_start = Some(Instant::now());
         }
@@ -12454,12 +12702,98 @@ impl ProgramPlayer {
 
     // ── Audio-only pipeline ────────────────────────────────────────────────
 
+    fn should_rebuild_audio_multi_pipeline(
+        active: &[usize],
+        current_active: &[usize],
+        pipeline_exists: bool,
+    ) -> bool {
+        active != current_active || !pipeline_exists
+    }
+
+    fn should_reseek_audio_multi_pipeline(
+        active: &[usize],
+        current_active: &[usize],
+        pipeline_exists: bool,
+        force_reseek: bool,
+    ) -> bool {
+        force_reseek && active == current_active && pipeline_exists
+    }
+
+    fn audio_multi_source_position_ns(clip: &ProgramClip, timeline_pos_ns: u64) -> u64 {
+        if timeline_pos_ns >= clip.timeline_start_ns {
+            clip.source_in_ns
+                + (timeline_pos_ns - clip.timeline_start_ns)
+                    .min(clip.source_out_ns.saturating_sub(clip.source_in_ns))
+        } else {
+            clip.source_in_ns
+        }
+    }
+
+    fn reseek_audio_multi_pipeline(
+        &mut self,
+        active: &[usize],
+        timeline_pos_ns: u64,
+        force_reseek: bool,
+    ) -> bool {
+        if !Self::should_reseek_audio_multi_pipeline(
+            active,
+            &self.audio_multi_active,
+            self.audio_multi_pipeline.is_some(),
+            force_reseek,
+        ) {
+            return false;
+        }
+        let Some(ref pipeline) = self.audio_multi_pipeline else {
+            return false;
+        };
+        let was_playing = self.state == PlayerState::Playing;
+        let _ = pipeline.set_state(gst::State::Paused);
+        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+        // Reset the separate audio pipeline's segment/running-time before the
+        // per-decoder reseeks. Without this flush, the audiomixer can keep the
+        // old running-time and drop freshly reseeked external-audio buffers as
+        // "late" until the next full audio boundary rebuild.
+        let _ = pipeline.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        for &aidx in active {
+            let Some(decoder) = self.audio_multi_decoders.get(&aidx) else {
+                return false;
+            };
+            let Some(clip) = self.audio_clips.get(aidx) else {
+                return false;
+            };
+            let source_pos_ns = Self::audio_multi_source_position_ns(clip, timeline_pos_ns);
+            let _ = decoder.seek(
+                1.0,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(source_pos_ns),
+                gst::SeekType::Set,
+                gst::ClockTime::from_nseconds(clip.source_out_ns),
+            );
+        }
+        if was_playing {
+            if let Some(base) = self.pipeline.base_time() {
+                pipeline.set_base_time(base);
+            }
+            let _ = pipeline.set_state(gst::State::Playing);
+        }
+        true
+    }
+
     /// Build a separate pipeline that mixes multiple audio-track clips.
     /// This pipeline is independent from the main compositor pipeline to
     /// avoid clock interference that causes video stuttering.
-    fn rebuild_audio_multi_pipeline(&mut self, active: &[usize], timeline_pos_ns: u64) {
-        if active == self.audio_multi_active && self.audio_multi_pipeline.is_some() {
-            return; // No change needed.
+    fn rebuild_audio_multi_pipeline(
+        &mut self,
+        active: &[usize],
+        timeline_pos_ns: u64,
+    ) {
+        if !Self::should_rebuild_audio_multi_pipeline(
+            active,
+            &self.audio_multi_active,
+            self.audio_multi_pipeline.is_some(),
+        ) {
+            return;
         }
         self.teardown_audio_multi_pipeline();
 
@@ -12723,6 +13057,8 @@ impl ProgramPlayer {
                 let _ = l.sync_state_with_parent();
             }
             let _ = decoder.sync_state_with_parent();
+            self.audio_multi_decoders
+                .insert(branch.audio_clip_idx, decoder.clone());
             decoders.push((decoder, branch));
         }
 
@@ -12741,10 +13077,8 @@ impl ProgramPlayer {
 
         for (decoder, branch) in &decoders {
             // Compute the source position this clip should play from.
-            let source_pos_ns = if timeline_pos_ns >= branch.timeline_start_ns {
-                branch.source_in_ns
-                    + (timeline_pos_ns - branch.timeline_start_ns)
-                        .min(branch.source_out_ns.saturating_sub(branch.source_in_ns))
+            let source_pos_ns = if let Some(clip) = self.audio_clips.get(branch.audio_clip_idx) {
+                Self::audio_multi_source_position_ns(clip, timeline_pos_ns)
             } else {
                 branch.source_in_ns
             };
@@ -12782,6 +13116,7 @@ impl ProgramPlayer {
         self.audio_multi_active.clear();
         self.audio_multi_pads.clear();
         self.audio_multi_pan_elems.clear();
+        self.audio_multi_decoders.clear();
     }
 
     fn audio_clip_at(&self, timeline_pos_ns: u64) -> Option<usize> {
@@ -12903,7 +13238,15 @@ impl ProgramPlayer {
         self.apply_main_audio_slot_volumes(self.timeline_pos_ns);
     }
 
+    fn force_sync_audio_to(&mut self, timeline_pos_ns: u64) {
+        self.sync_audio_to_with_options(timeline_pos_ns, true);
+    }
+
     fn sync_audio_to(&mut self, timeline_pos_ns: u64) {
+        self.sync_audio_to_with_options(timeline_pos_ns, false);
+    }
+
+    fn sync_audio_to_with_options(&mut self, timeline_pos_ns: u64, force_multi_rebuild: bool) {
         let reverse_video_audio = self.reverse_video_clip_at_for_audio(timeline_pos_ns);
         self.apply_reverse_video_main_audio_ducking(reverse_video_audio);
         if let Some(idx) = reverse_video_audio {
@@ -12915,7 +13258,16 @@ impl ProgramPlayer {
                 // Use the multi-clip mixer for all audio-track playback (1 or more clips).
                 let _ = self.audio_pipeline.set_state(gst::State::Ready);
                 self.audio_current_source = None;
-                self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
+                if !self.reseek_audio_multi_pipeline(
+                    &active,
+                    timeline_pos_ns,
+                    force_multi_rebuild,
+                ) {
+                    if force_multi_rebuild {
+                        self.teardown_audio_multi_pipeline();
+                    }
+                    self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
+                }
             } else {
                 self.teardown_audio_multi_pipeline();
                 let _ = self.audio_pipeline.set_state(gst::State::Ready);
@@ -13130,6 +13482,78 @@ mod tests {
         super::eq_set_band_gain(&eq, 0, -12.0);
         let g2: f64 = band0.property("gain");
         assert!((g2 - (-12.0)).abs() < 0.001, "band0 gain should be -12.0, got {g2}");
+    }
+
+    #[test]
+    fn smooth_playback_drops_late_even_with_single_slot() {
+        assert!(ProgramPlayer::should_drop_late_for_playback_mode(
+            true,
+            false,
+            &crate::ui_state::PlaybackPriority::Smooth,
+            1,
+            false,
+        ));
+    }
+
+    #[test]
+    fn balanced_single_slot_does_not_drop_late() {
+        assert!(!ProgramPlayer::should_drop_late_for_playback_mode(
+            true,
+            false,
+            &crate::ui_state::PlaybackPriority::Balanced,
+            1,
+            false,
+        ));
+    }
+
+    #[test]
+    fn accurate_three_slot_playback_still_drops_late() {
+        assert!(ProgramPlayer::should_drop_late_for_playback_mode(
+            true,
+            false,
+            &crate::ui_state::PlaybackPriority::Accurate,
+            3,
+            false,
+        ));
+    }
+
+    #[test]
+    fn explicit_audio_sync_reseeks_multi_pipeline_when_active_set_matches() {
+        assert!(ProgramPlayer::should_reseek_audio_multi_pipeline(
+            &[2],
+            &[2],
+            true,
+            true,
+        ));
+        assert!(!ProgramPlayer::should_rebuild_audio_multi_pipeline(
+            &[2],
+            &[2],
+            true,
+        ));
+    }
+
+    #[test]
+    fn poll_audio_reuses_multi_pipeline_when_active_set_matches() {
+        assert!(!ProgramPlayer::should_rebuild_audio_multi_pipeline(
+            &[2],
+            &[2],
+            true,
+        ));
+        assert!(!ProgramPlayer::should_reseek_audio_multi_pipeline(
+            &[2],
+            &[2],
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn poll_audio_rebuilds_multi_pipeline_when_active_set_changes() {
+        assert!(ProgramPlayer::should_rebuild_audio_multi_pipeline(
+            &[2],
+            &[2, 3],
+            true,
+        ));
     }
 
     fn make_clip() -> ProgramClip {

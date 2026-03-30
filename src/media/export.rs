@@ -1,4 +1,4 @@
-use crate::media::program_player::ProgramPlayer;
+use crate::media::{adjustment_scope::AdjustmentScopeShape, program_player::ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
 use anyhow::{anyhow, Result};
@@ -434,9 +434,9 @@ pub fn export_project(
         filter.push_str(&format!("concat=n={}:v=1:a=0[vbase]", primary_clips.len()));
     }
 
-    // Use the pre-collected adjustment clips from all tracks.
-    let mut adjustment_clips = all_adjustment_clips;
-    adjustment_clips.sort_by_key(|c| c.timeline_start);
+    // Preserve track stacking order from `active_video_tracks` so overlapping
+    // adjustment layers apply in the same order as preview.
+    let adjustment_clips = all_adjustment_clips;
 
     // === Secondary video tracks: overlay each clip at its timeline position ===
     // Chain overlays: [vbase] → overlay clip 0 → [vcomp0] → overlay clip 1 → [vcomp1] → ...
@@ -534,62 +534,19 @@ pub fn export_project(
     // Each adjustment layer applies its effects (color, LUT, blur, frei0r) to the
     // composite output, time-gated to the adjustment clip's duration.
     for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
-        let adj_color = build_color_filter(adj_clip);
-        let adj_temp_tint = build_temperature_tint_filter_with_caps(adj_clip, &color_caps);
-        let adj_grading = build_grading_filter_with_caps(adj_clip, &color_caps);
-        let adj_denoise = build_denoise_filter(adj_clip);
-        let adj_sharpen = build_sharpen_filter(adj_clip);
-        let adj_blur = build_blur_filter(adj_clip);
-        let adj_frei0r = build_frei0r_effects_filter(adj_clip);
-        let adj_lut = build_lut_filter_prefix(adj_clip);
-
-        // Combine all effect filters into a single chain.
-        // The filter builders return strings with a leading comma (e.g. ",eq=brightness=0.1")
-        // and build_lut_filter_prefix returns a trailing comma (e.g. "lut3d=file.cube,").
-        // We concatenate then strip the leading comma so the chain starts clean.
-        let mut effects_chain = String::new();
-        if !adj_lut.is_empty() {
-            effects_chain.push_str(&adj_lut);
-        }
-        effects_chain.push_str(&adj_color);
-        effects_chain.push_str(&adj_temp_tint);
-        effects_chain.push_str(&adj_grading);
-        effects_chain.push_str(&adj_denoise);
-        effects_chain.push_str(&adj_sharpen);
-        effects_chain.push_str(&adj_blur);
-        effects_chain.push_str(&adj_frei0r);
-
-        if effects_chain.is_empty() {
-            continue; // No effects — skip this adjustment layer
-        }
-        // Strip leading/trailing commas to avoid empty filter names.
-        let effects_chain = effects_chain.trim_matches(',').to_string();
-        if effects_chain.is_empty() {
-            continue;
-        }
-
-        let start_s = adj_clip.timeline_start as f64 / 1_000_000_000.0;
-        let end_s = (adj_clip.timeline_start + adj_clip.duration()) as f64 / 1_000_000_000.0;
-        let opacity = adj_clip.opacity.clamp(0.0, 1.0);
         let next_label = format!("vadj{adj_idx}");
-
-        if opacity < 1.0 - f64::EPSILON {
-            // Partial opacity: split → apply effects → overlay with opacity
-            let orig_label = format!("vadj{adj_idx}orig");
-            let work_label = format!("vadj{adj_idx}work");
-            let fx_label = format!("vadj{adj_idx}fx");
-            filter.push_str(&format!(
-                ";[{prev_label}]split[{orig_label}][{work_label}];\
-                 [{work_label}]{effects_chain},format=yuva420p,colorchannelmixer=aa={opacity:.4}[{fx_label}];\
-                 [{orig_label}][{fx_label}]overlay=enable='between(t,{start_s:.6},{end_s:.6})'[{next_label}]"
-            ));
-        } else {
-            // Full opacity: apply effects directly to the stream.
-            filter.push_str(&format!(
-                ";[{prev_label}]{effects_chain}[{next_label}]"
-            ));
+        if let Some(graph) = build_adjustment_layer_filter_graph(
+            &prev_label,
+            &next_label,
+            adj_clip,
+            adj_idx,
+            out_w,
+            out_h,
+            &color_caps,
+        ) {
+            filter.push_str(&graph);
+            prev_label = next_label;
         }
-        prev_label = next_label;
     }
 
     // Final output video label — use the last composited label directly
@@ -1251,6 +1208,116 @@ fn build_keyframed_property_expression(
     format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
 }
 
+fn build_adjustment_scope_alpha_expression(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+) -> String {
+    if !has_transform_keyframes(clip) {
+        let scope = AdjustmentScopeShape::from_transform(
+            out_w,
+            out_h,
+            clip.scale,
+            clip.position_x,
+            clip.position_y,
+            clip.rotate as f64,
+            clip.crop_left,
+            clip.crop_right,
+            clip.crop_top,
+            clip.crop_bottom,
+        );
+        if scope.is_full_frame(out_w, out_h) {
+            return "1".to_string();
+        }
+    }
+
+    let pw = out_w.max(1) as f64;
+    let ph = out_h.max(1) as f64;
+    let scale_expr = build_keyframed_property_expression(
+        &clip.scale_keyframes,
+        clip.scale,
+        0.1,
+        4.0,
+        time_var,
+    );
+    let pos_x_expr = build_keyframed_property_expression(
+        &clip.position_x_keyframes,
+        clip.position_x,
+        -1.0,
+        1.0,
+        time_var,
+    );
+    let pos_y_expr = build_keyframed_property_expression(
+        &clip.position_y_keyframes,
+        clip.position_y,
+        -1.0,
+        1.0,
+        time_var,
+    );
+    let rotate_expr = build_keyframed_property_expression(
+        &clip.rotate_keyframes,
+        clip.rotate as f64,
+        -180.0,
+        180.0,
+        time_var,
+    );
+    let crop_left_expr = build_keyframed_property_expression(
+        &clip.crop_left_keyframes,
+        clip.crop_left as f64,
+        0.0,
+        500.0,
+        time_var,
+    );
+    let crop_right_expr = build_keyframed_property_expression(
+        &clip.crop_right_keyframes,
+        clip.crop_right as f64,
+        0.0,
+        500.0,
+        time_var,
+    );
+    let crop_top_expr = build_keyframed_property_expression(
+        &clip.crop_top_keyframes,
+        clip.crop_top as f64,
+        0.0,
+        500.0,
+        time_var,
+    );
+    let crop_bottom_expr = build_keyframed_property_expression(
+        &clip.crop_bottom_keyframes,
+        clip.crop_bottom as f64,
+        0.0,
+        500.0,
+        time_var,
+    );
+
+    let cx_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}*(1-({scale_expr}))/2");
+    let cy_expr = format!("{ph:.10}/2+({pos_y_expr})*{ph:.10}*(1-({scale_expr}))/2");
+    let half_w_expr = format!("{pw:.10}*({scale_expr})/2");
+    let half_h_expr = format!("{ph:.10}*({scale_expr})/2");
+    let left_raw_expr =
+        format!("({cx_expr})-({half_w_expr})+({crop_left_expr})*({scale_expr})");
+    let right_raw_expr =
+        format!("({cx_expr})+({half_w_expr})-({crop_right_expr})*({scale_expr})");
+    let top_raw_expr =
+        format!("({cy_expr})-({half_h_expr})+({crop_top_expr})*({scale_expr})");
+    let bottom_raw_expr =
+        format!("({cy_expr})+({half_h_expr})-({crop_bottom_expr})*({scale_expr})");
+    let right_expr = format!("max({right_raw_expr},{left_raw_expr})");
+    let bottom_expr = format!("max({bottom_raw_expr},{top_raw_expr})");
+    let rad_expr = format!("({rotate_expr})*PI/180");
+    let ux_expr = format!(
+        "({cx_expr})+(X-({cx_expr}))*cos({rad_expr})-(Y-({cy_expr}))*sin({rad_expr})"
+    );
+    let uy_expr = format!(
+        "({cy_expr})+(X-({cx_expr}))*sin({rad_expr})+(Y-({cy_expr}))*cos({rad_expr})"
+    );
+
+    format!(
+        "between({ux_expr},{left_raw_expr},({right_expr})-0.000001)*between({uy_expr},{top_raw_expr},({bottom_expr})-0.000001)"
+    )
+}
+
 /// Build an FFmpeg volume filter that applies ducking to a clip.
 /// Returns empty string if the clip's track doesn't have ducking enabled or
 /// there are no overlapping non-ducked audio sources.
@@ -1591,11 +1658,116 @@ fn build_vidstab_filter(clip: &Clip, trf_path: Option<&str>) -> String {
     }
 }
 
+struct KnownFrei0rExportParam {
+    native_type: crate::media::frei0r_registry::Frei0rNativeType,
+    gst_properties: &'static [&'static str],
+}
+
+struct KnownFrei0rExportSchema {
+    ffmpeg_name: &'static str,
+    native_params: &'static [KnownFrei0rExportParam],
+}
+
+const THREE_POINT_COLOR_BALANCE_EXPORT_PARAMS: &[KnownFrei0rExportParam] = &[
+    KnownFrei0rExportParam {
+        native_type: crate::media::frei0r_registry::Frei0rNativeType::Color,
+        gst_properties: &["black-color-r", "black-color-g", "black-color-b"],
+    },
+    KnownFrei0rExportParam {
+        native_type: crate::media::frei0r_registry::Frei0rNativeType::Color,
+        gst_properties: &["gray-color-r", "gray-color-g", "gray-color-b"],
+    },
+    KnownFrei0rExportParam {
+        native_type: crate::media::frei0r_registry::Frei0rNativeType::Color,
+        gst_properties: &["white-color-r", "white-color-g", "white-color-b"],
+    },
+    KnownFrei0rExportParam {
+        native_type: crate::media::frei0r_registry::Frei0rNativeType::Bool,
+        gst_properties: &["split-preview"],
+    },
+    KnownFrei0rExportParam {
+        native_type: crate::media::frei0r_registry::Frei0rNativeType::Bool,
+        gst_properties: &["source-image-on-left-side"],
+    },
+];
+
+const THREE_POINT_COLOR_BALANCE_EXPORT_SCHEMA: KnownFrei0rExportSchema = KnownFrei0rExportSchema {
+    ffmpeg_name: "three_point_balance",
+    native_params: THREE_POINT_COLOR_BALANCE_EXPORT_PARAMS,
+};
+
+fn known_frei0r_export_schema(plugin_name: &str) -> Option<&'static KnownFrei0rExportSchema> {
+    match plugin_name {
+        "3-point-color-balance" => Some(&THREE_POINT_COLOR_BALANCE_EXPORT_SCHEMA),
+        _ => None,
+    }
+}
+
+fn format_frei0r_native_param<P: AsRef<str>>(
+    effect: &crate::model::clip::Frei0rEffect,
+    native_type: crate::media::frei0r_registry::Frei0rNativeType,
+    gst_properties: &[P],
+) -> String {
+    use crate::media::frei0r_registry::Frei0rNativeType;
+
+    match native_type {
+        Frei0rNativeType::Color => {
+            let r = gst_properties
+                .first()
+                .and_then(|k| effect.params.get(k.as_ref()))
+                .copied()
+                .unwrap_or(0.0);
+            let g = gst_properties
+                .get(1)
+                .and_then(|k| effect.params.get(k.as_ref()))
+                .copied()
+                .unwrap_or(0.0);
+            let b = gst_properties
+                .get(2)
+                .and_then(|k| effect.params.get(k.as_ref()))
+                .copied()
+                .unwrap_or(0.0);
+            format!("{r:.6}/{g:.6}/{b:.6}")
+        }
+        Frei0rNativeType::Position => {
+            let x = gst_properties
+                .first()
+                .and_then(|k| effect.params.get(k.as_ref()))
+                .copied()
+                .unwrap_or(0.0);
+            let y = gst_properties
+                .get(1)
+                .and_then(|k| effect.params.get(k.as_ref()))
+                .copied()
+                .unwrap_or(0.0);
+            format!("{x:.6}/{y:.6}")
+        }
+        Frei0rNativeType::NativeString => {
+            let prop = gst_properties.first().map(|s| s.as_ref()).unwrap_or("");
+            effect.string_params.get(prop).cloned().unwrap_or_default()
+        }
+        Frei0rNativeType::Bool => {
+            let prop = gst_properties.first().map(|s| s.as_ref()).unwrap_or("");
+            let val = effect.params.get(prop).copied().unwrap_or(0.0);
+            if val > 0.5 {
+                "y".to_string()
+            } else {
+                "n".to_string()
+            }
+        }
+        Frei0rNativeType::Double => {
+            let prop = gst_properties.first().map(|s| s.as_ref()).unwrap_or("");
+            let val = effect.params.get(prop).copied().unwrap_or(0.0);
+            format!("{val:.6}")
+        }
+    }
+}
+
 /// Build a chain of FFmpeg frei0r filters for user-applied effects on a clip.
 /// Each enabled effect becomes `,frei0r=filter_name={name}:filter_params={p1}|{p2}|...`.
 /// Effects with no FFmpeg frei0r support are silently skipped.
 fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
-    use crate::media::frei0r_registry::{Frei0rRegistry, Frei0rNativeType};
+    use crate::media::frei0r_registry::Frei0rRegistry;
 
     if clip.frei0r_effects.is_empty() {
         return String::new();
@@ -1609,8 +1781,8 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
             continue;
         }
 
-        // Look up the plugin info to get ordered param names.
         let plugin = registry.find_by_name(&effect.plugin_name);
+        let fallback_schema = known_frei0r_export_schema(&effect.plugin_name);
 
         // Build filter_params string using native frei0r param ordering.
         let params_str = if let Some(info) = plugin {
@@ -1618,40 +1790,14 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
                 // Use native param info for correct compound formatting.
                 info.native_params
                     .iter()
-                    .map(|np| match np.native_type {
-                        Frei0rNativeType::Color => {
-                            // COLOR: combine 3 GStreamer properties into r/g/b.
-                            let r = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                            let g = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                            let b = np.gst_properties.get(2).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                            format!("{r:.6}/{g:.6}/{b:.6}")
-                        }
-                        Frei0rNativeType::Position => {
-                            // POSITION: combine 2 GStreamer properties into x/y.
-                            let x = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                            let y = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                            format!("{x:.6}/{y:.6}")
-                        }
-                        Frei0rNativeType::NativeString => {
-                            let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
-                            effect
-                                .string_params
-                                .get(prop)
-                                .cloned()
-                                .unwrap_or_default()
-                        }
-                        _ => {
-                            // Bool / Double: single GStreamer property.
-                            let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
-                            if np.native_type == Frei0rNativeType::Bool {
-                                let val = effect.params.get(prop).copied().unwrap_or(0.0);
-                                if val > 0.5 { "y".to_string() } else { "n".to_string() }
-                            } else {
-                                let val = effect.params.get(prop).copied().unwrap_or(0.0);
-                                format!("{val:.6}")
-                            }
-                        }
-                    })
+                    .map(|np| format_frei0r_native_param(effect, np.native_type, &np.gst_properties))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            } else if let Some(schema) = fallback_schema {
+                schema
+                    .native_params
+                    .iter()
+                    .map(|np| format_frei0r_native_param(effect, np.native_type, np.gst_properties))
                     .collect::<Vec<_>>()
                     .join("|")
             } else {
@@ -1675,20 +1821,37 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
                     .collect::<Vec<_>>()
                     .join("|")
             }
+        } else if let Some(schema) = fallback_schema {
+            schema
+                .native_params
+                .iter()
+                .map(|np| format_frei0r_native_param(effect, np.native_type, np.gst_properties))
+                .collect::<Vec<_>>()
+                .join("|")
         } else {
-            // No registry info — use param values in HashMap iteration order.
-            effect
-                .params
-                .values()
-                .map(|v| format!("{v:.6}"))
+            // No registry info — fall back to deterministic property-name order.
+            let mut keys: Vec<_> = effect.params.keys().collect();
+            keys.sort_unstable();
+            keys.into_iter()
+                .map(|k| format!("{:.6}", effect.params.get(k).copied().unwrap_or(0.0)))
                 .collect::<Vec<_>>()
                 .join("|")
         };
 
         // Use FFmpeg module name (may differ from GStreamer name).
-        let ffmpeg_name = plugin
-            .map(|p| p.ffmpeg_name.as_str())
-            .unwrap_or(&effect.plugin_name);
+        let ffmpeg_name = if let Some(info) = plugin {
+            if !info.native_params.is_empty() {
+                info.ffmpeg_name.as_str()
+            } else {
+                fallback_schema
+                    .map(|schema| schema.ffmpeg_name)
+                    .unwrap_or(info.ffmpeg_name.as_str())
+            }
+        } else {
+            fallback_schema
+                .map(|schema| schema.ffmpeg_name)
+                .unwrap_or(&effect.plugin_name)
+        };
 
         if params_str.is_empty() {
             result.push_str(&format!(",frei0r=filter_name={}", ffmpeg_name));
@@ -1714,6 +1877,65 @@ fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
         }
     }
     result
+}
+
+fn build_adjustment_effects_chain_filter(
+    clip: &Clip,
+    color_caps: &ColorFilterCapabilities,
+) -> String {
+    let mut effects_chain = String::new();
+    let lut = build_lut_filter_prefix(clip);
+    if !lut.is_empty() {
+        effects_chain.push_str(&lut);
+    }
+    effects_chain.push_str(&build_color_filter(clip));
+    effects_chain.push_str(&build_temperature_tint_filter_with_caps(clip, color_caps));
+    effects_chain.push_str(&build_grading_filter_with_caps(clip, color_caps));
+    effects_chain.push_str(&build_denoise_filter(clip));
+    effects_chain.push_str(&build_sharpen_filter(clip));
+    effects_chain.push_str(&build_blur_filter(clip));
+    effects_chain.push_str(&build_frei0r_effects_filter(clip));
+    effects_chain.trim_matches(',').to_string()
+}
+
+fn build_adjustment_layer_filter_graph(
+    input_label: &str,
+    output_label: &str,
+    adj_clip: &Clip,
+    adj_idx: usize,
+    out_w: u32,
+    out_h: u32,
+    color_caps: &ColorFilterCapabilities,
+) -> Option<String> {
+    let effects_chain = build_adjustment_effects_chain_filter(adj_clip, color_caps);
+    if effects_chain.is_empty() {
+        return None;
+    }
+
+    let opacity = adj_clip.opacity.clamp(0.0, 1.0);
+    if opacity <= f64::EPSILON {
+        return None;
+    }
+
+    let start_s = adj_clip.timeline_start as f64 / 1_000_000_000.0;
+    let end_s = (adj_clip.timeline_start + adj_clip.duration()) as f64 / 1_000_000_000.0;
+    let orig_label = format!("vadj{adj_idx}orig");
+    let work_label = format!("vadj{adj_idx}work");
+    let fx_label = format!("vadj{adj_idx}fx");
+    let scope_alpha = build_adjustment_scope_alpha_expression(adj_clip, out_w, out_h, "T");
+    let scope_alpha = if opacity < 1.0 - f64::EPSILON {
+        format!("({scope_alpha})*{opacity:.10}")
+    } else {
+        scope_alpha
+    };
+
+    Some(format!(
+        ";[{input_label}]split[{orig_label}][{work_label}];\
+         [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p,\
+         geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({scope_alpha})',\
+         setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+         [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]"
+    ))
 }
 
 fn parse_title_font(font_desc: &str) -> (String, f64) {
@@ -1833,7 +2055,7 @@ fn rgb_triplet_hex(r: f64, g: f64, b: f64) -> String {
 
 fn build_grading_filter_with_caps(
     clip: &crate::model::clip::Clip,
-    caps: &ColorFilterCapabilities,
+    _caps: &ColorFilterCapabilities,
 ) -> String {
     let has_grading = clip.shadows != 0.0
         || clip.midtones != 0.0
@@ -3048,11 +3270,12 @@ fn write_chapter_metadata(
 mod tests {
     use super::{
         append_pan_filter_chain, audio_crossfade_curve_name, build_audio_crossfade_filters,
+        build_adjustment_layer_filter_graph, build_adjustment_scope_alpha_expression,
         build_color_filter, build_crop_filter, build_grading_filter,
         build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
         build_temperature_tint_filter, build_timing_filter, build_title_filter,
         build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
-        compute_export_coloradj_params,
+        compute_export_coloradj_params, ColorFilterCapabilities,
         estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
         parse_progress_line, video_input_seek_and_duration, write_chapter_metadata,
         AudioCodec, ClipAudioFade, ExportOptions, VideoCodec,
@@ -3494,6 +3717,69 @@ mod tests {
         assert!(f.contains(",geq=lum='lum(X,Y)'"));
         assert!(f.contains("alpha(X,Y)"));
         assert!(f.contains("between(X,("));
+    }
+
+    #[test]
+    fn adjustment_scope_alpha_expression_is_passthrough_for_full_frame_static_scope() {
+        let clip = Clip::new_adjustment(0, 2_000_000_000);
+        assert_eq!(
+            build_adjustment_scope_alpha_expression(&clip, 1920, 1080, "T"),
+            "1"
+        );
+    }
+
+    #[test]
+    fn adjustment_layer_filter_graph_uses_clip_local_time_and_scope_mask() {
+        let mut clip = Clip::new_adjustment(5_000_000_000, 2_000_000_000);
+        clip.brightness_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.2,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.4,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        clip.scale = 0.75;
+        clip.scale_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.75,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        clip.position_x = 0.4;
+        clip.crop_left = 120;
+        clip.rotate = 18;
+
+        let graph = build_adjustment_layer_filter_graph(
+            "vin",
+            "vout",
+            &clip,
+            0,
+            1920,
+            1080,
+            &ColorFilterCapabilities::default(),
+        )
+        .expect("adjustment graph");
+
+        assert!(graph.contains("trim=start=5.000000:end=7.000000,setpts=PTS-STARTPTS"));
+        assert!(graph.contains("eq=brightness='if(lt(t,"));
+        assert!(graph.contains("a='alpha(X,Y)*("));
+        assert!(graph.contains("if(lt(T,"));
+        assert!(graph.contains("overlay=x=0:y=0:eof_action=pass[vout]"));
     }
 
     #[test]

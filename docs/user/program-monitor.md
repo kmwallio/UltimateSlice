@@ -50,13 +50,14 @@ or outside the export frame.
 
 ## Transform Overlay Controls
 
-When a timeline clip is selected, the Program Monitor overlay provides direct transform editing:
+When a visual timeline clip or adjustment layer is selected, the Program Monitor overlay provides direct transform editing:
 
 - **Corner handles**: drag to scale; hold **Shift** for constrained scaling.
 - **Center drag**: pan (Position X/Y).
 - **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
 - Keyboard nudges work when the overlay has focus (click the monitor once).
 - Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
+- For **adjustment layers**, these controls edit the scoped effect region instead of moving source pixels. The overlay box is the exact region used for live scoped adjustment preview.
 
 ## Safe Area Guides
 
@@ -78,6 +79,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
+- Adjustment layers are applied post-compositor. Supported scoped preview effects (including LUTs, primary color, temperature/tint, and three-point grading) are limited to the selected adjustment clip's transformed bounding box, and overlapping adjustment layers stack by track order.
 - **Transitions** (cross-dissolve, fade-to-black, wipe-right, wipe-left) are previewed in real time during both playback and scrubbing, matching the FFmpeg `xfade` export output. Dissolve and fade transitions animate compositor pad alpha; wipe transitions use videocrop animation on the incoming clip to progressively reveal it.
 - Freeze-frame clips are rendered as true video holds: Program Monitor samples the configured freeze source frame and holds that frame for the clip's resolved freeze duration during playback and scrubbing.
 - Freeze-frame decoder seeks use accurate (non-key-unit) frame selection for the hold sample, preventing black-frame preview failures on long-GOP media.
@@ -90,6 +92,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - During active overlap handoffs that start from an already-running slot set, UltimateSlice defers early pre-link EOS for newly added slots so late pad-added links can settle before post-seek arrival checks.
 - During boundary rebuilds, both the compositor and audiomixer aggregators are flushed together so their output running-time stays in sync; this prevents the audiomixer from dropping audio buffers as "late" after a video-path flush reset.
 - When a clip boundary only affects video tracks (e.g. a new video layer enters while the audio track continues), the audio pipeline is left running instead of being paused and resynced, eliminating the audible audio gap during video-only transitions.
+- When a video-only boundary still requires an explicit audio resync, UltimateSlice now flushes and re-seeks the existing multi-audio decoder set in place if the same music/voiceover clips remain active, which keeps continuing audio tracks aligned without cutting or silencing shorter overlapping audio clips.
 - Boundary rebuilds log per-phase timing (teardown, build, link wait, preroll, seek) to help diagnose and tune transition performance.
 - Post-seek wait budgets are automatically tightened when the boundary was prewarmed by a sidecar pipeline, since warm file cache enables faster decoder settle.
 - Occlusion audio-only decode substitution is currently disabled in preview rebuilds to prioritize reliable mixed audio from overlapping video tracks.
@@ -98,8 +101,8 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Preview quality (`Full` / `Half` / `Quarter`) downscales the composed monitor output while preserving full-frame fit/framing in the Program Monitor.
 - Preview quality `Auto` dynamically adjusts effective monitor output quality from the current Program Monitor canvas size (including resize/zoom changes) to balance clarity and performance.
 - While playback is active, Auto quality changes use a short minimum dwell to avoid rapid resolution flapping when overlap transitions briefly change load.
-- During heavy 3+ track playback overlap, the monitor enables an audio-master "drop-late" preview path so late video frames are dropped rather than queued behind audio; when overlap drops or playback pauses/stops, normal non-dropping buffering is restored.
-- During the same heavy-overlap windows, per-clip compositor branch queues also switch to drop-late mode to reduce branch backpressure and boundary handoff stalls.
+- In **Smooth** playback priority, the monitor enables an audio-master "drop-late" preview path whenever video playback is active, so late video frames are dropped rather than queued behind audio; when playback pauses/stops, normal non-dropping buffering is restored.
+- During heavier overlap windows (especially 3+ active slots), per-clip compositor branch queues also switch to drop-late mode to reduce branch backpressure and boundary handoff stalls.
 - During playback, the monitor also prewarms the next near-future boundary clip set (look-ahead probe/path warm-up), including lightweight incoming decoder/effects resource warm-up, to reduce transition-handoff stalls.
 - In **Smooth** playback priority with background prerender enabled, UltimateSlice prewarms a slightly deeper upcoming-boundary horizon (and farther lookahead) for transition windows; when background prerender jobs are already heavily queued, it automatically falls back to the baseline depth to avoid overscheduling.
 - Program Monitor logs now include periodic transition prerender hit/miss summaries by transition kind, which helps profiling runs identify where prerender is being generated but not consumed.
@@ -113,6 +116,7 @@ When a timeline clip is selected, the Program Monitor overlay provides direct tr
 - Ready prerender segments are now cache-pruned by playhead distance (while protecting any currently active prerender segment), keeping cache size bounded and focused on likely near-term reuse.
 - Prerender cache lookups now track hit/miss telemetry (with hit-rate summaries), and `get_performance_snapshot` includes `prerender_cache_hits`, `prerender_cache_misses`, and `prerender_cache_hit_rate_percent`.
 - For proxy-backed prerender inputs, LUT is not re-applied in the prerender FFmpeg graph, preventing double LUT grading when the proxy media is already LUT-baked.
+- When a **scoped** adjustment layer is active, background prerender falls back to the live compositor-output path so the Program Monitor does not show stale full-frame adjustment renders.
 
 ## Seeking
 

@@ -1138,7 +1138,7 @@ impl InspectorView {
                 let is_visual = is_video || is_image || is_title_clip || is_adjustment;
                 self.color_section.set_visible(is_video || is_image || is_adjustment);
                 self.audio_section.set_visible(is_video || is_audio);
-                self.transform_section.set_visible(is_visual && !is_adjustment);
+                self.transform_section.set_visible(is_visual);
                 self.title_section_box.set_visible(is_visual && !is_adjustment);
                 self.speed_section_box.set_visible(!is_title_clip && !is_adjustment);
                 self.lut_section_box.set_visible(is_video || is_image || is_adjustment);
@@ -1505,6 +1505,11 @@ impl InspectorView {
                         Phase1KeyframeProperty::PositionY,
                         playhead_ns,
                     ));
+                self.blend_mode_dropdown.set_sensitive(!is_adjustment);
+                self.anamorphic_desqueeze_dropdown
+                    .set_sensitive(!is_adjustment);
+                self.flip_h_btn.set_sensitive(!is_adjustment);
+                self.flip_v_btn.set_sensitive(!is_adjustment);
                 self.title_entry.set_text(&c.title_text);
                 self.title_font_btn.set_label(&c.title_font);
                 {
@@ -1672,6 +1677,10 @@ impl InspectorView {
                 self.anamorphic_desqueeze_dropdown.set_selected(0);
                 self.position_x_slider.set_value(0.0);
                 self.position_y_slider.set_value(0.0);
+                self.blend_mode_dropdown.set_sensitive(true);
+                self.anamorphic_desqueeze_dropdown.set_sensitive(true);
+                self.flip_h_btn.set_sensitive(true);
+                self.flip_v_btn.set_sensitive(true);
                 self.title_entry.set_text("");
                 self.title_font_btn.set_label("Sans Bold 36");
                 self.title_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));

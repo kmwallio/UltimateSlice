@@ -141,6 +141,19 @@ fn sync_transform_overlay_to_playhead(
     }
 }
 
+fn selected_clip_is_adjustment(project: &Project, selected_clip_id: Option<&str>) -> bool {
+    selected_clip_id
+        .and_then(|cid| {
+            project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == cid)
+        })
+        .map(|clip| clip.kind == ClipKind::Adjustment)
+        .unwrap_or(false)
+}
+
 fn seek_playhead_and_notify(
     timeline_state: &Rc<RefCell<TimelineState>>,
     timeline_panel_cell: &Rc<RefCell<Option<gtk::Widget>>>,
@@ -2850,8 +2863,14 @@ pub fn build_window(
             let timeline_state = timeline_state.clone();
             let transform_overlay_cell = transform_overlay_cell.clone();
             move |cl, cr, ct, cb, rot, fh, fv, sc, px, py| {
-                player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                 let selected = timeline_state.borrow().selected_clip_id.clone();
+                let is_adjustment = {
+                    let proj = project.borrow();
+                    selected_clip_is_adjustment(&proj, selected.as_deref())
+                };
+                if !is_adjustment {
+                    player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                }
                 let mut pp = prog_player.borrow_mut();
                 if let Some(ref clip_id) = selected {
                     pp.update_transform_for_clip(clip_id, cl, cr, ct, cb, rot, fh, fv, sc, px, py);
@@ -4634,7 +4653,13 @@ pub fn build_window(
                     let sc = inspector_view.scale_slider.value();
                     let px = inspector_view.position_x_slider.value();
                     let py = inspector_view.position_y_slider.value();
-                    player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    let is_adjustment = {
+                        let proj = project.borrow();
+                        selected_clip_is_adjustment(&proj, selected.as_deref())
+                    };
+                    if !is_adjustment {
+                        player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    }
                     let mut pp = prog_player.borrow_mut();
                     pp.enter_transform_live_mode();
                     pp.set_transform_properties_only(
@@ -4692,7 +4717,13 @@ pub fn build_window(
                     let sc = inspector_view.scale_slider.value();
                     let px = inspector_view.position_x_slider.value();
                     let py = inspector_view.position_y_slider.value();
-                    player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    let is_adjustment = {
+                        let proj = project.borrow();
+                        selected_clip_is_adjustment(&proj, selected.as_deref())
+                    };
+                    if !is_adjustment {
+                        player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    }
                     let mut pp = prog_player.borrow_mut();
                     pp.enter_transform_live_mode();
                     pp.set_transform_properties_only(
