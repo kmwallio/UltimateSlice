@@ -127,6 +127,20 @@ fn sync_transform_overlay_to_playhead(
                     transform_overlay.set_transform(scale, pos_x, pos_y);
                     transform_overlay.set_rotation(rotate);
                     transform_overlay.set_crop(cl, cr, ct, cb);
+                    if let Some(mask) = c.masks.first() {
+                        transform_overlay.set_mask(
+                            mask.enabled,
+                            match mask.shape {
+                                crate::model::clip::MaskShape::Rectangle => 0,
+                                crate::model::clip::MaskShape::Ellipse => 1,
+                            },
+                            mask.center_x, mask.center_y,
+                            mask.width, mask.height,
+                            mask.rotation,
+                        );
+                    } else {
+                        transform_overlay.set_mask(false, 0, 0.5, 0.5, 0.25, 0.25, 0.0);
+                    }
                     transform_overlay.set_clip_selected(true);
                 } else {
                     transform_overlay.set_clip_selected(false);
@@ -3191,6 +3205,20 @@ pub fn build_window(
                             .map(|c| c.frei0r_effects.clone())
                     })
                 };
+                // Also update mask shared state for live slider feedback.
+                {
+                    let proj = project.borrow();
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(masks) = selected.and_then(|cid| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .find(|c| c.id == cid)
+                            .map(|c| c.masks.clone())
+                    }) {
+                        prog_player.borrow_mut().update_current_masks(&masks);
+                    }
+                }
                 if let Some(effects) = effects {
                     let needs_reseek = prog_player
                         .borrow_mut()
@@ -6650,6 +6678,7 @@ pub fn build_window(
                             bg_removal_enabled: c.bg_removal_enabled,
                             bg_removal_threshold: c.bg_removal_threshold,
                             frei0r_effects: c.frei0r_effects.clone(),
+                            masks: c.masks.clone(),
                         })
                     })
                     .collect();
@@ -9771,6 +9800,48 @@ fn handle_mcp_command(
                         }
                         if let Some(v) = softness {
                             clip.chroma_key_softness = v as f32;
+                        }
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipMask {
+            clip_id, enabled, shape, center_x, center_y, width, height, rotation, feather, expansion, invert, reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        // Create mask[0] if absent
+                        if clip.masks.is_empty() {
+                            clip.masks.push(crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle));
+                        }
+                        if let Some(mask) = clip.masks.first_mut() {
+                            if let Some(v) = enabled { mask.enabled = v; }
+                            if let Some(ref s) = shape {
+                                mask.shape = match s.as_str() {
+                                    "ellipse" => crate::model::clip::MaskShape::Ellipse,
+                                    _ => crate::model::clip::MaskShape::Rectangle,
+                                };
+                            }
+                            if let Some(v) = center_x { mask.center_x = v.clamp(0.0, 1.0); }
+                            if let Some(v) = center_y { mask.center_y = v.clamp(0.0, 1.0); }
+                            if let Some(v) = width { mask.width = v.clamp(0.01, 0.5); }
+                            if let Some(v) = height { mask.height = v.clamp(0.01, 0.5); }
+                            if let Some(v) = rotation { mask.rotation = v.clamp(-180.0, 180.0); }
+                            if let Some(v) = feather { mask.feather = v.clamp(0.0, 0.5); }
+                            if let Some(v) = expansion { mask.expansion = v.clamp(-0.5, 0.5); }
+                            if let Some(v) = invert { mask.invert = v; }
                         }
                         proj.dirty = true;
                         found = true;

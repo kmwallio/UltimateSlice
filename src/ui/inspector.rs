@@ -165,6 +165,18 @@ pub struct InspectorView {
     pub bg_removal_threshold_slider: Scale,
     /// Set to `true` when the ONNX model is present; controls section visibility.
     pub bg_removal_model_available: Cell<bool>,
+    // Shape mask
+    pub mask_section: GBox,
+    pub mask_enable: CheckButton,
+    pub mask_shape_dropdown: gtk4::DropDown,
+    pub mask_center_x_slider: Scale,
+    pub mask_center_y_slider: Scale,
+    pub mask_width_slider: Scale,
+    pub mask_height_slider: Scale,
+    pub mask_rotation_spin: gtk4::SpinButton,
+    pub mask_feather_slider: Scale,
+    pub mask_expansion_slider: Scale,
+    pub mask_invert_check: CheckButton,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -1145,8 +1157,37 @@ impl InspectorView {
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
+                self.mask_section.set_visible(is_video || is_image || is_title_clip);
                 self.frei0r_effects_section
                     .set_visible(is_visual);
+
+                // Populate mask section from masks[0].
+                if let Some(mask) = c.masks.first() {
+                    self.mask_enable.set_active(mask.enabled);
+                    self.mask_shape_dropdown.set_selected(match mask.shape {
+                        crate::model::clip::MaskShape::Rectangle => 0,
+                        crate::model::clip::MaskShape::Ellipse => 1,
+                    });
+                    self.mask_center_x_slider.set_value(mask.center_x);
+                    self.mask_center_y_slider.set_value(mask.center_y);
+                    self.mask_width_slider.set_value(mask.width);
+                    self.mask_height_slider.set_value(mask.height);
+                    self.mask_rotation_spin.set_value(mask.rotation);
+                    self.mask_feather_slider.set_value(mask.feather);
+                    self.mask_expansion_slider.set_value(mask.expansion);
+                    self.mask_invert_check.set_active(mask.invert);
+                } else {
+                    self.mask_enable.set_active(false);
+                    self.mask_shape_dropdown.set_selected(0);
+                    self.mask_center_x_slider.set_value(0.5);
+                    self.mask_center_y_slider.set_value(0.5);
+                    self.mask_width_slider.set_value(0.25);
+                    self.mask_height_slider.set_value(0.25);
+                    self.mask_rotation_spin.set_value(0.0);
+                    self.mask_feather_slider.set_value(0.0);
+                    self.mask_expansion_slider.set_value(0.0);
+                    self.mask_invert_check.set_active(false);
+                }
 
                 // Populate applied frei0r effects list.
                 self.rebuild_frei0r_effects_list(&c.frei0r_effects);
@@ -2270,6 +2311,80 @@ pub fn build_inspector(
     bg_removal_threshold_slider.set_digits(2);
     bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
     bg_removal_inner.append(&bg_removal_threshold_slider);
+
+    // ── Shape Mask section (Video + Image + Title only) ──────────────
+    let mask_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&mask_section);
+
+    mask_section.append(&Separator::new(Orientation::Horizontal));
+    let mask_expander = Expander::new(Some("Shape Mask"));
+    mask_expander.set_expanded(false);
+    mask_section.append(&mask_expander);
+    let mask_inner = GBox::new(Orientation::Vertical, 8);
+    mask_expander.set_child(Some(&mask_inner));
+
+    let mask_enable = CheckButton::with_label("Enable Mask");
+    mask_inner.append(&mask_enable);
+
+    row_label(&mask_inner, "Shape");
+    let mask_shape_model = gtk4::StringList::new(&["Rectangle", "Ellipse"]);
+    let mask_shape_dropdown = gtk4::DropDown::new(Some(mask_shape_model), Option::<gtk4::Expression>::None);
+    mask_shape_dropdown.set_selected(0);
+    mask_inner.append(&mask_shape_dropdown);
+
+    row_label(&mask_inner, "Center X");
+    let mask_center_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    mask_center_x_slider.set_value(0.5);
+    mask_center_x_slider.set_draw_value(true);
+    mask_center_x_slider.set_digits(2);
+    mask_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    mask_inner.append(&mask_center_x_slider);
+
+    row_label(&mask_inner, "Center Y");
+    let mask_center_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    mask_center_y_slider.set_value(0.5);
+    mask_center_y_slider.set_draw_value(true);
+    mask_center_y_slider.set_digits(2);
+    mask_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    mask_inner.append(&mask_center_y_slider);
+
+    row_label(&mask_inner, "Width");
+    let mask_width_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
+    mask_width_slider.set_value(0.25);
+    mask_width_slider.set_draw_value(true);
+    mask_width_slider.set_digits(2);
+    mask_inner.append(&mask_width_slider);
+
+    row_label(&mask_inner, "Height");
+    let mask_height_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
+    mask_height_slider.set_value(0.25);
+    mask_height_slider.set_draw_value(true);
+    mask_height_slider.set_digits(2);
+    mask_inner.append(&mask_height_slider);
+
+    row_label(&mask_inner, "Rotation");
+    let mask_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    mask_rotation_spin.set_value(0.0);
+    mask_rotation_spin.set_digits(0);
+    mask_inner.append(&mask_rotation_spin);
+
+    row_label(&mask_inner, "Feather");
+    let mask_feather_slider = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    mask_feather_slider.set_value(0.0);
+    mask_feather_slider.set_draw_value(true);
+    mask_feather_slider.set_digits(2);
+    mask_inner.append(&mask_feather_slider);
+
+    row_label(&mask_inner, "Expansion");
+    let mask_expansion_slider = Scale::with_range(Orientation::Horizontal, -0.5, 0.5, 0.01);
+    mask_expansion_slider.set_value(0.0);
+    mask_expansion_slider.set_draw_value(true);
+    mask_expansion_slider.set_digits(2);
+    mask_expansion_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    mask_inner.append(&mask_expansion_slider);
+
+    let mask_invert_check = CheckButton::with_label("Invert Mask");
+    mask_inner.append(&mask_invert_check);
 
     // Create shared state needed by effects and later sections.
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
@@ -6495,6 +6610,158 @@ pub fn build_inspector(
         });
     }
 
+    // ── Shape Mask signals ────────────────────────────────────────────────
+    // Enable/shape changes trigger a pipeline rebuild (adds/removes probe element).
+    // Slider changes use on_frei0r_params_changed for live updates (probe reads
+    // from shared Arc<Mutex> state without needing a rebuild).
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_changed = on_frei0r_changed.clone();
+        mask_enable.connect_toggled(move |btn| {
+            if *updating.borrow() { return; }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if enabled && clip.masks.is_empty() {
+                                clip.masks.push(crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle));
+                            } else if !enabled && !clip.masks.is_empty() {
+                                clip.masks[0].enabled = false;
+                            } else if enabled && !clip.masks.is_empty() {
+                                clip.masks[0].enabled = true;
+                            }
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_mask_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_changed = on_frei0r_changed.clone();
+        mask_shape_dropdown.connect_selected_notify(move |dd| {
+            if *updating.borrow() { return; }
+            let shape = match dd.selected() {
+                1 => crate::model::clip::MaskShape::Ellipse,
+                _ => crate::model::clip::MaskShape::Rectangle,
+            };
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if let Some(m) = clip.masks.first_mut() {
+                                m.shape = shape;
+                                proj.dirty = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                on_mask_changed();
+            }
+        });
+    }
+    // Wire mask numeric sliders — use on_frei0r_params_changed (live update,
+    // no pipeline rebuild) since the probe reads from shared state.
+    macro_rules! wire_mask_slider {
+        ($slider:expr, $field:ident) => {{
+            let project = project.clone();
+            let updating = updating.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let on_mask_live = on_frei0r_params_changed.clone();
+            $slider.connect_value_changed(move |s| {
+                if *updating.borrow() { return; }
+                let val = s.value();
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                if let Some(m) = clip.masks.first_mut() {
+                                    m.$field = val;
+                                    proj.dirty = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    on_mask_live();
+                }
+            });
+        }};
+    }
+    wire_mask_slider!(mask_center_x_slider, center_x);
+    wire_mask_slider!(mask_center_y_slider, center_y);
+    wire_mask_slider!(mask_width_slider, width);
+    wire_mask_slider!(mask_height_slider, height);
+    wire_mask_slider!(mask_feather_slider, feather);
+    wire_mask_slider!(mask_expansion_slider, expansion);
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_live = on_frei0r_params_changed.clone();
+        mask_rotation_spin.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let val = s.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if let Some(m) = clip.masks.first_mut() {
+                                m.rotation = val;
+                                proj.dirty = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                on_mask_live();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_live = on_frei0r_params_changed.clone();
+        mask_invert_check.connect_toggled(move |btn| {
+            if *updating.borrow() { return; }
+            let invert = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if let Some(m) = clip.masks.first_mut() {
+                                m.invert = invert;
+                                proj.dirty = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                on_mask_live();
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -6596,6 +6863,17 @@ pub fn build_inspector(
         bg_removal_enable,
         bg_removal_threshold_slider,
         bg_removal_model_available: Cell::new(false),
+        mask_section,
+        mask_enable,
+        mask_shape_dropdown,
+        mask_center_x_slider,
+        mask_center_y_slider,
+        mask_width_slider,
+        mask_height_slider,
+        mask_rotation_spin,
+        mask_feather_slider,
+        mask_expansion_slider,
+        mask_invert_check,
         frei0r_effects_section,
         frei0r_effects_list,
         frei0r_effects_clipboard: frei0r_effects_clipboard.clone(),

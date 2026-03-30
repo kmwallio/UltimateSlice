@@ -463,6 +463,8 @@ pub struct ProgramClip {
     pub bg_removal_threshold: f64,
     /// User-applied frei0r filter effects, ordered first-to-last.
     pub frei0r_effects: Vec<crate::model::clip::Frei0rEffect>,
+    /// Shape masks applied to this clip.
+    pub masks: Vec<crate::model::clip::ClipMask>,
 }
 
 impl ProgramClip {
@@ -915,6 +917,9 @@ struct VideoSlot {
     /// Intended compositor alpha for blend-mode clips (used by the blend
     /// probe since the actual compositor pad alpha is forced to 0).
     blend_alpha: Arc<Mutex<f64>>,
+    /// Shared mask data read by the mask pad probe.  Updated live from
+    /// inspector slider changes without requiring a pipeline rebuild.
+    mask_data: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
 }
 
 /// Result of `compute_reuse_plan()`: whether all current decoder slots can be
@@ -4126,6 +4131,27 @@ impl ProgramPlayer {
         }
     }
 
+    /// Update mask data on the current slot's shared state so the pad probe
+    /// picks up changes without a pipeline rebuild.
+    pub fn update_current_masks(&mut self, masks: &[crate::model::clip::ClipMask]) {
+        // Update all active slots — masks may be on any clip.
+        for slot in &self.slots {
+            let clip = &self.clips[slot.clip_idx];
+            // Match by checking if this slot's clip has masks.
+            // In practice, we update all slots unconditionally since the
+            // shared mask_data contains only this clip's masks.
+            if !clip.masks.is_empty() || !masks.is_empty() {
+                if let Ok(mut guard) = slot.mask_data.lock() {
+                    *guard = masks.to_vec();
+                }
+            }
+        }
+        // Force frame redraw when paused.
+        if self.current_idx.is_some() && self.state != PlayerState::Playing {
+            self.reseek_slot_for_current();
+        }
+    }
+
     pub fn update_current_chroma_key(
         &mut self,
         enabled: bool,
@@ -5812,7 +5838,7 @@ impl ProgramPlayer {
         );
         // Also warm the effects-bin construction path.
         let (proc_w, proc_h) = self.preview_processing_dimensions();
-        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, self.project_height, None);
+        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, self.project_height, None, Arc::new(Mutex::new(Vec::new())));
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
         if self.prepreroll_sidecars.len() >= MAX_PREPREROLL_SIDECARS {
@@ -6026,6 +6052,27 @@ impl ProgramPlayer {
                 }
                 // Slow-motion interpolation mode
                 c.slow_motion_interp.hash(&mut hasher);
+                // Shape masks
+                c.masks.len().hash(&mut hasher);
+                for mask in &c.masks {
+                    mask.enabled.hash(&mut hasher);
+                    (mask.shape as u8).hash(&mut hasher);
+                    mask.center_x.to_bits().hash(&mut hasher);
+                    mask.center_y.to_bits().hash(&mut hasher);
+                    mask.width.to_bits().hash(&mut hasher);
+                    mask.height.to_bits().hash(&mut hasher);
+                    mask.rotation.to_bits().hash(&mut hasher);
+                    mask.feather.to_bits().hash(&mut hasher);
+                    mask.expansion.to_bits().hash(&mut hasher);
+                    mask.invert.hash(&mut hasher);
+                    mask.center_x_keyframes.len().hash(&mut hasher);
+                    mask.center_y_keyframes.len().hash(&mut hasher);
+                    mask.width_keyframes.len().hash(&mut hasher);
+                    mask.height_keyframes.len().hash(&mut hasher);
+                    mask.rotation_keyframes.len().hash(&mut hasher);
+                    mask.feather_keyframes.len().hash(&mut hasher);
+                    mask.expansion_keyframes.len().hash(&mut hasher);
+                }
             }
         }
         hasher.finish()
@@ -8113,6 +8160,7 @@ impl ProgramPlayer {
         target_height: u32,
         project_height: u32,
         lut: Option<Arc<CubeLut>>,
+        mask_shared: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
     ) -> (
         gst::Bin,
         Option<gst::Element>, // videobalance
@@ -8593,6 +8641,51 @@ impl ProgramPlayer {
         if let Some(ref e) = videobox_crop_alpha {
             chain.push(e.clone());
         }
+        // 2b. Shape mask alpha probe — multiplies alpha channel by mask SDF.
+        //     Placed after crop (cropped regions stay transparent) and before
+        //     color effects so the mask operates in pre-transform clip space.
+        let need_mask = clip.masks.iter().any(|m| m.enabled);
+        // Populate the shared mask data for live updates from inspector sliders.
+        *mask_shared.lock().unwrap() = clip.masks.clone();
+        if need_mask {
+            if let Some(mask_identity) = gst::ElementFactory::make("identity").build().ok() {
+                let mask_ref = mask_shared.clone();
+                mask_identity.static_pad("src").unwrap().add_probe(
+                    gst::PadProbeType::BUFFER,
+                    move |_pad, info| {
+                        if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                            let masks = mask_ref.lock().unwrap().clone();
+                            if masks.iter().any(|m| m.enabled) {
+                                let buf = buffer.make_mut();
+                                let pts_ns = buf.pts().map(|p| p.nseconds()).unwrap_or(0);
+                                if let Ok(mut map) = buf.map_writable() {
+                                    let data = map.as_mut_slice();
+                                    let total = data.len();
+                                    if total >= 4 {
+                                        let (width, height) = if let Some(caps) = _pad.current_caps() {
+                                            let s = caps.structure(0).unwrap();
+                                            (s.get::<i32>("width").unwrap_or(0) as usize,
+                                             s.get::<i32>("height").unwrap_or(0) as usize)
+                                        } else {
+                                            let pixels = total / 4;
+                                            let w = (pixels as f64).sqrt() as usize;
+                                            (w, if w > 0 { pixels / w } else { 0 })
+                                        };
+                                        if width > 0 && height > 0 && width * height * 4 <= total {
+                                            crate::media::mask_alpha::apply_masks_to_rgba_buffer(
+                                                &masks, data, width, height, pts_ns,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        gst::PadProbeReturn::Ok
+                    },
+                );
+                chain.push(mask_identity);
+            }
+        }
         // 3. Effects at project resolution (much cheaper than source res).
         if let Some(ref e) = conv1 {
             chain.push(e.clone());
@@ -9065,6 +9158,7 @@ impl ProgramPlayer {
             transition_enter_offset_ns: 0,
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
+            mask_data: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -9335,6 +9429,7 @@ impl ProgramPlayer {
             transition_enter_offset_ns: 0,
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
+            mask_data: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -10165,6 +10260,8 @@ impl ProgramPlayer {
         };
 
         // Build per-slot effects bin.
+        let slot_mask_data: Arc<Mutex<Vec<crate::model::clip::ClipMask>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let (
             effects_bin,
             videobalance,
@@ -10183,7 +10280,7 @@ impl ProgramPlayer {
             capsfilter_zoom,
             videobox_zoom,
             frei0r_user_effects,
-        ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_height, realtime_lut);
+        ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_height, realtime_lut, slot_mask_data.clone());
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
         if clip.is_title {
@@ -10319,6 +10416,7 @@ impl ProgramPlayer {
                 transition_enter_offset_ns: 0,
                 is_blend_mode,
                 blend_alpha: blend_alpha.clone(),
+                mask_data: slot_mask_data.clone(),
             };
             Self::apply_transform_to_slot(
                 &slot_ref_for_transform, clip.crop_left, clip.crop_right,
@@ -10379,6 +10477,7 @@ impl ProgramPlayer {
                 transition_enter_offset_ns: 0,
                 is_blend_mode,
                 blend_alpha,
+                mask_data: slot_mask_data.clone(),
             });
         }
 
@@ -10755,6 +10854,7 @@ impl ProgramPlayer {
             transition_enter_offset_ns: 0,
             is_blend_mode,
             blend_alpha: blend_alpha.clone(),
+            mask_data: slot_mask_data.clone(),
         };
         Self::apply_transform_to_slot(
             &slot_ref_for_transform,
@@ -10824,6 +10924,7 @@ impl ProgramPlayer {
             transition_enter_offset_ns: 0,
             is_blend_mode,
             blend_alpha,
+            mask_data: slot_mask_data,
         })
     }
 
@@ -13664,6 +13765,7 @@ mod tests {
             title_secondary_text: String::new(),
             is_title: false,
             anamorphic_desqueeze: 1.0,
+            masks: Vec::new(),
         }
     }
 
@@ -14330,6 +14432,7 @@ mod tests {
             transition_enter_offset_ns: 0,
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
+            mask_data: Arc::new(Mutex::new(Vec::new())),
         }
     }
 

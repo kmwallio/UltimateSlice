@@ -77,6 +77,14 @@ pub struct TransformOverlay {
     /// canvas (e.g. when the outer overlay covers the full scroll viewport and the
     /// canvas_frame is smaller due to zoom < 1.0).
     canvas_widget: Rc<RefCell<Option<gtk4::Widget>>>,
+    // Shape mask state for overlay drawing.
+    mask_enabled: Rc<Cell<bool>>,
+    mask_shape: Rc<Cell<u8>>, // 0=rect, 1=ellipse
+    mask_cx: Rc<Cell<f64>>,
+    mask_cy: Rc<Cell<f64>>,
+    mask_hw: Rc<Cell<f64>>,
+    mask_hh: Rc<Cell<f64>>,
+    mask_rotation: Rc<Cell<f64>>,
 }
 
 impl TransformOverlay {
@@ -102,6 +110,13 @@ impl TransformOverlay {
         let proj_h = Rc::new(Cell::new(1080_u32));
         let picture: Rc<RefCell<Option<gtk4::Picture>>> = Rc::new(RefCell::new(None));
         let canvas_widget: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+        let mask_enabled = Rc::new(Cell::new(false));
+        let mask_shape = Rc::new(Cell::new(0u8));
+        let mask_cx = Rc::new(Cell::new(0.5f64));
+        let mask_cy = Rc::new(Cell::new(0.5f64));
+        let mask_hw = Rc::new(Cell::new(0.25f64));
+        let mask_hh = Rc::new(Cell::new(0.25f64));
+        let mask_rotation = Rc::new(Cell::new(0.0f64));
 
         let da = DrawingArea::new();
         da.set_hexpand(true);
@@ -124,6 +139,13 @@ impl TransformOverlay {
             let proj_h = proj_h.clone();
             let picture = picture.clone();
             let canvas_widget = canvas_widget.clone();
+            let mask_enabled = mask_enabled.clone();
+            let mask_shape = mask_shape.clone();
+            let mask_cx = mask_cx.clone();
+            let mask_cy = mask_cy.clone();
+            let mask_hw = mask_hw.clone();
+            let mask_hh = mask_hh.clone();
+            let mask_rotation_d = mask_rotation.clone();
 
             da.set_draw_func(move |da, cr, ww, wh| {
                 if !selected.get() {
@@ -158,6 +180,17 @@ impl TransformOverlay {
                     proj_w.get(),
                     proj_h.get(),
                 );
+                // Draw mask outline if mask is enabled.
+                if mask_enabled.get() {
+                    draw_mask_outline(
+                        cr, vx, vy, vw, vh,
+                        s, px, py, rotation.get(),
+                        mask_shape.get(),
+                        mask_cx.get(), mask_cy.get(),
+                        mask_hw.get(), mask_hh.get(),
+                        mask_rotation_d.get(),
+                    );
+                }
             });
         }
 
@@ -632,6 +665,13 @@ impl TransformOverlay {
             proj_h,
             picture,
             canvas_widget,
+            mask_enabled,
+            mask_shape,
+            mask_cx,
+            mask_cy,
+            mask_hw,
+            mask_hh,
+            mask_rotation,
         }
     }
 
@@ -681,6 +721,18 @@ impl TransformOverlay {
     pub fn set_project_dimensions(&self, w: u32, h: u32) {
         self.proj_w.set(w);
         self.proj_h.set(h);
+    }
+
+    /// Update mask overlay state.
+    pub fn set_mask(&self, enabled: bool, shape: u8, cx: f64, cy: f64, hw: f64, hh: f64, rotation: f64) {
+        self.mask_enabled.set(enabled);
+        self.mask_shape.set(shape);
+        self.mask_cx.set(cx);
+        self.mask_cy.set(cy);
+        self.mask_hw.set(hw);
+        self.mask_hh.set(hh);
+        self.mask_rotation.set(rotation);
+        self.drawing_area.queue_draw();
     }
 }
 
@@ -1045,5 +1097,77 @@ fn draw_overlay(
     cr.set_source_rgba(1.0, 0.95, 0.3, 1.0);
     cr.move_to(tx, ty + te.height() + 1.0);
     cr.show_text(&label).ok();
+    cr.restore().ok();
+}
+
+/// Draw a dashed cyan outline for the mask shape.
+///
+/// The mask is defined in clip-local normalized coordinates (0..1).
+/// The mask probe runs before zoom/position in the GStreamer pipeline,
+/// so we must map through the clip's transform to get canvas-space
+/// coordinates for the overlay.
+fn draw_mask_outline(
+    cr: &gtk4::cairo::Context,
+    vx: f64, vy: f64, vw: f64, vh: f64,
+    clip_scale: f64, clip_px: f64, clip_py: f64, clip_rotation_deg: f64,
+    shape: u8,
+    mask_cx: f64, mask_cy: f64,
+    mask_hw: f64, mask_hh: f64,
+    mask_rotation_deg: f64,
+) {
+    // The clip occupies a region within the canvas defined by its scale/position.
+    // Clip centre in widget coords (same formula as draw_overlay):
+    let clip_cx = vx + vw / 2.0 + clip_px * vw * (1.0 - clip_scale) / 2.0;
+    let clip_cy = vy + vh / 2.0 + clip_py * vh * (1.0 - clip_scale) / 2.0;
+    let clip_w = vw * clip_scale;
+    let clip_h = vh * clip_scale;
+    let clip_left = clip_cx - clip_w / 2.0;
+    let clip_top = clip_cy - clip_h / 2.0;
+
+    // Map mask normalized coords (0..1 within the clip frame) to widget coords.
+    let cx = clip_left + mask_cx * clip_w;
+    let cy = clip_top + mask_cy * clip_h;
+    let hw = mask_hw * clip_w;
+    let hh = mask_hh * clip_h;
+
+    let clip_rot_rad = (-clip_rotation_deg).to_radians();
+    let mask_rot_rad = mask_rotation_deg.to_radians();
+
+    cr.save().ok();
+    cr.set_source_rgba(0.0, 0.85, 0.95, 0.9); // cyan
+    cr.set_line_width(2.0);
+    cr.set_dash(&[8.0, 4.0], 0.0);
+
+    // First apply clip rotation around clip centre, then mask rotation around mask centre.
+    // We combine by translating to clip centre, rotating by clip rotation,
+    // then translating to mask centre offset, then rotating by mask rotation.
+    cr.translate(clip_cx, clip_cy);
+    cr.rotate(clip_rot_rad);
+    cr.translate(cx - clip_cx, cy - clip_cy);
+    cr.rotate(mask_rot_rad);
+
+    if shape == 1 {
+        // Ellipse
+        cr.save().ok();
+        cr.scale(hw.max(0.1), hh.max(0.1));
+        cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+        cr.restore().ok();
+        cr.stroke().ok();
+    } else {
+        // Rectangle
+        cr.rectangle(-hw, -hh, hw * 2.0, hh * 2.0);
+        cr.stroke().ok();
+    }
+
+    // Draw center crosshair.
+    cr.set_dash(&[], 0.0);
+    cr.set_line_width(1.0);
+    let ch = 8.0;
+    cr.move_to(-ch, 0.0);
+    cr.line_to(ch, 0.0);
+    cr.move_to(0.0, -ch);
+    cr.line_to(0.0, ch);
+    cr.stroke().ok();
+
     cr.restore().ok();
 }

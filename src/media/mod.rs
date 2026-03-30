@@ -1,6 +1,7 @@
 pub mod audio_sync;
 pub mod adjustment_scope;
 pub mod ladspa_registry;
+pub mod mask_alpha;
 pub mod voiceover;
 pub mod bg_removal_cache;
 pub mod color_match;

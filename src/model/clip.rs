@@ -323,6 +323,13 @@ pub enum Phase1KeyframeProperty {
     EqLowGain,
     EqMidGain,
     EqHighGain,
+    MaskCenterX,
+    MaskCenterY,
+    MaskWidth,
+    MaskHeight,
+    MaskRotation,
+    MaskFeather,
+    MaskExpansion,
 }
 
 impl Phase1KeyframeProperty {
@@ -349,6 +356,13 @@ impl Phase1KeyframeProperty {
             Self::EqLowGain => "eq_low_gain",
             Self::EqMidGain => "eq_mid_gain",
             Self::EqHighGain => "eq_high_gain",
+            Self::MaskCenterX => "mask_center_x",
+            Self::MaskCenterY => "mask_center_y",
+            Self::MaskWidth => "mask_width",
+            Self::MaskHeight => "mask_height",
+            Self::MaskRotation => "mask_rotation",
+            Self::MaskFeather => "mask_feather",
+            Self::MaskExpansion => "mask_expansion",
         }
     }
 
@@ -375,6 +389,13 @@ impl Phase1KeyframeProperty {
             "eq_low_gain" | "eq-low-gain" => Some(Self::EqLowGain),
             "eq_mid_gain" | "eq-mid-gain" => Some(Self::EqMidGain),
             "eq_high_gain" | "eq-high-gain" => Some(Self::EqHighGain),
+            "mask_center_x" | "mask-center-x" => Some(Self::MaskCenterX),
+            "mask_center_y" | "mask-center-y" => Some(Self::MaskCenterY),
+            "mask_width" | "mask-width" => Some(Self::MaskWidth),
+            "mask_height" | "mask-height" => Some(Self::MaskHeight),
+            "mask_rotation" | "mask-rotation" => Some(Self::MaskRotation),
+            "mask_feather" | "mask-feather" => Some(Self::MaskFeather),
+            "mask_expansion" | "mask-expansion" => Some(Self::MaskExpansion),
             _ => None,
         }
     }
@@ -436,6 +457,113 @@ fn default_chroma_key_tolerance() -> f32 {
 }
 fn default_chroma_key_softness() -> f32 {
     0.1
+}
+
+/// Shape type for a clip mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskShape {
+    #[default]
+    Rectangle,
+    Ellipse,
+}
+
+fn default_mask_enabled() -> bool {
+    true
+}
+fn default_mask_center() -> f64 {
+    0.5
+}
+fn default_mask_half_size() -> f64 {
+    0.25
+}
+
+/// A shape mask applied to a clip to restrict visible area via alpha.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipMask {
+    /// Unique id (UUID v4).
+    pub id: String,
+    /// Shape type: Rectangle or Ellipse.
+    #[serde(default)]
+    pub shape: MaskShape,
+    /// Whether this mask is active.
+    #[serde(default = "default_mask_enabled")]
+    pub enabled: bool,
+    /// Center X in normalized coords: 0.0 = left edge, 1.0 = right edge. Default 0.5.
+    #[serde(default = "default_mask_center")]
+    pub center_x: f64,
+    #[serde(default)]
+    pub center_x_keyframes: Vec<NumericKeyframe>,
+    /// Center Y in normalized coords: 0.0 = top edge, 1.0 = bottom edge. Default 0.5.
+    #[serde(default = "default_mask_center")]
+    pub center_y: f64,
+    #[serde(default)]
+    pub center_y_keyframes: Vec<NumericKeyframe>,
+    /// Half-width in normalized coords. Default 0.25 (mask covers 50% of frame width).
+    #[serde(default = "default_mask_half_size")]
+    pub width: f64,
+    #[serde(default)]
+    pub width_keyframes: Vec<NumericKeyframe>,
+    /// Half-height in normalized coords. Default 0.25.
+    #[serde(default = "default_mask_half_size")]
+    pub height: f64,
+    #[serde(default)]
+    pub height_keyframes: Vec<NumericKeyframe>,
+    /// Rotation in degrees. Default 0.0.
+    #[serde(default)]
+    pub rotation: f64,
+    #[serde(default)]
+    pub rotation_keyframes: Vec<NumericKeyframe>,
+    /// Feather width in normalized coords: 0.0 = hard edge, 0.5 = very soft. Default 0.0.
+    #[serde(default)]
+    pub feather: f64,
+    #[serde(default)]
+    pub feather_keyframes: Vec<NumericKeyframe>,
+    /// Expansion: grows or shrinks the mask boundary. -0.5 to 0.5 normalized. Default 0.0.
+    #[serde(default)]
+    pub expansion: f64,
+    #[serde(default)]
+    pub expansion_keyframes: Vec<NumericKeyframe>,
+    /// When true, the mask is inverted (visible outside, transparent inside).
+    #[serde(default)]
+    pub invert: bool,
+}
+
+impl ClipMask {
+    /// Create a new mask with default centered rectangle.
+    pub fn new(shape: MaskShape) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            shape,
+            enabled: true,
+            center_x: 0.5,
+            center_x_keyframes: Vec::new(),
+            center_y: 0.5,
+            center_y_keyframes: Vec::new(),
+            width: 0.25,
+            width_keyframes: Vec::new(),
+            height: 0.25,
+            height_keyframes: Vec::new(),
+            rotation: 0.0,
+            rotation_keyframes: Vec::new(),
+            feather: 0.0,
+            feather_keyframes: Vec::new(),
+            expansion: 0.0,
+            expansion_keyframes: Vec::new(),
+            invert: false,
+        }
+    }
+
+    /// Retain and rebase all keyframe lanes within a local time range.
+    pub fn retain_keyframes_in_local_range(&mut self, start_ns: u64, end_ns: u64) {
+        Clip::retain_and_rebase_keyframes(&mut self.center_x_keyframes, start_ns, end_ns);
+        Clip::retain_and_rebase_keyframes(&mut self.center_y_keyframes, start_ns, end_ns);
+        Clip::retain_and_rebase_keyframes(&mut self.width_keyframes, start_ns, end_ns);
+        Clip::retain_and_rebase_keyframes(&mut self.height_keyframes, start_ns, end_ns);
+        Clip::retain_and_rebase_keyframes(&mut self.rotation_keyframes, start_ns, end_ns);
+        Clip::retain_and_rebase_keyframes(&mut self.feather_keyframes, start_ns, end_ns);
+        Clip::retain_and_rebase_keyframes(&mut self.expansion_keyframes, start_ns, end_ns);
+    }
 }
 fn default_bg_removal_threshold() -> f64 {
     0.5
@@ -893,6 +1021,9 @@ pub struct Clip {
     /// Applied LADSPA audio effects, ordered from first to last in the chain.
     #[serde(default)]
     pub ladspa_effects: Vec<LadspaEffect>,
+    /// Shape masks applied to this clip (empty = no mask).
+    #[serde(default)]
+    pub masks: Vec<ClipMask>,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -1041,6 +1172,14 @@ impl Clip {
         Self::retain_and_rebase_keyframes(&mut self.opacity_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.position_x_keyframes, start_ns, end_ns);
         Self::retain_and_rebase_keyframes(&mut self.position_y_keyframes, start_ns, end_ns);
+        for mask in &mut self.masks {
+            mask.retain_keyframes_in_local_range(start_ns, end_ns);
+        }
+    }
+
+    /// Returns `true` when any mask is present and enabled.
+    pub fn has_mask(&self) -> bool {
+        self.masks.iter().any(|m| m.enabled)
     }
 
     pub fn new(
@@ -1163,6 +1302,7 @@ impl Clip {
             media_duration_ns: None,
             frei0r_effects: Vec::new(),
             ladspa_effects: Vec::new(),
+            masks: Vec::new(),
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,
@@ -1306,6 +1446,27 @@ impl Clip {
             Phase1KeyframeProperty::CropTop => &self.crop_top_keyframes,
             Phase1KeyframeProperty::CropBottom => &self.crop_bottom_keyframes,
             Phase1KeyframeProperty::Blur => &self.blur_keyframes,
+            Phase1KeyframeProperty::MaskCenterX => {
+                self.masks.first().map(|m| m.center_x_keyframes.as_slice()).unwrap_or(&[])
+            }
+            Phase1KeyframeProperty::MaskCenterY => {
+                self.masks.first().map(|m| m.center_y_keyframes.as_slice()).unwrap_or(&[])
+            }
+            Phase1KeyframeProperty::MaskWidth => {
+                self.masks.first().map(|m| m.width_keyframes.as_slice()).unwrap_or(&[])
+            }
+            Phase1KeyframeProperty::MaskHeight => {
+                self.masks.first().map(|m| m.height_keyframes.as_slice()).unwrap_or(&[])
+            }
+            Phase1KeyframeProperty::MaskRotation => {
+                self.masks.first().map(|m| m.rotation_keyframes.as_slice()).unwrap_or(&[])
+            }
+            Phase1KeyframeProperty::MaskFeather => {
+                self.masks.first().map(|m| m.feather_keyframes.as_slice()).unwrap_or(&[])
+            }
+            Phase1KeyframeProperty::MaskExpansion => {
+                self.masks.first().map(|m| m.expansion_keyframes.as_slice()).unwrap_or(&[])
+            }
         }
     }
 
@@ -1335,6 +1496,34 @@ impl Clip {
             Phase1KeyframeProperty::CropTop => &mut self.crop_top_keyframes,
             Phase1KeyframeProperty::CropBottom => &mut self.crop_bottom_keyframes,
             Phase1KeyframeProperty::Blur => &mut self.blur_keyframes,
+            Phase1KeyframeProperty::MaskCenterX => {
+                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                &mut self.masks[0].center_x_keyframes
+            }
+            Phase1KeyframeProperty::MaskCenterY => {
+                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                &mut self.masks[0].center_y_keyframes
+            }
+            Phase1KeyframeProperty::MaskWidth => {
+                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                &mut self.masks[0].width_keyframes
+            }
+            Phase1KeyframeProperty::MaskHeight => {
+                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                &mut self.masks[0].height_keyframes
+            }
+            Phase1KeyframeProperty::MaskRotation => {
+                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                &mut self.masks[0].rotation_keyframes
+            }
+            Phase1KeyframeProperty::MaskFeather => {
+                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                &mut self.masks[0].feather_keyframes
+            }
+            Phase1KeyframeProperty::MaskExpansion => {
+                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                &mut self.masks[0].expansion_keyframes
+            }
         }
     }
 
@@ -1361,6 +1550,13 @@ impl Clip {
             Phase1KeyframeProperty::CropTop => self.crop_top as f64,
             Phase1KeyframeProperty::CropBottom => self.crop_bottom as f64,
             Phase1KeyframeProperty::Blur => self.blur as f64,
+            Phase1KeyframeProperty::MaskCenterX => self.masks.first().map(|m| m.center_x).unwrap_or(0.5),
+            Phase1KeyframeProperty::MaskCenterY => self.masks.first().map(|m| m.center_y).unwrap_or(0.5),
+            Phase1KeyframeProperty::MaskWidth => self.masks.first().map(|m| m.width).unwrap_or(0.25),
+            Phase1KeyframeProperty::MaskHeight => self.masks.first().map(|m| m.height).unwrap_or(0.25),
+            Phase1KeyframeProperty::MaskRotation => self.masks.first().map(|m| m.rotation).unwrap_or(0.0),
+            Phase1KeyframeProperty::MaskFeather => self.masks.first().map(|m| m.feather).unwrap_or(0.0),
+            Phase1KeyframeProperty::MaskExpansion => self.masks.first().map(|m| m.expansion).unwrap_or(0.0),
         }
     }
 
@@ -1388,6 +1584,13 @@ impl Clip {
             Phase1KeyframeProperty::EqLowGain
             | Phase1KeyframeProperty::EqMidGain
             | Phase1KeyframeProperty::EqHighGain => value.clamp(-24.0, 12.0),
+            Phase1KeyframeProperty::MaskCenterX
+            | Phase1KeyframeProperty::MaskCenterY => value.clamp(0.0, 1.0),
+            Phase1KeyframeProperty::MaskWidth
+            | Phase1KeyframeProperty::MaskHeight => value.clamp(0.01, 0.5),
+            Phase1KeyframeProperty::MaskRotation => value.clamp(-180.0, 180.0),
+            Phase1KeyframeProperty::MaskFeather => value.clamp(0.0, 0.5),
+            Phase1KeyframeProperty::MaskExpansion => value.clamp(-0.5, 0.5),
         }
     }
 

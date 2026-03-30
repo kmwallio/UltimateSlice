@@ -984,6 +984,12 @@ fn parse_asset_clip(
                 let json_str = v.replace("&quot;", "\"");
                 clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
             }
+            if let Some(v) = attrs.get("us:masks") {
+                let json_str = v.replace("&quot;", "\"");
+                if let Ok(masks) = serde_json::from_str::<Vec<crate::model::clip::ClipMask>>(&json_str) {
+                    clip.masks = masks;
+                }
+            }
             if let Some(v) = attrs.get("us:ladspa-effects") {
                 let json_str = v.replace("&quot;", "\"");
                 clip.ladspa_effects = serde_json::from_str(&json_str).unwrap_or_default();
@@ -2539,6 +2545,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
             | "us:ladspa-effects"
+            | "us:masks"
             | "us:measured-loudness-lufs"
     )
 }
@@ -2942,7 +2949,7 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
 }
 
 fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
-    const KEYFRAME_ATTR_PREFIXES: [&str; 17] = [
+    const KEYFRAME_ATTR_PREFIXES: [&str; 18] = [
         "us:brightness-keyframes=\"",
         "us:contrast-keyframes=\"",
         "us:saturation-keyframes=\"",
@@ -2960,6 +2967,7 @@ fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
         "us:crop-top-keyframes=\"",
         "us:crop-bottom-keyframes=\"",
         "us:frei0r-effects=\"",
+        "us:masks=\"",
     ];
 
     let mut cursor = 0usize;

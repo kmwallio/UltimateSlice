@@ -389,6 +389,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`/`eq_low_gain`/`eq_mid_gain`/`eq_high_gain`) at an absolute timeline position |
 | `remove_clip_keyframe` | Remove a phase-1 keyframe for a property at an absolute timeline position |
 | `set_clip_chroma_key` | Set chroma key (green/blue screen) params on a clip by id |
+| `set_clip_mask` | Set shape mask on a clip (rectangle or ellipse) to restrict visible area |
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.14 to a file path |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |

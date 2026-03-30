@@ -682,6 +682,11 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
                         }
                     }
+                    if !clip.masks.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.masks) {
+                            asset_clip.push_attribute(("us:masks", json.as_str()));
+                        }
+                    }
                     if !clip.ladspa_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.ladspa_effects) {
                             asset_clip.push_attribute(("us:ladspa-effects", json.as_str()));
@@ -2233,6 +2238,26 @@ fn patch_asset_clip_block_transform(
         updated_start = next;
     }
 
+    // Patch masks JSON attribute.
+    {
+        let masks_value = if clip.masks.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&clip.masks)
+                .ok()
+                .map(|s| s.replace('"', "&quot;"))
+        };
+        let next = if let Some(v) = masks_value {
+            replace_or_insert_attr(&updated_start, "us:masks", &v)?
+        } else {
+            remove_attr(&updated_start, "us:masks")
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
     let mut updated_block = String::with_capacity(block.len());
     updated_block.push_str(&updated_start);
     updated_block.push_str(&block[start_tag_end + 1..]);
@@ -3523,6 +3548,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
             | "us:ladspa-effects"
+            | "us:masks"
             | "us:measured-loudness-lufs"
     )
 }

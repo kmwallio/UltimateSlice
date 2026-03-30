@@ -1455,6 +1455,53 @@ impl EditCommand for AddAdjustmentLayerCommand {
     }
 }
 
+/// Snapshot of a clip's mask state for undo/redo.
+#[derive(Clone, Debug)]
+pub struct ClipMaskSnapshot {
+    pub masks: Vec<crate::model::clip::ClipMask>,
+}
+
+impl ClipMaskSnapshot {
+    pub fn from_clip(clip: &crate::model::clip::Clip) -> Self {
+        Self {
+            masks: clip.masks.clone(),
+        }
+    }
+    fn apply_to(&self, clip: &mut crate::model::clip::Clip) {
+        clip.masks = self.masks.clone();
+    }
+}
+
+/// Set clip mask properties (full snapshot replace).
+pub struct SetClipMaskCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_mask: ClipMaskSnapshot,
+    pub new_mask: ClipMaskSnapshot,
+}
+
+impl EditCommand for SetClipMaskCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                self.new_mask.apply_to(clip);
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                self.old_mask.apply_to(clip);
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip mask"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

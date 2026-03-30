@@ -464,6 +464,8 @@ Tracking docs:
   - [x] Phase 1b: Background prerender support for adjustment layer frei0r effects — when Background Render is enabled, prerender the adjustment frei0r/LUT/blur effects into temporary clips so the Program Monitor shows the full effect chain without real-time GStreamer topology changes
   - [x] Phase 2: Bounding box scoping (position, scale, crop, and rotate constrain the adjustment effect region in both preview and export; overlapping scoped adjustments stack by track order)
 - [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
+  - [x] Phase 1: Rectangle & ellipse masks with feathering — per-clip mask model (`Vec<ClipMask>`), SDF-based alpha computation, GStreamer preview pad probe, FFmpeg `geq` export, Inspector UI with all controls, transform overlay mask outline, keyframe property support, FCPXML round-trip, MCP `set_clip_mask` tool, full undo/redo
+  - [ ] Phase 2: Bezier/freeform path masks with draggable control points
 
 ### Video Transform (per clip)
 - [x] Scale / resize clip (zoom in/out within frame) via GStreamer `videoscale` + `videobox`

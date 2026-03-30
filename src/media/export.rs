@@ -312,7 +312,8 @@ pub fn export_project(
         let rotate_filter = build_rotation_filter(clip, false);
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
-        if has_transform_keyframes || has_opacity_keyframes {
+        let clip_has_mask = clip.has_mask();
+        if has_transform_keyframes || has_opacity_keyframes || clip_has_mask {
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
                 clip.scale,
@@ -341,6 +342,7 @@ pub fn export_project(
                 1.0,
                 "T",
             );
+            let mask_alpha_expr = build_combined_mask_geq_alpha(clip, out_w, out_h);
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
@@ -348,7 +350,7 @@ pub fn export_project(
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
-                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[pv{i}raw];\
+                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
                  [pv{i}raw]format=yuv420p[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
@@ -459,9 +461,10 @@ pub fn export_project(
         let rotate_filter = build_rotation_filter(clip, true);
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
+        let ov_has_mask = clip.has_mask();
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
-        if has_transform_keyframes || has_opacity_keyframes {
+        if has_transform_keyframes || has_opacity_keyframes || ov_has_mask {
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
                 clip.scale,
@@ -490,6 +493,7 @@ pub fn export_project(
                 1.0,
                 "T",
             );
+            let mask_alpha_expr = build_combined_mask_geq_alpha(clip, out_w, out_h);
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
@@ -497,7 +501,7 @@ pub fn export_project(
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
-                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[{ov_label}raw]"
+                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
@@ -2123,6 +2127,30 @@ pub(crate) fn compute_export_coloradj_params(
     }
 }
 
+
+/// Build a combined mask alpha expression for all enabled masks on a clip.
+/// The `geq` runs on the composited output canvas (post-zoom/position), so
+/// the clip's scale and position are passed through to map mask coordinates
+/// from clip-local space to canvas pixel space.
+/// Returns "1" when no masks are active.
+fn build_combined_mask_geq_alpha(clip: &crate::model::clip::Clip, out_w: u32, out_h: u32) -> String {
+    let active: Vec<_> = clip.masks.iter().filter(|m| m.enabled).collect();
+    if active.is_empty() {
+        return "1".to_string();
+    }
+    let exprs: Vec<String> = active
+        .iter()
+        .map(|m| crate::media::mask_alpha::build_mask_ffmpeg_geq_alpha(
+            m, out_w, out_h, clip.scale, clip.position_x, clip.position_y, "T",
+        ))
+        .collect();
+    if exprs.len() == 1 {
+        exprs.into_iter().next().unwrap()
+    } else {
+        // Multiplicative combination (intersection).
+        exprs.join("*")
+    }
+}
 
 fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.chroma_key_enabled {

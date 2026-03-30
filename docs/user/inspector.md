@@ -348,6 +348,31 @@ Place the chroma-keyed clip on an upper video track with the background on a low
 
 ---
 
+## Shape Mask
+
+Restricts the visible area of a clip using a geometric shape. Pixels outside the mask become transparent, revealing lower video tracks through the compositor.
+
+| Control | Range | Default | Description |
+|---|---|---|---|
+| **Enable Mask** | on/off | off | Activates/deactivates shape masking |
+| **Shape** | Rectangle / Ellipse | Rectangle | Shape type for the mask region |
+| **Center X** | 0.0 → 1.0 | 0.5 | Horizontal mask center (0 = left, 1 = right) |
+| **Center Y** | 0.0 → 1.0 | 0.5 | Vertical mask center (0 = top, 1 = bottom) |
+| **Width** | 0.01 → 0.5 | 0.25 | Half-width of the mask (normalized) |
+| **Height** | 0.01 → 0.5 | 0.25 | Half-height of the mask (normalized) |
+| **Rotation** | −180° → 180° | 0° | Rotate the mask shape |
+| **Feather** | 0.0 → 0.5 | 0.0 | Edge softness (SDF-based smoothstep falloff) |
+| **Expansion** | −0.5 → 0.5 | 0.0 | Grow or shrink the mask boundary |
+| **Invert Mask** | on/off | off | Show area outside the mask instead of inside |
+
+> **Pipeline placement** — The mask is applied after crop and LUT but before color effects and chroma key. It operates in pre-transform clip space, so the mask moves with the clip's scale/position/rotation. Preview uses a GStreamer RGBA pad probe with SDF alpha computation; export uses FFmpeg `geq` filter expressions for parity.
+
+All numeric mask properties support keyframe animation via the Phase 1 keyframe system.
+
+The Program Monitor transform overlay shows a cyan dashed outline of the active mask shape with a center crosshair.
+
+---
+
 ## Applied Effects (Frei0r Plugins)
 
 The **Applied Effects** section appears below Color Correction when a clip has frei0r effects applied. Effects are discovered from the system's GStreamer frei0r plugin registry (~130+ filters on a typical Linux system).

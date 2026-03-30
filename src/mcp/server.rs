@@ -563,6 +563,27 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_mask",
+            "description": "Set shape mask on a clip (rectangle or ellipse) to restrict visible area. Creates mask if absent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":   { "type": "string",  "description": "Clip id" },
+                    "enabled":   { "type": "boolean", "description": "Enable/disable mask" },
+                    "shape":     { "type": "string",  "enum": ["rectangle", "ellipse"], "description": "Mask shape type" },
+                    "center_x":  { "type": "number",  "description": "Mask center X (0.0-1.0, default 0.5)" },
+                    "center_y":  { "type": "number",  "description": "Mask center Y (0.0-1.0, default 0.5)" },
+                    "width":     { "type": "number",  "description": "Mask half-width (0.01-0.5, default 0.25)" },
+                    "height":    { "type": "number",  "description": "Mask half-height (0.01-0.5, default 0.25)" },
+                    "rotation":  { "type": "number",  "description": "Mask rotation in degrees (-180 to 180)" },
+                    "feather":   { "type": "number",  "description": "Edge feather (0.0-0.5, default 0.0)" },
+                    "expansion": { "type": "number",  "description": "Expand/contract mask (-0.5 to 0.5)" },
+                    "invert":    { "type": "boolean", "description": "Invert mask (show outside, hide inside)" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_project_title",
             "description": "Rename the project.",
             "inputSchema": {
@@ -1561,6 +1582,21 @@ fn dispatch_tool_payload(
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             threshold: args.get("threshold").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+
+        "set_clip_mask" => McpCommand::SetClipMask {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()),
+            shape: args.get("shape").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            center_x: args.get("center_x").and_then(|v| v.as_f64()),
+            center_y: args.get("center_y").and_then(|v| v.as_f64()),
+            width: args.get("width").and_then(|v| v.as_f64()),
+            height: args.get("height").and_then(|v| v.as_f64()),
+            rotation: args.get("rotation").and_then(|v| v.as_f64()),
+            feather: args.get("feather").and_then(|v| v.as_f64()),
+            expansion: args.get("expansion").and_then(|v| v.as_f64()),
+            invert: args.get("invert").and_then(|v| v.as_bool()),
             reply: tx,
         },
 

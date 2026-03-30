@@ -361,6 +361,13 @@ fn phase1_property_value_bounds(property: Phase1KeyframeProperty) -> (f64, f64) 
         Phase1KeyframeProperty::EqLowGain
         | Phase1KeyframeProperty::EqMidGain
         | Phase1KeyframeProperty::EqHighGain => (-24.0, 12.0),
+        Phase1KeyframeProperty::MaskCenterX
+        | Phase1KeyframeProperty::MaskCenterY => (0.0, 1.0),
+        Phase1KeyframeProperty::MaskWidth
+        | Phase1KeyframeProperty::MaskHeight => (0.01, 0.5),
+        Phase1KeyframeProperty::MaskRotation => (-180.0, 180.0),
+        Phase1KeyframeProperty::MaskFeather => (0.0, 0.5),
+        Phase1KeyframeProperty::MaskExpansion => (-0.5, 0.5),
     }
 }
 
