@@ -6724,6 +6724,8 @@ pub fn build_window(
         let force_rebuild_media_browser = force_rebuild_media_browser.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
+            // Sync compound clip duration when editing inside a compound.
+            timeline_state.borrow().sync_compound_duration();
             let use_light_refresh = mcp_light_refresh_next.replace(false);
             if clear_media_browser_on_next_reload.replace(false) {
                 on_close_preview();

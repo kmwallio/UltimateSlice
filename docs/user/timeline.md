@@ -171,6 +171,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 
 - **Create Compound Clip (`Alt+G`)** — select 2+ clips, then press `Alt+G` or right-click → "Create Compound Clip". The selected clips are replaced by a single compound clip containing them as an internal sub-timeline.
 - **Break Apart Compound Clip** — right-click a compound clip → "Break Apart Compound Clip" to restore the internal clips to the timeline.
+- **Drill-down editing** — double-click a compound clip to enter its sub-timeline. A teal breadcrumb bar shows your navigation path (e.g. "Project > Compound Clip 1"). Press `Escape` to go back one level.
 - Compound clips render with a teal fill color and a stacked-layers badge.
 - Preview and export correctly flatten compound clips, rendering all internal clips at the right timeline positions.
 - Compound clips are saved/loaded via FCPXML (`us:clip-kind="compound"` + `us:compound-tracks` vendor attribute).

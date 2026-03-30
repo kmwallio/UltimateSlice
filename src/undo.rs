@@ -2057,4 +2057,99 @@ mod tests {
         assert!(!history.undo(&mut project));
         assert!(!history.redo(&mut project));
     }
+
+    // ── Compound clip undo tests ──────────────────────────────────────
+
+    #[test]
+    fn test_set_track_clips_command_on_nested_track() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        // Create a compound clip with an internal video track
+        let mut inner_track = Track::new_video("Inner V1");
+        let inner_track_id = inner_track.id.clone();
+        let mut clip_a = Clip::new("a.mp4", 5_000, 0, ClipKind::Video);
+        clip_a.id = "A".into();
+        inner_track.add_clip(clip_a.clone());
+
+        let mut compound = Clip::new_compound(0, vec![inner_track]);
+        compound.id = "compound".into();
+        let mut root_track = Track::new_video("Root V1");
+        root_track.add_clip(compound);
+        project.tracks.push(root_track);
+
+        // Verify inner clip exists
+        assert!(project.clip_ref("A").is_some());
+
+        // Delete the inner clip via SetTrackClipsCommand targeting the nested track
+        let old_clips = vec![clip_a];
+        let new_clips: Vec<Clip> = vec![];
+        let cmd = SetTrackClipsCommand {
+            track_id: inner_track_id.clone(),
+            old_clips: old_clips.clone(),
+            new_clips: new_clips.clone(),
+            label: "Delete inner clip".into(),
+        };
+
+        cmd.execute(&mut project);
+        // Inner clip should be gone
+        assert!(project.clip_ref("A").is_none());
+        let inner = project.track_ref(&inner_track_id).unwrap();
+        assert!(inner.clips.is_empty());
+
+        // Undo should restore it
+        cmd.undo(&mut project);
+        assert!(project.clip_ref("A").is_some());
+        let inner = project.track_ref(&inner_track_id).unwrap();
+        assert_eq!(inner.clips.len(), 1);
+    }
+
+    #[test]
+    fn test_set_multiple_tracks_clips_command_on_nested_tracks() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let mut inner_v = Track::new_video("Inner V");
+        let inner_v_id = inner_v.id.clone();
+        let mut clip_v = Clip::new("v.mp4", 5_000, 0, ClipKind::Video);
+        clip_v.id = "V1".into();
+        inner_v.add_clip(clip_v.clone());
+
+        let mut inner_a = Track::new_audio("Inner A");
+        let inner_a_id = inner_a.id.clone();
+        let mut clip_a = Clip::new("a.wav", 5_000, 0, ClipKind::Audio);
+        clip_a.id = "A1".into();
+        inner_a.add_clip(clip_a.clone());
+
+        let mut compound = Clip::new_compound(0, vec![inner_v, inner_a]);
+        compound.id = "compound".into();
+        let mut root = Track::new_video("Root");
+        root.add_clip(compound);
+        project.tracks.push(root);
+
+        // Use SetMultipleTracksClipsCommand to clear both nested tracks
+        let cmd = SetMultipleTracksClipsCommand {
+            changes: vec![
+                TrackClipsChange {
+                    track_id: inner_v_id.clone(),
+                    old_clips: vec![clip_v],
+                    new_clips: vec![],
+                },
+                TrackClipsChange {
+                    track_id: inner_a_id.clone(),
+                    old_clips: vec![clip_a],
+                    new_clips: vec![],
+                },
+            ],
+            label: "Clear compound internals".into(),
+        };
+
+        cmd.execute(&mut project);
+        assert!(project.track_ref(&inner_v_id).unwrap().clips.is_empty());
+        assert!(project.track_ref(&inner_a_id).unwrap().clips.is_empty());
+
+        cmd.undo(&mut project);
+        assert_eq!(project.track_ref(&inner_v_id).unwrap().clips.len(), 1);
+        assert_eq!(project.track_ref(&inner_a_id).unwrap().clips.len(), 1);
+    }
 }

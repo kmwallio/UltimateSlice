@@ -3318,4 +3318,75 @@ mod tests {
         assert!(dur_with_three > 0);
         assert_ne!(dur_with_three, dur_with_ramp, "3rd KF should change duration");
     }
+
+    #[test]
+    fn test_new_compound_basic() {
+        let mut track_v = crate::model::track::Track::new_video("V1");
+        let mut c1 = Clip::new("a.mp4", 5_000_000_000, 0, ClipKind::Video);
+        c1.id = "c1".into();
+        let mut c2 = Clip::new("b.mp4", 3_000_000_000, 5_000_000_000, ClipKind::Video);
+        c2.id = "c2".into();
+        track_v.add_clip(c1);
+        track_v.add_clip(c2);
+
+        let compound = Clip::new_compound(1_000_000_000, vec![track_v]);
+        assert_eq!(compound.kind, ClipKind::Compound);
+        assert!(compound.is_compound());
+        assert!(compound.compound_tracks.is_some());
+        // Duration = max timeline_end of internal clips = 5s + 3s = 8s
+        assert_eq!(compound.source_out, 8_000_000_000);
+        assert_eq!(compound.timeline_start, 1_000_000_000);
+        assert_eq!(compound.label, "Compound Clip");
+    }
+
+    #[test]
+    fn test_is_compound_false_for_video() {
+        let clip = Clip::new("a.mp4", 1000, 0, ClipKind::Video);
+        assert!(!clip.is_compound());
+        assert!(clip.compound_tracks.is_none());
+    }
+
+    #[test]
+    fn test_compound_duration_empty() {
+        let clip = Clip::new("", 0, 0, ClipKind::Compound);
+        assert_eq!(clip.compound_duration(), 0);
+    }
+
+    #[test]
+    fn test_compound_duration_matches_internal_clips() {
+        let mut track = crate::model::track::Track::new_video("V1");
+        let mut c = Clip::new("a.mp4", 10_000_000_000, 2_000_000_000, ClipKind::Video);
+        c.id = "inner".into();
+        track.add_clip(c);
+
+        let compound = Clip::new_compound(0, vec![track]);
+        // Internal clip ends at 2s + 10s = 12s
+        assert_eq!(compound.compound_duration(), 12_000_000_000);
+        assert_eq!(compound.source_out, 12_000_000_000);
+    }
+
+    #[test]
+    fn test_compound_serde_round_trip() {
+        let mut track = crate::model::track::Track::new_video("V1");
+        track.add_clip(Clip::new("a.mp4", 5_000_000_000, 0, ClipKind::Video));
+        let compound = Clip::new_compound(1_000_000_000, vec![track]);
+
+        let json = serde_json::to_string(&compound).unwrap();
+        let restored: Clip = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.kind, ClipKind::Compound);
+        assert!(restored.is_compound());
+        let inner = restored.compound_tracks.unwrap();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].clips.len(), 1);
+        assert_eq!(inner[0].clips[0].source_path, "a.mp4");
+    }
+
+    #[test]
+    fn test_compound_tracks_none_when_not_compound() {
+        let clip = Clip::new("a.mp4", 1000, 0, ClipKind::Video);
+        let json = serde_json::to_string(&clip).unwrap();
+        // compound_tracks should be skipped in serialization
+        assert!(!json.contains("compound_tracks"));
+    }
 }

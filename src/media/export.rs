@@ -3438,6 +3438,7 @@ mod tests {
         compute_export_coloradj_params, ColorFilterCapabilities,
         estimate_export_size_bytes, has_linked_audio_peer, has_transform_keyframes,
         parse_progress_line, video_input_seek_and_duration, write_chapter_metadata,
+        flatten_compound_tracks,
         AudioCodec, ClipAudioFade, ExportOptions, VideoCodec,
     };
     use gstreamer as gst;
@@ -4333,5 +4334,123 @@ mod tests {
             .expect("should produce metadata file");
         let content = std::fs::read_to_string(file.path()).unwrap();
         assert!(content.contains("title=Title\\=With\\;Special\\#Chars\\\\Here Newline"));
+    }
+
+    // ── Compound clip flattening tests ────────────────────────────────
+
+    #[test]
+    fn test_flatten_compound_tracks_no_compounds() {
+        use crate::model::track::Track;
+        let mut t = Track::new_video("V1");
+        let mut c = Clip::new("a.mp4", 5_000, 0, ClipKind::Video);
+        c.id = "A".into();
+        t.add_clip(c);
+
+        let flattened = flatten_compound_tracks(&[t]);
+        assert_eq!(flattened.len(), 1);
+        assert_eq!(flattened[0].clips.len(), 1);
+        assert_eq!(flattened[0].clips[0].id, "A");
+        assert_eq!(flattened[0].clips[0].timeline_start, 0);
+    }
+
+    #[test]
+    fn test_flatten_compound_tracks_single_compound() {
+        use crate::model::track::Track;
+
+        // Inner clip at internal position 2000, compound starts at 10000 on parent
+        let mut inner_track = Track::new_video("Inner V");
+        let mut inner_clip = Clip::new("inner.mp4", 3_000, 2_000, ClipKind::Video);
+        inner_clip.id = "inner".into();
+        inner_track.add_clip(inner_clip);
+
+        let mut compound = Clip::new_compound(10_000, vec![inner_track]);
+        compound.id = "compound".into();
+
+        let mut root_track = Track::new_video("Root V");
+        root_track.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root_track]);
+        assert_eq!(flattened.len(), 1);
+        assert_eq!(flattened[0].clips.len(), 1);
+        // Inner clip's absolute position: 10000 (compound start) + 2000 (internal offset) = 12000
+        assert_eq!(flattened[0].clips[0].timeline_start, 12_000);
+        assert_eq!(flattened[0].clips[0].source_path, "inner.mp4");
+    }
+
+    #[test]
+    fn test_flatten_compound_preserves_non_compound_clips() {
+        use crate::model::track::Track;
+
+        let mut root_track = Track::new_video("V1");
+        let mut regular = Clip::new("regular.mp4", 5_000, 0, ClipKind::Video);
+        regular.id = "R".into();
+        root_track.add_clip(regular);
+
+        // Compound at 10000
+        let mut inner = Track::new_video("Inner");
+        let mut ic = Clip::new("inner.mp4", 3_000, 0, ClipKind::Video);
+        ic.id = "I".into();
+        inner.add_clip(ic);
+        let mut compound = Clip::new_compound(10_000, vec![inner]);
+        compound.id = "C".into();
+        root_track.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root_track]);
+        // Should have 2 clips: regular at 0, inner at 10000
+        assert_eq!(flattened[0].clips.len(), 2);
+        let ids: Vec<&str> = flattened[0].clips.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"R"));
+        // Inner clip gets a fresh UUID, so check by source_path
+        let inner_clip = flattened[0].clips.iter().find(|c| c.source_path == "inner.mp4").unwrap();
+        assert_eq!(inner_clip.timeline_start, 10_000);
+    }
+
+    #[test]
+    fn test_flatten_nested_compound() {
+        use crate::model::track::Track;
+
+        // Deeply nested: compound inside compound
+        let mut deep_track = Track::new_video("Deep");
+        let mut deep_clip = Clip::new("deep.mp4", 1_000, 500, ClipKind::Video);
+        deep_clip.id = "deep".into();
+        deep_track.add_clip(deep_clip);
+
+        let mut inner_compound = Clip::new_compound(1_000, vec![deep_track]);
+        inner_compound.id = "inner-compound".into();
+
+        let mut mid_track = Track::new_video("Mid");
+        mid_track.add_clip(inner_compound);
+
+        let mut outer_compound = Clip::new_compound(5_000, vec![mid_track]);
+        outer_compound.id = "outer-compound".into();
+
+        let mut root = Track::new_video("Root");
+        root.add_clip(outer_compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+        assert_eq!(flattened[0].clips.len(), 1);
+        // deep clip absolute position: 5000 (outer) + 1000 (inner) + 500 (deep clip offset) = 6500
+        assert_eq!(flattened[0].clips[0].timeline_start, 6_500);
+        assert_eq!(flattened[0].clips[0].source_path, "deep.mp4");
+    }
+
+    #[test]
+    fn test_flatten_compound_no_compound_clips_remain() {
+        use crate::model::track::Track;
+
+        let mut inner = Track::new_video("Inner");
+        inner.add_clip(Clip::new("a.mp4", 1_000, 0, ClipKind::Video));
+        let mut compound = Clip::new_compound(0, vec![inner]);
+        compound.id = "C".into();
+
+        let mut root = Track::new_video("Root");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+        for track in &flattened {
+            for clip in &track.clips {
+                assert_ne!(clip.kind, ClipKind::Compound, "no compound clips should remain after flattening");
+            }
+        }
     }
 }

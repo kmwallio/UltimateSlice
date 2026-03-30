@@ -67,6 +67,8 @@
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Alt+G` | Create compound clip from selected clips |
+| `Double-click` (compound clip) | Drill into compound clip sub-timeline |
+| `Escape` (in compound) | Exit compound clip drill-down (go back one level) |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
