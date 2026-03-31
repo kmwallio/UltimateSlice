@@ -2678,6 +2678,39 @@ impl ProgramPlayer {
         &self.state
     }
 
+    /// Return the letterbox inset fractions (x, y) for the first active video slot.
+    /// Each value is 0.0–0.5 representing the fraction of the canvas that is letterbox.
+    /// Returns (0.0, 0.0) if no slot is active or source matches project aspect ratio.
+    pub fn content_inset(&self) -> (f64, f64) {
+        if let Some(slot) = self.slots.first() {
+            // Get source dimensions from effects_bin ghost sink pad
+            let src_dims = slot.effects_bin.static_pad("sink")
+                .and_then(|ghost| {
+                    ghost.peer().and_then(|p| p.current_caps())
+                        .or_else(|| ghost.current_caps())
+                })
+                .and_then(|c| c.structure(0).map(|s| {
+                    (s.get::<i32>("width").unwrap_or(0),
+                     s.get::<i32>("height").unwrap_or(0))
+                }));
+            if let Some((src_w, src_h)) = src_dims {
+                if src_w > 0 && src_h > 0 && self.project_width > 0 && self.project_height > 0 {
+                    let pw = self.project_width as f64;
+                    let ph = self.project_height as f64;
+                    let sw = src_w as f64;
+                    let sh = src_h as f64;
+                    let scale = (pw / sw).min(ph / sh);
+                    let scaled_w = sw * scale;
+                    let scaled_h = sh * scale;
+                    let ix = ((pw - scaled_w) / 2.0) / pw;
+                    let iy = ((ph - scaled_h) / 2.0) / ph;
+                    return (ix.clamp(0.0, 0.5), iy.clamp(0.0, 0.5));
+                }
+            }
+        }
+        (0.0, 0.0)
+    }
+
     pub fn preview_divisor(&self) -> u32 {
         self.preview_divisor
     }

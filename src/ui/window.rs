@@ -113,6 +113,8 @@ fn sync_transform_overlay_to_playhead(
     selected_clip_id: Option<&str>,
     playhead_ns: u64,
 ) {
+    // Default content inset to 0 (will be overridden by caller if program player available)
+    transform_overlay.set_content_inset(0.0, 0.0);
     match selected_clip_id {
         Some(cid) => {
             let clip_opt = project
@@ -5767,6 +5769,8 @@ pub fn build_window(
                     if selected.is_some() {
                         let proj = project.borrow();
                         sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), pos_ns);
+                        let (ix, iy) = pp.borrow().content_inset();
+                        to.set_content_inset(ix, iy);
                     }
                 }
                 // Update inspector sliders to reflect keyframe-evaluated values
@@ -7108,6 +7112,8 @@ pub fn build_window(
                     }
                     let playhead_ns = timeline_state.borrow().playhead_ns;
                     sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), playhead_ns);
+                    let (ix, iy) = prog_player.borrow().content_inset();
+                    to.set_content_inset(ix, iy);
                 }
 
                 let suppress_embedded_audio_ids: HashSet<String> = proj
