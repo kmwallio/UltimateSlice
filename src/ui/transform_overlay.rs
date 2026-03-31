@@ -261,8 +261,15 @@ impl TransformOverlay {
                 let ww = da_ref.width();
                 let wh = da_ref.height();
                 let _ = &picture; // kept for potential future use
-                let (vx, vy, vw, vh) =
+                let (vx_full, vy_full, vw_full, vh_full) =
                     canvas_video_rect(&da_ref, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
+                // Shrink to content area (excluding letterbox)
+                let ix = content_inset_x.get();
+                let iy = content_inset_y.get();
+                let vx = vx_full + vw_full * ix;
+                let vy = vy_full + vh_full * iy;
+                let vw = vw_full * (1.0 - 2.0 * ix);
+                let vh = vh_full * (1.0 - 2.0 * iy);
                 let s = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
