@@ -8740,10 +8740,12 @@ impl ProgramPlayer {
                                 if data.len() < expected {
                                     return gst::PadProbeReturn::Ok;
                                 }
-                                // Scale crop from project pixels to frame pixels,
+                                // Scale crop from project pixels to content-area frame pixels,
                                 // then add letterbox offset.
-                                let scale_x = if proj_w > 0 { w as f64 / proj_w as f64 } else { 1.0 };
-                                let scale_y = if proj_h > 0 { h as f64 / proj_h as f64 } else { 1.0 };
+                                let content_w = (w as i32 - 2 * lb_h.max(0)).max(1) as f64;
+                                let content_h = (h as i32 - 2 * lb_v.max(0)).max(1) as f64;
+                                let scale_x = if proj_w > 0 { content_w / proj_w as f64 } else { 1.0 };
+                                let scale_y = if proj_h > 0 { content_h / proj_h as f64 } else { 1.0 };
                                 let ct = ((ct.max(0) as f64 * scale_y).round() as usize) + lb_v.max(0) as usize;
                                 let cb = ((cb.max(0) as f64 * scale_y).round() as usize) + lb_v.max(0) as usize;
                                 let cl = ((cl.max(0) as f64 * scale_x).round() as usize) + lb_h.max(0) as usize;
