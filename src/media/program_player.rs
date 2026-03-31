@@ -7259,17 +7259,14 @@ impl ProgramPlayer {
                 if src_w <= 0 || src_h <= 0 {
                     return (0, 0);
                 }
-                // frame_w/frame_h are from videocrop sink (project resolution)
-                let fw = slot.videocrop.as_ref()
-                    .and_then(|vc| vc.static_pad("sink"))
+                // Get project resolution from effects_bin src pad
+                let (fw, fh) = slot.effects_bin.static_pad("src")
                     .and_then(|p| p.current_caps())
-                    .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("width").ok()))
-                    .unwrap_or(0);
-                let fh = slot.videocrop.as_ref()
-                    .and_then(|vc| vc.static_pad("sink"))
-                    .and_then(|p| p.current_caps())
-                    .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("height").ok()))
-                    .unwrap_or(0);
+                    .and_then(|c| c.structure(0).map(|s| {
+                        (s.get::<i32>("width").unwrap_or(0),
+                         s.get::<i32>("height").unwrap_or(0))
+                    }))
+                    .unwrap_or((0, 0));
                 if fw <= 0 || fh <= 0 {
                     return (0, 0);
                 }
@@ -8649,11 +8646,14 @@ impl ProgramPlayer {
                         if cl == 0 && cr == 0 && ct == 0 && cb == 0 {
                             return gst::PadProbeReturn::Ok;
                         }
-                        // Offset crop by letterbox so it targets video content
+                        // Offset crop by letterbox so it targets video content.
+                        // Also ensure both letterbox sides are zeroed (not just the
+                        // side the user is cropping from) so the opaque black bars
+                        // don't remain visible.
                         let cl = cl + lb_h;
-                        let cr = cr + lb_h;
+                        let cr = (cr + lb_h).max(lb_h);
                         let ct = ct + lb_v;
-                        let cb = cb + lb_v;
+                        let cb = (cb + lb_v).max(lb_v);
                         if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
                             let buf = buffer.make_mut();
                             if let Ok(mut map) = buf.map_writable() {
