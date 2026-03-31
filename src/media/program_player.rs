@@ -7245,9 +7245,8 @@ impl ProgramPlayer {
         // videoconvertscale adds letterbox bars.  Offset the crop values
         // by the letterbox size so cropping applies to the video content
         // area, not the black bars (fixes letterbox shifting on crop).
-        // Use videocrop_src (source-resolution crop) for user crop values.
         let (frame_w, frame_h) = slot
-            .videocrop_src
+            .videocrop
             .as_ref()
             .and_then(|vc| vc.static_pad("sink"))
             .and_then(|p| p.current_caps())
@@ -7261,15 +7260,41 @@ impl ProgramPlayer {
             })
             .unwrap_or((9999, 9999));
 
-        // videocrop now operates at source resolution (before convertscale).
-        // Scale crop values from project pixels to source pixels.
-        // frame_w/frame_h = source dimensions from videocrop sink caps.
-        let (mut cl, mut cr, mut ct, mut cb) = (
-            crop_left.max(0),
-            crop_right.max(0),
-            crop_top.max(0),
-            crop_bottom.max(0),
-        );
+        // When the source aspect ratio differs from the project,
+        // videoconvertscale adds letterbox bars at project resolution.
+        // Offset crop values by the letterbox size so user crop applies
+        // to the video content, not the black bars.
+        // Detect source dimensions from the videocrop_src sink pad
+        // (which sits before convertscale in the pipeline and receives
+        // the raw decoded frame).
+        let (letterbox_h, letterbox_v) = slot
+            .videocrop_src
+            .as_ref()
+            .and_then(|vc| vc.static_pad("sink"))
+            .and_then(|p| p.current_caps())
+            .and_then(|c| c.structure(0).map(|s| {
+                let src_w = s.get::<i32>("width").unwrap_or(frame_w);
+                let src_h = s.get::<i32>("height").unwrap_or(frame_h);
+                let scale = (frame_w as f64 / src_w as f64)
+                    .min(frame_h as f64 / src_h as f64);
+                let scaled_w = (src_w as f64 * scale).round() as i32;
+                let scaled_h = (src_h as f64 * scale).round() as i32;
+                ((frame_w - scaled_w) / 2, (frame_h - scaled_h) / 2)
+            }))
+            .unwrap_or((0, 0));
+
+        let any_crop = crop_left > 0 || crop_right > 0 || crop_top > 0 || crop_bottom > 0;
+        let (mut cl, mut cr, mut ct, mut cb) = if any_crop {
+            // Offset by letterbox so crop targets the content area
+            (
+                crop_left.max(0) + letterbox_h,
+                crop_right.max(0) + letterbox_h,
+                crop_top.max(0) + letterbox_v,
+                crop_bottom.max(0) + letterbox_v,
+            )
+        } else {
+            (0, 0, 0, 0)
+        };
         const MIN_DIM: i32 = 2;
         if cl + cr > frame_w - MIN_DIM {
             let total = (frame_w - MIN_DIM).max(0);
@@ -7291,28 +7316,20 @@ impl ProgramPlayer {
             ct = (ct as f64 * ratio) as i32;
             cb = total - ct;
         }
-        // Apply user crop to the source-resolution videocrop element.
-        if let Some(ref vc) = slot.videocrop_src {
+        if let Some(ref vc) = slot.videocrop {
             vc.set_property("left", cl);
             vc.set_property("right", cr);
             vc.set_property("top", ct);
             vc.set_property("bottom", cb);
         }
-        // Reset wipe-transition videocrop to no-crop (wipe code sets it during transitions).
-        if let Some(ref vc) = slot.videocrop {
-            vc.set_property("left", 0i32);
-            vc.set_property("right", 0i32);
-            vc.set_property("top", 0i32);
-            vc.set_property("bottom", 0i32);
-        }
-        // videobox_crop_alpha: crop is now applied at source resolution
-        // (before convertscale), so we don't need to re-pad here.
-        // The convertscale with add-borders handles the display.
+        // Re-pad cropped edges with transparent borders so the compositor
+        // reveals lower tracks through the cropped area.
         if let Some(ref vb) = slot.videobox_crop_alpha {
-            vb.set_property("left", 0i32);
-            vb.set_property("right", 0i32);
-            vb.set_property("top", 0i32);
-            vb.set_property("bottom", 0i32);
+            vb.set_property("left", -cl);
+            vb.set_property("right", -cr);
+            vb.set_property("top", -ct);
+            vb.set_property("bottom", -cb);
+            vb.set_property("border-alpha", 0.0_f64);
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
             if vfr.find_property("angle").is_some() {
@@ -8628,18 +8645,7 @@ impl ProgramPlayer {
                 chain.push(cs);
             }
         }
-        // 1. User crop at source resolution BEFORE scaling, so crop
-        //    operates on video content (not letterbox bars).
-        //    A separate videocrop_src element handles this; the existing
-        //    videocrop stays at project resolution for wipe transitions.
-        let videocrop_src = gst::ElementFactory::make("videocrop")
-            .name("videocrop_src")
-            .build()
-            .ok();
-        if let Some(ref e) = videocrop_src {
-            chain.push(e.clone());
-        }
-        // 1b. Convert + downscale to project resolution in a single pass.
+        // 1. Convert + downscale to project resolution in a single pass.
         if let Some(ref e) = convertscale {
             chain.push(e.clone());
         }
@@ -8665,8 +8671,11 @@ impl ProgramPlayer {
                 },
             );
         }
-        // 2. Re-pad cropped edges with transparent borders (at project resolution)
-        //    so the compositor reveals lower tracks through cropped areas.
+        // 2. Crop at project resolution (RGBA) then re-pad with transparent
+        //    borders so the compositor reveals lower tracks through cropped areas.
+        if let Some(ref e) = videocrop {
+            chain.push(e.clone());
+        }
         if let Some(ref e) = videobox_crop_alpha {
             chain.push(e.clone());
         }
