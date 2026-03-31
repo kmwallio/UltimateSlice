@@ -5843,7 +5843,7 @@ impl ProgramPlayer {
         );
         // Also warm the effects-bin construction path.
         let (proc_w, proc_h) = self.preview_processing_dimensions();
-        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, self.project_height, None, Arc::new(Mutex::new(Vec::new())));
+        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, self.project_width, self.project_height, None, Arc::new(Mutex::new(Vec::new())));
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
         if self.prepreroll_sidecars.len() >= MAX_PREPREROLL_SIDECARS {
@@ -7291,26 +7291,17 @@ impl ProgramPlayer {
         }
 
         // Update shared crop state — the alpha pad probe reads this on each frame.
-        // No GStreamer element property changes, no caps renegotiation.
-        // proj_w/proj_h from effects_bin src pad = actual processing resolution.
-        // Crop values are in project pixels; the probe scales them.
-        let (proj_w, proj_h) = slot.effects_bin.static_pad("src")
-            .and_then(|p| p.current_caps())
-            .and_then(|c| c.structure(0).map(|s| {
-                (s.get::<i32>("width").unwrap_or(0),
-                 s.get::<i32>("height").unwrap_or(0))
-            }))
-            .unwrap_or((0, 0));
-        *slot.crop_alpha_state.lock().unwrap() = (
-            crop_left.max(0),
-            crop_right.max(0),
-            crop_top.max(0),
-            crop_bottom.max(0),
-            lb_h,
-            lb_v,
-            proj_w,
-            proj_h,
-        );
+        // Only update crop values and letterbox; proj_w/proj_h are set at
+        // construction from actual project dimensions (not processing resolution).
+        {
+            let mut st = slot.crop_alpha_state.lock().unwrap();
+            st.0 = crop_left.max(0);
+            st.1 = crop_right.max(0);
+            st.2 = crop_top.max(0);
+            st.3 = crop_bottom.max(0);
+            st.4 = lb_h;
+            st.5 = lb_v;
+        }
         if let Some(ref vfr) = slot.videoflip_rotate {
             if vfr.find_property("angle").is_some() {
                 // UI positive rotation is counterclockwise, matching GstRotate.
@@ -8179,6 +8170,7 @@ impl ProgramPlayer {
         clip: &ProgramClip,
         target_width: u32,
         target_height: u32,
+        project_width: u32,
         project_height: u32,
         lut: Option<Arc<CubeLut>>,
         mask_shared: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
@@ -8662,7 +8654,7 @@ impl ProgramPlayer {
         // Source dimensions are used to compute letterbox offset so crop
         // targets video content, not letterbox bars.
         let crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32, i32, i32, i32, i32)>> =
-            Arc::new(Mutex::new((clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom, 0i32, 0i32, target_width as i32, target_height as i32)));
+            Arc::new(Mutex::new((clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom, 0i32, 0i32, project_width as i32, project_height as i32)));
         {
             let crop_state = crop_alpha_state.clone();
             if let Ok(identity) = gst::ElementFactory::make("identity").build() {
@@ -10406,7 +10398,7 @@ impl ProgramPlayer {
             videobox_zoom,
             frei0r_user_effects,
             crop_alpha_state,
-        ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_height, realtime_lut, slot_mask_data.clone());
+        ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_width, self.project_height, realtime_lut, slot_mask_data.clone());
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
         if clip.is_title {
