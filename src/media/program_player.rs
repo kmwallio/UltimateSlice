@@ -882,6 +882,8 @@ struct VideoSlot {
     squareblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
+    /// Shared crop values for alpha-based crop probe (left, right, top, bottom).
+    crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32)>>,
     imagefreeze: Option<gst::Element>,
     videoflip_rotate: Option<gst::Element>,
     videoflip_flip: Option<gst::Element>,
@@ -7238,71 +7240,14 @@ impl ProgramPlayer {
         // half-res), so crop_left + crop_right could otherwise exceed the
         // frame width, causing caps negotiation failures in GStreamer.
         //
-        // When the source aspect ratio differs from the project,
-        // videoconvertscale adds letterbox bars.  Offset the crop values
-        // by the letterbox size so cropping applies to the video content
-        // area, not the black bars (fixes letterbox shifting on crop).
-        let (frame_w, frame_h) = slot
-            .videocrop
-            .as_ref()
-            .and_then(|vc| vc.static_pad("sink"))
-            .and_then(|p| p.current_caps())
-            .and_then(|c| {
-                c.structure(0).map(|s| {
-                    (
-                        s.get::<i32>("width").unwrap_or(9999),
-                        s.get::<i32>("height").unwrap_or(9999),
-                    )
-                })
-            })
-            .unwrap_or((9999, 9999));
-
-        // If caps aren't negotiated yet, skip crop entirely to avoid crashes.
-        if frame_w >= 9999 || frame_h >= 9999 || frame_w < 4 || frame_h < 4 {
-            return;
-        }
-        let (mut cl, mut cr, mut ct, mut cb) = (
+        // Update shared crop state — the alpha pad probe reads this on each frame.
+        // No GStreamer element property changes, no caps renegotiation.
+        *slot.crop_alpha_state.lock().unwrap() = (
             crop_left.max(0),
             crop_right.max(0),
             crop_top.max(0),
             crop_bottom.max(0),
         );
-        const MIN_DIM: i32 = 4;
-        if cl + cr > frame_w - MIN_DIM {
-            let total = (frame_w - MIN_DIM).max(0);
-            let ratio = if cl + cr > 0 {
-                total as f64 / (cl + cr) as f64
-            } else {
-                1.0
-            };
-            cl = (cl as f64 * ratio) as i32;
-            cr = total - cl;
-        }
-        if ct + cb > frame_h - MIN_DIM {
-            let total = (frame_h - MIN_DIM).max(0);
-            let ratio = if ct + cb > 0 {
-                total as f64 / (ct + cb) as f64
-            } else {
-                1.0
-            };
-            ct = (ct as f64 * ratio) as i32;
-            cb = total - ct;
-        }
-        if let Some(ref vc) = slot.videocrop {
-            vc.set_property("left", cl);
-            vc.set_property("right", cr);
-            vc.set_property("top", ct);
-            vc.set_property("bottom", cb);
-        }
-        // Re-pad cropped edges with transparent borders so the compositor
-        // reveals lower tracks through the cropped area.
-        if let Some(ref vb) = slot.videobox_crop_alpha {
-            vb.set_property("left", -cl);
-            vb.set_property("right", -cr);
-            vb.set_property("top", -ct);
-            vb.set_property("bottom", -cb);
-            vb.set_property("border-alpha", 0.0_f64);
-        }
         if let Some(ref vfr) = slot.videoflip_rotate {
             if vfr.find_property("angle").is_some() {
                 // UI positive rotation is counterclockwise, matching GstRotate.
@@ -8189,6 +8134,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // capsfilter_zoom
         Option<gst::Element>, // videobox_zoom
         Vec<gst::Element>,    // frei0r_user_effects
+        Arc<Mutex<(i32, i32, i32, i32)>>, // crop_alpha_state
     )
     {
         let bin = gst::Bin::new();
@@ -8643,26 +8589,99 @@ impl ProgramPlayer {
                 },
             );
         }
-        // 2. Crop at project resolution (RGBA) then re-pad with transparent
-        //    borders so the compositor reveals lower tracks through cropped areas.
-        //    Block RECONFIGURE events on videocrop src pad to prevent upstream
-        //    caps renegotiation through multiqueue when crop changes dynamically.
-        if let Some(ref e) = videocrop {
-            if let Some(src_pad) = e.static_pad("src") {
-                src_pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_pad, info| {
-                    if let Some(ev) = info.event() {
-                        if let gst::EventView::Reconfigure(_) = ev.view() {
-                            return gst::PadProbeReturn::Drop;
+        // 2. Crop via alpha-channel zeroing on RGBA buffers.  Unlike videocrop,
+        //    this does NOT change frame dimensions, avoiding caps renegotiation
+        //    crashes through multiqueue.
+        let crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32)>> =
+            Arc::new(Mutex::new((clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom)));
+        {
+            let crop_state = crop_alpha_state.clone();
+            if let Ok(identity) = gst::ElementFactory::make("identity").build() {
+                identity.static_pad("src").unwrap().add_probe(
+                    gst::PadProbeType::BUFFER,
+                    move |_pad, info| {
+                        let (cl, cr, ct, cb) = *crop_state.lock().unwrap();
+                        if cl == 0 && cr == 0 && ct == 0 && cb == 0 {
+                            return gst::PadProbeReturn::Ok;
                         }
-                    }
-                    gst::PadProbeReturn::Ok
-                });
+                        if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                            let buf = buffer.make_mut();
+                            if let Ok(mut map) = buf.map_writable() {
+                                let data = map.as_mut_slice();
+                                // Determine frame dimensions from buffer size (RGBA = 4 bytes/pixel)
+                                // We need to figure out width from the buffer; use the pad caps.
+                                let len = data.len();
+                                // Assume RGBA, estimate width from stride
+                                // For safety, get width from nearby pad if possible
+                                // Fallback: assume square-ish, or use a reasonable width
+                                let stride_guess = if len > 0 {
+                                    // Typical: width * 4 bytes per pixel * height = len
+                                    // We'll look for the width from the buffer's video meta
+                                    // or approximate from common resolutions
+                                    0usize // will be computed below
+                                } else {
+                                    return gst::PadProbeReturn::Ok;
+                                };
+                                let _ = stride_guess;
+                                // Use video frame info for accurate dimensions
+                                let info_ref = gstreamer_video::VideoInfo::from_caps(
+                                    &_pad.current_caps().unwrap_or_else(|| {
+                                        gst::Caps::builder("video/x-raw")
+                                            .field("format", "RGBA")
+                                            .field("width", 1920i32)
+                                            .field("height", 1080i32)
+                                            .build()
+                                    }),
+                                );
+                                let (w, h) = match info_ref {
+                                    Ok(ref vi) => (vi.width() as i32, vi.height() as i32),
+                                    Err(_) => return gst::PadProbeReturn::Ok,
+                                };
+                                let stride = w as usize * 4;
+                                // Zero alpha for cropped rows (top/bottom)
+                                let ct = ct.max(0) as usize;
+                                let cb = cb.max(0) as usize;
+                                let cl = cl.max(0) as usize;
+                                let cr = cr.max(0) as usize;
+                                let h = h as usize;
+                                let w = w as usize;
+                                for row in 0..h {
+                                    if row < ct || row >= h.saturating_sub(cb) {
+                                        // Entire row is cropped — zero alpha
+                                        for x in 0..w {
+                                            let idx = row * stride + x * 4 + 3;
+                                            if idx < data.len() {
+                                                data[idx] = 0;
+                                            }
+                                        }
+                                    } else {
+                                        // Left crop
+                                        for x in 0..cl.min(w) {
+                                            let idx = row * stride + x * 4 + 3;
+                                            if idx < data.len() {
+                                                data[idx] = 0;
+                                            }
+                                        }
+                                        // Right crop
+                                        for x in w.saturating_sub(cr)..w {
+                                            let idx = row * stride + x * 4 + 3;
+                                            if idx < data.len() {
+                                                data[idx] = 0;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        gst::PadProbeReturn::Ok
+                    },
+                );
+                bin.add(&identity).ok();
+                chain.push(identity);
             }
-            chain.push(e.clone());
         }
-        if let Some(ref e) = videobox_crop_alpha {
-            chain.push(e.clone());
-        }
+        // videocrop/videobox_crop_alpha remain in the slot for wipe transitions
+        // but are NOT added to the effects chain for user crop.
         // 2b. Shape mask alpha probe — multiplies alpha channel by mask SDF.
         //     Placed after crop (cropped regions stay transparent) and before
         //     color effects so the mask operates in pre-transform clip space.
@@ -8839,6 +8858,7 @@ impl ProgramPlayer {
             capsfilter_zoom,
             videobox_zoom,
             frei0r_user_effects,
+            crop_alpha_state,
         )
     }
 
@@ -9164,6 +9184,7 @@ impl ProgramPlayer {
             
             videocrop: None,
             videobox_crop_alpha: None,
+            crop_alpha_state: Arc::new(Mutex::new((0, 0, 0, 0))),
             imagefreeze: None,
             videoflip_rotate: None,
             videoflip_flip: None,
@@ -9435,6 +9456,7 @@ impl ProgramPlayer {
             
             squareblur: None,
             videocrop: None,
+            crop_alpha_state: Arc::new(Mutex::new((0, 0, 0, 0))),
             videobox_crop_alpha: None,
             imagefreeze: None,
             videoflip_rotate: None,
@@ -10304,6 +10326,7 @@ impl ProgramPlayer {
             capsfilter_zoom,
             videobox_zoom,
             frei0r_user_effects,
+            crop_alpha_state,
         ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_height, realtime_lut, slot_mask_data.clone());
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
@@ -10424,6 +10447,7 @@ impl ProgramPlayer {
                 squareblur: squareblur.clone(),
                 videocrop: videocrop.clone(),
                 videobox_crop_alpha: videobox_crop_alpha.clone(),
+                crop_alpha_state: crop_alpha_state.clone(),
                 imagefreeze: imagefreeze.clone(),
                 videoflip_rotate: videoflip_rotate.clone(),
                 videoflip_flip: videoflip_flip.clone(),
@@ -10493,6 +10517,7 @@ impl ProgramPlayer {
                 alpha_chroma_key,
                 capsfilter_zoom,
                 videobox_zoom,
+            crop_alpha_state,
                 frei0r_user_effects,
                 slot_queue: Some(slot_queue),
                 comp_arrival_seq,
@@ -10864,6 +10889,7 @@ impl ProgramPlayer {
             videocrop: videocrop.clone(),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
             imagefreeze: imagefreeze.clone(),
+            crop_alpha_state: crop_alpha_state.clone(),
             videoflip_rotate: videoflip_rotate.clone(),
             videoflip_flip: videoflip_flip.clone(),
             textoverlay: textoverlay.clone(),
@@ -10940,6 +10966,7 @@ impl ProgramPlayer {
             alpha_filter,
             alpha_chroma_key,
             capsfilter_zoom,
+            crop_alpha_state,
             videobox_zoom,
             frei0r_user_effects,
             slot_queue: Some(slot_queue),
@@ -14439,6 +14466,7 @@ mod tests {
             },
             gaussianblur: if has_gaussianblur { identity() } else { None },
             squareblur: None, // no squareblur in test slots
+            crop_alpha_state: Arc::new(Mutex::new((0, 0, 0, 0))),
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: if has_imagefreeze { identity() } else { None },
