@@ -8385,7 +8385,7 @@ impl ProgramPlayer {
         // causing EXC_BAD_ACCESS (SIGSEGV) in unpack_NV12.  Force single-threaded
         // conversion on macOS to prevent this race.
         let convertscale = gst::ElementFactory::make("videoconvertscale")
-            .property("add-borders", false)
+            .property("add-borders", true)
             .build()
             .ok();
         #[cfg(target_os = "macos")]
@@ -8538,13 +8538,10 @@ impl ProgramPlayer {
 
         // Set processing-resolution capsfilters.
         // capsfilter_proj constrains to RGBA at target preview processing size.
-        // With add-borders: false, videoconvertscale outputs at the actual
-        // scaled size (maintaining aspect ratio), not padded to project
-        // resolution. The compositor positions and sizes each slot.
         let proj_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", gst::IntRange::new(1i32, target_width as i32))
-            .field("height", gst::IntRange::new(1i32, target_height as i32))
+            .field("width", target_width as i32)
+            .field("height", target_height as i32)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         if let Some(ref cf) = capsfilter_proj {
@@ -9194,7 +9191,7 @@ impl ProgramPlayer {
         let (proc_w, proc_h) = self.preview_processing_dimensions();
         let effects_bin = gst::Bin::new();
         let convertscale = gst::ElementFactory::make("videoconvertscale")
-            .property("add-borders", false)
+            .property("add-borders", true)
             .build()
             .ok()?;
         // On macOS, vtdec IOSurface-backed buffers must not be read by parallel
