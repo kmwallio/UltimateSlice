@@ -882,8 +882,11 @@ struct VideoSlot {
     squareblur: Option<gst::Element>,
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
-    /// Shared crop values for alpha-based crop probe (left, right, top, bottom).
-    crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32)>>,
+    /// Shared crop values for alpha-based crop probe.
+    /// (crop_left, crop_right, crop_top, crop_bottom, letterbox_h, letterbox_v)
+    /// letterbox_h/v are added to crop values inside the probe so crop targets
+    /// video content, not letterbox bars.
+    crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32, i32, i32)>>,
     imagefreeze: Option<gst::Element>,
     videoflip_rotate: Option<gst::Element>,
     videoflip_flip: Option<gst::Element>,
@@ -7240,6 +7243,43 @@ impl ProgramPlayer {
         // half-res), so crop_left + crop_right could otherwise exceed the
         // frame width, causing caps negotiation failures in GStreamer.
         //
+        // Compute letterbox offset from source dimensions vs project frame.
+        // The effects_bin ghost sink pad peer carries the raw decoded caps.
+        let (lb_h, lb_v) = slot
+            .effects_bin
+            .static_pad("sink")
+            .and_then(|ghost| {
+                // Ghost pad target → internal pad → peer = decoder src pad
+                ghost.peer()
+            })
+            .and_then(|peer| peer.current_caps())
+            .and_then(|c| c.structure(0).map(|s| {
+                let src_w = s.get::<i32>("width").unwrap_or(0);
+                let src_h = s.get::<i32>("height").unwrap_or(0);
+                if src_w <= 0 || src_h <= 0 {
+                    return (0, 0);
+                }
+                // frame_w/frame_h are from videocrop sink (project resolution)
+                let fw = slot.videocrop.as_ref()
+                    .and_then(|vc| vc.static_pad("sink"))
+                    .and_then(|p| p.current_caps())
+                    .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("width").ok()))
+                    .unwrap_or(0);
+                let fh = slot.videocrop.as_ref()
+                    .and_then(|vc| vc.static_pad("sink"))
+                    .and_then(|p| p.current_caps())
+                    .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("height").ok()))
+                    .unwrap_or(0);
+                if fw <= 0 || fh <= 0 {
+                    return (0, 0);
+                }
+                let scale = (fw as f64 / src_w as f64).min(fh as f64 / src_h as f64);
+                let scaled_w = (src_w as f64 * scale).round() as i32;
+                let scaled_h = (src_h as f64 * scale).round() as i32;
+                ((fw - scaled_w) / 2, (fh - scaled_h) / 2)
+            }))
+            .unwrap_or((0, 0));
+
         // Update shared crop state — the alpha pad probe reads this on each frame.
         // No GStreamer element property changes, no caps renegotiation.
         *slot.crop_alpha_state.lock().unwrap() = (
@@ -7247,6 +7287,8 @@ impl ProgramPlayer {
             crop_right.max(0),
             crop_top.max(0),
             crop_bottom.max(0),
+            lb_h,
+            lb_v,
         );
         if let Some(ref vfr) = slot.videoflip_rotate {
             if vfr.find_property("angle").is_some() {
@@ -8134,7 +8176,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // capsfilter_zoom
         Option<gst::Element>, // videobox_zoom
         Vec<gst::Element>,    // frei0r_user_effects
-        Arc<Mutex<(i32, i32, i32, i32)>>, // crop_alpha_state
+        Arc<Mutex<(i32, i32, i32, i32, i32, i32)>>, // crop_alpha_state
     )
     {
         let bin = gst::Bin::new();
@@ -8592,18 +8634,26 @@ impl ProgramPlayer {
         // 2. Crop via alpha-channel zeroing on RGBA buffers.  Unlike videocrop,
         //    this does NOT change frame dimensions, avoiding caps renegotiation
         //    crashes through multiqueue.
-        let crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32)>> =
-            Arc::new(Mutex::new((clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom)));
+        // Crop state: (left, right, top, bottom, src_width, src_height).
+        // Source dimensions are used to compute letterbox offset so crop
+        // targets video content, not letterbox bars.
+        let crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32, i32, i32)>> =
+            Arc::new(Mutex::new((clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom, 0i32, 0i32)));
         {
             let crop_state = crop_alpha_state.clone();
             if let Ok(identity) = gst::ElementFactory::make("identity").build() {
                 identity.static_pad("src").unwrap().add_probe(
                     gst::PadProbeType::BUFFER,
                     move |_pad, info| {
-                        let (cl, cr, ct, cb) = *crop_state.lock().unwrap();
+                        let (cl, cr, ct, cb, lb_h, lb_v) = *crop_state.lock().unwrap();
                         if cl == 0 && cr == 0 && ct == 0 && cb == 0 {
                             return gst::PadProbeReturn::Ok;
                         }
+                        // Offset crop by letterbox so it targets video content
+                        let cl = cl + lb_h;
+                        let cr = cr + lb_h;
+                        let ct = ct + lb_v;
+                        let cb = cb + lb_v;
                         if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
                             let buf = buffer.make_mut();
                             if let Ok(mut map) = buf.map_writable() {
@@ -9183,7 +9233,7 @@ impl ProgramPlayer {
             
             videocrop: None,
             videobox_crop_alpha: None,
-            crop_alpha_state: Arc::new(Mutex::new((0, 0, 0, 0))),
+            crop_alpha_state: Arc::new(Mutex::new((0i32, 0i32, 0i32, 0i32, 0i32, 0i32))),
             imagefreeze: None,
             videoflip_rotate: None,
             videoflip_flip: None,
@@ -9455,7 +9505,7 @@ impl ProgramPlayer {
             
             squareblur: None,
             videocrop: None,
-            crop_alpha_state: Arc::new(Mutex::new((0, 0, 0, 0))),
+            crop_alpha_state: Arc::new(Mutex::new((0i32, 0i32, 0i32, 0i32, 0i32, 0i32))),
             videobox_crop_alpha: None,
             imagefreeze: None,
             videoflip_rotate: None,
@@ -14465,7 +14515,7 @@ mod tests {
             },
             gaussianblur: if has_gaussianblur { identity() } else { None },
             squareblur: None, // no squareblur in test slots
-            crop_alpha_state: Arc::new(Mutex::new((0, 0, 0, 0))),
+            crop_alpha_state: Arc::new(Mutex::new((0i32, 0i32, 0i32, 0i32, 0i32, 0i32))),
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: if has_imagefreeze { identity() } else { None },
