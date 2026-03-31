@@ -8676,7 +8676,6 @@ impl ProgramPlayer {
                         gst::PadProbeReturn::Ok
                     },
                 );
-                bin.add(&identity).ok();
                 chain.push(identity);
             }
         }
