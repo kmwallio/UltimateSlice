@@ -7245,14 +7245,16 @@ impl ProgramPlayer {
         //
         // Compute letterbox offset from source dimensions vs project frame.
         // The effects_bin ghost sink pad peer carries the raw decoded caps.
-        let (lb_h, lb_v) = slot
-            .effects_bin
-            .static_pad("sink")
+        // Try multiple approaches to get source dimensions for letterbox computation:
+        // 1. Ghost sink pad's peer (decoder src pad)
+        // 2. Ghost sink pad's own current caps (may have source caps after preroll)
+        // 3. The first element inside the effects_bin's sink pad caps
+        let source_caps = slot.effects_bin.static_pad("sink")
             .and_then(|ghost| {
-                // Ghost pad target → internal pad → peer = decoder src pad
-                ghost.peer()
-            })
-            .and_then(|peer| peer.current_caps())
+                ghost.peer().and_then(|p| p.current_caps())
+                    .or_else(|| ghost.current_caps())
+            });
+        let (lb_h, lb_v) = source_caps
             .and_then(|c| c.structure(0).map(|s| {
                 let src_w = s.get::<i32>("width").unwrap_or(0);
                 let src_h = s.get::<i32>("height").unwrap_or(0);
@@ -7276,6 +7278,11 @@ impl ProgramPlayer {
                 ((fw - scaled_w) / 2, (fh - scaled_h) / 2)
             }))
             .unwrap_or((0, 0));
+        if crop_left > 0 || crop_right > 0 || crop_top > 0 || crop_bottom > 0 {
+            log::info!(
+                "ProgramPlayer: crop letterbox offset: lb_h={lb_h} lb_v={lb_v} crop=({crop_left},{crop_right},{crop_top},{crop_bottom})"
+            );
+        }
 
         // Update shared crop state — the alpha pad probe reads this on each frame.
         // No GStreamer element property changes, no caps renegotiation.
