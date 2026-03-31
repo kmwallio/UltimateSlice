@@ -2,7 +2,7 @@ use crate::fcpxml;
 use crate::media::export::{
     export_project, AudioCodec, Container, ExportOptions, ExportProgress, VideoCodec,
 };
-use crate::model::media_library::MediaItem;
+use crate::model::media_library::MediaLibrary;
 use crate::model::project::{FrameRate, Project};
 use crate::recent;
 use crate::ui::timeline::{ActiveTool, TimelineState};
@@ -16,8 +16,11 @@ use std::rc::Rc;
 
 fn save_project_to_path(
     project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
     path: &std::path::Path,
 ) -> Result<(), String> {
+    // Sync bin data from library into project before writing.
+    crate::model::media_library::sync_bins_to_project(&library.borrow(), &mut project.borrow_mut());
     let xml = {
         let proj = project.borrow();
         fcpxml::writer::write_fcpxml_for_path(&proj, path)
@@ -205,6 +208,7 @@ fn refresh_preset_dropdown(
 pub fn confirm_unsaved_then(
     window: Option<gtk::Window>,
     project: Rc<RefCell<Project>>,
+    library: Rc<RefCell<MediaLibrary>>,
     on_project_changed: Rc<dyn Fn()>,
     on_continue: Rc<dyn Fn()>,
 ) {
@@ -233,6 +237,7 @@ pub fn confirm_unsaved_then(
     dialog.content_area().append(&label);
 
     let project_c = project.clone();
+    let library_c = library.clone();
     let on_project_changed_c = on_project_changed.clone();
     let on_continue_c = on_continue.clone();
     dialog.connect_response(move |d, resp| match resp {
@@ -244,7 +249,7 @@ pub fn confirm_unsaved_then(
             d.close();
             let existing_path = project_c.borrow().file_path.clone();
             if let Some(path) = existing_path {
-                match save_project_to_path(&project_c, std::path::Path::new(&path)) {
+                match save_project_to_path(&project_c, &library_c, std::path::Path::new(&path)) {
                     Ok(()) => {
                         on_project_changed_c();
                         on_continue_c();
@@ -263,12 +268,13 @@ pub fn confirm_unsaved_then(
                 filters.append(&filter);
                 file_dialog.set_filters(Some(&filters));
                 let project_s = project_c.clone();
+                let library_s = library_c.clone();
                 let on_project_changed_s = on_project_changed_c.clone();
                 let on_continue_s = on_continue_c.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
-                            match save_project_to_path(&project_s, &path) {
+                            match save_project_to_path(&project_s, &library_s, &path) {
                                 Ok(()) => {
                                     on_project_changed_s();
                                     on_continue_s();
@@ -289,7 +295,7 @@ pub fn confirm_unsaved_then(
 #[allow(deprecated)]
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
-    _library: Rc<RefCell<Vec<MediaItem>>>,
+    library: Rc<RefCell<MediaLibrary>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
@@ -308,6 +314,7 @@ pub fn build_toolbar(
     btn_new.set_tooltip_text(Some("New project (Ctrl+N)"));
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
@@ -333,7 +340,7 @@ pub fn build_toolbar(
                     on_project_changed();
                 }
             });
-            confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
+            confirm_unsaved_then(window, project.clone(), library.clone(), on_project_changed_cb, action);
         });
     }
     header.pack_start(&btn_new);
@@ -343,6 +350,7 @@ pub fn build_toolbar(
     btn_open.set_tooltip_text(Some("Open project XML (Ctrl+O)"));
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
@@ -438,7 +446,7 @@ pub fn build_toolbar(
                     });
                 }
             });
-            confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
+            confirm_unsaved_then(window, project.clone(), library.clone(), on_project_changed_cb, action);
         });
     }
     header.pack_start(&btn_open);
@@ -449,6 +457,7 @@ pub fn build_toolbar(
     btn_recent.set_tooltip_text(Some("Open a recently used project"));
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
@@ -496,6 +505,7 @@ pub fn build_toolbar(
 
                     let path_owned = path_str.clone();
                     let project = project.clone();
+                    let library = library.clone();
                     let timeline_state = timeline_state.clone();
                     let on_project_changed = on_project_changed.clone();
                     let on_project_reloaded = on_project_reloaded.clone();
@@ -580,6 +590,7 @@ pub fn build_toolbar(
                         confirm_unsaved_then(
                             window,
                             project.clone(),
+                            library.clone(),
                             on_project_changed_cb,
                             action,
                         );
@@ -594,6 +605,7 @@ pub fn build_toolbar(
     btn_save.set_tooltip_text(Some("Save project XML (Ctrl+S)"));
     {
         let project = project.clone();
+        let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         btn_save.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
@@ -609,13 +621,14 @@ pub fn build_toolbar(
             dialog.set_filters(Some(&filters));
 
             let project = project.clone();
+            let library = library.clone();
             let on_project_changed = on_project_changed.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
             dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
-                        match save_project_to_path(&project, &path) {
+                        match save_project_to_path(&project, &library, &path) {
                             Ok(()) => {
                                 println!("Saved to {}", path.display());
                                 on_project_changed();

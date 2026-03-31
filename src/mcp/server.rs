@@ -724,6 +724,65 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "create_bin",
+            "description": "Create a media library bin (folder) for organizing media items",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name for the new bin" },
+                    "parent_id": { "type": "string", "description": "Parent bin ID for nesting (omit for root-level bin)" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "delete_bin",
+            "description": "Delete a media library bin; items and child bins are moved to the parent (or root)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "bin_id": { "type": "string", "description": "ID of the bin to delete" }
+                },
+                "required": ["bin_id"]
+            }
+        },
+        {
+            "name": "rename_bin",
+            "description": "Rename a media library bin",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "bin_id": { "type": "string", "description": "ID of the bin to rename" },
+                    "name": { "type": "string", "description": "New name for the bin" }
+                },
+                "required": ["bin_id", "name"]
+            }
+        },
+        {
+            "name": "list_bins",
+            "description": "List all media library bins with hierarchy and item counts",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "move_to_bin",
+            "description": "Move media items to a bin (or root if bin_id is null/omitted)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source paths of media items to move"
+                    },
+                    "bin_id": { "type": "string", "description": "Target bin ID, or omit/null to move to root" }
+                },
+                "required": ["source_paths"]
+            }
+        },
+        {
             "name": "reorder_track",
             "description": "Move a track from one position to another (0-based indices).",
             "inputSchema": {
@@ -1757,6 +1816,42 @@ fn dispatch_tool_payload(
             root_path: args["root_path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
+
+        "create_bin" => {
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let parent_id = args.get("parent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            if name.is_empty() {
+                return Err(tool_error_payload(-32602, "name is required"));
+            }
+            McpCommand::CreateBin { name, parent_id, reply: tx }
+        }
+        "delete_bin" => {
+            let bin_id = args.get("bin_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if bin_id.is_empty() {
+                return Err(tool_error_payload(-32602, "bin_id is required"));
+            }
+            McpCommand::DeleteBin { bin_id, reply: tx }
+        }
+        "rename_bin" => {
+            let bin_id = args.get("bin_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if bin_id.is_empty() || name.is_empty() {
+                return Err(tool_error_payload(-32602, "bin_id and name are required"));
+            }
+            McpCommand::RenameBin { bin_id, name, reply: tx }
+        }
+        "list_bins" => McpCommand::ListBins { reply: tx },
+        "move_to_bin" => {
+            let source_paths: Vec<String> = args.get("source_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+            if source_paths.is_empty() {
+                return Err(tool_error_payload(-32602, "source_paths is required"));
+            }
+            let bin_id = args.get("bin_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            McpCommand::MoveToBin { source_paths, bin_id, reply: tx }
+        }
 
         "reorder_track" => McpCommand::ReorderTrack {
             from_index: args["from_index"].as_u64().unwrap_or(0) as usize,

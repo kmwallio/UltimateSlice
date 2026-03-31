@@ -525,7 +525,12 @@ Tracking docs:
 
 ### Media Management
 - [x] Relink dialog — general-purpose UI to find and repoint all offline/missing media
-- [ ] Bins / folders — hierarchical media browser organization for large projects
+- [x] Bins / folders — hierarchical media browser organization for large projects
+  - [x] `MediaBin` data model with nesting (max 2 levels), `bin_id` on `MediaItem`, `MediaLibrary` wrapper struct
+  - [x] Breadcrumb navigation bar, folder-icon bin cells in FlowBox, double-click to enter, "All Media" toggle
+  - [x] Right-click context menu: New Bin, Rename, Delete, New Sub-bin, Move to Bin
+  - [x] FCPXML persistence via `us:bins`/`us:media-bins` vendor attributes on `<event>`
+  - [x] MCP tools: `create_bin`, `delete_bin`, `rename_bin`, `list_bins`, `move_to_bin`; `list_library` includes `bin_id`
 - [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
 - [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
 - [ ] Metadata display & filtering — show resolution, codec, frame rate, duration, file size in media browser

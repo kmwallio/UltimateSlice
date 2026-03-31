@@ -1,7 +1,7 @@
 use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, Phase1KeyframeProperty};
-use crate::model::media_library::MediaItem;
+use crate::model::media_library::{MediaItem, MediaLibrary};
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 use crate::recent;
@@ -2564,7 +2564,7 @@ pub fn build_window(
     let project = Rc::new(RefCell::new(Project::new("Untitled")));
 
     // Shared media library (items visible in the browser, not yet on timeline)
-    let library: Rc<RefCell<Vec<MediaItem>>> = Rc::new(RefCell::new(Vec::new()));
+    let library: Rc<RefCell<MediaLibrary>> = Rc::new(RefCell::new(MediaLibrary::new()));
     let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
 
     // MCP command channel — created unconditionally so the socket transport can
@@ -4389,7 +4389,7 @@ pub fn build_window(
                     } else {
                         let lib = library.borrow();
                         let proj = project.borrow();
-                        lookup_source_placement_info(&lib, &proj, &source_path)
+                        lookup_source_placement_info(&lib.items, &proj, &source_path)
                     }
                 };
                 let mut proj = project.borrow_mut();
@@ -4527,7 +4527,7 @@ pub fn build_window(
                     let is_image = crate::model::clip::is_image_file(path);
 
                     // Import into library if not already present (synchronous probe).
-                    let already_in_library = library.borrow().iter().any(|item| item.source_path == *path);
+                    let already_in_library = library.borrow().items.iter().any(|item| item.source_path == *path);
                     if !already_in_library {
                         let uri = format!("file://{path}");
                         let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
@@ -4541,23 +4541,23 @@ pub fn build_window(
                         item.has_audio = metadata.has_audio;
                         item.is_image = is_image;
                         item.source_timecode_base_ns = lookup_source_timecode_base_ns(
-                            &library.borrow(),
+                            &library.borrow().items,
                             &project.borrow(),
                             path,
                         );
-                        library.borrow_mut().push(item);
+                        library.borrow_mut().items.push(item);
                     }
 
                     // Look up placement info (may re-probe if needed).
                     let source_info = {
                         let lib = library.borrow();
                         let proj = project.borrow();
-                        lookup_source_placement_info(&lib, &proj, path)
+                        lookup_source_placement_info(&lib.items, &proj, path)
                     };
 
                     let duration_ns = {
                         let lib = library.borrow();
-                        lib.iter()
+                        lib.items.iter()
                             .find(|item| item.source_path == *path)
                             .map(|item| item.duration_ns)
                             .unwrap_or(if is_image { 4_000_000_000 } else { 10_000_000_000 })
@@ -6205,7 +6205,7 @@ pub fn build_window(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &path)
+                lookup_source_placement_info(&lib.items, &proj, &path)
             };
             // Switch preview stack to audio banner when clip has no video.
             set_audio_only(source_info.is_audio_only);
@@ -6285,7 +6285,7 @@ pub fn build_window(
             }
             let duration_ns = {
                 let lib = library.borrow();
-                lib.iter()
+                lib.items.iter()
                     .find(|item| item.source_path == source_path)
                     .map(|item| item.duration_ns)
                     .unwrap_or(source_out)
@@ -6334,7 +6334,7 @@ pub fn build_window(
                     .unwrap_or(0);
                 let lib = library.borrow();
                 for path in &source_paths {
-                    let dur = lib
+                    let dur = lib.items
                         .iter()
                         .find(|item| item.source_path == *path)
                         .map(|item| item.duration_ns)
@@ -6391,7 +6391,7 @@ pub fn build_window(
             let missing_paths = {
                 let proj = project.borrow();
                 let lib = library.borrow();
-                collect_missing_source_paths(&proj, &lib)
+                collect_missing_source_paths(&proj, &lib.items)
             };
             if missing_paths.is_empty() {
                 flash_window_status_title(&win, &project, "No offline media to relink");
@@ -6449,7 +6449,7 @@ pub fn build_window(
                             }
                         }
                         let mut lc = 0usize;
-                        for item in lib.iter_mut() {
+                        for item in lib.items.iter_mut() {
                             if item.source_path == old_path {
                                 item.source_path = new_path_str.clone();
                                 lc += 1;
@@ -6471,7 +6471,7 @@ pub fn build_window(
                         if current_path == old_path {
                             let duration_ns = library
                                 .borrow()
-                                .iter()
+                                .items.iter()
                                 .find(|item| item.source_path == new_path_str)
                                 .map(|item| item.duration_ns)
                                 .unwrap_or_else(|| source_marks.borrow().duration_ns);
@@ -6484,14 +6484,14 @@ pub fn build_window(
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                     }
                     on_project_changed();
                     {
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        let mp = refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                         let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
                         drop(st);
                         inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
@@ -6542,7 +6542,7 @@ pub fn build_window(
                     let summary = {
                         let mut proj = project.borrow_mut();
                         let mut lib = library.borrow_mut();
-                        relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root_path)
+                        relink_missing_media_under_root(&mut proj, lib.items.as_mut_slice(), &root_path)
                     };
                     log::info!(
                         "[relink] scanned={} remapped={} unresolved={} clips={} library={}",
@@ -6567,7 +6567,7 @@ pub fn build_window(
                     if let Some(new_path) = remapped_source {
                         let duration_ns = library
                             .borrow()
-                            .iter()
+                            .items.iter()
                             .find(|item| item.source_path == new_path)
                             .map(|item| item.duration_ns)
                             .unwrap_or_else(|| source_marks.borrow().duration_ns);
@@ -6579,14 +6579,14 @@ pub fn build_window(
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                     }
                     on_project_changed();
                     let remaining_missing = {
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        let mp = refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                         let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
                         drop(st);
                         inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
@@ -7068,7 +7068,11 @@ pub fn build_window(
             let use_light_refresh = mcp_light_refresh_next.replace(false);
             if clear_media_browser_on_next_reload.replace(false) {
                 on_close_preview();
-                library.borrow_mut().clear();
+                {
+                    let mut lib = library.borrow_mut();
+                    lib.items.clear();
+                    lib.bins.clear();
+                }
                 prog_player.borrow_mut().stop();
                 let proxy_mode_enabled = preferences_state.borrow().proxy_mode.is_enabled();
                 {
@@ -7174,9 +7178,9 @@ pub fn build_window(
 
             {
                 let mut lib = library.borrow_mut();
-                let seen: HashSet<String> = lib.iter().map(|i| i.source_path.clone()).collect();
+                let seen: HashSet<String> = lib.items.iter().map(|i| i.source_path.clone()).collect();
                 for (path, dur, source_timecode_base_ns) in &media_from_project {
-                    if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
+                    if let Some(item) = lib.items.iter_mut().find(|i| i.source_path == *path) {
                         if item.duration_ns == 0 && *dur > 0 {
                             item.duration_ns = *dur;
                         }
@@ -7194,19 +7198,23 @@ pub fn build_window(
                 for (path, dur, source_timecode_base_ns) in new_items {
                     let mut item = MediaItem::new(path, dur);
                     item.source_timecode_base_ns = source_timecode_base_ns;
-                    lib.push(item);
+                    lib.items.push(item);
                 }
+                // Restore bin assignments from parsed FCPXML data.
+                let mut proj = project.borrow_mut();
+                crate::model::media_library::apply_bins_from_project(&mut lib, &mut proj);
+                drop(proj);
             }
 
             let missing_paths = {
                 let proj = project.borrow();
                 let mut lib = library.borrow_mut();
                 let mut st = timeline_state.borrow_mut();
-                let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                let mp = refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                 log::debug!(
                     "[on_project_changed] missing_count={} lib_missing_count={}",
                     mp.len(),
-                    lib.iter().filter(|i| i.is_missing).count(),
+                    lib.items.iter().filter(|i| i.is_missing).count(),
                 );
                 mp
             };
@@ -8151,11 +8159,14 @@ pub fn build_window(
     // Also creates a versioned backup in $XDG_DATA_HOME/ultimateslice/backups/.
     {
         let project = project.clone();
+        let library = library.clone();
         let window_weak = window.downgrade();
         let preferences_state = preferences_state.clone();
         glib::timeout_add_local(std::time::Duration::from_secs(60), move || {
             let is_dirty = project.borrow().dirty;
             if is_dirty {
+                // Sync bin data before autosave.
+                crate::model::media_library::sync_bins_to_project(&library.borrow(), &mut project.borrow_mut());
                 let xml_result = {
                     let proj = project.borrow();
                     crate::fcpxml::writer::write_fcpxml(&proj)
@@ -8455,6 +8466,7 @@ pub fn build_window(
 
     {
         let project = project.clone();
+        let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
@@ -8488,6 +8500,7 @@ pub fn build_window(
             crate::ui::toolbar::confirm_unsaved_then(
                 Some(w.clone().upcast::<gtk::Window>()),
                 project.clone(),
+                library.clone(),
                 on_project_changed.clone(),
                 on_continue,
             );
@@ -8552,7 +8565,7 @@ fn handle_mcp_command(
     cmd: crate::mcp::McpCommand,
     window: &gtk::ApplicationWindow,
     project: &Rc<RefCell<Project>>,
-    library: &Rc<RefCell<Vec<MediaItem>>>,
+    library: &Rc<RefCell<MediaLibrary>>,
     player: &Rc<RefCell<Player>>,
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     timeline_state: &Rc<RefCell<TimelineState>>,
@@ -9398,7 +9411,7 @@ fn handle_mcp_command(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &source_path)
+                lookup_source_placement_info(&lib.items, &proj, &source_path)
             };
             let created = {
                 let mut proj = project.borrow_mut();
@@ -10842,6 +10855,8 @@ fn handle_mcp_command(
         }
 
         McpCommand::SaveFcpxml { path, reply } => {
+            // Sync bin data before save.
+            crate::model::media_library::sync_bins_to_project(&library.borrow(), &mut project.borrow_mut());
             let result = {
                 let proj = project.borrow();
                 crate::fcpxml::writer::write_fcpxml_for_path(&proj, std::path::Path::new(&path))
@@ -10880,6 +10895,7 @@ fn handle_mcp_command(
         }
 
         McpCommand::SaveProjectWithMedia { path, reply } => {
+            crate::model::media_library::sync_bins_to_project(&library.borrow(), &mut project.borrow_mut());
             let result = {
                 let proj = project.borrow();
                 crate::fcpxml::writer::export_project_with_media(&proj, std::path::Path::new(&path))
@@ -11188,7 +11204,7 @@ fn handle_mcp_command(
 
         McpCommand::ListLibrary { reply } => {
             let lib = library.borrow();
-            let items: Vec<_> = lib
+            let items: Vec<_> = lib.items
                 .iter()
                 .map(|item| {
                     json!({
@@ -11199,6 +11215,7 @@ fn handle_mcp_command(
                         "is_audio_only": item.is_audio_only,
                         "has_audio": item.has_audio,
                         "is_missing": item.is_missing,
+                        "bin_id": item.bin_id,
                     })
                 })
                 .collect();
@@ -11214,19 +11231,19 @@ fn handle_mcp_command(
             let source_timecode_base_ns = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_timecode_base_ns(&lib, &proj, &path)
+                lookup_source_timecode_base_ns(&lib.items, &proj, &path)
             };
             let mut item = MediaItem::new(path.clone(), duration_ns);
             item.is_audio_only = audio_only;
             item.has_audio = has_audio;
             item.source_timecode_base_ns = source_timecode_base_ns;
             let label = item.label.clone();
-            library.borrow_mut().push(item);
+            library.borrow_mut().items.push(item);
             {
                 let proj = project.borrow();
                 let mut lib = library.borrow_mut();
                 let mut st = timeline_state.borrow_mut();
-                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
             }
             reply
                 .send(json!({
@@ -11252,13 +11269,13 @@ fn handle_mcp_command(
             let summary = {
                 let mut proj = project.borrow_mut();
                 let mut lib = library.borrow_mut();
-                relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root)
+                relink_missing_media_under_root(&mut proj, lib.items.as_mut_slice(), &root)
             };
             {
                 let proj = project.borrow();
                 let mut lib = library.borrow_mut();
                 let mut st = timeline_state.borrow_mut();
-                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
             }
             reply
                 .send(json!({
@@ -11277,6 +11294,99 @@ fn handle_mcp_command(
             if summary.updated_clip_count > 0 || summary.updated_library_count > 0 {
                 on_project_changed_full();
             }
+        }
+
+        McpCommand::CreateBin { name, parent_id, reply } => {
+            use crate::model::media_library::MediaBin;
+            let mut lib = library.borrow_mut();
+            // Enforce max depth of 2
+            if let Some(ref pid) = parent_id {
+                let parent_depth = lib.bins.iter().find(|b| &b.id == pid).map(|b| b.depth(&lib.bins)).unwrap_or(0);
+                if parent_depth >= 2 {
+                    reply.send(json!({"error": "Maximum bin nesting depth (2) reached"})).ok();
+                    return;
+                }
+                if !lib.bins.iter().any(|b| &b.id == pid) {
+                    reply.send(json!({"error": "Parent bin not found"})).ok();
+                    return;
+                }
+            }
+            let bin = MediaBin::new(&name, parent_id.clone());
+            let id = bin.id.clone();
+            lib.bins.push(bin);
+            drop(lib);
+            reply.send(json!({"success": true, "id": id, "name": name, "parent_id": parent_id})).ok();
+        }
+
+        McpCommand::DeleteBin { bin_id, reply } => {
+            let mut lib = library.borrow_mut();
+            let bin = lib.bins.iter().find(|b| b.id == bin_id);
+            if bin.is_none() {
+                reply.send(json!({"error": "Bin not found"})).ok();
+                return;
+            }
+            let parent_id = bin.unwrap().parent_id.clone();
+            // Move items to parent/root
+            for item in lib.items.iter_mut() {
+                if item.bin_id.as_deref() == Some(&bin_id) {
+                    item.bin_id = parent_id.clone();
+                }
+            }
+            // Reparent child bins
+            let child_ids: Vec<String> = lib.bins.iter().filter(|b| b.parent_id.as_deref() == Some(&bin_id)).map(|b| b.id.clone()).collect();
+            for cid in child_ids {
+                if let Some(cb) = lib.bins.iter_mut().find(|b| b.id == cid) {
+                    cb.parent_id = parent_id.clone();
+                }
+            }
+            lib.bins.retain(|b| b.id != bin_id);
+            drop(lib);
+            reply.send(json!({"success": true})).ok();
+        }
+
+        McpCommand::RenameBin { bin_id, name, reply } => {
+            let mut lib = library.borrow_mut();
+            if let Some(bin) = lib.bins.iter_mut().find(|b| b.id == bin_id) {
+                bin.name = name.clone();
+                drop(lib);
+                reply.send(json!({"success": true, "bin_id": bin_id, "name": name})).ok();
+            } else {
+                reply.send(json!({"error": "Bin not found"})).ok();
+            }
+        }
+
+        McpCommand::ListBins { reply } => {
+            let lib = library.borrow();
+            let bins: Vec<_> = lib.bins.iter().map(|b| {
+                let item_count = lib.items.iter().filter(|i| i.bin_id.as_deref() == Some(&b.id)).count();
+                json!({
+                    "id": b.id,
+                    "name": b.name,
+                    "parent_id": b.parent_id,
+                    "item_count": item_count,
+                })
+            }).collect();
+            reply.send(json!(bins)).ok();
+        }
+
+        McpCommand::MoveToBin { source_paths, bin_id, reply } => {
+            let mut lib = library.borrow_mut();
+            // Validate bin exists if specified
+            if let Some(ref bid) = bin_id {
+                if !lib.bins.iter().any(|b| &b.id == bid) {
+                    reply.send(json!({"error": "Target bin not found"})).ok();
+                    return;
+                }
+            }
+            let mut moved = 0usize;
+            for item in lib.items.iter_mut() {
+                if source_paths.contains(&item.source_path) {
+                    item.bin_id = bin_id.clone();
+                    moved += 1;
+                }
+            }
+            drop(lib);
+            reply.send(json!({"success": true, "moved_count": moved})).ok();
         }
 
         McpCommand::ReorderTrack {
@@ -11429,7 +11539,7 @@ fn handle_mcp_command(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &source_path)
+                lookup_source_placement_info(&lib.items, &proj, &source_path)
             };
             let result = {
                 let mut proj = project.borrow_mut();
@@ -11536,7 +11646,7 @@ fn handle_mcp_command(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &source_path)
+                lookup_source_placement_info(&lib.items, &proj, &source_path)
             };
             let result = {
                 let mut proj = project.borrow_mut();
@@ -11764,7 +11874,7 @@ fn handle_mcp_command(
         McpCommand::SelectLibraryItem { path, reply } => {
             let item = library
                 .borrow()
-                .iter()
+                .items.iter()
                 .find(|i| i.source_path == path)
                 .cloned();
             match item {
@@ -11838,7 +11948,7 @@ fn handle_mcp_command(
                             } else {
                                 let duration_ns = library
                                     .borrow()
-                                    .iter()
+                                    .items.iter()
                                     .find(|item| item.source_path == source_path)
                                     .map(|item| item.duration_ns)
                                     .unwrap_or(source_out);

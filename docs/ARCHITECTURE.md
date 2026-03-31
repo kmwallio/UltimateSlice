@@ -37,7 +37,7 @@ src/
     clip.rs                 Clip struct — source path, source_in/out (ns), timeline_start, label, ClipKind (Video/Audio/Image/Title/Adjustment/Compound)
     track.rs                Track struct — id, TrackKind, Vec<Clip>, muted, locked
     project.rs              Project struct — title, FrameRate, resolution, Vec<Track>, dirty flag
-    media_library.rs        MediaItem (library entry) + SourceMarks (source in/out state)
+    media_library.rs        MediaItem (library entry), MediaBin (folder), MediaLibrary (items + bins) + SourceMarks (source in/out state)
 
   media/
     audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
@@ -401,6 +401,11 @@ Before declaring a task finished, agents must verify via MCP:
 | `list_library` | Items in the media library (not yet on timeline), including missing/offline status |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
 | `relink_media` | Recursively scan a root folder and remap missing media paths to matching files |
+| `create_bin` | Create a media library bin (folder) with optional parent for nesting (max 2 levels) |
+| `delete_bin` | Delete a media library bin; items and child bins move to parent or root |
+| `rename_bin` | Rename a media library bin |
+| `list_bins` | List all bins with hierarchy and item counts |
+| `move_to_bin` | Move media items to a bin (or root if bin_id is null) |
 | `reorder_track` | Move a track from one index to another (undoable) |
 | `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
 | `create_project` | Discard the current project and start a new empty one (optional title) |

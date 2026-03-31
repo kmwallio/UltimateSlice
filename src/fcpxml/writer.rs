@@ -158,6 +158,17 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute((k.as_str(), v.as_str()));
             }
         }
+        // Emit bin persistence attributes when present.
+        if let Some(ref bins_json) = project.parsed_bins_json {
+            if bins_json != "[]" {
+                event.push_attribute(("us:bins", bins_json.as_str()));
+            }
+        }
+        if let Some(ref media_bins_json) = project.parsed_media_bins_json {
+            if media_bins_json != "{}" {
+                event.push_attribute(("us:media-bins", media_bins_json.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 

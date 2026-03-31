@@ -2,7 +2,12 @@
   "sheet-order" : [
     "ROADMAP.md",
     "CHANGELOG.md",
-    "README.md"
+    "README.md",
+    "PERFSUMMARY.md",
+    "PERFLIVE.md",
+    "PROXYPERF.md",
+    "SPEEDRAMPCRASH.md",
+    "GEMINI.md"
   ],
   "hidden-folders" : [
     "target",

@@ -567,6 +567,46 @@ button.export-split-toggle {
     color: white;
 }
 
+/* Bin breadcrumb navigation */
+.bin-breadcrumb-bar {
+    min-height: 24px;
+}
+
+.bin-breadcrumb-btn {
+    padding: 2px 6px;
+    min-height: 20px;
+    font-size: 11px;
+    border-radius: 4px;
+    background: transparent;
+    color: #8ab4f8;
+    border: none;
+    box-shadow: none;
+}
+
+.bin-breadcrumb-btn:hover {
+    background-color: #2a2a2e;
+}
+
+.bin-breadcrumb-sep {
+    color: #666;
+    font-size: 11px;
+}
+
+.bin-breadcrumb-active {
+    font-size: 11px;
+    font-weight: bold;
+    color: #e0e0e0;
+}
+
+/* Bin folder cells in media grid */
+.bin-folder-cell {
+    border-radius: 6px;
+}
+
+.bin-folder-name {
+    font-weight: bold;
+}
+
 /* Popover menus (Recent projects) */
 popover {
     background-color: #242428;

@@ -16,6 +16,32 @@ You can also drag files directly from your file manager into the **Media Library
 
 Supported formats depend on your installed GStreamer plugins (any format `playbin` can decode). Still images are supported natively.
 
+## Bins / Folders
+
+Organize your media into **bins** (folders) for large projects.
+
+### Creating Bins
+
+- **Right-click** on empty space in the library and choose **New Bin…**
+- Enter a name and press **Create**
+- Bins can be nested up to 2 levels deep (right-click a bin → **New Sub-bin…**)
+
+### Navigating Bins
+
+- **Double-click** a bin folder to enter it
+- Use the **breadcrumb bar** above the grid to navigate back to parent bins or root
+- Click the **All** button in the header to see all media regardless of bin
+
+### Managing Items in Bins
+
+- **Drag** a media item onto a bin folder to move it into that bin
+- **Right-click** a media item → **Move to "Bin Name"** to move it to a bin
+- **Right-click** a media item → **Move to Root** to move it back to the top level
+- Items imported while viewing a bin are automatically placed in that bin
+- **Right-click** a bin → **Rename…** or **Delete** (items move to the parent or root)
+
+Bins are saved with your project and restored when you reopen it.
+
 ## Browsing and Selecting
 
 - Click a library item to select it — the **Source Monitor** immediately loads and previews the clip.

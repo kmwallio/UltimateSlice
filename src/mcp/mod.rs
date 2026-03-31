@@ -250,6 +250,28 @@ pub enum McpCommand {
         root_path: String,
         reply: SyncSender<Value>,
     },
+    CreateBin {
+        name: String,
+        parent_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    DeleteBin {
+        bin_id: String,
+        reply: SyncSender<Value>,
+    },
+    RenameBin {
+        bin_id: String,
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ListBins {
+        reply: SyncSender<Value>,
+    },
+    MoveToBin {
+        source_paths: Vec<String>,
+        bin_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
     ReorderTrack {
         from_index: usize,
         to_index: usize,

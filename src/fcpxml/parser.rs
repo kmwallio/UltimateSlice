@@ -153,6 +153,13 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if !selected_event_seen {
                             selected_event_seen = true;
                             in_selected_event = true;
+                            // Extract bin persistence attrs before collecting unknowns
+                            if let Some(bins_json) = attrs.get("us:bins") {
+                                project.parsed_bins_json = Some(bins_json.clone());
+                            }
+                            if let Some(media_bins_json) = attrs.get("us:media-bins") {
+                                project.parsed_media_bins_json = Some(media_bins_json.clone());
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
