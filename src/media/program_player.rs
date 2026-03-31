@@ -8647,13 +8647,12 @@ impl ProgramPlayer {
                             return gst::PadProbeReturn::Ok;
                         }
                         // Offset crop by letterbox so it targets video content.
-                        // Also ensure both letterbox sides are zeroed (not just the
-                        // side the user is cropping from) so the opaque black bars
-                        // don't remain visible.
+                        // Also ensure both letterbox sides are zeroed so the
+                        // opaque black bars don't remain visible.
                         let cl = cl + lb_h;
-                        let cr = (cr + lb_h).max(lb_h);
+                        let cr = cr + lb_h;
                         let ct = ct + lb_v;
-                        let cb = (cb + lb_v).max(lb_v);
+                        let cb = cb + lb_v;
                         if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
                             let buf = buffer.make_mut();
                             if let Ok(mut map) = buf.map_writable() {
@@ -8683,11 +8682,18 @@ impl ProgramPlayer {
                                             .build()
                                     }),
                                 );
-                                let (w, h) = match info_ref {
-                                    Ok(ref vi) => (vi.width() as i32, vi.height() as i32),
+                                let (w, h, stride) = match info_ref {
+                                    Ok(ref vi) => {
+                                        let s = vi.stride()[0] as usize;
+                                        (vi.width() as i32, vi.height() as i32, if s > 0 { s } else { vi.width() as usize * 4 })
+                                    }
                                     Err(_) => return gst::PadProbeReturn::Ok,
                                 };
-                                let stride = w as usize * 4;
+                                // Validate buffer size matches expected dimensions
+                                let expected = stride * h as usize;
+                                if data.len() < expected {
+                                    return gst::PadProbeReturn::Ok;
+                                }
                                 // Zero alpha for cropped rows (top/bottom)
                                 let ct = ct.max(0) as usize;
                                 let cb = cb.max(0) as usize;
