@@ -2011,7 +2011,7 @@ impl ProgramPlayer {
                 preview_luts: false,
                 proxy_scale_divisor: 2,
                 experimental_preview_optimizations: false,
-                realtime_preview: false,
+                realtime_preview: true,
                 background_prerender: false,
                 crossfade_enabled: false,
                 crossfade_curve: CrossfadeCurve::default(),
@@ -6613,8 +6613,12 @@ impl ProgramPlayer {
         if slot_count >= 3 {
             return true;
         }
-        matches!(playback_priority, PlaybackPriority::Smooth)
-            && (slot_count > 0 || transition_overlap_active)
+        // Only enable drop-late for active transition overlaps in Smooth
+        // mode (2 clips composited together).  Enabling it for single-slot
+        // playback removes backpressure, letting the compositor spin at
+        // thousands of fps — the leaky display queue and QoS sink then drop
+        // nearly every frame, producing ~1-2 displayed fps instead of 30.
+        matches!(playback_priority, PlaybackPriority::Smooth) && transition_overlap_active
     }
 
     fn update_drop_late_policy(&mut self) {
@@ -6757,8 +6761,10 @@ impl ProgramPlayer {
     fn adaptive_arrival_wait_ms(&self, nominal_ms: u64) -> u64 {
         let scale = self.rebuild_wait_scale();
         let scaled = (nominal_ms as f64 * scale) as u64;
-        // Enforce a minimum so we don't drop to zero.
-        scaled.max(200)
+        // Enforce a minimum so we don't drop to zero.  100ms is sufficient
+        // for pre-warmed sources on single-track sequential playback; the
+        // previous 200ms floor added unnecessary latency at clip boundaries.
+        scaled.max(100)
     }
 
     /// Wait for decoder slots to reach their target state (typically Paused).
@@ -8071,29 +8077,32 @@ impl ProgramPlayer {
             self.pipeline.remove(lv).ok();
         }
         // 2. Stop any residual streaming work on removed elements.
+        // Use short timeouts (10ms) — after FlushStart, Null transitions are
+        // near-instant.  The previous 100ms timeout per element caused up to
+        // 700ms blocking on the main thread during boundary crossings.
         let _ = slot.decoder.set_state(gst::State::Null);
-        let _ = slot.decoder.state(gst::ClockTime::from_mseconds(100));
+        let _ = slot.decoder.state(gst::ClockTime::from_mseconds(10));
         let _ = slot.effects_bin.set_state(gst::State::Null);
-        let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(100));
+        let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(10));
         if let Some(ref q) = slot.slot_queue {
             let _ = q.set_state(gst::State::Null);
-            let _ = q.state(gst::ClockTime::from_mseconds(100));
+            let _ = q.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ac) = slot.audio_conv {
             let _ = ac.set_state(gst::State::Null);
-            let _ = ac.state(gst::ClockTime::from_mseconds(100));
+            let _ = ac.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref eq_elem) = slot.audio_equalizer {
             let _ = eq_elem.set_state(gst::State::Null);
-            let _ = eq_elem.state(gst::ClockTime::from_mseconds(100));
+            let _ = eq_elem.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ap) = slot.audio_panorama {
             let _ = ap.set_state(gst::State::Null);
-            let _ = ap.state(gst::ClockTime::from_mseconds(100));
+            let _ = ap.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref lv) = slot.audio_level {
             let _ = lv.set_state(gst::State::Null);
-            let _ = lv.state(gst::ClockTime::from_mseconds(100));
+            let _ = lv.state(gst::ClockTime::from_mseconds(10));
         }
         // 3. Release aggregator request pads after branch shutdown.
         if let Some(ref pad) = slot.compositor_pad {
@@ -13637,13 +13646,28 @@ mod tests {
     }
 
     #[test]
-    fn smooth_playback_drops_late_even_with_single_slot() {
-        assert!(ProgramPlayer::should_drop_late_for_playback_mode(
+    fn smooth_single_slot_no_transition_preserves_backpressure() {
+        // Single-slot playback must NOT enable drop-late: the leaky queue
+        // removes backpressure, letting the compositor spin at thousands of
+        // fps — QoS then drops nearly every frame, producing ~1-2 displayed
+        // fps.  Backpressure naturally throttles the compositor to 30 fps.
+        assert!(!ProgramPlayer::should_drop_late_for_playback_mode(
             true,
             false,
             &crate::ui_state::PlaybackPriority::Smooth,
             1,
             false,
+        ));
+    }
+
+    #[test]
+    fn smooth_transition_overlap_enables_drop_late() {
+        assert!(ProgramPlayer::should_drop_late_for_playback_mode(
+            true,
+            false,
+            &crate::ui_state::PlaybackPriority::Smooth,
+            2,
+            true,
         ));
     }
 

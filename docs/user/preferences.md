@@ -127,6 +127,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 
 - **Real-time preview** pre-builds upcoming decoder slots so boundary transitions are faster.
 - This can improve responsiveness at clip boundaries but may increase CPU/memory usage.
+- **Enabled by default.** Disabling it forces full pipeline teardown/rebuild at every clip boundary, which can cause ~500ms stutter per transition.
 - The setting is persisted across launches.
 - MCP automation:
   - `get_preferences` returns `realtime_preview`.

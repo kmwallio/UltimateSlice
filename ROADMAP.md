@@ -359,6 +359,10 @@ Tracking docs:
            - [x] Debounce duplicate playback boundary rebuild attempts (same desired clip set within ~120ms) to reduce transient rebuild thrash
            - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
            - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
+           - [x] Fix Smooth-mode single-slot drop-late removing backpressure (compositor spun at 11K fps, QoS dropped 99.99% → 1-2 displayed fps); now only enables drop-late for transition overlaps or 3+ tracks
+           - [x] Enable `realtime_preview` by default for out-of-box boundary stutter reduction
+           - [x] Reduce teardown state-query timeout from 100ms to 10ms per element (10x faster teardown)
+           - [x] Lower adaptive arrival wait floor from 200ms to 100ms for faster single-track boundary transitions
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
            - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick

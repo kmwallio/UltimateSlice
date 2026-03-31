@@ -697,7 +697,7 @@ impl Default for PreferencesState {
             gsk_renderer: GskRenderer::default(),
             preview_quality: PreviewQuality::default(),
             experimental_preview_optimizations: false,
-            realtime_preview: false,
+            realtime_preview: true,
             background_prerender: false,
             preview_luts: false,
             crossfade_enabled: false,
