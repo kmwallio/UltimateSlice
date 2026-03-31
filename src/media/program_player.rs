@@ -7257,13 +7257,17 @@ impl ProgramPlayer {
             })
             .unwrap_or((9999, 9999));
 
+        // If caps aren't negotiated yet, skip crop entirely to avoid crashes.
+        if frame_w >= 9999 || frame_h >= 9999 || frame_w < 4 || frame_h < 4 {
+            return;
+        }
         let (mut cl, mut cr, mut ct, mut cb) = (
             crop_left.max(0),
             crop_right.max(0),
             crop_top.max(0),
             crop_bottom.max(0),
         );
-        const MIN_DIM: i32 = 2;
+        const MIN_DIM: i32 = 4;
         if cl + cr > frame_w - MIN_DIM {
             let total = (frame_w - MIN_DIM).max(0);
             let ratio = if cl + cr > 0 {
@@ -8641,7 +8645,19 @@ impl ProgramPlayer {
         }
         // 2. Crop at project resolution (RGBA) then re-pad with transparent
         //    borders so the compositor reveals lower tracks through cropped areas.
+        //    Block RECONFIGURE events on videocrop src pad to prevent upstream
+        //    caps renegotiation through multiqueue when crop changes dynamically.
         if let Some(ref e) = videocrop {
+            if let Some(src_pad) = e.static_pad("src") {
+                src_pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_pad, info| {
+                    if let Some(ev) = info.event() {
+                        if let gst::EventView::Reconfigure(_) = ev.view() {
+                            return gst::PadProbeReturn::Drop;
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
             chain.push(e.clone());
         }
         if let Some(ref e) = videobox_crop_alpha {
