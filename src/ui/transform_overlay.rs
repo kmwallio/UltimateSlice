@@ -94,6 +94,8 @@ pub struct TransformOverlay {
     mask_hh: Rc<Cell<f64>>,
     mask_rotation: Rc<Cell<f64>>,
     mask_path_points: Rc<RefCell<Vec<crate::model::clip::BezierPoint>>>,
+    content_inset_x: Rc<Cell<f64>>,
+    content_inset_y: Rc<Cell<f64>>,
 }
 
 impl TransformOverlay {
@@ -119,6 +121,10 @@ impl TransformOverlay {
         let selected = Rc::new(Cell::new(false));
         let proj_w = Rc::new(Cell::new(1920_u32));
         let proj_h = Rc::new(Cell::new(1080_u32));
+        /// Letterbox inset fractions (0.0–0.5) for each side.
+        /// Used to shrink the clip bounding box to the video content area.
+        let content_inset_x = Rc::new(Cell::new(0.0_f64));
+        let content_inset_y = Rc::new(Cell::new(0.0_f64));
         let picture: Rc<RefCell<Option<gtk4::Picture>>> = Rc::new(RefCell::new(None));
         let canvas_widget: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
         let mask_enabled = Rc::new(Cell::new(false));
@@ -149,6 +155,8 @@ impl TransformOverlay {
             let selected = selected.clone();
             let proj_w = proj_w.clone();
             let proj_h = proj_h.clone();
+            let content_inset_x = content_inset_x.clone();
+            let content_inset_y = content_inset_y.clone();
             let picture = picture.clone();
             let canvas_widget = canvas_widget.clone();
             let mask_enabled = mask_enabled.clone();
@@ -192,6 +200,8 @@ impl TransformOverlay {
                     crop_bottom.get(),
                     proj_w.get(),
                     proj_h.get(),
+                    content_inset_x.get(),
+                    content_inset_y.get(),
                 );
                 // Draw mask outline if mask is enabled.
                 if mask_enabled.get() {
@@ -232,6 +242,8 @@ impl TransformOverlay {
             let selected = selected.clone();
             let proj_w = proj_w.clone();
             let proj_h = proj_h.clone();
+            let content_inset_x = content_inset_x.clone();
+            let content_inset_y = content_inset_y.clone();
             let picture = picture.clone();
             let drag_state = drag_state.clone();
             let on_drag_begin = on_drag_begin.clone();
@@ -911,6 +923,8 @@ impl TransformOverlay {
             mask_hh,
             mask_rotation,
             mask_path_points,
+            content_inset_x,
+            content_inset_y,
         }
     }
 
@@ -960,6 +974,14 @@ impl TransformOverlay {
     pub fn set_project_dimensions(&self, w: u32, h: u32) {
         self.proj_w.set(w);
         self.proj_h.set(h);
+    }
+
+    /// Set letterbox inset fractions (0.0–0.5 per side).
+    /// Used to shrink the clip bounding box to the actual video content area
+    /// when the source aspect ratio differs from the project.
+    pub fn set_content_inset(&self, inset_x: f64, inset_y: f64) {
+        self.content_inset_x.set(inset_x);
+        self.content_inset_y.set(inset_y);
     }
 
     /// Update mask overlay state.
@@ -1186,10 +1208,10 @@ fn unrotate_point_about(x: f64, y: f64, cx: f64, cy: f64, rad: f64) -> (f64, f64
 
 fn draw_overlay(
     cr: &gtk4::cairo::Context,
-    vx: f64,
-    vy: f64,
-    vw: f64,
-    vh: f64,
+    vx_full: f64,
+    vy_full: f64,
+    vw_full: f64,
+    vh_full: f64,
     scale: f64,
     pos_x: f64,
     pos_y: f64,
@@ -1200,7 +1222,15 @@ fn draw_overlay(
     crop_bottom: i32,
     proj_w: u32,
     proj_h: u32,
+    content_inset_x: f64,
+    content_inset_y: f64,
 ) {
+    // Shrink the video rect to the content area (excluding letterbox).
+    let vx = vx_full + vw_full * content_inset_x;
+    let vy = vy_full + vh_full * content_inset_y;
+    let vw = vw_full * (1.0 - 2.0 * content_inset_x);
+    let vh = vh_full * (1.0 - 2.0 * content_inset_y);
+
     // Clip centre and half-extents in widget coords.
     // GStreamer's videobox pads/crops (1-scale)*pw*(1+pos_x)/2 on the left, so the
     // clip centre = canvas_centre + pos_x * canvas_half * (1-scale).
