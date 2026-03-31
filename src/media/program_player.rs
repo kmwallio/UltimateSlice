@@ -880,9 +880,6 @@ struct VideoSlot {
     gaussianblur: Option<gst::Element>,
     /// frei0r squareblur for creative blur effect (RGBA-native, no format conversion needed).
     squareblur: Option<gst::Element>,
-    /// User crop element at source resolution (before convertscale).
-    videocrop_src: Option<gst::Element>,
-    /// Wipe transition crop element at project resolution (after convertscale).
     videocrop: Option<gst::Element>,
     videobox_crop_alpha: Option<gst::Element>,
     imagefreeze: Option<gst::Element>,
@@ -7260,41 +7257,12 @@ impl ProgramPlayer {
             })
             .unwrap_or((9999, 9999));
 
-        // When the source aspect ratio differs from the project,
-        // videoconvertscale adds letterbox bars at project resolution.
-        // Offset crop values by the letterbox size so user crop applies
-        // to the video content, not the black bars.
-        // Detect source dimensions from the videocrop_src sink pad
-        // (which sits before convertscale in the pipeline and receives
-        // the raw decoded frame).
-        let (letterbox_h, letterbox_v) = slot
-            .videocrop_src
-            .as_ref()
-            .and_then(|vc| vc.static_pad("sink"))
-            .and_then(|p| p.current_caps())
-            .and_then(|c| c.structure(0).map(|s| {
-                let src_w = s.get::<i32>("width").unwrap_or(frame_w);
-                let src_h = s.get::<i32>("height").unwrap_or(frame_h);
-                let scale = (frame_w as f64 / src_w as f64)
-                    .min(frame_h as f64 / src_h as f64);
-                let scaled_w = (src_w as f64 * scale).round() as i32;
-                let scaled_h = (src_h as f64 * scale).round() as i32;
-                ((frame_w - scaled_w) / 2, (frame_h - scaled_h) / 2)
-            }))
-            .unwrap_or((0, 0));
-
-        let any_crop = crop_left > 0 || crop_right > 0 || crop_top > 0 || crop_bottom > 0;
-        let (mut cl, mut cr, mut ct, mut cb) = if any_crop {
-            // Offset by letterbox so crop targets the content area
-            (
-                crop_left.max(0) + letterbox_h,
-                crop_right.max(0) + letterbox_h,
-                crop_top.max(0) + letterbox_v,
-                crop_bottom.max(0) + letterbox_v,
-            )
-        } else {
-            (0, 0, 0, 0)
-        };
+        let (mut cl, mut cr, mut ct, mut cb) = (
+            crop_left.max(0),
+            crop_right.max(0),
+            crop_top.max(0),
+            crop_bottom.max(0),
+        );
         const MIN_DIM: i32 = 2;
         if cl + cr > frame_w - MIN_DIM {
             let total = (frame_w - MIN_DIM).max(0);
@@ -8417,7 +8385,7 @@ impl ProgramPlayer {
         // causing EXC_BAD_ACCESS (SIGSEGV) in unpack_NV12.  Force single-threaded
         // conversion on macOS to prevent this race.
         let convertscale = gst::ElementFactory::make("videoconvertscale")
-            .property("add-borders", true)
+            .property("add-borders", false)
             .build()
             .ok();
         #[cfg(target_os = "macos")]
@@ -8570,10 +8538,13 @@ impl ProgramPlayer {
 
         // Set processing-resolution capsfilters.
         // capsfilter_proj constrains to RGBA at target preview processing size.
+        // With add-borders: false, videoconvertscale outputs at the actual
+        // scaled size (maintaining aspect ratio), not padded to project
+        // resolution. The compositor positions and sizes each slot.
         let proj_caps = gst::Caps::builder("video/x-raw")
             .field("format", "RGBA")
-            .field("width", target_width as i32)
-            .field("height", target_height as i32)
+            .field("width", gst::IntRange::new(1i32, target_width as i32))
+            .field("height", gst::IntRange::new(1i32, target_height as i32))
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         if let Some(ref cf) = capsfilter_proj {
@@ -9178,7 +9149,6 @@ impl ProgramPlayer {
             gaussianblur: None,
             squareblur: None,
             
-            videocrop_src: None,
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: None,
@@ -9224,7 +9194,7 @@ impl ProgramPlayer {
         let (proc_w, proc_h) = self.preview_processing_dimensions();
         let effects_bin = gst::Bin::new();
         let convertscale = gst::ElementFactory::make("videoconvertscale")
-            .property("add-borders", true)
+            .property("add-borders", false)
             .build()
             .ok()?;
         // On macOS, vtdec IOSurface-backed buffers must not be read by parallel
@@ -9450,7 +9420,6 @@ impl ProgramPlayer {
             colorbalance_3pt: None,
             gaussianblur: None,
             
-            videocrop_src: None,
             squareblur: None,
             videocrop: None,
             videobox_crop_alpha: None,
@@ -10422,7 +10391,6 @@ impl ProgramPlayer {
             let video_linked = Arc::new(AtomicBool::new(true));
             let audio_linked = Arc::new(AtomicBool::new(false));
 
-            let videocrop_src_elem = effects_bin.by_name("videocrop_src");
             let slot_ref_for_transform = VideoSlot {
                 clip_idx,
                 decoder: src.clone(),
@@ -10441,7 +10409,6 @@ impl ProgramPlayer {
                 
                 gaussianblur: gaussianblur.clone(),
                 squareblur: squareblur.clone(),
-                videocrop_src: videocrop_src_elem,
                 videocrop: videocrop.clone(),
                 videobox_crop_alpha: videobox_crop_alpha.clone(),
                 imagefreeze: imagefreeze.clone(),
@@ -10485,7 +10452,6 @@ impl ProgramPlayer {
             let _ = capsfilter.sync_state_with_parent();
             let _ = effects_bin.sync_state_with_parent();
             let _ = slot_queue.sync_state_with_parent();
-            let videocrop_src_elem = effects_bin.by_name("videocrop_src");
 
             return Some(VideoSlot {
                 clip_idx,
@@ -10504,7 +10470,6 @@ impl ProgramPlayer {
                 colorbalance_3pt,
                 gaussianblur,
                 squareblur,
-                videocrop_src: videocrop_src_elem.clone(),
                 videocrop,
                 videobox_crop_alpha,
                 imagefreeze,
@@ -10884,7 +10849,6 @@ impl ProgramPlayer {
             gaussianblur: gaussianblur.clone(),
             squareblur: squareblur.clone(),
             videocrop: videocrop.clone(),
-            videocrop_src: effects_bin.by_name("videocrop_src"),
             videobox_crop_alpha: videobox_crop_alpha.clone(),
             imagefreeze: imagefreeze.clone(),
             videoflip_rotate: videoflip_rotate.clone(),
@@ -10936,7 +10900,6 @@ impl ProgramPlayer {
             proc_w,
             proc_h,
         );
-        let videocrop_src_elem = effects_bin.by_name("videocrop_src");
 
         Some(VideoSlot {
             clip_idx,
@@ -10955,7 +10918,6 @@ impl ProgramPlayer {
             colorbalance_3pt,
             gaussianblur,
             squareblur,
-            videocrop_src: videocrop_src_elem,
             videocrop,
             videobox_crop_alpha,
             imagefreeze,
@@ -14462,7 +14424,6 @@ mod tests {
             } else {
                 None
             },
-            videocrop_src: None,
             gaussianblur: if has_gaussianblur { identity() } else { None },
             squareblur: None, // no squareblur in test slots
             videocrop: None,
