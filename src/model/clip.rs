@@ -89,7 +89,7 @@ fn default_subtitle_highlight_color() -> u32 {
     0xFFFF00FF // yellow, fully opaque
 }
 fn default_subtitle_word_window_secs() -> f64 {
-    2.0
+    4.0 // Number of words per fixed group in highlight mode.
 }
 fn default_subtitle_position_y() -> f64 {
     0.85

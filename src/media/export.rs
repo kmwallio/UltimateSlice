@@ -2214,7 +2214,7 @@ fn build_subtitle_filter_composited(
         let hr = ((hc >> 24) & 0xFF) as u8;
         let hg = ((hc >> 16) & 0xFF) as u8;
         let hb = ((hc >> 8) & 0xFF) as u8;
-        let window_ns = (style_clip.subtitle_word_window_secs * 1_000_000_000.0) as u64;
+        let group_size = (style_clip.subtitle_word_window_secs as usize).max(2);
 
         {
             use std::io::Write;
@@ -2283,24 +2283,25 @@ fn build_subtitle_filter_composited(
                     continue;
                 }
 
+                // Fixed groups: divide words into groups of group_size.
+                // Each group gets one Dialogue event per word (for highlight),
+                // but the visible text is the same fixed set of words.
                 for (wi, word) in seg.words.iter().enumerate() {
                     let w_abs_start = style_clip.timeline_start
                         + ((word.start_ns.saturating_sub(style_clip.source_in)) as f64 / style_clip.speed) as u64;
                     let w_abs_end = style_clip.timeline_start
                         + ((word.end_ns.saturating_sub(style_clip.source_in)) as f64 / style_clip.speed) as u64;
 
-                    let mut text = String::new();
-                    let win_start = word.start_ns.saturating_sub(window_ns);
-                    let win_end = word.start_ns.saturating_add(window_ns);
+                    // Determine which fixed group this word belongs to.
+                    let group_start = (wi / group_size) * group_size;
+                    let group_end = (group_start + group_size).min(seg.words.len());
 
-                    for (owi, ow) in seg.words.iter().enumerate() {
-                        if ow.end_ns <= win_start || ow.start_ns >= win_end {
-                            continue;
-                        }
+                    let mut text = String::new();
+                    for (owi, ow) in seg.words[group_start..group_end].iter().enumerate() {
                         if !text.is_empty() {
                             text.push(' ');
                         }
-                        if owi == wi {
+                        if group_start + owi == wi {
                             match highlight_mode {
                                 SubtitleHighlightMode::Color => {
                                     text.push_str(&format!("{{\\c&H{hb:02X}{hg:02X}{hr:02X}&}}"));

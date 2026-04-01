@@ -6055,21 +6055,25 @@ pub fn build_window(
                                             .unwrap_or(24.0);
 
                                         // Build word-level display with active word highlighting.
-                                        // Time-based window: show words within ±word_window_secs of the playhead.
-                                        let window_ns = (clip.subtitle_word_window_secs * 1_000_000_000.0) as u64;
+                                        // Fixed groups: divide words into groups of N, show the
+                                        // group containing the active word. The group stays on
+                                        // screen until its last word finishes, then advances.
+                                        let group_size = (clip.subtitle_word_window_secs as usize).max(2);
                                         let mut word_displays = Vec::new();
                                         if !seg.words.is_empty() && clip.subtitle_highlight_mode != crate::model::clip::SubtitleHighlightMode::None {
-                                            let window_start = local_ns.saturating_sub(window_ns);
-                                            let window_end = local_ns.saturating_add(window_ns);
-                                            for word in &seg.words {
-                                                // Include word if it overlaps the time window.
-                                                if word.end_ns > window_start && word.start_ns < window_end {
-                                                    let is_active = local_ns >= word.start_ns && local_ns < word.end_ns;
-                                                    word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
-                                                        text: word.text.clone(),
-                                                        active: is_active,
-                                                    });
-                                                }
+                                            // Find which word is active.
+                                            let active_idx = seg.words.iter().position(|w| {
+                                                local_ns >= w.start_ns && local_ns < w.end_ns
+                                            });
+                                            // Determine which fixed group the active word belongs to.
+                                            let center = active_idx.unwrap_or(0);
+                                            let group_start = (center / group_size) * group_size;
+                                            let group_end = (group_start + group_size).min(seg.words.len());
+                                            for (wi, word) in seg.words[group_start..group_end].iter().enumerate() {
+                                                word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
+                                                    text: word.text.clone(),
+                                                    active: Some(group_start + wi) == active_idx,
+                                                });
                                             }
                                         }
 

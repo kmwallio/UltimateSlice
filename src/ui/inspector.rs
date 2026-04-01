@@ -2504,13 +2504,13 @@ pub fn build_inspector(
     subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
     subtitle_style_box.append(&subtitle_highlight_color_row);
 
-    let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 1.0, 8.0, 1.0);
-    subtitle_word_window_slider.set_value(2.0);
+    let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 2.0, 10.0, 1.0);
+    subtitle_word_window_slider.set_value(4.0);
     subtitle_word_window_slider.set_draw_value(true);
     subtitle_word_window_slider.set_digits(0);
-    subtitle_word_window_slider.add_mark(2.0, gtk4::PositionType::Bottom, None);
+    subtitle_word_window_slider.add_mark(4.0, gtk4::PositionType::Bottom, None);
     subtitle_word_window_slider.set_tooltip_text(Some(
-        "How many seconds of words to show around the active word in highlight mode",
+        "Number of words shown per group in highlight mode",
     ));
     subtitle_style_box.append(&subtitle_word_window_slider);
 
