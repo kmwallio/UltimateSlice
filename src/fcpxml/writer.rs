@@ -730,6 +730,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             crate::model::clip::SubtitleHighlightMode::Bold => "bold",
                             crate::model::clip::SubtitleHighlightMode::Color => "color",
                             crate::model::clip::SubtitleHighlightMode::Underline => "underline",
+                            crate::model::clip::SubtitleHighlightMode::Stroke => "stroke",
                             _ => "none",
                         };
                         asset_clip.push_attribute(("us:subtitle-highlight-mode", mode_str));
@@ -739,6 +740,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     if (clip.subtitle_word_window_secs - 2.0).abs() > 0.001 {
                         asset_clip.push_attribute(("us:subtitle-word-window-secs", clip.subtitle_word_window_secs.to_string().as_str()));
+                    }
+                    if (clip.subtitle_position_y - 0.85).abs() > 0.001 {
+                        asset_clip.push_attribute(("us:subtitle-position-y", clip.subtitle_position_y.to_string().as_str()));
                     }
                     if !clip.ladspa_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.ladspa_effects) {
@@ -3647,6 +3651,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:subtitle-highlight-mode"
             | "us:subtitle-highlight-color"
             | "us:subtitle-word-window-secs"
+            | "us:subtitle-position-y"
     )
 }
 

@@ -1564,7 +1564,7 @@ fn tools_list() -> Value {
                     "outline_width": { "type": "number", "description": "Outline width in pts" },
                     "bg_box": { "type": "boolean", "description": "Enable background box" },
                     "bg_box_color": { "type": "integer", "description": "Background box color as 0xRRGGBBAA" },
-                    "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline"], "description": "Word highlight mode" },
+                    "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline", "stroke"], "description": "Word highlight mode" },
                     "highlight_color": { "type": "integer", "description": "Highlight color as 0xRRGGBBAA" }
                 },
                 "required": ["clip_id"]

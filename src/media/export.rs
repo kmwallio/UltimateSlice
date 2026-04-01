@@ -610,38 +610,40 @@ pub fn export_project(
     }
 
     // === Post-compositing subtitle burn-in ===
-    // Collect all subtitle segments from all clips, convert to timeline-absolute
-    // timestamps, and build a single subtitle filter applied after compositing.
+    // Chain one subtitle filter per clip that has subtitles. Each clip gets its
+    // own temp file and styling, so different tracks can have different positions,
+    // fonts, and highlight modes.
     {
-        let mut all_segments: Vec<(u64, u64, String, &crate::model::clip::Clip)> = Vec::new();
+        let mut sub_idx = 0usize;
         for track in flattened_project_tracks {
             for clip in &track.clips {
                 if clip.subtitle_segments.is_empty() {
                     continue;
                 }
-                for seg in &clip.subtitle_segments {
-                    let abs_start = clip.timeline_start
-                        + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
-                    let abs_end = clip.timeline_start
-                        + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
-                    all_segments.push((abs_start, abs_end, seg.text.clone(), clip));
-                }
-            }
-        }
+                // Collect this clip's segments as timeline-absolute.
+                let clip_segs: Vec<(u64, u64, String, &crate::model::clip::Clip)> = clip
+                    .subtitle_segments
+                    .iter()
+                    .map(|seg| {
+                        let abs_start = clip.timeline_start
+                            + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                        let abs_end = clip.timeline_start
+                            + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                        (abs_start, abs_end, seg.text.clone(), clip)
+                    })
+                    .collect();
 
-        if !all_segments.is_empty() {
-            // Use the first clip with subtitles for style (TODO: per-segment styling
-            // would require ASS style switches, not feasible with force_style alone).
-            let style_clip = all_segments[0].3;
-            let (sub_filter, sub_temp) =
-                build_subtitle_filter_composited(&all_segments, style_clip, out_h);
-            if let Some(f) = sub_temp {
-                _mask_temp_files.push(f);
-            }
-            if !sub_filter.is_empty() {
-                let next_label = "vsub";
-                filter.push_str(&format!(";[{prev_label}]{sub_filter}[{next_label}]"));
-                prev_label = next_label.to_string();
+                let (sub_filter, sub_temp) =
+                    build_subtitle_filter_composited(&clip_segs, clip, out_h);
+                if let Some(f) = sub_temp {
+                    _mask_temp_files.push(f);
+                }
+                if !sub_filter.is_empty() {
+                    let next_label = format!("vsub{sub_idx}");
+                    filter.push_str(&format!(";[{prev_label}]{sub_filter}[{next_label}]"));
+                    prev_label = next_label;
+                    sub_idx += 1;
+                }
             }
         }
     }
@@ -2271,6 +2273,11 @@ fn build_subtitle_filter(
                                     line.push_str(&ow.text);
                                     line.push_str(ass_underline_off);
                                 }
+                                SubtitleHighlightMode::Stroke => {
+                                    line.push_str(&format!("{{\\3c&H{hb:02X}{hg:02X}{hr:02X}&\\bord4}}"));
+                                    line.push_str(&ow.text);
+                                    line.push_str("{\\3c&H000000&\\bord0}");
+                                }
                                 SubtitleHighlightMode::None => {
                                     line.push_str(&ow.text);
                                 }
@@ -2333,8 +2340,18 @@ fn build_subtitle_filter_composited(
     let b = ((rgba >> 8) & 0xFF) as u8;
     let ass_primary = format!("&H00{b:02X}{g:02X}{r:02X}");
 
+    // Map position_y to ASS alignment + MarginV.
+    let pos_y = style_clip.subtitle_position_y.clamp(0.05, 0.95);
+    let (ass_align, margin_v) = if pos_y < 0.33 {
+        (8, ((pos_y * out_h as f64) as u32).max(10))
+    } else if pos_y < 0.66 {
+        (5, (((pos_y - 0.5).abs() * out_h as f64) as u32).max(10))
+    } else {
+        (2, (((1.0 - pos_y) * out_h as f64) as u32).max(10))
+    };
+
     let mut style_parts = format!(
-        "FontName={font_name},FontSize={scaled_size},PrimaryColour={ass_primary},Alignment=2,MarginV=40"
+        "FontName={font_name},FontSize={scaled_size},PrimaryColour={ass_primary},Alignment={ass_align},MarginV={margin_v}"
     );
 
     if style_clip.subtitle_outline_width > 0.0 {
@@ -2412,7 +2429,7 @@ fn build_subtitle_filter_composited(
             }
             let _ = writeln!(
                 sub_file,
-                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},0,0,0,0,100,100,0,0,{border_style},{outline_w},0,2,10,10,40,1"
+                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},0,0,0,0,100,100,0,0,{border_style},{outline_w},0,{ass_align},10,10,{margin_v},1"
             );
             let _ = writeln!(sub_file);
             let _ = writeln!(sub_file, "[Events]");
@@ -2465,6 +2482,11 @@ fn build_subtitle_filter_composited(
                                     text.push_str("{\\u1}");
                                     text.push_str(&ow.text);
                                     text.push_str("{\\u0}");
+                                }
+                                SubtitleHighlightMode::Stroke => {
+                                    text.push_str(&format!("{{\\3c&H{hb:02X}{hg:02X}{hr:02X}&\\bord4}}"));
+                                    text.push_str(&ow.text);
+                                    text.push_str("{\\3c&H000000&\\bord0}");
                                 }
                                 SubtitleHighlightMode::None => text.push_str(&ow.text),
                             }

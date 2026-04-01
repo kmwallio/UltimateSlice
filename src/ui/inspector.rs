@@ -182,6 +182,8 @@ pub struct InspectorView {
     pub subtitle_highlight_color_btn: gtk4::ColorDialogButton,
     pub subtitle_highlight_color_row: GBox,
     pub subtitle_word_window_slider: Scale,
+    pub subtitle_position_slider: Scale,
+    pub subtitle_bg_box_check: CheckButton,
     pub subtitle_style_box: GBox,
     /// Set to `true` when the STT model is present; controls section content.
     pub stt_model_available: Cell<bool>,
@@ -1222,13 +1224,16 @@ impl InspectorView {
                     crate::model::clip::SubtitleHighlightMode::Bold => 1,
                     crate::model::clip::SubtitleHighlightMode::Color => 2,
                     crate::model::clip::SubtitleHighlightMode::Underline => 3,
+                    crate::model::clip::SubtitleHighlightMode::Stroke => 4,
                 };
                 self.subtitle_highlight_dropdown.set_selected(hl_idx);
-                self.subtitle_highlight_color_row.set_visible(hl_idx == 2);
+                self.subtitle_highlight_color_row.set_visible(hl_idx == 2 || hl_idx == 4);
                 self.subtitle_word_window_slider.set_value(c.subtitle_word_window_secs);
                 // Show word window slider only when a highlight mode is active.
                 self.subtitle_word_window_slider.set_visible(hl_idx != 0);
-                if hl_idx == 2 {
+                self.subtitle_position_slider.set_value(c.subtitle_position_y);
+                self.subtitle_bg_box_check.set_active(c.subtitle_bg_box);
+                if hl_idx == 2 || hl_idx == 4 {
                     let hc = c.subtitle_highlight_color;
                     let hr = ((hc >> 24) & 0xFF) as f32 / 255.0;
                     let hg = ((hc >> 16) & 0xFF) as f32 / 255.0;
@@ -2485,7 +2490,7 @@ pub fn build_inspector(
     subtitle_style_box.append(&subtitle_color_btn);
 
     row_label(&subtitle_style_box, "Word Highlight");
-    let highlight_model = gtk4::StringList::new(&["None", "Bold", "Color", "Underline"]);
+    let highlight_model = gtk4::StringList::new(&["None", "Bold", "Color", "Underline", "Stroke"]);
     let subtitle_highlight_dropdown = gtk4::DropDown::new(Some(highlight_model), Option::<gtk4::Expression>::None);
     subtitle_highlight_dropdown.set_selected(0);
     subtitle_style_box.append(&subtitle_highlight_dropdown);
@@ -2508,6 +2513,21 @@ pub fn build_inspector(
         "How many seconds of words to show around the active word in highlight mode",
     ));
     subtitle_style_box.append(&subtitle_word_window_slider);
+
+    row_label(&subtitle_style_box, "Vertical Position");
+    let subtitle_position_slider = Scale::with_range(Orientation::Horizontal, 0.05, 0.95, 0.05);
+    subtitle_position_slider.set_value(0.85);
+    subtitle_position_slider.set_draw_value(true);
+    subtitle_position_slider.set_digits(2);
+    subtitle_position_slider.add_mark(0.85, gtk4::PositionType::Bottom, None);
+    subtitle_position_slider.add_mark(0.10, gtk4::PositionType::Bottom, Some("Top"));
+    subtitle_position_slider.add_mark(0.50, gtk4::PositionType::Bottom, Some("Mid"));
+    subtitle_position_slider.set_tooltip_text(Some("Vertical position: 0 = top, 1 = bottom"));
+    subtitle_style_box.append(&subtitle_position_slider);
+
+    let subtitle_bg_box_check = CheckButton::with_label("Background Box");
+    subtitle_bg_box_check.set_active(true);
+    subtitle_style_box.append(&subtitle_bg_box_check);
 
     // Clear button
     let subtitle_clear_btn = Button::with_label("Clear Subtitles");
@@ -7103,6 +7123,8 @@ pub fn build_inspector(
         subtitle_highlight_color_btn,
         subtitle_highlight_color_row,
         subtitle_word_window_slider,
+        subtitle_position_slider,
+        subtitle_bg_box_check,
         subtitle_style_box,
         stt_model_available: Cell::new(false),
         stt_generating: Cell::new(false),

@@ -29,6 +29,8 @@ pub enum SubtitleHighlightMode {
     Color,
     /// Active word rendered with underline.
     Underline,
+    /// Active word rendered with a colored outline stroke.
+    Stroke,
 }
 
 impl Default for SubtitleHighlightMode {
@@ -88,6 +90,9 @@ fn default_subtitle_highlight_color() -> u32 {
 }
 fn default_subtitle_word_window_secs() -> f64 {
     2.0
+}
+fn default_subtitle_position_y() -> f64 {
+    0.85
 }
 
 /// Type of media a clip contains
@@ -1223,6 +1228,9 @@ pub struct Clip {
     /// Words within ±this duration of the current word are shown. Default 2.0s.
     #[serde(default = "default_subtitle_word_window_secs")]
     pub subtitle_word_window_secs: f64,
+    /// Vertical position of subtitles: 0.0 (top) to 1.0 (bottom). Default 0.85.
+    #[serde(default = "default_subtitle_position_y")]
+    pub subtitle_position_y: f64,
     /// Unsupported FCPXML asset-clip attributes preserved for round-trip export.
     #[serde(default)]
     pub fcpxml_unknown_attrs: Vec<(String, String)>,
@@ -1522,6 +1530,7 @@ impl Clip {
             subtitle_highlight_mode: SubtitleHighlightMode::None,
             subtitle_highlight_color: default_subtitle_highlight_color(),
             subtitle_word_window_secs: default_subtitle_word_window_secs(),
+            subtitle_position_y: default_subtitle_position_y(),
             fcpxml_unknown_attrs: Vec::new(),
             fcpxml_unknown_children: Vec::new(),
             fcpxml_original_source_path: None,

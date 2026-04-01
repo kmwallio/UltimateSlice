@@ -35,6 +35,8 @@ pub struct SubtitleLine {
     pub bg_box_color: (f64, f64, f64, f64),
     /// Font size scaling factor (from clip font descriptor).
     pub font_size: f64,
+    /// Vertical position: 0.0 (top) to 1.0 (bottom). Default 0.85.
+    pub position_y: f64,
 }
 
 /// A single word to display, with active (highlighted) flag.
@@ -57,6 +59,7 @@ impl Default for SubtitleLine {
             bg_box: true,
             bg_box_color: (0.0, 0.0, 0.0, 0.6),
             font_size: 24.0,
+            position_y: 0.85,
         }
     }
 }
@@ -403,11 +406,10 @@ pub fn build_program_monitor(
             }
             let w = width as f64;
             let h = height as f64;
-            let base_y = h * 0.88;
-            let line_spacing = 6.0;
-            let mut cursor_y = base_y;
-
-            for line in guard.iter().rev() {
+            // Group lines by position_y (within 0.02 tolerance) so lines at the
+            // same position stack, but lines at different positions render independently.
+            for line in guard.iter() {
+                let ty_base = h * line.position_y;
                 // Scale font: Pango pts → pixels (×4/3), then proportional to preview height.
                 // Matches the export scaling: font_size * 4/3 * (out_h / 1080).
                 let font_size = (line.font_size * (4.0 / 3.0) * h / 1080.0).clamp(10.0, 72.0);
@@ -425,7 +427,7 @@ pub fn build_program_monitor(
 
                 let te = cr.text_extents(&display_text).unwrap_or_else(|_| cr.text_extents("M").unwrap());
                 let tx = (w - te.width()) / 2.0 - te.x_bearing();
-                let ty = cursor_y;
+                let ty = ty_base;
 
                 // Background box.
                 if line.bg_box {
@@ -495,6 +497,23 @@ pub fn build_program_monitor(
                                     word_x += we.x_advance();
                                     continue;
                                 }
+                                SubtitleHighlightMode::Stroke => {
+                                    // Draw the word text first in normal color, then
+                                    // overlay a stroked outline in highlight_color.
+                                    let (tr, tg, tb, ta) = line.color;
+                                    cr.set_source_rgba(tr, tg, tb, ta);
+                                    let _ = cr.move_to(word_x, ty);
+                                    let _ = cr.show_text(&word.text);
+                                    // Stroke outline.
+                                    let (hr, hg, hb, ha) = line.highlight_color;
+                                    cr.set_source_rgba(hr, hg, hb, ha);
+                                    cr.set_line_width(2.5);
+                                    let _ = cr.move_to(word_x, ty);
+                                    cr.text_path(&word.text);
+                                    cr.stroke().ok();
+                                    word_x += we.x_advance();
+                                    continue;
+                                }
                                 SubtitleHighlightMode::None => {
                                     let (tr, tg, tb, ta) = line.color;
                                     cr.set_source_rgba(tr, tg, tb, ta);
@@ -516,7 +535,6 @@ pub fn build_program_monitor(
                     let _ = cr.show_text(&display_text);
                 }
 
-                cursor_y -= te.height() + line_spacing;
             }
         });
     }

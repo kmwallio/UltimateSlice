@@ -3876,9 +3876,10 @@ pub fn build_window(
                 1 => crate::model::clip::SubtitleHighlightMode::Bold,
                 2 => crate::model::clip::SubtitleHighlightMode::Color,
                 3 => crate::model::clip::SubtitleHighlightMode::Underline,
+                4 => crate::model::clip::SubtitleHighlightMode::Stroke,
                 _ => crate::model::clip::SubtitleHighlightMode::None,
             };
-            hl_color_row.set_visible(idx == 2);
+            hl_color_row.set_visible(idx == 2 || idx == 4);
             let selected = timeline_state.borrow().selected_clip_id.clone();
             if let Some(ref clip_id) = selected {
                 let mut proj = project.borrow_mut();
@@ -3939,6 +3940,50 @@ pub fn build_window(
                 for track in &mut proj.tracks {
                     if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
                         clip.subtitle_word_window_secs = val;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire subtitle position slider.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_position_slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let val = s.value();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_position_y = val;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire subtitle background box toggle.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_bg_box_check.connect_toggled(move |btn| {
+            if *updating.borrow() { return; }
+            let enabled = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_bg_box = enabled;
                         proj.dirty = true;
                         break;
                     }
@@ -6059,6 +6104,7 @@ pub fn build_window(
                                                 (bc & 0xFF) as f64 / 255.0,
                                             ),
                                             font_size,
+                                            position_y: clip.subtitle_position_y,
                                         });
                                         break;
                                     }
@@ -13289,6 +13335,7 @@ fn handle_mcp_command(
                         "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
                         "color" => crate::model::clip::SubtitleHighlightMode::Color,
                         "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
+                        "stroke" => crate::model::clip::SubtitleHighlightMode::Stroke,
                         _ => crate::model::clip::SubtitleHighlightMode::None,
                     };
                 }

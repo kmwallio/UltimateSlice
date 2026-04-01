@@ -1028,6 +1028,7 @@ fn parse_asset_clip(
                     "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
                     "color" => crate::model::clip::SubtitleHighlightMode::Color,
                     "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
+                    "stroke" => crate::model::clip::SubtitleHighlightMode::Stroke,
                     _ => crate::model::clip::SubtitleHighlightMode::None,
                 };
             }
@@ -1036,6 +1037,9 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:subtitle-word-window-secs") {
                 clip.subtitle_word_window_secs = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:subtitle-position-y") {
+                clip.subtitle_position_y = v.parse().unwrap_or(0.85);
             }
             if let Some(v) = attrs.get("us:ladspa-effects") {
                 let json_str = v.replace("&quot;", "\"");
@@ -2627,6 +2631,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:subtitle-highlight-mode"
             | "us:subtitle-highlight-color"
             | "us:subtitle-word-window-secs"
+            | "us:subtitle-position-y"
     )
 }
 

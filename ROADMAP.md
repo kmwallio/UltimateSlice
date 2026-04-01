@@ -614,6 +614,7 @@ Tracking docs:
 ### AI & Automation
 - [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency
 - [ ] Speech-to-Text: Automatic subtitle generation and transcription
+- [x] Subtitle highlight modes — None, Bold, Color, Underline, Stroke (colored outline)
 - [ ] AI Scene Cut Detection for long source files
 - [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
 - [ ] Optical Flow slow-motion (AI frame interpolation)
