@@ -174,6 +174,9 @@ pub struct InspectorView {
     pub subtitle_generate_label: Label,
     pub subtitle_language_dropdown: gtk4::DropDown,
     pub subtitle_list_box: GBox,
+    pub subtitle_scroll: gtk4::ScrolledWindow,
+    /// Tracks displayed segment IDs to avoid rebuilding on every update tick.
+    subtitle_segments_snapshot: Rc<RefCell<Vec<String>>>,
     pub subtitle_clear_btn: Button,
     pub subtitle_error_label: Label,
     pub subtitle_font_btn: gtk4::Button,
@@ -1199,16 +1202,78 @@ impl InspectorView {
                     self.subtitle_generate_label.set_text("Generate Subtitles");
                 }
                 self.subtitle_clear_btn.set_sensitive(!c.subtitle_segments.is_empty() && !generating);
-                // Show segment count and style controls when subtitles exist
+                // Show segment list and style controls when subtitles exist.
                 let has_subtitles = !c.subtitle_segments.is_empty();
-                while let Some(child) = self.subtitle_list_box.first_child() {
-                    self.subtitle_list_box.remove(&child);
-                }
-                if has_subtitles {
-                    let count_label = Label::new(Some(&format!("{} subtitle segments", c.subtitle_segments.len())));
-                    count_label.set_halign(gtk::Align::Start);
-                    count_label.add_css_class("dim-label");
-                    self.subtitle_list_box.append(&count_label);
+                self.subtitle_scroll.set_visible(has_subtitles);
+
+                // Only rebuild the segment list if the segment IDs changed.
+                let current_ids: Vec<String> = c.subtitle_segments.iter().map(|s| s.id.clone()).collect();
+                let needs_rebuild = *self.subtitle_segments_snapshot.borrow() != current_ids;
+                if needs_rebuild {
+                    while let Some(child) = self.subtitle_list_box.first_child() {
+                        self.subtitle_list_box.remove(&child);
+                    }
+                    if has_subtitles {
+                        let count_label = Label::new(Some(&format!("{} segments", c.subtitle_segments.len())));
+                        count_label.set_halign(gtk::Align::Start);
+                        count_label.add_css_class("dim-label");
+                        self.subtitle_list_box.append(&count_label);
+
+                        let project = self.project.clone();
+                        let on_cmd = self.on_execute_command.clone();
+                        let clip_id = c.id.clone();
+
+                        for seg in &c.subtitle_segments {
+                            let row = GBox::new(Orientation::Vertical, 1);
+
+                            // Timecode label
+                            let start_s = seg.start_ns as f64 / 1_000_000_000.0;
+                            let end_s = seg.end_ns as f64 / 1_000_000_000.0;
+                            let tc_label = Label::new(Some(&format!(
+                                "{:.1}s – {:.1}s", start_s, end_s
+                            )));
+                            tc_label.set_halign(gtk::Align::Start);
+                            tc_label.add_css_class("dim-label");
+                            tc_label.set_margin_start(4);
+                            row.append(&tc_label);
+
+                            // Editable text entry
+                            let entry = gtk4::Entry::new();
+                            entry.set_text(&seg.text);
+                            entry.set_hexpand(true);
+                            entry.add_css_class("flat");
+
+                            let seg_id = seg.id.clone();
+                            let old_text = seg.text.clone();
+                            let clip_id_c = clip_id.clone();
+                            let project_c = project.clone();
+                            let on_cmd_c = on_cmd.clone();
+                            entry.connect_activate(move |e| {
+                                let new_text = e.text().to_string();
+                                if new_text == old_text {
+                                    return;
+                                }
+                                // Find track_id for the clip.
+                                let track_id = {
+                                    let proj = project_c.borrow();
+                                    proj.tracks.iter()
+                                        .find(|t| t.clips.iter().any(|c| c.id == clip_id_c))
+                                        .map(|t| t.id.clone())
+                                        .unwrap_or_default()
+                                };
+                                on_cmd_c(Box::new(crate::undo::EditSubtitleTextCommand {
+                                    clip_id: clip_id_c.clone(),
+                                    track_id,
+                                    segment_id: seg_id.clone(),
+                                    old_text: old_text.clone(),
+                                    new_text,
+                                }));
+                            });
+                            row.append(&entry);
+                            self.subtitle_list_box.append(&row);
+                        }
+                    }
+                    *self.subtitle_segments_snapshot.borrow_mut() = current_ids;
                 }
                 // Style controls are always visible so users can configure before generating.
                 self.subtitle_style_box.set_visible(true);
@@ -2464,8 +2529,13 @@ pub fn build_inspector(
     subtitle_controls_box.append(&subtitle_error_label);
 
     // Scrollable segment list
-    let subtitle_list_box = GBox::new(Orientation::Vertical, 4);
-    subtitle_controls_box.append(&subtitle_list_box);
+    let subtitle_scroll = gtk4::ScrolledWindow::new();
+    subtitle_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    subtitle_scroll.set_max_content_height(200);
+    subtitle_scroll.set_propagate_natural_height(true);
+    let subtitle_list_box = GBox::new(Orientation::Vertical, 2);
+    subtitle_scroll.set_child(Some(&subtitle_list_box));
+    subtitle_controls_box.append(&subtitle_scroll);
 
     // ── Style controls (visible when subtitles exist) ────────────────
     let subtitle_style_box = GBox::new(Orientation::Vertical, 6);
@@ -7115,6 +7185,8 @@ pub fn build_inspector(
         subtitle_generate_label,
         subtitle_language_dropdown,
         subtitle_list_box,
+        subtitle_scroll,
+        subtitle_segments_snapshot: Rc::new(RefCell::new(Vec::new())),
         subtitle_clear_btn,
         subtitle_error_label,
         subtitle_font_btn,

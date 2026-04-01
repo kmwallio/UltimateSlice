@@ -182,9 +182,16 @@ pub fn build_program_monitor(
     overlays_popover_box.set_margin_bottom(8);
     overlays_popover_box.set_margin_start(12);
     overlays_popover_box.set_margin_end(12);
+    let subtitle_overlay_btn = CheckButton::with_label("Subtitles");
+    subtitle_overlay_btn.set_active(true);
+    subtitle_overlay_btn.set_tooltip_text(Some(
+        "Show/hide subtitle overlay in the Program Monitor",
+    ));
+
     overlays_popover_box.append(&safe_area_btn);
     overlays_popover_box.append(&false_color_btn);
     overlays_popover_box.append(&zebra_btn);
+    overlays_popover_box.append(&subtitle_overlay_btn);
 
     let overlays_popover = Popover::new();
     overlays_popover.set_child(Some(&overlays_popover_box));
@@ -391,6 +398,7 @@ pub fn build_program_monitor(
 
     // Subtitle overlay: displays current subtitle lines with per-clip styling.
     let subtitle_lines: Rc<RefCell<Vec<SubtitleLine>>> = Rc::new(RefCell::new(Vec::new()));
+    let subtitle_visible: Rc<Cell<bool>> = Rc::new(Cell::new(true));
     let subtitle_da = DrawingArea::new();
     subtitle_da.set_hexpand(true);
     subtitle_da.set_vexpand(true);
@@ -399,7 +407,11 @@ pub fn build_program_monitor(
     subtitle_da.set_can_target(false);
     {
         let sl = subtitle_lines.clone();
+        let sv = subtitle_visible.clone();
         subtitle_da.set_draw_func(move |_da, cr, width, height| {
+            if !sv.get() {
+                return;
+            }
             let guard = sl.borrow();
             if guard.is_empty() || width <= 0 || height <= 0 {
                 return;
@@ -839,6 +851,16 @@ pub fn build_program_monitor(
             let enabled = btn.is_active();
             zebra_setter(enabled, z_thresh.get());
             on_zebra_changed(enabled, z_thresh.get());
+        });
+    }
+
+    // Wire subtitle overlay checkbox toggle.
+    {
+        let sv = subtitle_visible.clone();
+        let da = subtitle_da.clone();
+        subtitle_overlay_btn.connect_toggled(move |btn| {
+            sv.set(btn.is_active());
+            da.queue_draw();
         });
     }
 
