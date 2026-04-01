@@ -2243,6 +2243,7 @@ fn build_subtitle_filter_composited(
                 outline_color = format!("&H00{obb:02X}{obg:02X}{obr:02X}");
                 outline_w = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
             }
+            let mut shadow_depth = 0u32;
             if style_clip.subtitle_bg_box {
                 let bc = style_clip.subtitle_bg_box_color;
                 let bbr = ((bc >> 24) & 0xFF) as u8;
@@ -2251,11 +2252,18 @@ fn build_subtitle_filter_composited(
                 let bba = (bc & 0xFF) as u8;
                 let ass_alpha = 255 - bba;
                 back_color = format!("&H{ass_alpha:02X}{bbb:02X}{bbg:02X}{bbr:02X}");
-                border_style = 3;
+                if highlight_mode == SubtitleHighlightMode::Stroke {
+                    // Stroke mode needs BorderStyle=1 for outline overrides to work.
+                    // Simulate bg box via shadow (BackColour + Shadow depth).
+                    border_style = 1;
+                    shadow_depth = 4;
+                } else {
+                    border_style = 3;
+                }
             }
             let _ = writeln!(
                 sub_file,
-                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},0,0,0,0,100,100,0,0,{border_style},{outline_w},0,{ass_align},10,10,{margin_v},1"
+                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},0,0,0,0,100,100,0,0,{border_style},{outline_w},{shadow_depth},{ass_align},10,10,{margin_v},1"
             );
             let _ = writeln!(sub_file);
             let _ = writeln!(sub_file, "[Events]");
