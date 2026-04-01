@@ -1502,6 +1502,192 @@ impl EditCommand for SetClipMaskCommand {
     }
 }
 
+// ── Subtitle commands ─────────────────────────────────────────────────────
+
+/// Set (or replace) all subtitle segments on a clip (used after STT generation).
+pub struct GenerateSubtitlesCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_segments: Vec<crate::model::clip::SubtitleSegment>,
+    pub new_segments: Vec<crate::model::clip::SubtitleSegment>,
+}
+
+impl EditCommand for GenerateSubtitlesCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments = self.new_segments.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments = self.old_segments.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Generate subtitles"
+    }
+}
+
+/// Edit the text of a single subtitle segment.
+pub struct EditSubtitleTextCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub segment_id: String,
+    pub old_text: String,
+    pub new_text: String,
+}
+
+impl EditCommand for EditSubtitleTextCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+                seg.text = self.new_text.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+                seg.text = self.old_text.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Edit subtitle text"
+    }
+}
+
+/// Edit the timing of a single subtitle segment.
+pub struct EditSubtitleTimingCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub segment_id: String,
+    pub old_start_ns: u64,
+    pub old_end_ns: u64,
+    pub new_start_ns: u64,
+    pub new_end_ns: u64,
+}
+
+impl EditCommand for EditSubtitleTimingCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+                seg.start_ns = self.new_start_ns;
+                seg.end_ns = self.new_end_ns;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+                seg.start_ns = self.old_start_ns;
+                seg.end_ns = self.old_end_ns;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Edit subtitle timing"
+    }
+}
+
+/// Clear all subtitle segments from a clip.
+pub struct ClearSubtitlesCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_segments: Vec<crate::model::clip::SubtitleSegment>,
+}
+
+impl EditCommand for ClearSubtitlesCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments.clear();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments = self.old_segments.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Clear subtitles"
+    }
+}
+
+/// Set a subtitle style property on a clip.
+pub struct SetSubtitleStyleCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_font: String,
+    pub new_font: String,
+    pub old_color: u32,
+    pub new_color: u32,
+    pub old_outline_color: u32,
+    pub new_outline_color: u32,
+    pub old_outline_width: f64,
+    pub new_outline_width: f64,
+    pub old_bg_box: bool,
+    pub new_bg_box: bool,
+    pub old_bg_box_color: u32,
+    pub new_bg_box_color: u32,
+    pub old_highlight_mode: crate::model::clip::SubtitleHighlightMode,
+    pub new_highlight_mode: crate::model::clip::SubtitleHighlightMode,
+    pub old_highlight_color: u32,
+    pub new_highlight_color: u32,
+}
+
+impl EditCommand for SetSubtitleStyleCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_font = self.new_font.clone();
+            clip.subtitle_color = self.new_color;
+            clip.subtitle_outline_color = self.new_outline_color;
+            clip.subtitle_outline_width = self.new_outline_width;
+            clip.subtitle_bg_box = self.new_bg_box;
+            clip.subtitle_bg_box_color = self.new_bg_box_color;
+            clip.subtitle_highlight_mode = self.new_highlight_mode;
+            clip.subtitle_highlight_color = self.new_highlight_color;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_font = self.old_font.clone();
+            clip.subtitle_color = self.old_color;
+            clip.subtitle_outline_color = self.old_outline_color;
+            clip.subtitle_outline_width = self.old_outline_width;
+            clip.subtitle_bg_box = self.old_bg_box;
+            clip.subtitle_bg_box_color = self.old_bg_box_color;
+            clip.subtitle_highlight_mode = self.old_highlight_mode;
+            clip.subtitle_highlight_color = self.old_highlight_color;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set subtitle style"
+    }
+}
+
+/// Helper: find a mutable clip reference by clip_id and track_id.
+fn find_clip_mut<'a>(
+    project: &'a mut Project,
+    clip_id: &str,
+    track_id: &str,
+) -> Option<&'a mut Clip> {
+    project
+        .track_mut(track_id)?
+        .clips
+        .iter_mut()
+        .find(|c| c.id == clip_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -165,6 +165,28 @@ pub struct InspectorView {
     pub bg_removal_threshold_slider: Scale,
     /// Set to `true` when the ONNX model is present; controls section visibility.
     pub bg_removal_model_available: Cell<bool>,
+    // Subtitles (speech-to-text)
+    pub subtitle_section: GBox,
+    pub subtitle_controls_box: GBox,
+    pub subtitle_no_model_box: GBox,
+    pub subtitle_generate_btn: Button,
+    pub subtitle_generate_spinner: gtk4::Spinner,
+    pub subtitle_generate_label: Label,
+    pub subtitle_language_dropdown: gtk4::DropDown,
+    pub subtitle_list_box: GBox,
+    pub subtitle_clear_btn: Button,
+    pub subtitle_error_label: Label,
+    pub subtitle_font_btn: gtk4::Button,
+    pub subtitle_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_dropdown: gtk4::DropDown,
+    pub subtitle_highlight_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_color_row: GBox,
+    pub subtitle_word_window_slider: Scale,
+    pub subtitle_style_box: GBox,
+    /// Set to `true` when the STT model is present; controls section content.
+    pub stt_model_available: Cell<bool>,
+    /// Set to `true` while an STT job is in flight for the selected clip.
+    pub stt_generating: Cell<bool>,
     // Shape mask
     pub mask_section: GBox,
     pub mask_enable: CheckButton,
@@ -1161,6 +1183,59 @@ impl InspectorView {
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
+                self.subtitle_section.set_visible(is_video || is_audio);
+                let has_stt_model = self.stt_model_available.get();
+                let generating = self.stt_generating.get();
+                self.subtitle_no_model_box.set_visible(!has_stt_model && !generating);
+                self.subtitle_controls_box.set_visible(has_stt_model || !c.subtitle_segments.is_empty() || generating);
+                self.subtitle_generate_btn.set_sensitive(has_stt_model && c.subtitle_segments.is_empty() && !generating);
+                self.subtitle_generate_spinner.set_visible(generating);
+                self.subtitle_generate_spinner.set_spinning(generating);
+                if generating {
+                    self.subtitle_generate_label.set_text("Generating\u{2026}");
+                } else {
+                    self.subtitle_generate_label.set_text("Generate Subtitles");
+                }
+                self.subtitle_clear_btn.set_sensitive(!c.subtitle_segments.is_empty() && !generating);
+                // Show segment count and style controls when subtitles exist
+                let has_subtitles = !c.subtitle_segments.is_empty();
+                while let Some(child) = self.subtitle_list_box.first_child() {
+                    self.subtitle_list_box.remove(&child);
+                }
+                if has_subtitles {
+                    let count_label = Label::new(Some(&format!("{} subtitle segments", c.subtitle_segments.len())));
+                    count_label.set_halign(gtk::Align::Start);
+                    count_label.add_css_class("dim-label");
+                    self.subtitle_list_box.append(&count_label);
+                }
+                // Style controls are always visible so users can configure before generating.
+                self.subtitle_style_box.set_visible(true);
+                self.subtitle_font_btn.set_label(&c.subtitle_font);
+                let rgba = c.subtitle_color;
+                let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
+                let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
+                let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
+                let a = (rgba & 0xFF) as f32 / 255.0;
+                self.subtitle_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                let hl_idx = match c.subtitle_highlight_mode {
+                    crate::model::clip::SubtitleHighlightMode::None => 0,
+                    crate::model::clip::SubtitleHighlightMode::Bold => 1,
+                    crate::model::clip::SubtitleHighlightMode::Color => 2,
+                    crate::model::clip::SubtitleHighlightMode::Underline => 3,
+                };
+                self.subtitle_highlight_dropdown.set_selected(hl_idx);
+                self.subtitle_highlight_color_row.set_visible(hl_idx == 2);
+                self.subtitle_word_window_slider.set_value(c.subtitle_word_window_secs);
+                // Show word window slider only when a highlight mode is active.
+                self.subtitle_word_window_slider.set_visible(hl_idx != 0);
+                if hl_idx == 2 {
+                    let hc = c.subtitle_highlight_color;
+                    let hr = ((hc >> 24) & 0xFF) as f32 / 255.0;
+                    let hg = ((hc >> 16) & 0xFF) as f32 / 255.0;
+                    let hb = ((hc >> 8) & 0xFF) as f32 / 255.0;
+                    let ha = (hc & 0xFF) as f32 / 255.0;
+                    self.subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
+                }
                 self.mask_section.set_visible(is_video || is_image || is_title_clip);
                 self.frei0r_effects_section
                     .set_visible(is_visual && !is_compound && !is_multicam);
@@ -2321,6 +2396,123 @@ pub fn build_inspector(
     bg_removal_threshold_slider.set_digits(2);
     bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
     bg_removal_inner.append(&bg_removal_threshold_slider);
+
+    // ── Subtitles section (Video + Audio clips) ────────────────────────
+    let subtitle_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&subtitle_section);
+
+    subtitle_section.append(&Separator::new(Orientation::Horizontal));
+    let subtitle_expander = Expander::new(Some("Subtitles"));
+    subtitle_expander.set_expanded(false);
+    subtitle_section.append(&subtitle_expander);
+    let subtitle_inner = GBox::new(Orientation::Vertical, 8);
+    subtitle_expander.set_child(Some(&subtitle_inner));
+
+    // "No model" warning box — shown when whisper model is not installed.
+    let subtitle_no_model_box = GBox::new(Orientation::Vertical, 6);
+    let no_model_icon_label = Label::new(Some("Speech-to-text model not installed"));
+    no_model_icon_label.set_halign(gtk::Align::Start);
+    no_model_icon_label.add_css_class("warning");
+    subtitle_no_model_box.append(&no_model_icon_label);
+    let no_model_hint = Label::new(Some(
+        "Download a Whisper GGML model (e.g. ggml-base.en.bin) and place it in the models directory. \
+         See Preferences \u{2192} Models for details.",
+    ));
+    no_model_hint.set_halign(gtk::Align::Start);
+    no_model_hint.add_css_class("dim-label");
+    no_model_hint.set_wrap(true);
+    no_model_hint.set_max_width_chars(40);
+    subtitle_no_model_box.append(&no_model_hint);
+    subtitle_inner.append(&subtitle_no_model_box);
+
+    // Controls box — shown when model IS installed.
+    let subtitle_controls_box = GBox::new(Orientation::Vertical, 8);
+    subtitle_inner.append(&subtitle_controls_box);
+
+    // Language selector
+    row_label(&subtitle_controls_box, "Language");
+    let lang_model = gtk4::StringList::new(&["auto", "en", "es", "fr", "de", "it", "pt", "ja", "zh", "ko", "ru", "ar", "hi"]);
+    let subtitle_language_dropdown = gtk4::DropDown::new(Some(lang_model), Option::<gtk4::Expression>::None);
+    subtitle_language_dropdown.set_selected(0);
+    subtitle_controls_box.append(&subtitle_language_dropdown);
+
+    // Generate button with spinner
+    let subtitle_generate_btn = Button::new();
+    subtitle_generate_btn.set_tooltip_text(Some("Run speech-to-text to generate subtitle segments"));
+    let gen_btn_box = GBox::new(Orientation::Horizontal, 6);
+    gen_btn_box.set_halign(gtk::Align::Center);
+    let subtitle_generate_spinner = gtk4::Spinner::new();
+    subtitle_generate_spinner.set_visible(false);
+    let subtitle_generate_label = Label::new(Some("Generate Subtitles"));
+    gen_btn_box.append(&subtitle_generate_spinner);
+    gen_btn_box.append(&subtitle_generate_label);
+    subtitle_generate_btn.set_child(Some(&gen_btn_box));
+    subtitle_controls_box.append(&subtitle_generate_btn);
+
+    // Error label (hidden by default)
+    let subtitle_error_label = Label::new(None);
+    subtitle_error_label.set_halign(gtk::Align::Start);
+    subtitle_error_label.add_css_class("error");
+    subtitle_error_label.set_wrap(true);
+    subtitle_error_label.set_max_width_chars(40);
+    subtitle_error_label.set_visible(false);
+    subtitle_controls_box.append(&subtitle_error_label);
+
+    // Scrollable segment list
+    let subtitle_list_box = GBox::new(Orientation::Vertical, 4);
+    subtitle_controls_box.append(&subtitle_list_box);
+
+    // ── Style controls (visible when subtitles exist) ────────────────
+    let subtitle_style_box = GBox::new(Orientation::Vertical, 6);
+    subtitle_controls_box.append(&subtitle_style_box);
+
+    subtitle_style_box.append(&Separator::new(Orientation::Horizontal));
+    let style_label = Label::new(Some("Style"));
+    style_label.set_halign(gtk::Align::Start);
+    style_label.add_css_class("heading");
+    subtitle_style_box.append(&style_label);
+
+    row_label(&subtitle_style_box, "Font");
+    let subtitle_font_btn = gtk4::Button::with_label("Sans Bold 24");
+    subtitle_font_btn.set_tooltip_text(Some("Click to choose a subtitle font"));
+    subtitle_style_box.append(&subtitle_font_btn);
+
+    row_label(&subtitle_style_box, "Text Color");
+    let sub_color_dialog = gtk4::ColorDialog::new();
+    sub_color_dialog.set_with_alpha(true);
+    let subtitle_color_btn = gtk4::ColorDialogButton::new(Some(sub_color_dialog));
+    subtitle_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+    subtitle_style_box.append(&subtitle_color_btn);
+
+    row_label(&subtitle_style_box, "Word Highlight");
+    let highlight_model = gtk4::StringList::new(&["None", "Bold", "Color", "Underline"]);
+    let subtitle_highlight_dropdown = gtk4::DropDown::new(Some(highlight_model), Option::<gtk4::Expression>::None);
+    subtitle_highlight_dropdown.set_selected(0);
+    subtitle_style_box.append(&subtitle_highlight_dropdown);
+
+    let subtitle_highlight_color_row = GBox::new(Orientation::Vertical, 4);
+    row_label(&subtitle_highlight_color_row, "Highlight Color");
+    let sub_hl_color_dialog = gtk4::ColorDialog::new();
+    sub_hl_color_dialog.set_with_alpha(true);
+    let subtitle_highlight_color_btn = gtk4::ColorDialogButton::new(Some(sub_hl_color_dialog));
+    subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
+    subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
+    subtitle_style_box.append(&subtitle_highlight_color_row);
+
+    let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 1.0, 8.0, 1.0);
+    subtitle_word_window_slider.set_value(2.0);
+    subtitle_word_window_slider.set_draw_value(true);
+    subtitle_word_window_slider.set_digits(0);
+    subtitle_word_window_slider.add_mark(2.0, gtk4::PositionType::Bottom, None);
+    subtitle_word_window_slider.set_tooltip_text(Some(
+        "How many seconds of words to show around the active word in highlight mode",
+    ));
+    subtitle_style_box.append(&subtitle_word_window_slider);
+
+    // Clear button
+    let subtitle_clear_btn = Button::with_label("Clear Subtitles");
+    subtitle_clear_btn.add_css_class("destructive-action");
+    subtitle_controls_box.append(&subtitle_clear_btn);
 
     // ── Shape Mask section (Video + Image + Title only) ──────────────
     let mask_section = GBox::new(Orientation::Vertical, 8);
@@ -6895,6 +7087,25 @@ pub fn build_inspector(
         bg_removal_enable,
         bg_removal_threshold_slider,
         bg_removal_model_available: Cell::new(false),
+        subtitle_section,
+        subtitle_controls_box,
+        subtitle_no_model_box,
+        subtitle_generate_btn,
+        subtitle_generate_spinner,
+        subtitle_generate_label,
+        subtitle_language_dropdown,
+        subtitle_list_box,
+        subtitle_clear_btn,
+        subtitle_error_label,
+        subtitle_font_btn,
+        subtitle_color_btn,
+        subtitle_highlight_dropdown,
+        subtitle_highlight_color_btn,
+        subtitle_highlight_color_row,
+        subtitle_word_window_slider,
+        subtitle_style_box,
+        stt_model_available: Cell::new(false),
+        stt_generating: Cell::new(false),
         mask_section,
         mask_enable,
         mask_shape_dropdown,

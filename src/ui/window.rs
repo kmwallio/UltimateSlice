@@ -2735,6 +2735,9 @@ pub fn build_window(
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
+    let stt_cache = Rc::new(RefCell::new(
+        crate::media::stt_cache::SttCache::new(),
+    ));
     let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
     let effective_proxy_scale_divisor = Rc::new(Cell::new(match initial_proxy_mode {
         crate::ui_state::ProxyMode::QuarterRes => 4,
@@ -3740,6 +3743,208 @@ pub fn build_window(
     {
         let cb = on_relink_media_gui.clone();
         inspector_view.relink_btn.connect_clicked(move |_| cb());
+    }
+
+    // Wire inspector "Generate Subtitles" button to STT cache.
+    {
+        let stt_cache = stt_cache.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let lang_dropdown = inspector_view.subtitle_language_dropdown.clone();
+        let inspector_view_gen = inspector_view.clone();
+        inspector_view.subtitle_generate_btn.connect_clicked(move |_btn| {
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let proj = project.borrow();
+                let languages = ["auto", "en", "es", "fr", "de", "it", "pt", "ja", "zh", "ko", "ru", "ar", "hi"];
+                let lang_idx = lang_dropdown.selected() as usize;
+                let language = languages.get(lang_idx).unwrap_or(&"auto");
+                for track in &proj.tracks {
+                    if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                        stt_cache.borrow_mut().request(
+                            &clip.source_path,
+                            clip.source_in,
+                            clip.source_out,
+                            language,
+                        );
+                        inspector_view_gen.stt_generating.set(true);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire inspector "Clear Subtitles" button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        inspector_view.subtitle_clear_btn.connect_clicked(move |_btn| {
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_segments.clear();
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+
+    // Wire subtitle font button — opens GTK FontDialog.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let font_btn = inspector_view.subtitle_font_btn.clone();
+        inspector_view.subtitle_font_btn.connect_clicked(move |btn| {
+            let dialog = gtk4::FontDialog::new();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let project_c = project.clone();
+            let ts_c = timeline_state.clone();
+            let opc = on_project_changed.clone();
+            let font_btn_c = font_btn.clone();
+            dialog.choose_font(window.as_ref(), None::<&pango::FontDescription>, None::<&gio::Cancellable>, move |result| {
+                if let Ok(font_desc) = result {
+                    let desc_str = font_desc.to_string();
+                    font_btn_c.set_label(&desc_str);
+                    let selected = ts_c.borrow().selected_clip_id.clone();
+                    if let Some(ref clip_id) = selected {
+                        let mut proj = project_c.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                clip.subtitle_font = desc_str.clone();
+                                proj.dirty = true;
+                                break;
+                            }
+                        }
+                        drop(proj);
+                        opc();
+                    }
+                }
+            });
+        });
+    }
+
+    // Wire subtitle color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_color_btn.connect_notify_local(Some("rgba"), move |btn, _| {
+            if *updating.borrow() { return; }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0) as u32;
+            let g = (rgba.green() * 255.0) as u32;
+            let b = (rgba.blue() * 255.0) as u32;
+            let a = (rgba.alpha() * 255.0) as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_color = color;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+
+    // Wire subtitle highlight mode dropdown.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let hl_color_row = inspector_view.subtitle_highlight_color_row.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_highlight_dropdown.connect_notify_local(Some("selected"), move |dd, _| {
+            if *updating.borrow() { return; }
+            let idx = dd.selected();
+            let mode = match idx {
+                1 => crate::model::clip::SubtitleHighlightMode::Bold,
+                2 => crate::model::clip::SubtitleHighlightMode::Color,
+                3 => crate::model::clip::SubtitleHighlightMode::Underline,
+                _ => crate::model::clip::SubtitleHighlightMode::None,
+            };
+            hl_color_row.set_visible(idx == 2);
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_highlight_mode = mode;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+
+    // Wire subtitle highlight color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_highlight_color_btn.connect_notify_local(Some("rgba"), move |btn, _| {
+            if *updating.borrow() { return; }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0) as u32;
+            let g = (rgba.green() * 255.0) as u32;
+            let b = (rgba.blue() * 255.0) as u32;
+            let a = (rgba.alpha() * 255.0) as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_highlight_color = color;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+
+    // Wire subtitle word window slider.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_word_window_slider.connect_value_changed(move |s| {
+            if *updating.borrow() { return; }
+            let val = s.value();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_word_window_secs = val;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     // Wire timeline's on_project_changed + on_seek + on_play_pause
@@ -5029,6 +5234,7 @@ pub fn build_window(
         prog_false_color_setter,
         prog_zebra_setter,
         prog_frame_updater,
+        prog_subtitle_text_setter,
     ) = {
         // Build the interactive transform overlay and wire its drag callback.
         let transform_overlay = Rc::new(crate::ui::transform_overlay::TransformOverlay::new(
@@ -5587,6 +5793,7 @@ pub fn build_window(
         let timeline_state_poll = timeline_state.clone();
         let inspector_view_poll = inspector_view.clone();
         let prog_frame_updater_poll = prog_frame_updater.clone();
+        let prog_subtitle_setter_poll = prog_subtitle_text_setter.clone();
         let monitor_state_poll = monitor_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
@@ -5778,6 +5985,88 @@ pub fn build_window(
                 {
                     let proj = project.borrow();
                     inspector_view_poll.update_keyframed_sliders(&proj, pos_ns);
+                }
+                // Update subtitle overlay text for current playhead position.
+                // Collect active subtitles from ALL clips at the playhead, with per-clip styling.
+                {
+                    let proj = project.borrow();
+                    let mut lines: Vec<crate::ui::program_monitor::SubtitleLine> = Vec::new();
+                    for track in &proj.tracks {
+                        for clip in &track.clips {
+                            if clip.subtitle_segments.is_empty() {
+                                continue;
+                            }
+                            let clip_end = clip.timeline_start + clip.duration();
+                            if pos_ns >= clip.timeline_start && pos_ns < clip_end {
+                                let local_ns = ((pos_ns - clip.timeline_start) as f64 * clip.speed) as u64 + clip.source_in;
+                                for seg in &clip.subtitle_segments {
+                                    if local_ns >= seg.start_ns && local_ns < seg.end_ns {
+                                        let c = clip.subtitle_color;
+                                        let oc = clip.subtitle_outline_color;
+                                        let bc = clip.subtitle_bg_box_color;
+                                        let hc = clip.subtitle_highlight_color;
+                                        let font_size = clip.subtitle_font.rsplit_once(' ')
+                                            .and_then(|(_, s)| s.parse::<f64>().ok())
+                                            .unwrap_or(24.0);
+
+                                        // Build word-level display with active word highlighting.
+                                        // Time-based window: show words within ±word_window_secs of the playhead.
+                                        let window_ns = (clip.subtitle_word_window_secs * 1_000_000_000.0) as u64;
+                                        let mut word_displays = Vec::new();
+                                        if !seg.words.is_empty() && clip.subtitle_highlight_mode != crate::model::clip::SubtitleHighlightMode::None {
+                                            let window_start = local_ns.saturating_sub(window_ns);
+                                            let window_end = local_ns.saturating_add(window_ns);
+                                            for word in &seg.words {
+                                                // Include word if it overlaps the time window.
+                                                if word.end_ns > window_start && word.start_ns < window_end {
+                                                    let is_active = local_ns >= word.start_ns && local_ns < word.end_ns;
+                                                    word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
+                                                        text: word.text.clone(),
+                                                        active: is_active,
+                                                    });
+                                                }
+                                            }
+                                        }
+
+                                        lines.push(crate::ui::program_monitor::SubtitleLine {
+                                            words: word_displays,
+                                            text: seg.text.clone(),
+                                            color: (
+                                                ((c >> 24) & 0xFF) as f64 / 255.0,
+                                                ((c >> 16) & 0xFF) as f64 / 255.0,
+                                                ((c >> 8) & 0xFF) as f64 / 255.0,
+                                                (c & 0xFF) as f64 / 255.0,
+                                            ),
+                                            highlight_color: (
+                                                ((hc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((hc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((hc >> 8) & 0xFF) as f64 / 255.0,
+                                                (hc & 0xFF) as f64 / 255.0,
+                                            ),
+                                            highlight_mode: clip.subtitle_highlight_mode,
+                                            outline_color: (
+                                                ((oc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((oc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((oc >> 8) & 0xFF) as f64 / 255.0,
+                                                (oc & 0xFF) as f64 / 255.0,
+                                            ),
+                                            outline_width: clip.subtitle_outline_width,
+                                            bg_box: clip.subtitle_bg_box,
+                                            bg_box_color: (
+                                                ((bc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((bc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((bc >> 8) & 0xFF) as f64 / 255.0,
+                                                (bc & 0xFF) as f64 / 255.0,
+                                            ),
+                                            font_size,
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    prog_subtitle_setter_poll(lines);
                 }
                 if let Some(ref editor) = *keyframe_editor_poll.borrow() {
                     editor.queue_redraw();
@@ -7923,6 +8212,8 @@ pub fn build_window(
     {
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let stt_cache = stt_cache.clone();
+        let project_for_stt = project.clone();
         let prog_player = prog_player.clone();
         let effective_proxy_enabled = effective_proxy_enabled.clone();
         let status_label = status_label.clone();
@@ -7973,16 +8264,55 @@ pub fn build_window(
                 inspector_view
                     .bg_removal_model_available
                     .set(bg_removal_cache.borrow().is_available());
+                inspector_view
+                    .stt_model_available
+                    .set(stt_cache.borrow().is_available());
+            }
+            // Poll STT cache — apply generated subtitles to clips.
+            {
+                let stt_results = stt_cache.borrow_mut().poll();
+                if !stt_results.is_empty() {
+                    for result in stt_results {
+                        let mut proj = project_for_stt.borrow_mut();
+                        for track in &mut proj.tracks {
+                            for clip in &mut track.clips {
+                                if clip.source_path == result.source_path
+                                    && clip.source_in == result.source_in_ns
+                                    && clip.source_out == result.source_out_ns
+                                {
+                                    clip.subtitle_segments = result.segments.clone();
+                                }
+                            }
+                        }
+                        proj.dirty = true;
+                    }
+                    // Clear generating state now that results have arrived.
+                    inspector_view.stt_generating.set(false);
+                }
+                // Also clear if no jobs are pending (handles edge cases like failure).
+                if !stt_cache.borrow().progress().in_flight {
+                    inspector_view.stt_generating.set(false);
+                }
+                // Show/hide error label from last STT result.
+                let stt_err = stt_cache.borrow().last_error.clone();
+                if let Some(err) = stt_err {
+                    inspector_view.subtitle_error_label.set_text(&err);
+                    inspector_view.subtitle_error_label.set_visible(true);
+                } else {
+                    inspector_view.subtitle_error_label.set_visible(false);
+                }
             }
             let proxy_progress = proxy_cache.borrow().progress();
             let prerender_progress = prog_player.borrow().background_prerender_progress();
             let bg_progress = bg_removal_cache.borrow().progress();
+            let stt_progress = stt_cache.borrow().progress();
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
             let bg_active = bg_progress.in_flight;
+            let stt_active = stt_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
-            if proxy_active || prerender_active || syncing_audio || detecting_silence || bg_active {
+            if proxy_active || prerender_active || syncing_audio || detecting_silence || bg_active || stt_active {
                 status_label.set_visible(true);
                 let mut parts = Vec::new();
                 if syncing_audio {
@@ -8008,6 +8338,9 @@ pub fn build_window(
                         "Removing backgrounds… {}/{}",
                         bg_progress.completed, bg_progress.total
                     ));
+                }
+                if stt_active {
+                    parts.push("Generating subtitles…".to_string());
                 }
                 status_label.set_text(&parts.join(" | "));
                 if proxy_active {
@@ -8115,6 +8448,7 @@ pub fn build_window(
         };
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+        let stt_cache = stt_cache.clone();
         let window_weak = window.downgrade();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
@@ -8130,6 +8464,7 @@ pub fn build_window(
                         &preferences_state,
                         &proxy_cache,
                         &bg_removal_cache,
+                        &stt_cache,
                         &on_close_preview,
                         &on_source_selected,
                         &on_project_changed_mcp_light,
@@ -8572,6 +8907,7 @@ fn handle_mcp_command(
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     on_close_preview: &Rc<dyn Fn()>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
@@ -12857,6 +13193,120 @@ fn handle_mcp_command(
             } else {
                 reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
             }
+        }
+        // ── Subtitle / STT commands ────────────────────────────────────────
+        McpCommand::GenerateSubtitles { clip_id, language, reply } => {
+            let proj = project.borrow();
+            let clip_info = proj.tracks.iter().flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .map(|c| (c.source_path.clone(), c.source_in, c.source_out));
+            drop(proj);
+            if let Some((source_path, source_in, source_out)) = clip_info {
+                stt_cache.borrow_mut().request(&source_path, source_in, source_out, &language);
+                reply.send(json!({"success": true, "status": "queued"})).ok();
+            } else {
+                reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
+            }
+        }
+        McpCommand::GetClipSubtitles { clip_id, reply } => {
+            let proj = project.borrow();
+            if let Some(clip) = proj.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| c.id == clip_id) {
+                reply.send(json!({
+                    "clip_id": clip_id,
+                    "language": &clip.subtitles_language,
+                    "segments": clip.subtitle_segments.iter().map(|s| json!({
+                        "id": s.id,
+                        "start_ns": s.start_ns,
+                        "end_ns": s.end_ns,
+                        "text": s.text,
+                        "words": s.words.iter().map(|w| json!({
+                            "start_ns": w.start_ns,
+                            "end_ns": w.end_ns,
+                            "text": w.text,
+                        })).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                })).ok();
+            } else {
+                reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
+            }
+        }
+        McpCommand::EditSubtitleText { clip_id, segment_id, text, reply } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == segment_id) {
+                    seg.text = text;
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                    reply.send(json!({"success": true})).ok();
+                } else {
+                    reply.send(json!({"error": format!("Segment not found: {segment_id}")})).ok();
+                }
+            } else {
+                reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
+            }
+        }
+        McpCommand::EditSubtitleTiming { clip_id, segment_id, start_ns, end_ns, reply } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == segment_id) {
+                    seg.start_ns = start_ns;
+                    seg.end_ns = end_ns;
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                    reply.send(json!({"success": true})).ok();
+                } else {
+                    reply.send(json!({"error": format!("Segment not found: {segment_id}")})).ok();
+                }
+            } else {
+                reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
+            }
+        }
+        McpCommand::ClearSubtitles { clip_id, reply } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.subtitle_segments.clear();
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+                reply.send(json!({"success": true})).ok();
+            } else {
+                reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
+            }
+        }
+        McpCommand::SetSubtitleStyle { clip_id, font, color, outline_color, outline_width, bg_box, bg_box_color, highlight_mode, highlight_color, reply } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(f) = font { clip.subtitle_font = f; }
+                if let Some(c) = color { clip.subtitle_color = c; }
+                if let Some(c) = outline_color { clip.subtitle_outline_color = c; }
+                if let Some(w) = outline_width { clip.subtitle_outline_width = w; }
+                if let Some(b) = bg_box { clip.subtitle_bg_box = b; }
+                if let Some(c) = bg_box_color { clip.subtitle_bg_box_color = c; }
+                if let Some(mode) = highlight_mode {
+                    clip.subtitle_highlight_mode = match mode.as_str() {
+                        "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
+                        "color" => crate::model::clip::SubtitleHighlightMode::Color,
+                        "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
+                        _ => crate::model::clip::SubtitleHighlightMode::None,
+                    };
+                }
+                if let Some(c) = highlight_color { clip.subtitle_highlight_color = c; }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+                reply.send(json!({"success": true})).ok();
+            } else {
+                reply.send(json!({"error": format!("Clip not found: {clip_id}")})).ok();
+            }
+        }
+        McpCommand::ExportSrt { path, reply } => {
+            let proj = project.borrow();
+            match crate::media::export::export_srt(&proj, &path) {
+                Ok(()) => reply.send(json!({"success": true, "path": path})).ok(),
+                Err(e) => reply.send(json!({"error": format!("SRT export failed: {e}")})).ok(),
+            };
         }
     }
 }

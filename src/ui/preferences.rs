@@ -477,6 +477,111 @@ pub fn show_preferences_dialog(
         models_box.append(&download_btn);
         models_box.append(&progress_bar);
 
+        // ── Whisper STT model status ─────────────────────────────────────
+        models_box.append(&Separator::new(Orientation::Horizontal));
+
+        let stt_row = GBox::new(Orientation::Horizontal, 8);
+        let stt_name = Label::new(Some("Whisper (Speech-to-Text)"));
+        stt_name.set_halign(gtk::Align::Start);
+        stt_name.set_hexpand(true);
+        let stt_status = Label::new(None);
+        stt_status.set_halign(gtk::Align::End);
+
+        let has_stt = crate::media::stt_cache::find_stt_model_path().is_some();
+        if has_stt {
+            stt_status.set_text("✓ Installed");
+            stt_status.add_css_class("success");
+        } else {
+            stt_status.set_text("Not installed");
+            stt_status.add_css_class("dim-label");
+        }
+        stt_row.append(&stt_name);
+        stt_row.append(&stt_status);
+        models_box.append(&stt_row);
+
+        let stt_hint = Label::new(None);
+        stt_hint.set_markup(
+            "Whisper is used for speech-to-text subtitle generation. \
+             Download a GGML model (e.g. ggml-base.en.bin, ~150 MB) from \
+             <a href=\"https://huggingface.co/ggerganov/whisper.cpp/tree/main\">huggingface.co/ggerganov/whisper.cpp</a> \
+             and place it in:",
+        );
+        stt_hint.set_halign(gtk::Align::Start);
+        stt_hint.add_css_class("dim-label");
+        stt_hint.set_wrap(true);
+        stt_hint.set_max_width_chars(60);
+        models_box.append(&stt_hint);
+
+        let stt_model_dir = crate::media::stt_cache::stt_model_dir();
+        let stt_dir_str = stt_model_dir.to_string_lossy();
+        let stt_path_label = Label::new(None);
+        stt_path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&stt_dir_str),
+            glib::markup_escape_text(&stt_dir_str),
+        ));
+        stt_path_label.set_halign(gtk::Align::Start);
+        stt_path_label.add_css_class("monospace");
+        models_box.append(&stt_path_label);
+
+        stack.add_titled(&models_box, Some("models"), "Models");
+    }
+
+    // When ai-inference is NOT enabled, still show a Models tab with STT info.
+    #[cfg(not(feature = "ai-inference"))]
+    {
+        let models_box = GBox::new(Orientation::Vertical, 10);
+        models_box.set_margin_start(8);
+        models_box.set_margin_end(8);
+        models_box.set_margin_top(8);
+        let models_label = Label::new(Some("Models"));
+        models_label.set_halign(gtk::Align::Start);
+        models_label.add_css_class("title-4");
+        models_box.append(&models_label);
+
+        let stt_row = GBox::new(Orientation::Horizontal, 8);
+        let stt_name = Label::new(Some("Whisper (Speech-to-Text)"));
+        stt_name.set_halign(gtk::Align::Start);
+        stt_name.set_hexpand(true);
+        let stt_status = Label::new(None);
+        stt_status.set_halign(gtk::Align::End);
+        let has_stt = crate::media::stt_cache::find_stt_model_path().is_some();
+        if has_stt {
+            stt_status.set_text("✓ Installed");
+            stt_status.add_css_class("success");
+        } else {
+            stt_status.set_text("Not installed");
+            stt_status.add_css_class("dim-label");
+        }
+        stt_row.append(&stt_name);
+        stt_row.append(&stt_status);
+        models_box.append(&stt_row);
+
+        let stt_hint = Label::new(None);
+        stt_hint.set_markup(
+            "Whisper is used for speech-to-text subtitle generation. \
+             Download a GGML model (e.g. ggml-base.en.bin, ~150 MB) from \
+             <a href=\"https://huggingface.co/ggerganov/whisper.cpp/tree/main\">huggingface.co/ggerganov/whisper.cpp</a> \
+             and place it in:",
+        );
+        stt_hint.set_halign(gtk::Align::Start);
+        stt_hint.add_css_class("dim-label");
+        stt_hint.set_wrap(true);
+        stt_hint.set_max_width_chars(60);
+        models_box.append(&stt_hint);
+
+        let stt_model_dir = crate::media::stt_cache::stt_model_dir();
+        let stt_dir_str = stt_model_dir.to_string_lossy();
+        let stt_path_label = Label::new(None);
+        stt_path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&stt_dir_str),
+            glib::markup_escape_text(&stt_dir_str),
+        ));
+        stt_path_label.set_halign(gtk::Align::Start);
+        stt_path_label.add_css_class("monospace");
+        models_box.append(&stt_path_label);
+
         stack.add_titled(&models_box, Some("models"), "Models");
     }
 

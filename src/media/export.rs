@@ -318,6 +318,7 @@ pub fn export_project(
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
         let title_filter = build_title_filter(clip, out_h);
+        let subtitle_filter = ""; // Subtitles applied post-compositing.
         let speed_filter = build_timing_filter(clip, frame_duration_s, project.frame_rate.numerator, project.frame_rate.denominator);
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
@@ -363,7 +364,7 @@ pub fn export_project(
                 Some(MaskAlphaResult::RasterFile(_)) | None => "1".to_string(),
             };
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{speed_filter}\
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
@@ -392,14 +393,14 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -489,6 +490,7 @@ pub fn export_project(
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
         let chroma_key_filter = build_chroma_key_filter(clip);
         let title_filter = build_title_filter(clip, out_h);
+        let subtitle_filter = ""; // Subtitles applied post-compositing.
         let speed_filter = build_timing_filter(clip, frame_duration_s, project.frame_rate.numerator, project.frame_rate.denominator);
         let lut_prefix = build_lut_filter_prefix(clip);        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
         let rotate_filter = build_rotation_filter(clip, true);
@@ -535,7 +537,7 @@ pub fn export_project(
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
@@ -558,7 +560,7 @@ pub fn export_project(
             let opacity = clip.opacity.clamp(0.0, 1.0);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -604,6 +606,43 @@ pub fn export_project(
         ) {
             filter.push_str(&graph);
             prev_label = next_label;
+        }
+    }
+
+    // === Post-compositing subtitle burn-in ===
+    // Collect all subtitle segments from all clips, convert to timeline-absolute
+    // timestamps, and build a single subtitle filter applied after compositing.
+    {
+        let mut all_segments: Vec<(u64, u64, String, &crate::model::clip::Clip)> = Vec::new();
+        for track in flattened_project_tracks {
+            for clip in &track.clips {
+                if clip.subtitle_segments.is_empty() {
+                    continue;
+                }
+                for seg in &clip.subtitle_segments {
+                    let abs_start = clip.timeline_start
+                        + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                    let abs_end = clip.timeline_start
+                        + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                    all_segments.push((abs_start, abs_end, seg.text.clone(), clip));
+                }
+            }
+        }
+
+        if !all_segments.is_empty() {
+            // Use the first clip with subtitles for style (TODO: per-segment styling
+            // would require ASS style switches, not feasible with force_style alone).
+            let style_clip = all_segments[0].3;
+            let (sub_filter, sub_temp) =
+                build_subtitle_filter_composited(&all_segments, style_clip, out_h);
+            if let Some(f) = sub_temp {
+                _mask_temp_files.push(f);
+            }
+            if !sub_filter.is_empty() {
+                let next_label = "vsub";
+                filter.push_str(&format!(";[{prev_label}]{sub_filter}[{next_label}]"));
+                prev_label = next_label.to_string();
+            }
         }
     }
 
@@ -2100,6 +2139,463 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     }
 
     filter
+}
+
+/// Build drawtext filters for subtitle segments burned into the export.
+/// Build subtitle burn-in filter via ffmpeg's `subtitles` filter with a temp ASS file.
+///
+/// For highlight mode None: renders full segment text per SRT cue.
+/// For highlight modes (Bold/Color/Underline): generates a time-windowed word display
+/// with ASS override tags to highlight the active word, matching the preview overlay.
+///
+/// Returns `(filter_string, temp_file)` — the temp file must be kept alive until ffmpeg finishes.
+fn build_subtitle_filter(
+    clip: &crate::model::clip::Clip,
+    out_h: u32,
+) -> (String, Option<tempfile::NamedTempFile>) {
+    use crate::model::clip::SubtitleHighlightMode;
+
+    if clip.subtitle_segments.is_empty() {
+        return (String::new(), None);
+    }
+
+    let scale_factor = out_h as f64 / TITLE_REFERENCE_HEIGHT;
+    let (font_name, font_size) = parse_subtitle_font(&clip.subtitle_font);
+    let scaled_size = (font_size * (4.0 / 3.0) * scale_factor).round() as u32;
+
+    let rgba = clip.subtitle_color;
+    let r = ((rgba >> 24) & 0xFF) as u8;
+    let g = ((rgba >> 16) & 0xFF) as u8;
+    let b = ((rgba >> 8) & 0xFF) as u8;
+    // ASS colour format is &HAABBGGRR (note BGR order).
+    let ass_primary = format!("&H00{b:02X}{g:02X}{r:02X}");
+
+    let mut style_parts = format!(
+        "FontName={font_name},FontSize={scaled_size},PrimaryColour={ass_primary},Alignment=2,MarginV=40"
+    );
+
+    if clip.subtitle_outline_width > 0.0 {
+        let bw = (clip.subtitle_outline_width * scale_factor).round() as u32;
+        let oc = clip.subtitle_outline_color;
+        let obr = ((oc >> 24) & 0xFF) as u8;
+        let obg = ((oc >> 16) & 0xFF) as u8;
+        let obb = ((oc >> 8) & 0xFF) as u8;
+        style_parts.push_str(&format!(",OutlineColour=&H00{obb:02X}{obg:02X}{obr:02X},Outline={bw}"));
+    }
+
+    if clip.subtitle_bg_box {
+        let bc = clip.subtitle_bg_box_color;
+        let bbr = ((bc >> 24) & 0xFF) as u8;
+        let bbg = ((bc >> 16) & 0xFF) as u8;
+        let bbb = ((bc >> 8) & 0xFF) as u8;
+        let bba = (bc & 0xFF) as u8;
+        let ass_alpha = format!("{:02X}", 255 - bba);
+        style_parts.push_str(&format!(",BorderStyle=3,BackColour=&H{ass_alpha}{bbb:02X}{bbg:02X}{bbr:02X}"));
+    }
+
+    let highlight_mode = clip.subtitle_highlight_mode;
+    let has_words = clip.subtitle_segments.iter().any(|s| !s.words.is_empty());
+    let use_karaoke = highlight_mode != SubtitleHighlightMode::None && has_words;
+
+    let mut sub_file = match tempfile::Builder::new().suffix(".srt").tempfile() {
+        Ok(f) => f,
+        Err(_) => return (String::new(), None),
+    };
+
+    {
+        use std::io::Write;
+
+        if use_karaoke {
+            // Build karaoke cues: for each word, emit a short SRT cue showing the
+            // time-windowed words with the active word highlighted via ASS tags.
+            let hc = clip.subtitle_highlight_color;
+            let hr = ((hc >> 24) & 0xFF) as u8;
+            let hg = ((hc >> 16) & 0xFF) as u8;
+            let hb = ((hc >> 8) & 0xFF) as u8;
+            let ass_hl_color = format!("{{\\c&H{hb:02X}{hg:02X}{hr:02X}&}}");
+            let ass_normal_color = format!("{{\\c{ass_primary}&}}");
+            let ass_bold_on = "{\\b1}";
+            let ass_bold_off = "{\\b0}";
+            let ass_underline_on = "{\\u1}";
+            let ass_underline_off = "{\\u0}";
+            let window_ns = (clip.subtitle_word_window_secs * 1_000_000_000.0) as u64;
+
+            let mut cue_idx = 0usize;
+            for seg in &clip.subtitle_segments {
+                if seg.words.is_empty() {
+                    // Fallback: emit full segment as a single cue.
+                    cue_idx += 1;
+                    let start_ns = (seg.start_ns.saturating_sub(clip.source_in) as f64 / clip.speed) as u64;
+                    let end_ns = (seg.end_ns.saturating_sub(clip.source_in) as f64 / clip.speed) as u64;
+                    let _ = writeln!(sub_file, "{cue_idx}");
+                    let _ = writeln!(sub_file, "{} --> {}", srt_timecode(start_ns), srt_timecode(end_ns));
+                    let _ = writeln!(sub_file, "{}", seg.text);
+                    let _ = writeln!(sub_file);
+                    continue;
+                }
+
+                for (wi, word) in seg.words.iter().enumerate() {
+                    cue_idx += 1;
+                    let w_start = (word.start_ns.saturating_sub(clip.source_in) as f64 / clip.speed) as u64;
+                    let w_end = (word.end_ns.saturating_sub(clip.source_in) as f64 / clip.speed) as u64;
+                    let _ = writeln!(sub_file, "{cue_idx}");
+                    let _ = writeln!(sub_file, "{} --> {}", srt_timecode(w_start), srt_timecode(w_end));
+
+                    // Build the windowed text with highlight on the active word.
+                    let mut line = String::new();
+                    let word_center_ns = word.start_ns;
+                    let win_start = word_center_ns.saturating_sub(window_ns);
+                    let win_end = word_center_ns.saturating_add(window_ns);
+
+                    for (owi, ow) in seg.words.iter().enumerate() {
+                        if ow.end_ns <= win_start || ow.start_ns >= win_end {
+                            continue;
+                        }
+                        if !line.is_empty() {
+                            line.push(' ');
+                        }
+                        if owi == wi {
+                            match highlight_mode {
+                                SubtitleHighlightMode::Color => {
+                                    line.push_str(&ass_hl_color);
+                                    line.push_str(&ow.text);
+                                    line.push_str(&ass_normal_color);
+                                }
+                                SubtitleHighlightMode::Bold => {
+                                    line.push_str(ass_bold_on);
+                                    line.push_str(&ow.text);
+                                    line.push_str(ass_bold_off);
+                                }
+                                SubtitleHighlightMode::Underline => {
+                                    line.push_str(ass_underline_on);
+                                    line.push_str(&ow.text);
+                                    line.push_str(ass_underline_off);
+                                }
+                                SubtitleHighlightMode::None => {
+                                    line.push_str(&ow.text);
+                                }
+                            }
+                        } else {
+                            line.push_str(&ow.text);
+                        }
+                    }
+                    let _ = writeln!(sub_file, "{line}");
+                    let _ = writeln!(sub_file);
+                }
+            }
+        } else {
+            // Simple mode: one SRT cue per segment, full text.
+            for (i, seg) in clip.subtitle_segments.iter().enumerate() {
+                let start_ns = (seg.start_ns.saturating_sub(clip.source_in) as f64 / clip.speed) as u64;
+                let end_ns = (seg.end_ns.saturating_sub(clip.source_in) as f64 / clip.speed) as u64;
+                let _ = writeln!(sub_file, "{}", i + 1);
+                let _ = writeln!(sub_file, "{} --> {}", srt_timecode(start_ns), srt_timecode(end_ns));
+                let _ = writeln!(sub_file, "{}", seg.text);
+                let _ = writeln!(sub_file);
+            }
+        }
+        let _ = sub_file.flush();
+    }
+
+    let sub_path = sub_file.path().to_string_lossy().to_string();
+    let escaped_path = sub_path
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "'\\''");
+
+    let filter = format!(
+        ",subtitles='{escaped_path}':force_style='{style_parts}'"
+    );
+
+    (filter, Some(sub_file))
+}
+
+/// Build a single subtitle filter for post-compositing burn-in.
+/// Takes timeline-absolute segments collected from all clips.
+fn build_subtitle_filter_composited(
+    segments: &[(u64, u64, String, &crate::model::clip::Clip)],
+    style_clip: &crate::model::clip::Clip,
+    out_h: u32,
+) -> (String, Option<tempfile::NamedTempFile>) {
+    use crate::model::clip::SubtitleHighlightMode;
+
+    if segments.is_empty() {
+        return (String::new(), None);
+    }
+
+    let scale_factor = out_h as f64 / TITLE_REFERENCE_HEIGHT;
+    let (font_name, font_size) = parse_subtitle_font(&style_clip.subtitle_font);
+    let scaled_size = (font_size * (4.0 / 3.0) * scale_factor).round() as u32;
+
+    let rgba = style_clip.subtitle_color;
+    let r = ((rgba >> 24) & 0xFF) as u8;
+    let g = ((rgba >> 16) & 0xFF) as u8;
+    let b = ((rgba >> 8) & 0xFF) as u8;
+    let ass_primary = format!("&H00{b:02X}{g:02X}{r:02X}");
+
+    let mut style_parts = format!(
+        "FontName={font_name},FontSize={scaled_size},PrimaryColour={ass_primary},Alignment=2,MarginV=40"
+    );
+
+    if style_clip.subtitle_outline_width > 0.0 {
+        let bw = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
+        let oc = style_clip.subtitle_outline_color;
+        let obr = ((oc >> 24) & 0xFF) as u8;
+        let obg = ((oc >> 16) & 0xFF) as u8;
+        let obb = ((oc >> 8) & 0xFF) as u8;
+        style_parts.push_str(&format!(",OutlineColour=&H00{obb:02X}{obg:02X}{obr:02X},Outline={bw}"));
+    }
+
+    if style_clip.subtitle_bg_box {
+        let bc = style_clip.subtitle_bg_box_color;
+        let bbr = ((bc >> 24) & 0xFF) as u8;
+        let bbg = ((bc >> 16) & 0xFF) as u8;
+        let bbb = ((bc >> 8) & 0xFF) as u8;
+        let bba = (bc & 0xFF) as u8;
+        let ass_alpha = format!("{:02X}", 255 - bba);
+        style_parts.push_str(&format!(",BorderStyle=3,BackColour=&H{ass_alpha}{bbb:02X}{bbg:02X}{bbr:02X}"));
+    }
+
+    let highlight_mode = style_clip.subtitle_highlight_mode;
+    let has_words = style_clip.subtitle_segments.iter().any(|s| !s.words.is_empty());
+    let use_karaoke = highlight_mode != SubtitleHighlightMode::None && has_words;
+
+    if use_karaoke {
+        // Write a proper ASS file so override tags (\c, \b, \u) work.
+        let mut sub_file = match tempfile::Builder::new().suffix(".ass").tempfile() {
+            Ok(f) => f,
+            Err(_) => return (String::new(), None),
+        };
+
+        let hc = style_clip.subtitle_highlight_color;
+        let hr = ((hc >> 24) & 0xFF) as u8;
+        let hg = ((hc >> 16) & 0xFF) as u8;
+        let hb = ((hc >> 8) & 0xFF) as u8;
+        let window_ns = (style_clip.subtitle_word_window_secs * 1_000_000_000.0) as u64;
+
+        {
+            use std::io::Write;
+
+            // ASS header with default style matching our settings.
+            let _ = writeln!(sub_file, "[Script Info]");
+            let _ = writeln!(sub_file, "ScriptType: v4.00+");
+            let _ = writeln!(sub_file, "PlayResX: {out_w}", out_w = out_h * 16 / 9); // approximate
+            let _ = writeln!(sub_file, "PlayResY: {out_h}");
+            let _ = writeln!(sub_file);
+            let _ = writeln!(sub_file, "[V4+ Styles]");
+            let _ = writeln!(
+                sub_file,
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
+            );
+            // Build the default style line.
+            let mut outline_color = "&H00000000".to_string();
+            let mut outline_w = 0u32;
+            let mut border_style = 1u32;
+            let mut back_color = "&H00000000".to_string();
+            if style_clip.subtitle_outline_width > 0.0 {
+                let oc = style_clip.subtitle_outline_color;
+                let obr = ((oc >> 24) & 0xFF) as u8;
+                let obg = ((oc >> 16) & 0xFF) as u8;
+                let obb = ((oc >> 8) & 0xFF) as u8;
+                outline_color = format!("&H00{obb:02X}{obg:02X}{obr:02X}");
+                outline_w = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
+            }
+            if style_clip.subtitle_bg_box {
+                let bc = style_clip.subtitle_bg_box_color;
+                let bbr = ((bc >> 24) & 0xFF) as u8;
+                let bbg = ((bc >> 16) & 0xFF) as u8;
+                let bbb = ((bc >> 8) & 0xFF) as u8;
+                let bba = (bc & 0xFF) as u8;
+                let ass_alpha = 255 - bba;
+                back_color = format!("&H{ass_alpha:02X}{bbb:02X}{bbg:02X}{bbr:02X}");
+                border_style = 3;
+            }
+            let _ = writeln!(
+                sub_file,
+                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},0,0,0,0,100,100,0,0,{border_style},{outline_w},0,2,10,10,40,1"
+            );
+            let _ = writeln!(sub_file);
+            let _ = writeln!(sub_file, "[Events]");
+            let _ = writeln!(sub_file, "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text");
+
+            for seg in &style_clip.subtitle_segments {
+                if seg.words.is_empty() {
+                    let abs_start = style_clip.timeline_start
+                        + ((seg.start_ns.saturating_sub(style_clip.source_in)) as f64 / style_clip.speed) as u64;
+                    let abs_end = style_clip.timeline_start
+                        + ((seg.end_ns.saturating_sub(style_clip.source_in)) as f64 / style_clip.speed) as u64;
+                    let _ = writeln!(
+                        sub_file,
+                        "Dialogue: 0,{},{},Default,,0,0,0,,{}",
+                        ass_timecode(abs_start), ass_timecode(abs_end), seg.text
+                    );
+                    continue;
+                }
+
+                for (wi, word) in seg.words.iter().enumerate() {
+                    let w_abs_start = style_clip.timeline_start
+                        + ((word.start_ns.saturating_sub(style_clip.source_in)) as f64 / style_clip.speed) as u64;
+                    let w_abs_end = style_clip.timeline_start
+                        + ((word.end_ns.saturating_sub(style_clip.source_in)) as f64 / style_clip.speed) as u64;
+
+                    let mut text = String::new();
+                    let win_start = word.start_ns.saturating_sub(window_ns);
+                    let win_end = word.start_ns.saturating_add(window_ns);
+
+                    for (owi, ow) in seg.words.iter().enumerate() {
+                        if ow.end_ns <= win_start || ow.start_ns >= win_end {
+                            continue;
+                        }
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        if owi == wi {
+                            match highlight_mode {
+                                SubtitleHighlightMode::Color => {
+                                    text.push_str(&format!("{{\\c&H{hb:02X}{hg:02X}{hr:02X}&}}"));
+                                    text.push_str(&ow.text);
+                                    text.push_str(&format!("{{\\c{ass_primary}&}}"));
+                                }
+                                SubtitleHighlightMode::Bold => {
+                                    text.push_str("{\\b1}");
+                                    text.push_str(&ow.text);
+                                    text.push_str("{\\b0}");
+                                }
+                                SubtitleHighlightMode::Underline => {
+                                    text.push_str("{\\u1}");
+                                    text.push_str(&ow.text);
+                                    text.push_str("{\\u0}");
+                                }
+                                SubtitleHighlightMode::None => text.push_str(&ow.text),
+                            }
+                        } else {
+                            text.push_str(&ow.text);
+                        }
+                    }
+
+                    let _ = writeln!(
+                        sub_file,
+                        "Dialogue: 0,{},{},Default,,0,0,0,,{text}",
+                        ass_timecode(w_abs_start), ass_timecode(w_abs_end)
+                    );
+                }
+            }
+            let _ = sub_file.flush();
+        }
+
+        let sub_path = sub_file.path().to_string_lossy().to_string();
+        let escaped_path = sub_path
+            .replace('\\', "\\\\")
+            .replace(':', "\\:")
+            .replace('\'', "'\\''");
+
+        // ASS file has styles embedded, no force_style needed.
+        let filter = format!("subtitles='{escaped_path}'");
+        (filter, Some(sub_file))
+    } else {
+        // Simple mode: SRT with force_style.
+        let mut sub_file = match tempfile::Builder::new().suffix(".srt").tempfile() {
+            Ok(f) => f,
+            Err(_) => return (String::new(), None),
+        };
+
+        {
+            use std::io::Write;
+            let mut sorted: Vec<_> = segments.iter().collect();
+            sorted.sort_by_key(|(start, _, _, _)| *start);
+            for (i, (start_ns, end_ns, text, _)) in sorted.iter().enumerate() {
+                let _ = writeln!(sub_file, "{}", i + 1);
+                let _ = writeln!(sub_file, "{} --> {}", srt_timecode(*start_ns), srt_timecode(*end_ns));
+                let _ = writeln!(sub_file, "{text}");
+                let _ = writeln!(sub_file);
+            }
+            let _ = sub_file.flush();
+        }
+
+        let sub_path = sub_file.path().to_string_lossy().to_string();
+        let escaped_path = sub_path
+            .replace('\\', "\\\\")
+            .replace(':', "\\:")
+            .replace('\'', "'\\''");
+
+        let filter = format!(
+            "subtitles='{escaped_path}':force_style='{style_parts}'"
+        );
+        (filter, Some(sub_file))
+    }
+}
+
+/// Parse subtitle font descriptor (e.g. "Sans Bold 24") into (name, size).
+fn parse_subtitle_font(font_desc: &str) -> (String, f64) {
+    // Try to extract trailing numeric size.
+    let parts: Vec<&str> = font_desc.rsplitn(2, ' ').collect();
+    if parts.len() == 2 {
+        if let Ok(size) = parts[0].parse::<f64>() {
+            return (parts[1].to_string(), size);
+        }
+    }
+    (font_desc.to_string(), 24.0)
+}
+
+/// Export subtitles from all clips in the project as an SRT file.
+pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
+    use std::io::Write;
+    let mut segments: Vec<(u64, u64, String)> = Vec::new();
+
+    for track in &project.tracks {
+        for clip in &track.clips {
+            if clip.subtitle_segments.is_empty() {
+                continue;
+            }
+            for seg in &clip.subtitle_segments {
+                // Convert source-relative to timeline-absolute timestamps.
+                let timeline_start = clip.timeline_start
+                    + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                let timeline_end = clip.timeline_start
+                    + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                segments.push((timeline_start, timeline_end, seg.text.clone()));
+            }
+        }
+    }
+
+    // Sort by start time.
+    segments.sort_by_key(|s| s.0);
+
+    let mut file = std::fs::File::create(output_path)?;
+    for (i, (start_ns, end_ns, text)) in segments.iter().enumerate() {
+        let start_tc = srt_timecode(*start_ns);
+        let end_tc = srt_timecode(*end_ns);
+        writeln!(file, "{}", i + 1)?;
+        writeln!(file, "{start_tc} --> {end_tc}")?;
+        writeln!(file, "{text}")?;
+        writeln!(file)?;
+    }
+
+    Ok(())
+}
+
+/// Format nanoseconds as ASS timecode: H:MM:SS.cc (centiseconds)
+fn ass_timecode(ns: u64) -> String {
+    let total_cs = ns / 10_000_000;
+    let cs = total_cs % 100;
+    let total_s = total_cs / 100;
+    let s = total_s % 60;
+    let total_m = total_s / 60;
+    let m = total_m % 60;
+    let h = total_m / 60;
+    format!("{h}:{m:02}:{s:02}.{cs:02}")
+}
+
+/// Format nanoseconds as SRT timecode: HH:MM:SS,mmm
+fn srt_timecode(ns: u64) -> String {
+    let total_ms = ns / 1_000_000;
+    let ms = total_ms % 1000;
+    let total_s = total_ms / 1000;
+    let s = total_s % 60;
+    let total_m = total_s / 60;
+    let m = total_m % 60;
+    let h = total_m / 60;
+    format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
 fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {

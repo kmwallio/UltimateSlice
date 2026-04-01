@@ -579,6 +579,49 @@ pub enum McpCommand {
         muted: Option<bool>,
         reply: SyncSender<Value>,
     },
+    // ── Subtitle / STT commands ────────────────────────────────────────
+    GenerateSubtitles {
+        clip_id: String,
+        language: String,
+        reply: SyncSender<Value>,
+    },
+    GetClipSubtitles {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    EditSubtitleText {
+        clip_id: String,
+        segment_id: String,
+        text: String,
+        reply: SyncSender<Value>,
+    },
+    EditSubtitleTiming {
+        clip_id: String,
+        segment_id: String,
+        start_ns: u64,
+        end_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    ClearSubtitles {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetSubtitleStyle {
+        clip_id: String,
+        font: Option<String>,
+        color: Option<u32>,
+        outline_color: Option<u32>,
+        outline_width: Option<f64>,
+        bg_box: Option<bool>,
+        bg_box_color: Option<u32>,
+        highlight_mode: Option<String>,
+        highlight_color: Option<u32>,
+        reply: SyncSender<Value>,
+    },
+    ExportSrt {
+        path: String,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

@@ -698,6 +698,48 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             asset_clip.push_attribute(("us:masks", json.as_str()));
                         }
                     }
+                    // Subtitle segments + style
+                    if !clip.subtitle_segments.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.subtitle_segments) {
+                            asset_clip.push_attribute(("us:subtitle-segments", json.as_str()));
+                        }
+                    }
+                    if !clip.subtitles_language.is_empty() {
+                        asset_clip.push_attribute(("us:subtitles-language", clip.subtitles_language.as_str()));
+                    }
+                    if clip.subtitle_font != "Sans Bold 24" {
+                        asset_clip.push_attribute(("us:subtitle-font", clip.subtitle_font.as_str()));
+                    }
+                    if clip.subtitle_color != 0xFFFFFFFF {
+                        asset_clip.push_attribute(("us:subtitle-color", clip.subtitle_color.to_string().as_str()));
+                    }
+                    if clip.subtitle_outline_color != 0x000000FF {
+                        asset_clip.push_attribute(("us:subtitle-outline-color", clip.subtitle_outline_color.to_string().as_str()));
+                    }
+                    if (clip.subtitle_outline_width - 2.0).abs() > 0.001 {
+                        asset_clip.push_attribute(("us:subtitle-outline-width", clip.subtitle_outline_width.to_string().as_str()));
+                    }
+                    if !clip.subtitle_bg_box {
+                        asset_clip.push_attribute(("us:subtitle-bg-box", "false"));
+                    }
+                    if clip.subtitle_bg_box_color != 0x00000099 {
+                        asset_clip.push_attribute(("us:subtitle-bg-box-color", clip.subtitle_bg_box_color.to_string().as_str()));
+                    }
+                    if clip.subtitle_highlight_mode != crate::model::clip::SubtitleHighlightMode::None {
+                        let mode_str = match clip.subtitle_highlight_mode {
+                            crate::model::clip::SubtitleHighlightMode::Bold => "bold",
+                            crate::model::clip::SubtitleHighlightMode::Color => "color",
+                            crate::model::clip::SubtitleHighlightMode::Underline => "underline",
+                            _ => "none",
+                        };
+                        asset_clip.push_attribute(("us:subtitle-highlight-mode", mode_str));
+                    }
+                    if clip.subtitle_highlight_color != 0xFFFF00FF {
+                        asset_clip.push_attribute(("us:subtitle-highlight-color", clip.subtitle_highlight_color.to_string().as_str()));
+                    }
+                    if (clip.subtitle_word_window_secs - 2.0).abs() > 0.001 {
+                        asset_clip.push_attribute(("us:subtitle-word-window-secs", clip.subtitle_word_window_secs.to_string().as_str()));
+                    }
                     if !clip.ladspa_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.ladspa_effects) {
                             asset_clip.push_attribute(("us:ladspa-effects", json.as_str()));
@@ -3594,6 +3636,17 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:ladspa-effects"
             | "us:masks"
             | "us:measured-loudness-lufs"
+            | "us:subtitle-segments"
+            | "us:subtitles-language"
+            | "us:subtitle-font"
+            | "us:subtitle-color"
+            | "us:subtitle-outline-color"
+            | "us:subtitle-outline-width"
+            | "us:subtitle-bg-box"
+            | "us:subtitle-bg-box-color"
+            | "us:subtitle-highlight-mode"
+            | "us:subtitle-highlight-color"
+            | "us:subtitle-word-window-secs"
     )
 }
 

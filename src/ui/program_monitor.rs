@@ -10,6 +10,57 @@ use gtk4::{
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// Style info for a subtitle line in the program monitor overlay.
+#[derive(Clone)]
+pub struct SubtitleLine {
+    /// Individual words with their active/inactive state.
+    /// If non-empty, words are rendered individually with highlighting.
+    /// If empty, `text` is rendered as a single block.
+    pub words: Vec<SubtitleWordDisplay>,
+    /// Fallback full text (used when words is empty).
+    pub text: String,
+    /// Text color as (r, g, b, a) 0.0–1.0.
+    pub color: (f64, f64, f64, f64),
+    /// Highlight color for the active word.
+    pub highlight_color: (f64, f64, f64, f64),
+    /// Highlight mode.
+    pub highlight_mode: crate::model::clip::SubtitleHighlightMode,
+    /// Outline color.
+    pub outline_color: (f64, f64, f64, f64),
+    /// Outline width in pts.
+    pub outline_width: f64,
+    /// Background box enabled.
+    pub bg_box: bool,
+    /// Background box color.
+    pub bg_box_color: (f64, f64, f64, f64),
+    /// Font size scaling factor (from clip font descriptor).
+    pub font_size: f64,
+}
+
+/// A single word to display, with active (highlighted) flag.
+#[derive(Clone)]
+pub struct SubtitleWordDisplay {
+    pub text: String,
+    pub active: bool,
+}
+
+impl Default for SubtitleLine {
+    fn default() -> Self {
+        Self {
+            words: Vec::new(),
+            text: String::new(),
+            color: (1.0, 1.0, 1.0, 1.0),
+            highlight_color: (1.0, 1.0, 0.0, 1.0),
+            highlight_mode: crate::model::clip::SubtitleHighlightMode::None,
+            outline_color: (0.0, 0.0, 0.0, 0.9),
+            outline_width: 2.0,
+            bg_box: true,
+            bg_box_color: (0.0, 0.0, 0.0, 0.6),
+            font_size: 24.0,
+        }
+    }
+}
+
 /// Transform parameters for a clip (crop, rotation, flip).
 /// Kept here so other modules can reference it without a separate file.
 #[derive(Clone, Copy, Default)]
@@ -25,11 +76,12 @@ pub struct ClipTransform {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, frame_updater)`.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, frame_updater, subtitle_text_setter)`.
 /// - `safe_area_setter(enabled)` — toggle safe-area guide overlay.
 /// - `false_color_setter(enabled)` — toggle false-color luminance overlay.
 /// - `zebra_setter(enabled, threshold)` — toggle zebra overexposure overlay; threshold is 0.0–1.0.
 /// - `frame_updater(frame)` — push a new 320×180 RGBA scope frame; triggers overlay redraw.
+/// - `subtitle_text_setter(lines)` — set current subtitle lines for overlay display with per-clip styling.
 pub fn build_program_monitor(
     _program_player: Rc<RefCell<ProgramPlayer>>,
     paintable_a: gdk4::Paintable,
@@ -61,6 +113,7 @@ pub fn build_program_monitor(
     Rc<dyn Fn(bool)>,
     Rc<dyn Fn(bool, f64)>,
     Rc<dyn Fn(ScopeFrame)>,
+    Rc<dyn Fn(Vec<SubtitleLine>)>,
 ) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -332,6 +385,143 @@ pub fn build_program_monitor(
     }
     overlay.add_overlay(&zebra_da);
     overlay.set_measure_overlay(&zebra_da, false);
+
+    // Subtitle overlay: displays current subtitle lines with per-clip styling.
+    let subtitle_lines: Rc<RefCell<Vec<SubtitleLine>>> = Rc::new(RefCell::new(Vec::new()));
+    let subtitle_da = DrawingArea::new();
+    subtitle_da.set_hexpand(true);
+    subtitle_da.set_vexpand(true);
+    subtitle_da.set_halign(gtk::Align::Fill);
+    subtitle_da.set_valign(gtk::Align::Fill);
+    subtitle_da.set_can_target(false);
+    {
+        let sl = subtitle_lines.clone();
+        subtitle_da.set_draw_func(move |_da, cr, width, height| {
+            let guard = sl.borrow();
+            if guard.is_empty() || width <= 0 || height <= 0 {
+                return;
+            }
+            let w = width as f64;
+            let h = height as f64;
+            let base_y = h * 0.88;
+            let line_spacing = 6.0;
+            let mut cursor_y = base_y;
+
+            for line in guard.iter().rev() {
+                // Scale font: Pango pts → pixels (×4/3), then proportional to preview height.
+                // Matches the export scaling: font_size * 4/3 * (out_h / 1080).
+                let font_size = (line.font_size * (4.0 / 3.0) * h / 1080.0).clamp(10.0, 72.0);
+                cr.set_font_size(font_size);
+
+                // Build the display string and measure it.
+                let display_text = if !line.words.is_empty() {
+                    line.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+                } else {
+                    line.text.clone()
+                };
+                if display_text.is_empty() {
+                    continue;
+                }
+
+                let te = cr.text_extents(&display_text).unwrap_or_else(|_| cr.text_extents("M").unwrap());
+                let tx = (w - te.width()) / 2.0 - te.x_bearing();
+                let ty = cursor_y;
+
+                // Background box.
+                if line.bg_box {
+                    let pad_x = 8.0;
+                    let pad_y = 4.0;
+                    let (br, bg, bb, ba) = line.bg_box_color;
+                    cr.set_source_rgba(br, bg, bb, ba);
+                    let box_x = tx + te.x_bearing() - pad_x;
+                    let box_y = ty - te.height() - pad_y;
+                    let box_w = te.width() + pad_x * 2.0;
+                    let box_h = te.height() + pad_y * 2.0;
+                    let r = 4.0;
+                    cr.new_sub_path();
+                    cr.arc(box_x + box_w - r, box_y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+                    cr.arc(box_x + box_w - r, box_y + box_h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+                    cr.arc(box_x + r, box_y + box_h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+                    cr.arc(box_x + r, box_y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
+                    cr.close_path();
+                    cr.fill().ok();
+                }
+
+                // Outline for the full text.
+                if line.outline_width > 0.0 {
+                    let (or, og, ob, oa) = line.outline_color;
+                    cr.set_source_rgba(or, og, ob, oa);
+                    cr.set_line_width(line.outline_width * 1.5);
+                    let _ = cr.move_to(tx, ty);
+                    cr.text_path(&display_text);
+                    cr.stroke().ok();
+                }
+
+                // Render words individually with highlighting, or as a single block.
+                use crate::model::clip::SubtitleHighlightMode;
+                if !line.words.is_empty() && line.highlight_mode != SubtitleHighlightMode::None {
+                    let mut word_x = tx;
+                    let space_w = cr.text_extents(" ").map(|e| e.x_advance()).unwrap_or(font_size * 0.3);
+                    for (i, word) in line.words.iter().enumerate() {
+                        if i > 0 {
+                            word_x += space_w;
+                        }
+                        let we = cr.text_extents(&word.text).unwrap_or_else(|_| cr.text_extents("M").unwrap());
+
+                        if word.active {
+                            match line.highlight_mode {
+                                SubtitleHighlightMode::Color => {
+                                    let (hr, hg, hb, ha) = line.highlight_color;
+                                    cr.set_source_rgba(hr, hg, hb, ha);
+                                }
+                                SubtitleHighlightMode::Bold => {
+                                    // Draw twice for faux bold.
+                                    let (tr, tg, tb, ta) = line.color;
+                                    cr.set_source_rgba(tr, tg, tb, ta);
+                                    let _ = cr.move_to(word_x + 0.5, ty);
+                                    let _ = cr.show_text(&word.text);
+                                    cr.set_source_rgba(tr, tg, tb, ta);
+                                }
+                                SubtitleHighlightMode::Underline => {
+                                    let (tr, tg, tb, ta) = line.color;
+                                    cr.set_source_rgba(tr, tg, tb, ta);
+                                    let _ = cr.move_to(word_x, ty);
+                                    let _ = cr.show_text(&word.text);
+                                    // Draw underline.
+                                    cr.set_line_width(1.5);
+                                    let _ = cr.move_to(word_x, ty + 3.0);
+                                    let _ = cr.line_to(word_x + we.x_advance(), ty + 3.0);
+                                    cr.stroke().ok();
+                                    word_x += we.x_advance();
+                                    continue;
+                                }
+                                SubtitleHighlightMode::None => {
+                                    let (tr, tg, tb, ta) = line.color;
+                                    cr.set_source_rgba(tr, tg, tb, ta);
+                                }
+                            }
+                        } else {
+                            let (tr, tg, tb, ta) = line.color;
+                            cr.set_source_rgba(tr, tg, tb, ta);
+                        }
+                        let _ = cr.move_to(word_x, ty);
+                        let _ = cr.show_text(&word.text);
+                        word_x += we.x_advance();
+                    }
+                } else {
+                    // Single-block rendering (no word-level highlight).
+                    let (tr, tg, tb, ta) = line.color;
+                    cr.set_source_rgba(tr, tg, tb, ta);
+                    let _ = cr.move_to(tx, ty);
+                    let _ = cr.show_text(&display_text);
+                }
+
+                cursor_y -= te.height() + line_spacing;
+            }
+        });
+    }
+    overlay.add_overlay(&subtitle_da);
+    overlay.set_measure_overlay(&subtitle_da, false);
 
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
@@ -634,6 +824,16 @@ pub fn build_program_monitor(
         });
     }
 
+    // subtitle_text_setter: update the current subtitle overlay lines.
+    let subtitle_text_setter: Rc<dyn Fn(Vec<SubtitleLine>)> = {
+        let sl = subtitle_lines.clone();
+        let da = subtitle_da.clone();
+        Rc::new(move |lines: Vec<SubtitleLine>| {
+            *sl.borrow_mut() = lines;
+            da.queue_draw();
+        })
+    };
+
     // frame_updater: push a new scope frame to the false-color and zebra overlays.
     let frame_updater: Rc<dyn Fn(ScopeFrame)> = {
         let fc_da = false_color_da.clone();
@@ -665,6 +865,7 @@ pub fn build_program_monitor(
         false_color_setter,
         zebra_setter,
         frame_updater,
+        subtitle_text_setter,
     )
 }
 

@@ -7473,6 +7473,23 @@ fn draw_clip(
                 cr.set_source_rgb(0.55, 0.95, 1.0);
                 let _ = cr.move_to(bx, by);
                 let _ = cr.show_text(badge);
+                badge_right = bx - 8.0;
+            }
+        }
+
+        // CC badge: show when clip has subtitle segments
+        if !clip.subtitle_segments.is_empty() && cw > 50.0 {
+            let badge = "CC";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(0.9, 0.75, 1.0); // light purple
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
             }
         }
     }

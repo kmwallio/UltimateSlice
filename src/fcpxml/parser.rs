@@ -997,6 +997,46 @@ fn parse_asset_clip(
                     clip.masks = masks;
                 }
             }
+            // Subtitle segments + style
+            if let Some(v) = attrs.get("us:subtitle-segments") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.subtitle_segments = serde_json::from_str(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:subtitles-language") {
+                clip.subtitles_language = v.clone();
+            }
+            if let Some(v) = attrs.get("us:subtitle-font") {
+                clip.subtitle_font = v.clone();
+            }
+            if let Some(v) = attrs.get("us:subtitle-color") {
+                clip.subtitle_color = v.parse().unwrap_or(0xFFFFFFFF);
+            }
+            if let Some(v) = attrs.get("us:subtitle-outline-color") {
+                clip.subtitle_outline_color = v.parse().unwrap_or(0x000000FF);
+            }
+            if let Some(v) = attrs.get("us:subtitle-outline-width") {
+                clip.subtitle_outline_width = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:subtitle-bg-box") {
+                clip.subtitle_bg_box = v != "false";
+            }
+            if let Some(v) = attrs.get("us:subtitle-bg-box-color") {
+                clip.subtitle_bg_box_color = v.parse().unwrap_or(0x00000099);
+            }
+            if let Some(v) = attrs.get("us:subtitle-highlight-mode") {
+                clip.subtitle_highlight_mode = match v.as_str() {
+                    "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
+                    "color" => crate::model::clip::SubtitleHighlightMode::Color,
+                    "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
+                    _ => crate::model::clip::SubtitleHighlightMode::None,
+                };
+            }
+            if let Some(v) = attrs.get("us:subtitle-highlight-color") {
+                clip.subtitle_highlight_color = v.parse().unwrap_or(0xFFFF00FF);
+            }
+            if let Some(v) = attrs.get("us:subtitle-word-window-secs") {
+                clip.subtitle_word_window_secs = v.parse().unwrap_or(2.0);
+            }
             if let Some(v) = attrs.get("us:ladspa-effects") {
                 let json_str = v.replace("&quot;", "\"");
                 clip.ladspa_effects = serde_json::from_str(&json_str).unwrap_or_default();
@@ -2576,6 +2616,17 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:ladspa-effects"
             | "us:masks"
             | "us:measured-loudness-lufs"
+            | "us:subtitle-segments"
+            | "us:subtitles-language"
+            | "us:subtitle-font"
+            | "us:subtitle-color"
+            | "us:subtitle-outline-color"
+            | "us:subtitle-outline-width"
+            | "us:subtitle-bg-box"
+            | "us:subtitle-bg-box-color"
+            | "us:subtitle-highlight-mode"
+            | "us:subtitle-highlight-color"
+            | "us:subtitle-word-window-secs"
     )
 }
 

@@ -1488,6 +1488,98 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_id", "angle_index"]
             }
+        },
+        // ── Subtitle / STT tools ──────────────────────────────────────────
+        {
+            "name": "generate_subtitles",
+            "description": "Run speech-to-text on a clip to generate subtitle segments. Returns immediately; poll get_clip_subtitles for results.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip to transcribe" },
+                    "language": { "type": "string", "description": "Language code (en, es, fr, de, ja, zh, auto). Default: auto" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "get_clip_subtitles",
+            "description": "Get all subtitle segments for a clip, including word-level timestamps.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "edit_subtitle_text",
+            "description": "Edit the text of a subtitle segment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" },
+                    "segment_id": { "type": "string", "description": "ID of the subtitle segment" },
+                    "text": { "type": "string", "description": "New text for the segment" }
+                },
+                "required": ["clip_id", "segment_id", "text"]
+            }
+        },
+        {
+            "name": "edit_subtitle_timing",
+            "description": "Edit the start/end timing of a subtitle segment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" },
+                    "segment_id": { "type": "string", "description": "ID of the subtitle segment" },
+                    "start_ns": { "type": "integer", "description": "New start time in nanoseconds (source-relative)" },
+                    "end_ns": { "type": "integer", "description": "New end time in nanoseconds (source-relative)" }
+                },
+                "required": ["clip_id", "segment_id", "start_ns", "end_ns"]
+            }
+        },
+        {
+            "name": "clear_subtitles",
+            "description": "Remove all subtitle segments from a clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_subtitle_style",
+            "description": "Set subtitle display style for a clip (font, colors, highlight mode).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" },
+                    "font": { "type": "string", "description": "Font descriptor e.g. 'Sans Bold 24'" },
+                    "color": { "type": "integer", "description": "Text color as 0xRRGGBBAA" },
+                    "outline_color": { "type": "integer", "description": "Outline color as 0xRRGGBBAA" },
+                    "outline_width": { "type": "number", "description": "Outline width in pts" },
+                    "bg_box": { "type": "boolean", "description": "Enable background box" },
+                    "bg_box_color": { "type": "integer", "description": "Background box color as 0xRRGGBBAA" },
+                    "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline"], "description": "Word highlight mode" },
+                    "highlight_color": { "type": "integer", "description": "Highlight color as 0xRRGGBBAA" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "export_srt",
+            "description": "Export all subtitles in the project as an SRT file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Output file path for the .srt file" }
+                },
+                "required": ["path"]
+            }
         }
     ]})
 }
@@ -2220,6 +2312,49 @@ fn dispatch_tool_payload(
             angle_index: args["angle_index"].as_u64().unwrap_or(0) as usize,
             volume: args["volume"].as_f64().map(|v| v as f32),
             muted: args["muted"].as_bool(),
+            reply: tx,
+        },
+        // ── Subtitle / STT tools ──────────────────────────────────────────
+        "generate_subtitles" => McpCommand::GenerateSubtitles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            language: args["language"].as_str().unwrap_or("auto").to_string(),
+            reply: tx,
+        },
+        "get_clip_subtitles" => McpCommand::GetClipSubtitles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "edit_subtitle_text" => McpCommand::EditSubtitleText {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            segment_id: args["segment_id"].as_str().unwrap_or("").to_string(),
+            text: args["text"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "edit_subtitle_timing" => McpCommand::EditSubtitleTiming {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            segment_id: args["segment_id"].as_str().unwrap_or("").to_string(),
+            start_ns: args["start_ns"].as_u64().unwrap_or(0),
+            end_ns: args["end_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+        "clear_subtitles" => McpCommand::ClearSubtitles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_subtitle_style" => McpCommand::SetSubtitleStyle {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            font: args["font"].as_str().map(String::from),
+            color: args["color"].as_u64().map(|v| v as u32),
+            outline_color: args["outline_color"].as_u64().map(|v| v as u32),
+            outline_width: args["outline_width"].as_f64(),
+            bg_box: args["bg_box"].as_bool(),
+            bg_box_color: args["bg_box_color"].as_u64().map(|v| v as u32),
+            highlight_mode: args["highlight_mode"].as_str().map(String::from),
+            highlight_color: args["highlight_color"].as_u64().map(|v| v as u32),
+            reply: tx,
+        },
+        "export_srt" => McpCommand::ExportSrt {
+            path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 

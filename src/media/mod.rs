@@ -4,6 +4,7 @@ pub mod ladspa_registry;
 pub mod mask_alpha;
 pub mod voiceover;
 pub mod bg_removal_cache;
+pub mod stt_cache;
 pub mod color_match;
 pub mod cube_lut;
 pub mod export;
