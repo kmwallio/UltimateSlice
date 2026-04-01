@@ -442,11 +442,14 @@ fn run_stt_job(
                 let w_start = (token_data.t0 as u64) * 10_000_000;
                 let w_end = (token_data.t1 as u64) * 10_000_000;
 
-                // Merge contraction suffixes ('s, 't, 'll, etc.) into previous word.
+                // Merge contraction suffixes ('s, 't, 'll, etc.) and
+                // punctuation-only tokens into the previous word.
                 let is_contraction = token_text.starts_with('\'')
                     && token_text.len() <= 3
                     && !words.is_empty();
-                if is_contraction {
+                let is_punctuation = !words.is_empty()
+                    && token_text.chars().all(|c| c.is_ascii_punctuation());
+                if is_contraction || is_punctuation {
                     let prev = words.last_mut().unwrap();
                     prev.text.push_str(&token_text);
                     prev.end_ns = w_end;
