@@ -613,8 +613,17 @@ Tracking docs:
 
 ### AI & Automation
 - [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency
-- [ ] Speech-to-Text: Automatic subtitle generation and transcription
-- [x] Subtitle highlight modes — None, Bold, Color, Underline, Stroke (colored outline)
+- [x] Speech-to-Text: Automatic subtitle generation and transcription
+  - [x] Local Whisper model inference via `whisper-rs` (GGML models, auto-discovery)
+  - [x] Per-clip subtitle segments with word-level timestamps
+  - [x] Subtitle styling: font, color, outline, background box, vertical position
+  - [x] Word highlight modes: None, Bold, Color, Underline, Stroke (karaoke-style)
+  - [x] Time-based word window (configurable seconds around active word)
+  - [x] Multi-track subtitle support with independent per-clip positioning/styling
+  - [x] Program Monitor overlay with real-time word highlighting
+  - [x] Export burn-in via ASS/SRT subtitle filter (post-compositing, above all tracks)
+  - [x] SRT file export, 7 MCP tools, FCPXML round-trip, timeline CC badge
+  - [x] Whisper output cleanup (contraction merging, punctuation spacing)
 - [ ] AI Scene Cut Detection for long source files
 - [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
 - [ ] Optical Flow slow-motion (AI frame interpolation)

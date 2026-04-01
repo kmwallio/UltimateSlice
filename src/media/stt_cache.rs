@@ -408,22 +408,26 @@ fn run_stt_job(
     for i in 0..num_segments {
         let start_ts = state.full_get_segment_t0(i).unwrap_or(0); // centiseconds
         let end_ts = state.full_get_segment_t1(i).unwrap_or(0);
-        let text = state
+        let raw_text = state
             .full_get_segment_text(i)
             .unwrap_or_default()
             .trim()
             .to_string();
 
-        if text.is_empty() {
+        if raw_text.is_empty() {
             continue;
         }
+
+        // Clean up whisper tokenization artifacts: collapse multiple spaces,
+        // remove space before punctuation (e.g. "he 's" → "he's").
+        let text = clean_whisper_text(&raw_text);
 
         // Convert centiseconds → nanoseconds.
         let start_ns = (start_ts as u64) * 10_000_000;
         let end_ns = (end_ts as u64) * 10_000_000;
 
         // Extract word-level timestamps from tokens.
-        let mut words = Vec::new();
+        let mut words: Vec<SubtitleWord> = Vec::new();
         let n_tokens = state.full_n_tokens(i).unwrap_or(0);
         for t in 0..n_tokens {
             if let Ok(token_data) = state.full_get_token_data(i, t) {
@@ -437,11 +441,22 @@ fn run_stt_job(
                 }
                 let w_start = (token_data.t0 as u64) * 10_000_000;
                 let w_end = (token_data.t1 as u64) * 10_000_000;
-                words.push(SubtitleWord {
-                    start_ns: w_start,
-                    end_ns: w_end,
-                    text: token_text,
-                });
+
+                // Merge contraction suffixes ('s, 't, 'll, etc.) into previous word.
+                let is_contraction = token_text.starts_with('\'')
+                    && token_text.len() <= 3
+                    && !words.is_empty();
+                if is_contraction {
+                    let prev = words.last_mut().unwrap();
+                    prev.text.push_str(&token_text);
+                    prev.end_ns = w_end;
+                } else {
+                    words.push(SubtitleWord {
+                        start_ns: w_start,
+                        end_ns: w_end,
+                        text: token_text,
+                    });
+                }
             }
         }
 
@@ -460,6 +475,31 @@ fn run_stt_job(
         job.source_path
     );
     (true, segments, None)
+}
+
+/// Clean up whisper tokenization artifacts in segment text.
+/// - Collapses multiple spaces
+/// - Removes space before punctuation ("he 's" → "he's", "cute !" → "cute!")
+/// - Trims leading/trailing whitespace
+fn clean_whisper_text(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut prev_space = false;
+    for ch in text.chars() {
+        if ch == ' ' {
+            prev_space = true;
+            continue;
+        }
+        // Don't insert space before punctuation or contraction markers.
+        if prev_space
+            && !result.is_empty()
+            && !matches!(ch, '\'' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']')
+        {
+            result.push(' ');
+        }
+        prev_space = false;
+        result.push(ch);
+    }
+    result
 }
 
 /// Stub: when the `speech-to-text` feature is disabled.
