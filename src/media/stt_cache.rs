@@ -444,8 +444,9 @@ fn run_stt_job(
 
                 // Merge contraction suffixes ('s, 't, 'll, etc.) and
                 // punctuation-only tokens into the previous word.
-                let is_contraction = token_text.starts_with('\'')
-                    && token_text.len() <= 3
+                // Handle both straight apostrophe (') and curly quote (\u{2019}).
+                let is_contraction = (token_text.starts_with('\'') || token_text.starts_with('\u{2019}'))
+                    && token_text.len() <= 4 // curly quote is multi-byte
                     && !words.is_empty();
                 let is_punctuation = !words.is_empty()
                     && token_text.chars().all(|c| c.is_ascii_punctuation());
@@ -495,7 +496,7 @@ fn clean_whisper_text(text: &str) -> String {
         // Don't insert space before punctuation or contraction markers.
         if prev_space
             && !result.is_empty()
-            && !matches!(ch, '\'' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']')
+            && !matches!(ch, '\'' | '\u{2019}' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']')
         {
             result.push(' ');
         }

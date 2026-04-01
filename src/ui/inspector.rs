@@ -173,6 +173,8 @@ pub struct InspectorView {
     pub subtitle_generate_spinner: gtk4::Spinner,
     pub subtitle_generate_label: Label,
     pub subtitle_language_dropdown: gtk4::DropDown,
+    pub subtitle_segments_section: GBox,
+    pub subtitle_segments_expander: Expander,
     pub subtitle_list_box: GBox,
     pub subtitle_scroll: gtk4::ScrolledWindow,
     /// Tracks displayed segment IDs to avoid rebuilding on every update tick.
@@ -1204,7 +1206,12 @@ impl InspectorView {
                 self.subtitle_clear_btn.set_sensitive(!c.subtitle_segments.is_empty() && !generating);
                 // Show segment list and style controls when subtitles exist.
                 let has_subtitles = !c.subtitle_segments.is_empty();
-                self.subtitle_scroll.set_visible(has_subtitles);
+                self.subtitle_segments_section.set_visible(has_subtitles);
+                if has_subtitles {
+                    self.subtitle_segments_expander.set_label(Some(&format!(
+                        "Subtitle Segments ({})", c.subtitle_segments.len()
+                    )));
+                }
 
                 // Only rebuild the segment list if the segment IDs changed.
                 let current_ids: Vec<String> = c.subtitle_segments.iter().map(|s| s.id.clone()).collect();
@@ -1214,11 +1221,6 @@ impl InspectorView {
                         self.subtitle_list_box.remove(&child);
                     }
                     if has_subtitles {
-                        let count_label = Label::new(Some(&format!("{} segments", c.subtitle_segments.len())));
-                        count_label.set_halign(gtk::Align::Start);
-                        count_label.add_css_class("dim-label");
-                        self.subtitle_list_box.append(&count_label);
-
                         let project = self.project.clone();
                         let on_cmd = self.on_execute_command.clone();
                         let clip_id = c.id.clone();
@@ -2528,15 +2530,6 @@ pub fn build_inspector(
     subtitle_error_label.set_visible(false);
     subtitle_controls_box.append(&subtitle_error_label);
 
-    // Scrollable segment list
-    let subtitle_scroll = gtk4::ScrolledWindow::new();
-    subtitle_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    subtitle_scroll.set_max_content_height(200);
-    subtitle_scroll.set_propagate_natural_height(true);
-    let subtitle_list_box = GBox::new(Orientation::Vertical, 2);
-    subtitle_scroll.set_child(Some(&subtitle_list_box));
-    subtitle_controls_box.append(&subtitle_scroll);
-
     // ── Style controls (visible when subtitles exist) ────────────────
     let subtitle_style_box = GBox::new(Orientation::Vertical, 6);
     subtitle_controls_box.append(&subtitle_style_box);
@@ -2603,6 +2596,23 @@ pub fn build_inspector(
     let subtitle_clear_btn = Button::with_label("Clear Subtitles");
     subtitle_clear_btn.add_css_class("destructive-action");
     subtitle_controls_box.append(&subtitle_clear_btn);
+
+    // ── Subtitle Segments section (separate expander for editing) ─────
+    let subtitle_segments_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&subtitle_segments_section);
+
+    subtitle_segments_section.append(&Separator::new(Orientation::Horizontal));
+    let segments_expander = Expander::new(Some("Subtitle Segments"));
+    segments_expander.set_expanded(false);
+    subtitle_segments_section.append(&segments_expander);
+
+    let subtitle_scroll = gtk4::ScrolledWindow::new();
+    subtitle_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    subtitle_scroll.set_max_content_height(300);
+    subtitle_scroll.set_propagate_natural_height(true);
+    let subtitle_list_box = GBox::new(Orientation::Vertical, 2);
+    subtitle_scroll.set_child(Some(&subtitle_list_box));
+    segments_expander.set_child(Some(&subtitle_scroll));
 
     // ── Shape Mask section (Video + Image + Title only) ──────────────
     let mask_section = GBox::new(Orientation::Vertical, 8);
@@ -7184,6 +7194,8 @@ pub fn build_inspector(
         subtitle_generate_spinner,
         subtitle_generate_label,
         subtitle_language_dropdown,
+        subtitle_segments_section,
+        subtitle_segments_expander: segments_expander,
         subtitle_list_box,
         subtitle_scroll,
         subtitle_segments_snapshot: Rc::new(RefCell::new(Vec::new())),
