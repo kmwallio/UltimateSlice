@@ -2310,9 +2310,15 @@ fn build_subtitle_filter_composited(
                                     text.push_str("{\\u0}");
                                 }
                                 SubtitleHighlightMode::Stroke => {
-                                    text.push_str(&format!("{{\\3c&H{hb:02X}{hg:02X}{hr:02X}&\\bord4}}"));
+                                    // Switch to outline border style, set outline color
+                                    // to highlight color with thick border, then restore.
+                                    text.push_str(&format!(
+                                        "{{\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&}}"
+                                    ));
                                     text.push_str(&ow.text);
-                                    text.push_str("{\\3c&H000000&\\bord0}");
+                                    text.push_str(&format!(
+                                        "{{\\bord{outline_w}\\3c{outline_color}&}}"
+                                    ));
                                 }
                                 SubtitleHighlightMode::None => text.push_str(&ow.text),
                             }
