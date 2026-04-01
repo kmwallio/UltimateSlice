@@ -178,7 +178,7 @@ pub struct InspectorView {
     pub subtitle_list_box: GBox,
     pub subtitle_scroll: gtk4::ScrolledWindow,
     /// Tracks displayed segment IDs to avoid rebuilding on every update tick.
-    subtitle_segments_snapshot: Rc<RefCell<Vec<String>>>,
+    pub subtitle_segments_snapshot: Rc<RefCell<Vec<String>>>,
     pub subtitle_clear_btn: Button,
     pub subtitle_error_label: Label,
     pub subtitle_font_btn: gtk4::Button,

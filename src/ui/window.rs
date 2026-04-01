@@ -8336,8 +8336,9 @@ pub fn build_window(
                         }
                         proj.dirty = true;
                     }
-                    // Clear generating state now that results have arrived.
+                    // Clear generating state and force segment list rebuild.
                     inspector_view.stt_generating.set(false);
+                    inspector_view.subtitle_segments_snapshot.borrow_mut().clear();
                 }
                 // Also clear if no jobs are pending (handles edge cases like failure).
                 if !stt_cache.borrow().progress().in_flight {
