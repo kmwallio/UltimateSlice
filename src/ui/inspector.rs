@@ -33,6 +33,14 @@ const VOLUME_DB_MIN: f64 = -100.0;
 const VOLUME_DB_MAX: f64 = 12.0;
 const VOLUME_LINEAR_MAX: f64 = 3.981_071_705_5; // +12 dB
 
+fn sync_title_font_button(button: &gtk4::Button, font_desc: &str) {
+    let normalized = crate::media::title_font::normalize_title_font_label(font_desc);
+    let tooltip =
+        crate::media::title_font::build_title_font_tooltip(font_desc, "Click to choose a font");
+    button.set_label(&normalized);
+    button.set_tooltip_text(Some(&tooltip));
+}
+
 fn db_to_linear_volume(db: f64) -> f64 {
     (10.0f64)
         .powf(db.clamp(VOLUME_DB_MIN, VOLUME_DB_MAX) / 20.0)
@@ -1928,7 +1936,7 @@ impl InspectorView {
                 self.flip_h_btn.set_sensitive(!is_adjustment);
                 self.flip_v_btn.set_sensitive(!is_adjustment);
                 self.title_entry.set_text(&c.title_text);
-                self.title_font_btn.set_label(&c.title_font);
+                sync_title_font_button(&self.title_font_btn, &c.title_font);
                 {
                     let rgba = c.title_color;
                     let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
@@ -2107,7 +2115,7 @@ impl InspectorView {
                 self.flip_h_btn.set_sensitive(true);
                 self.flip_v_btn.set_sensitive(true);
                 self.title_entry.set_text("");
-                self.title_font_btn.set_label("Sans Bold 36");
+                sync_title_font_button(&self.title_font_btn, "Sans Bold 36");
                 self.title_color_btn
                     .set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
                 self.title_x_slider.set_value(0.5);
@@ -3628,7 +3636,7 @@ pub fn build_inspector(
 
     row_label(&title_inner, "Font");
     let title_font_btn = gtk4::Button::with_label("Sans Bold 36");
-    title_font_btn.set_tooltip_text(Some("Click to choose a font"));
+    sync_title_font_button(&title_font_btn, "Sans Bold 36");
     title_inner.append(&title_font_btn);
 
     row_label(&title_inner, "Text Color");
@@ -6173,7 +6181,7 @@ pub fn build_inspector(
                 move |result| {
                     if let Ok(desc) = result {
                         let font_str = desc.to_string();
-                        fb.set_label(&font_str);
+                        sync_title_font_button(&fb, &font_str);
                         let id = id_c.borrow().clone();
                         if let Some(ref clip_id) = id {
                             {

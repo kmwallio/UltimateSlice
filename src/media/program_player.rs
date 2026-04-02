@@ -7686,26 +7686,6 @@ impl ProgramPlayer {
         }
     }
 
-    /// Parse a Pango font description ("Sans Bold 36") into (family, size).
-    fn parse_pango_font_desc(font_desc: &str) -> (String, f64) {
-        let trimmed = font_desc.trim();
-        if trimmed.is_empty() {
-            return ("Sans".to_string(), 36.0);
-        }
-        let mut parts = trimmed.rsplitn(2, ' ');
-        let last = parts.next().unwrap_or_default();
-        if let Ok(size) = last.parse::<f64>() {
-            let family = parts.next().unwrap_or("Sans").trim();
-            if family.is_empty() {
-                ("Sans".to_string(), size.max(1.0))
-            } else {
-                (family.to_string(), size.max(1.0))
-            }
-        } else {
-            (trimmed.to_string(), 36.0)
-        }
-    }
-
     fn apply_title_to_slot(
         slot: &VideoSlot,
         text: &str,
@@ -7737,11 +7717,12 @@ impl ProgramPlayer {
             to.set_property("silent", silent);
             if !silent {
                 to.set_property("text", text);
-                let (family, base_size) = Self::parse_pango_font_desc(font);
+                let base_size = crate::media::title_font::parse_title_font(font).size_points();
                 let scaled_size =
                     (base_size * PANGO_EXPORT_MATCH * (project_h as f64 / TITLE_REFERENCE_HEIGHT))
                         .max(4.0);
-                let adjusted_font = format!("{} {:.0}", family, scaled_size);
+                let adjusted_font =
+                    crate::media::title_font::build_preview_title_font_desc(font, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
                 // Use center alignment + pixel deltas to match FFmpeg drawtext
                 // centering semantics: drawtext places text center at
@@ -8879,12 +8860,16 @@ impl ProgramPlayer {
             } else {
                 to.set_property("silent", false);
                 to.set_property("text", &clip.title_text);
-                let (family, base_size) = Self::parse_pango_font_desc(&clip.title_font);
+                let base_size =
+                    crate::media::title_font::parse_title_font(&clip.title_font).size_points();
                 let scaled_size = (base_size
                     * PANGO_EXPORT_MATCH
                     * (project_height as f64 / TITLE_REFERENCE_HEIGHT))
                     .max(4.0);
-                let adjusted_font = format!("{} {:.0}", family, scaled_size);
+                let adjusted_font = crate::media::title_font::build_preview_title_font_desc(
+                    &clip.title_font,
+                    scaled_size,
+                );
                 to.set_property("font-desc", &adjusted_font);
                 to.set_property_from_str("halignment", "center");
                 to.set_property_from_str("valignment", "center");
@@ -10927,19 +10912,11 @@ impl ProgramPlayer {
         if clip.title_text.trim().is_empty() {
             return String::new();
         }
-        fn escape(value: &str) -> String {
-            value
-                .replace('\\', "\\\\")
-                .replace(':', "\\:")
-                .replace('\'', "\\'")
-                .replace('%', "\\%")
-        }
         const REF_H: f64 = 1080.0;
-        let text = escape(&clip.title_text).replace('\n', "\\n");
-        let (_, font_size) = Self::parse_pango_font_desc(&clip.title_font);
-        let font_selector = escape(&crate::media::export::build_drawtext_font_selector(
-            &clip.title_font,
-        ));
+        let text =
+            crate::media::title_font::escape_drawtext_value(&clip.title_text).replace('\n', "\\n");
+        let font_size = crate::media::title_font::parse_title_font(&clip.title_font).size_points();
+        let font_option = crate::media::title_font::build_drawtext_font_option(&clip.title_font);
         let rel_x = clip.title_x.clamp(0.0, 1.0);
         let rel_y = clip.title_y.clamp(0.0, 1.0);
         let scale_factor = out_h as f64 / REF_H;
@@ -10951,7 +10928,7 @@ impl ProgramPlayer {
         let a = (rgba & 0xFF) as u8;
         let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
         let mut filter = format!(
-            ",drawtext=font='{font_selector}':text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
+            ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
         );
         if clip.title_outline_width > 0.0 {
             let bw = (clip.title_outline_width * scale_factor).max(0.5);
@@ -14917,7 +14894,10 @@ mod tests {
 
         let filter = ProgramPlayer::prerender_build_title_filter(&clip, 1080);
 
-        assert!(filter.contains("font='Sans\\:weight=bold\\:slant=italic'"));
+        assert!(
+            filter.contains("drawtext=fontfile='")
+                || filter.contains("font='Sans\\:weight=bold\\:slant=italic'")
+        );
         assert!(filter.contains("fontsize=48.00"));
     }
 

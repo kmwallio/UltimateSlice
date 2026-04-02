@@ -460,7 +460,7 @@ Tracking docs:
 - [x] Quiet optional frei0r capability probes for prerender/export — unsupported FFmpeg frei0r modules are now detected silently so title-bearing prerender jobs fall back cleanly instead of logging misleading module-not-found errors
 - [x] Clip-local masks/blur/flip/anamorphic in background prerender — prerender FFmpeg graph now applies shape masks plus the remaining static visual clip transforms/effects that were missing from overlap caches
 - [x] Correctness-first prerender fallback for unsupported clip cases — animated clip/mask properties, speed/reverse/freeze timing, and advanced clip-audio effects now stay on the live path instead of producing incorrect cached prerenders
-- [x] Title font-face parity across preview/prerender/export — FFmpeg drawtext now resolves title fonts with fontconfig family/weight/slant selectors derived from the stored Pango description, keeping bold/italic title faces closer to the live preview
+- [x] Title font-face parity across preview/prerender/export — title font parsing is now shared, FFmpeg resolves title fonts to concrete `fontfile` matches via `fc-match`, and the Inspector surfaces fallback matches so preview/prerender/export no longer silently collapse distinct faces onto one export font
 - [x] MCP tools: `add_title_clip`, `set_clip_title_style`
 - [x] Transition effects (fade to black, wipe right, wipe left)
 - [x] Transition preview matching — program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions using compositor alpha animation and videocrop, matching FFmpeg `xfade` export output

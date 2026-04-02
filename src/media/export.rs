@@ -2130,117 +2130,6 @@ fn build_adjustment_layer_filter_graph(
     ))
 }
 
-fn parse_title_font(font_desc: &str) -> (String, f64) {
-    let trimmed = font_desc.trim();
-    if trimmed.is_empty() {
-        return ("Sans".to_string(), 36.0);
-    }
-    let mut parts = trimmed.rsplitn(2, ' ');
-    let last = parts.next().unwrap_or_default();
-    if let Ok(size) = last.parse::<f64>() {
-        let family = parts.next().unwrap_or("Sans").trim();
-        if family.is_empty() {
-            ("Sans".to_string(), size.max(1.0))
-        } else {
-            (family.to_string(), size.max(1.0))
-        }
-    } else {
-        (trimmed.to_string(), 36.0)
-    }
-}
-
-fn escape_fontconfig_pattern_value(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' | ':' | ',' | '=' | '-' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
-fn fontconfig_weight_selector(weight: pango::Weight) -> Option<&'static str> {
-    match weight {
-        pango::Weight::Thin => Some("thin"),
-        pango::Weight::Ultralight => Some("ultralight"),
-        pango::Weight::Light => Some("light"),
-        pango::Weight::Semilight => Some("semilight"),
-        pango::Weight::Book => Some("book"),
-        pango::Weight::Normal => None,
-        pango::Weight::Medium => Some("medium"),
-        pango::Weight::Semibold => Some("semibold"),
-        pango::Weight::Bold => Some("bold"),
-        pango::Weight::Ultrabold => Some("ultrabold"),
-        pango::Weight::Heavy => Some("heavy"),
-        pango::Weight::Ultraheavy => Some("ultraheavy"),
-        _ => None,
-    }
-}
-
-fn fontconfig_slant_selector(style: pango::Style) -> Option<&'static str> {
-    match style {
-        pango::Style::Normal => None,
-        pango::Style::Oblique => Some("oblique"),
-        pango::Style::Italic => Some("italic"),
-        _ => None,
-    }
-}
-
-fn fontconfig_width_selector(stretch: pango::Stretch) -> Option<&'static str> {
-    match stretch {
-        pango::Stretch::UltraCondensed => Some("ultracondensed"),
-        pango::Stretch::ExtraCondensed => Some("extracondensed"),
-        pango::Stretch::Condensed => Some("condensed"),
-        pango::Stretch::SemiCondensed => Some("semicondensed"),
-        pango::Stretch::Normal => None,
-        pango::Stretch::SemiExpanded => Some("semiexpanded"),
-        pango::Stretch::Expanded => Some("expanded"),
-        pango::Stretch::ExtraExpanded => Some("extraexpanded"),
-        pango::Stretch::UltraExpanded => Some("ultraexpanded"),
-        _ => None,
-    }
-}
-
-pub(crate) fn build_drawtext_font_selector(font_desc: &str) -> String {
-    let trimmed = font_desc.trim();
-    let desc = if trimmed.is_empty() {
-        pango::FontDescription::from_string("Sans 36")
-    } else {
-        pango::FontDescription::from_string(trimmed)
-    };
-    let family = desc
-        .family()
-        .map(|family| family.trim().to_string())
-        .filter(|family| !family.is_empty())
-        .unwrap_or_else(|| "Sans".to_string());
-    let mut selector = escape_fontconfig_pattern_value(&family);
-    if let Some(weight) = fontconfig_weight_selector(desc.weight()) {
-        selector.push_str(":weight=");
-        selector.push_str(weight);
-    }
-    if let Some(slant) = fontconfig_slant_selector(desc.style()) {
-        selector.push_str(":slant=");
-        selector.push_str(slant);
-    }
-    if let Some(width) = fontconfig_width_selector(desc.stretch()) {
-        selector.push_str(":width=");
-        selector.push_str(width);
-    }
-    selector
-}
-
-fn escape_drawtext_value(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace(':', "\\:")
-        .replace('\'', "\\'")
-        .replace('%', "\\%")
-}
-
 const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
 
 fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
@@ -2248,9 +2137,10 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
         return String::new();
     }
 
-    let text = escape_drawtext_value(&clip.title_text).replace('\n', "\\n");
-    let (_, font_size) = parse_title_font(&clip.title_font);
-    let font_selector = escape_drawtext_value(&build_drawtext_font_selector(&clip.title_font));
+    let text =
+        crate::media::title_font::escape_drawtext_value(&clip.title_text).replace('\n', "\\n");
+    let font_size = crate::media::title_font::parse_title_font(&clip.title_font).size_points();
+    let font_option = crate::media::title_font::build_drawtext_font_option(&clip.title_font);
     let rel_x = clip.title_x.clamp(0.0, 1.0);
     let rel_y = clip.title_y.clamp(0.0, 1.0);
 
@@ -2267,7 +2157,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
 
     // Base drawtext filter
     let mut filter = format!(
-        ",drawtext=font='{font_selector}':text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
+        ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
     );
 
     // Outline (border)
@@ -2315,11 +2205,12 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
 
     // Secondary text (second drawtext filter below primary)
     if !clip.title_secondary_text.trim().is_empty() {
-        let sec_text = escape_drawtext_value(&clip.title_secondary_text).replace('\n', "\\n");
+        let sec_text = crate::media::title_font::escape_drawtext_value(&clip.title_secondary_text)
+            .replace('\n', "\\n");
         let sec_size = scaled_size * 0.7; // secondary text is 70% of primary
         let sec_y_offset = scaled_size * 1.5; // offset below primary
         filter.push_str(&format!(
-            ",drawtext=font='{font_selector}':text='{sec_text}':fontsize={sec_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2+{sec_y_offset:.0}'"
+            ",drawtext={font_option}:text='{sec_text}':fontsize={sec_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2+{sec_y_offset:.0}'"
         ));
     }
 
@@ -4186,14 +4077,14 @@ mod tests {
     use super::{
         append_pan_filter_chain, audio_crossfade_curve_name, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
-        build_crop_filter, build_drawtext_font_selector, build_grading_filter,
-        build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
-        build_temperature_tint_filter, build_timing_filter, build_title_filter,
-        build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
-        compute_export_coloradj_params, estimate_export_size_bytes, flatten_compound_tracks,
-        has_linked_audio_peer, has_transform_keyframes, parse_progress_line,
-        video_input_seek_and_duration, write_chapter_metadata, AudioCodec, ClipAudioFade,
-        ColorFilterCapabilities, ExportOptions, VideoCodec,
+        build_crop_filter, build_grading_filter, build_keyframed_property_expression,
+        build_pan_expression, build_rotation_filter, build_temperature_tint_filter,
+        build_timing_filter, build_title_filter, build_volume_filter,
+        clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
+        estimate_export_size_bytes, flatten_compound_tracks, has_linked_audio_peer,
+        has_transform_keyframes, parse_progress_line, video_input_seek_and_duration,
+        write_chapter_metadata, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
+        VideoCodec,
     };
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
@@ -4996,7 +4887,7 @@ mod tests {
         let f = build_title_filter(&clip, 1080);
         assert!(f.contains(",drawtext="));
         assert!(f.contains("text='Hello\\: world'"));
-        assert!(f.contains("font='Sans\\:weight=bold'"));
+        assert!(f.contains("drawtext=fontfile='") || f.contains("font='Sans\\:weight=bold'"));
         assert!(f.contains("fontsize=64.00"));
         assert!(f.contains("fontcolor=ff3366@0.8000"));
         assert!(f.contains("x='(0.250000)*w-text_w/2'"));
@@ -5006,14 +4897,17 @@ mod tests {
     #[test]
     fn drawtext_font_selector_uses_structured_fontconfig_fields() {
         assert_eq!(
-            build_drawtext_font_selector("Sans Bold 48"),
+            crate::media::title_font::build_drawtext_font_selector("Sans Bold 48"),
             "Sans:weight=bold"
         );
         assert_eq!(
-            build_drawtext_font_selector("Sans Bold Italic 48"),
+            crate::media::title_font::build_drawtext_font_selector("Sans Bold Italic 48"),
             "Sans:weight=bold:slant=italic"
         );
-        assert_eq!(build_drawtext_font_selector(""), "Sans");
+        assert_eq!(
+            crate::media::title_font::build_drawtext_font_selector(""),
+            "Sans:weight=bold"
+        );
     }
 
     #[test]
