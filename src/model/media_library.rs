@@ -102,6 +102,8 @@ pub struct MediaItem {
     /// True when the file is a still image (PNG, JPEG, etc.).
     /// Set asynchronously after background probe completes.
     pub is_image: bool,
+    /// True when the source is an animated SVG that should use the animated-image path.
+    pub is_animated_svg: bool,
     /// Optional absolute source time reference for the start of the media.
     pub source_timecode_base_ns: Option<u64>,
     /// True when the source file path cannot be resolved on disk.
@@ -127,6 +129,7 @@ impl MediaItem {
             is_audio_only: false,
             has_audio: false,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
             is_missing,
             bin_id: None,
@@ -214,6 +217,8 @@ pub struct SourceMarks {
     pub has_audio: bool,
     /// True when the loaded source is a still image.
     pub is_image: bool,
+    /// True when the loaded source is an animated SVG.
+    pub is_animated_svg: bool,
     /// Optional absolute source time reference for the start of the loaded media.
     pub source_timecode_base_ns: Option<u64>,
 }
@@ -230,6 +235,7 @@ impl Default for SourceMarks {
             is_audio_only: false,
             has_audio: false,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         }
     }
@@ -252,6 +258,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
             is_missing: true, // test paths don't exist
             bin_id,

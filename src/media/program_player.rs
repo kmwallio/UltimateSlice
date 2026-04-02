@@ -531,6 +531,10 @@ pub struct ProgramClip {
     pub has_audio: bool,
     /// True when this clip is a still image (PNG, JPEG, etc.).
     pub is_image: bool,
+    /// True when this clip is an animated SVG image clip.
+    pub animated_svg: bool,
+    /// Authored animated duration for animated-SVG clips.
+    pub media_duration_ns: Option<u64>,
     /// True when this clip is an adjustment layer (effects apply to composite below).
     pub is_adjustment: bool,
     /// Chroma key enabled flag.
@@ -995,6 +999,8 @@ struct VideoSlot {
     /// When true, the slot is hidden (alpha=0, volume=0) — kept alive for
     /// potential re-entry but not counted as "active" for boundary detection.
     hidden: bool,
+    /// True when this slot uses a prerendered animated-SVG media file.
+    animated_svg_rendered: bool,
     /// True for synthetic prerender-composite slots.
     is_prerender_slot: bool,
     /// Timeline start of the prerender segment for synthetic prerender slots.
@@ -1325,6 +1331,8 @@ pub struct ProgramPlayer {
     /// Proxy cache keys already reported as fallback-to-original in this session.
     /// Prevents warning spam while proxies are still being generated.
     proxy_fallback_warned_keys: HashSet<String>,
+    /// Animated-SVG render paths keyed by render key.
+    animated_svg_paths: HashMap<String, String>,
     /// Bg-removed file paths: source_path → bg_removed file path.
     bg_removal_paths: HashMap<String, String>,
     /// Cache for per-path audio-stream probe results.
@@ -1473,6 +1481,8 @@ pub struct ProgramPlayer {
     /// Frame duration in nanoseconds, derived from project frame rate.
     /// Used to quantize seek positions and deduplicate same-frame seeks.
     frame_duration_ns: u64,
+    frame_rate_num: u32,
+    frame_rate_den: u32,
     /// Last frame-quantized seek position (nanoseconds). When a new seek
     /// lands on the same frame, the pipeline work is skipped entirely.
     last_seeked_frame_pos: Option<u64>,
@@ -2107,6 +2117,7 @@ impl ProgramPlayer {
                 master_muted: false,
                 proxy_paths: HashMap::new(),
                 proxy_fallback_warned_keys: HashSet::new(),
+                animated_svg_paths: HashMap::new(),
                 bg_removal_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
@@ -2169,6 +2180,8 @@ impl ProgramPlayer {
                 pending_prerender_promote: false,
                 // Default 24 fps ≈ 41_666_666 ns per frame
                 frame_duration_ns: 1_000_000_000 / 24,
+                frame_rate_num: 24,
+                frame_rate_den: 1,
                 last_seeked_frame_pos: None,
                 last_seek_instant: None,
                 short_frame_cache: ShortFrameCache::default(),
@@ -2310,6 +2323,14 @@ impl ProgramPlayer {
         }
     }
 
+    pub fn update_animated_svg_paths(&mut self, paths: HashMap<String, String>) {
+        if self.animated_svg_paths != paths {
+            self.animated_svg_paths = paths;
+            self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("animated-svg-paths-updated");
+        }
+    }
+
     pub fn update_bg_removal_paths(&mut self, paths: HashMap<String, String>) {
         if self.bg_removal_paths != paths {
             self.bg_removal_paths = paths;
@@ -2337,6 +2358,8 @@ impl ProgramPlayer {
                 self.invalidate_short_frame_cache("frame-rate-changed");
             }
             self.frame_duration_ns = frame_duration_ns;
+            self.frame_rate_num = numerator;
+            self.frame_rate_den = denominator;
         }
     }
 
@@ -3384,7 +3407,7 @@ impl ProgramPlayer {
                 let Some(clip) = self.clips.get(slot.clip_idx) else {
                     continue;
                 };
-                let source_ns = clip.source_pos_ns(self.timeline_pos_ns);
+                let source_ns = Self::effective_slot_source_pos_ns(slot, clip, self.timeline_pos_ns);
                 let _ = slot.decoder.seek(
                     rate,
                     gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
@@ -5441,11 +5464,24 @@ impl ProgramPlayer {
     }
 
     fn effective_source_path_for_clip(&self, clip: &ProgramClip) -> String {
-        let (path, _, _) = self.resolve_source_path_for_clip(clip);
+        let (path, _, _, _) = self.resolve_source_path_for_clip(clip);
         path
     }
 
-    fn resolve_source_path_for_clip(&self, clip: &ProgramClip) -> (String, bool, String) {
+    fn animated_svg_render_key_for_clip(&self, clip: &ProgramClip) -> Option<String> {
+        clip.animated_svg.then(|| {
+            crate::media::animated_svg::animated_svg_render_key(
+                &clip.source_path,
+                clip.source_in_ns,
+                clip.source_out_ns,
+                clip.media_duration_ns,
+                self.frame_rate_num,
+                self.frame_rate_den,
+            )
+        })
+    }
+
+    fn resolve_source_path_for_clip(&self, clip: &ProgramClip) -> (String, bool, String, bool) {
         let resolve_ready_proxy = |key: &String| {
             self.proxy_paths.get(key).and_then(|p| {
                 std::fs::metadata(p)
@@ -5455,6 +5491,18 @@ impl ProgramPlayer {
             })
         };
 
+        if let Some(key) = self.animated_svg_render_key_for_clip(clip) {
+            if let Some(path) = self.animated_svg_paths.get(&key).and_then(|p| {
+                std::fs::metadata(p)
+                    .ok()
+                    .filter(|m| m.len() > 0)
+                    .map(|_| p.clone())
+            }) {
+                return (path, false, key, true);
+            }
+            return (clip.source_path.clone(), false, key, false);
+        }
+
         // Check for bg-removed version first (takes priority — includes alpha channel).
         if clip.bg_removal_enabled {
             if let Some(bg_path) = self.bg_removal_paths.get(&clip.source_path) {
@@ -5463,7 +5511,7 @@ impl ProgramPlayer {
                     .filter(|m| m.len() > 0)
                     .is_some()
                 {
-                    return (bg_path.clone(), false, String::new());
+                    return (bg_path.clone(), false, String::new(), false);
                 }
             }
         }
@@ -5481,8 +5529,8 @@ impl ProgramPlayer {
                 clip.vidstab_smoothing,
             );
             resolve_ready_proxy(&key)
-                .map(|p| (p, true, key.clone()))
-                .unwrap_or_else(|| (clip.source_path.clone(), false, key))
+                .map(|p| (p, true, key.clone(), false))
+                .unwrap_or_else(|| (clip.source_path.clone(), false, key, false))
         } else if self.preview_luts && !clip.lut_paths.is_empty() {
             let key = crate::media::proxy_cache::proxy_key_with_vidstab(
                 &clip.source_path,
@@ -5491,10 +5539,10 @@ impl ProgramPlayer {
                 clip.vidstab_smoothing,
             );
             resolve_ready_proxy(&key)
-                .map(|p| (p, true, key.clone()))
-                .unwrap_or_else(|| (clip.source_path.clone(), false, key))
+                .map(|p| (p, true, key.clone(), false))
+                .unwrap_or_else(|| (clip.source_path.clone(), false, key, false))
         } else {
-            (clip.source_path.clone(), false, String::new())
+            (clip.source_path.clone(), false, String::new(), false)
         }
     }
 
@@ -6004,7 +6052,7 @@ impl ProgramPlayer {
     }
 
     fn prewarm_incoming_clip_resources(&mut self, clip: &ProgramClip, timeline_pos: u64) {
-        let effective_path = self.effective_source_path_for_clip(clip);
+        let (effective_path, _, _, animated_svg_rendered) = self.resolve_source_path_for_clip(clip);
         let uri = format!("file://{}", effective_path);
         // Build a lightweight sidecar pipeline that actually decodes the
         // first frame at the clip's source position.  This warms the OS
@@ -6046,7 +6094,12 @@ impl ProgramPlayer {
         let _ = sidecar.set_state(gst::State::Paused);
         // Seek to the clip's source position so the decoder decodes from
         // the right keyframe, not from position 0.
-        let source_ns = clip.source_pos_ns(timeline_pos);
+        let source_ns = if animated_svg_rendered {
+            clip.source_pos_ns(timeline_pos)
+                .saturating_sub(clip.source_in_ns)
+        } else {
+            clip.source_pos_ns(timeline_pos)
+        };
         let _ = decoder.seek(
             1.0,
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
@@ -6059,6 +6112,7 @@ impl ProgramPlayer {
         let (proc_w, proc_h) = self.preview_processing_dimensions();
         let (effects_bin, ..) = Self::build_effects_bin(
             clip,
+            animated_svg_rendered,
             proc_w,
             proc_h,
             self.project_width,
@@ -6408,8 +6462,14 @@ impl ProgramPlayer {
                         return None;
                     }
                     let c = clip.clone();
-                    let (path, source_is_proxy, _) = self.resolve_source_path_for_clip(&c);
-                    let source_ns = c.source_pos_ns(segment_start_ns);
+                    let (path, source_is_proxy, _, animated_svg_rendered) =
+                        self.resolve_source_path_for_clip(&c);
+                    let source_ns = if animated_svg_rendered {
+                        c.source_pos_ns(segment_start_ns)
+                            .saturating_sub(c.source_in_ns)
+                    } else {
+                        c.source_pos_ns(segment_start_ns)
+                    };
                     let has_audio = self.has_audio_for_path_fast(&path, c.has_embedded_audio());
                     Some((c, path, source_ns, has_audio, source_is_proxy))
                 })
@@ -7225,38 +7285,71 @@ impl ProgramPlayer {
         // source_pos_ns computes the correct source-file position within
         // the virtual overlap window.
         let effective_pos = timeline_pos_ns + slot.transition_enter_offset_ns;
-        let source_ns = clip.source_pos_ns(effective_pos);
-        let effective_seek_flags = Self::effective_decode_seek_flags(clip, seek_flags);
-        let stop_ns = Self::effective_video_seek_stop_ns(clip, source_ns, frame_duration_ns);
+        let source_ns = Self::effective_slot_source_pos_ns(slot, clip, effective_pos);
+        let effective_seek_flags =
+            Self::effective_decode_seek_flags(slot, clip, seek_flags);
+        let start_ns = Self::effective_video_seek_start_ns(slot, clip, source_ns);
+        let stop_ns =
+            Self::effective_video_seek_stop_ns(slot, clip, source_ns, frame_duration_ns);
         slot.decoder
             .seek(
                 clip.seek_rate(),
                 effective_seek_flags,
                 gst::SeekType::Set,
-                gst::ClockTime::from_nseconds(clip.seek_start_ns(source_ns)),
+                gst::ClockTime::from_nseconds(start_ns),
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(stop_ns),
             )
             .is_ok()
     }
 
+    fn effective_slot_source_pos_ns(
+        slot: &VideoSlot,
+        clip: &ProgramClip,
+        timeline_pos_ns: u64,
+    ) -> u64 {
+        let source_ns = clip.source_pos_ns(timeline_pos_ns);
+        if slot.animated_svg_rendered {
+            source_ns.saturating_sub(clip.source_in_ns)
+        } else {
+            source_ns
+        }
+    }
+
     fn effective_decode_seek_flags(
+        slot: &VideoSlot,
         clip: &ProgramClip,
         seek_flags: gst::SeekFlags,
     ) -> gst::SeekFlags {
-        if clip.reverse || clip.is_freeze_frame() || clip.is_image {
+        if clip.reverse || clip.is_freeze_frame() || (clip.is_image && !slot.animated_svg_rendered)
+        {
             (seek_flags | gst::SeekFlags::ACCURATE) & !gst::SeekFlags::KEY_UNIT
         } else {
             seek_flags
         }
     }
 
+    fn effective_video_seek_start_ns(slot: &VideoSlot, clip: &ProgramClip, source_pos_ns: u64) -> u64 {
+        if slot.animated_svg_rendered {
+            if clip.reverse { 0 } else { source_pos_ns }
+        } else {
+            clip.seek_start_ns(source_pos_ns)
+        }
+    }
+
     fn effective_video_seek_stop_ns(
+        slot: &VideoSlot,
         clip: &ProgramClip,
         source_pos_ns: u64,
         frame_duration_ns: u64,
     ) -> u64 {
-        if clip.is_freeze_frame() || clip.is_image {
+        if slot.animated_svg_rendered {
+            if clip.reverse {
+                source_pos_ns
+            } else {
+                clip.source_duration_ns().max(source_pos_ns)
+            }
+        } else if clip.is_freeze_frame() || clip.is_image {
             source_pos_ns.saturating_add(frame_duration_ns.max(1))
         } else {
             clip.seek_stop_ns(source_pos_ns)
@@ -7279,7 +7372,7 @@ impl ProgramPlayer {
                 .is_ok();
         }
         let effective_pos = timeline_pos_ns + slot.transition_enter_offset_ns;
-        let source_ns = clip.source_pos_ns(effective_pos);
+        let source_ns = Self::effective_slot_source_pos_ns(slot, clip, effective_pos);
         log::info!(
             "seek_slot_decoder_paused: clip={} timeline_ns={} source_ns={} transition_offset={}",
             clip.id,
@@ -8420,6 +8513,7 @@ impl ProgramPlayer {
     /// without requiring LUT-baked proxy media.
     fn build_effects_bin(
         clip: &ProgramClip,
+        animated_svg_rendered: bool,
         target_width: u32,
         target_height: u32,
         project_width: u32,
@@ -8628,7 +8722,7 @@ impl ProgramPlayer {
         } else {
             None
         };
-        let imagefreeze = if clip.is_freeze_frame() || clip.is_image {
+        let imagefreeze = if clip.is_freeze_frame() || (clip.is_image && !animated_svg_rendered) {
             gst::ElementFactory::make("imagefreeze").build().ok()
         } else {
             None
@@ -9292,8 +9386,13 @@ impl ProgramPlayer {
         let clip = self.clips[clip_idx].clone();
         // For audio-only clips, always use the original source — proxy transcodes
         // are video-optimized and add unnecessary decode overhead for pure audio.
-        let (effective_path, using_proxy, proxy_key) = if clip.is_audio_only {
-            (clip.source_path.clone(), false, clip.source_path.clone())
+        let (effective_path, using_proxy, proxy_key, _) = if clip.is_audio_only {
+            (
+                clip.source_path.clone(),
+                false,
+                clip.source_path.clone(),
+                false,
+            )
         } else {
             self.resolve_source_path_for_clip(&clip)
         };
@@ -9612,6 +9711,7 @@ impl ProgramPlayer {
             slot_queue: None,
             comp_arrival_seq: Arc::new(AtomicU64::new(0)),
             hidden: false,
+            animated_svg_rendered: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,
@@ -9919,6 +10019,7 @@ impl ProgramPlayer {
             slot_queue: Some(slot_queue),
             comp_arrival_seq,
             hidden: false,
+            animated_svg_rendered: false,
             is_prerender_slot: true,
             prerender_segment_start_ns: Some(segment_start_ns),
             transition_enter_offset_ns: 0,
@@ -10825,7 +10926,8 @@ impl ProgramPlayer {
         let clip = self.clips[clip_idx].clone();
 
         // Resolve proxy path.
-        let (effective_path, using_proxy, proxy_key) = self.resolve_source_path_for_clip(&clip);
+        let (effective_path, using_proxy, proxy_key, animated_svg_rendered) =
+            self.resolve_source_path_for_clip(&clip);
         let uri = format!("file://{}", effective_path);
         if self.proxy_enabled {
             log::info!(
@@ -10910,6 +11012,7 @@ impl ProgramPlayer {
             crop_alpha_state,
         ) = Self::build_effects_bin(
             &clip,
+            animated_svg_rendered,
             proc_w,
             proc_h,
             self.project_width,
@@ -11069,6 +11172,7 @@ impl ProgramPlayer {
                 slot_queue: Some(slot_queue.clone()),
                 comp_arrival_seq: comp_arrival_seq.clone(),
                 hidden: false,
+                animated_svg_rendered: false,
                 is_prerender_slot: false,
                 prerender_segment_start_ns: None,
                 transition_enter_offset_ns: 0,
@@ -11148,6 +11252,7 @@ impl ProgramPlayer {
                 slot_queue: Some(slot_queue),
                 comp_arrival_seq,
                 hidden: false,
+                animated_svg_rendered: false,
                 is_prerender_slot: false,
                 prerender_segment_start_ns: None,
                 transition_enter_offset_ns: 0,
@@ -11592,6 +11697,7 @@ impl ProgramPlayer {
             slot_queue: Some(slot_queue.clone()),
             comp_arrival_seq: comp_arrival_seq.clone(),
             hidden: false,
+            animated_svg_rendered,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,
@@ -11666,6 +11772,7 @@ impl ProgramPlayer {
             slot_queue: Some(slot_queue),
             comp_arrival_seq,
             hidden: false,
+            animated_svg_rendered,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,
@@ -12334,7 +12441,8 @@ impl ProgramPlayer {
         let need_flip = clip.flip_h || clip.flip_v;
         let need_title = !clip.title_text.is_empty();
         let need_chroma_key = clip.chroma_key_enabled;
-        let need_freeze_hold = clip.is_freeze_frame() || clip.is_image;
+        let need_freeze_hold =
+            clip.is_freeze_frame() || (clip.is_image && !slot.animated_svg_rendered);
 
         // User-applied frei0r effects: topology must match (same count + same
         // plugin names in the same order).
@@ -13082,7 +13190,7 @@ impl ProgramPlayer {
                 .iter()
                 .map(|&idx| {
                     let clip = &self.clips[idx];
-                    let (path, using_proxy, key) = self.resolve_source_path_for_clip(clip);
+                    let (path, using_proxy, key, _) = self.resolve_source_path_for_clip(clip);
                     if self.proxy_enabled {
                         format!(
                             "clip={} track={} mode={} key={} path={}",
@@ -14597,6 +14705,8 @@ mod tests {
             shadows_tint: 0.0,
             has_audio: true,
             is_image: false,
+            animated_svg: false,
+            media_duration_ns: None,
             is_adjustment: false,
             chroma_key_enabled: false,
             chroma_key_color: 0x00FF00,
@@ -15221,9 +15331,11 @@ mod tests {
         clip.source_out_ns = 1_000;
         clip.freeze_frame = true;
         clip.freeze_frame_source_ns = Some(2_000);
+        let slot = make_test_slot(false, false, false, false, false, false);
 
         let source = clip.source_pos_ns(0);
-        let stop = ProgramPlayer::effective_video_seek_stop_ns(&clip, source, 41_666_667);
+        let stop =
+            ProgramPlayer::effective_video_seek_stop_ns(&slot, &clip, source, 41_666_667);
         assert_eq!(stop, source + 41_666_667);
     }
 
@@ -15231,8 +15343,9 @@ mod tests {
     fn freeze_frame_preview_seek_stop_clamps_to_minimum_window() {
         let mut clip = make_clip();
         clip.freeze_frame = true;
+        let slot = make_test_slot(false, false, false, false, false, false);
         let source = clip.source_pos_ns(0);
-        let stop = ProgramPlayer::effective_video_seek_stop_ns(&clip, source, 0);
+        let stop = ProgramPlayer::effective_video_seek_stop_ns(&slot, &clip, source, 0);
         assert_eq!(stop, source + 1);
     }
 
@@ -15240,8 +15353,9 @@ mod tests {
     fn freeze_frame_decode_seek_forces_accurate_non_key_unit() {
         let mut clip = make_clip();
         clip.freeze_frame = true;
+        let slot = make_test_slot(false, false, false, false, false, false);
         let requested = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
-        let effective = ProgramPlayer::effective_decode_seek_flags(&clip, requested);
+        let effective = ProgramPlayer::effective_decode_seek_flags(&slot, &clip, requested);
         assert!(effective.contains(gst::SeekFlags::ACCURATE));
         assert!(!effective.contains(gst::SeekFlags::KEY_UNIT));
         assert!(effective.contains(gst::SeekFlags::FLUSH));
@@ -15250,8 +15364,9 @@ mod tests {
     #[test]
     fn non_freeze_forward_decode_seek_preserves_key_unit_choice() {
         let clip = make_clip();
+        let slot = make_test_slot(false, false, false, false, false, false);
         let requested = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
-        let effective = ProgramPlayer::effective_decode_seek_flags(&clip, requested);
+        let effective = ProgramPlayer::effective_decode_seek_flags(&slot, &clip, requested);
         assert!(effective.contains(gst::SeekFlags::KEY_UNIT));
         assert!(!effective.contains(gst::SeekFlags::ACCURATE));
     }
@@ -15447,6 +15562,7 @@ mod tests {
             slot_queue: None,
             comp_arrival_seq: Arc::new(AtomicU64::new(0)),
             hidden: false,
+            animated_svg_rendered: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
             transition_enter_offset_ns: 0,

@@ -33,6 +33,7 @@ Tracking docs:
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
 - [x] Still-image detection by extension (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) with 4-second default duration
+- [x] Animated SVG detection with authored duration and cached silent-video rendering for preview/export
 - [x] GStreamer Discoverer probes duration and source timecode on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
 - [x] Thumbnails auto-refresh when extraction completes (debounced batch redraw) without requiring manual panel/window redraw

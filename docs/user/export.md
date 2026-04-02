@@ -11,6 +11,8 @@ Use the toolbar linked split control **Export | ▼** (styled as one control):
 - Frame capture is written at the **project canvas resolution** (not reduced preview quality resolution).
 - If playback is active, UltimateSlice pauses internally for capture and then resumes playback.
 
+Animated SVG clips are rendered to cached silent video during export. Static image clips still use single-frame hold behavior, while animated SVG clips preserve authored motion and hold on the last frame if the clip was extended on the timeline.
+
 ## Export Dialog Options
 
 ### Video Codec

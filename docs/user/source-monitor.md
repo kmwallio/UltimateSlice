@@ -41,6 +41,8 @@ The selected region is highlighted in the scrubber bar.
 
 When dragging the green/orange In/Out markers directly on the scrubber, Source Monitor now seeks to the marker position continuously so the preview frame follows the marker being moved.
 
+Animated SVG sources render to a cached silent preview clip when selected. The current implementation supports the SMIL-style `<animate>` / `<animateTransform>` subset and falls back to the original SVG first frame if rendering fails.
+
 ## Scrubbing
 
 - Click anywhere on the scrubber to jump to that position.

@@ -530,6 +530,7 @@ struct SourcePlacementInfo {
     is_audio_only: bool,
     has_audio: bool,
     is_image: bool,
+    is_animated_svg: bool,
     source_timecode_base_ns: Option<u64>,
 }
 
@@ -667,6 +668,14 @@ fn lookup_source_placement_info(
     let item = library.iter().find(|item| item.source_path == source_path);
     let mut is_audio_only = item.map(|item| item.is_audio_only).unwrap_or(false);
     let mut has_audio = item.map(|item| item.has_audio).unwrap_or(false);
+    let is_animated_svg = item
+        .map(|item| item.is_animated_svg)
+        .unwrap_or_else(|| {
+            crate::model::clip::is_svg_file(source_path)
+                && crate::media::animated_svg::analyze_svg_path(source_path)
+                    .map(|analysis| analysis.is_animated)
+                    .unwrap_or(false)
+        });
     let is_image = item
         .map(|item| item.is_image)
         .unwrap_or_else(|| crate::model::clip::is_image_file(source_path));
@@ -688,6 +697,7 @@ fn lookup_source_placement_info(
         is_audio_only,
         has_audio,
         is_image,
+        is_animated_svg,
         source_timecode_base_ns: lookup_source_timecode_base_ns(library, project, source_path),
     }
 }
@@ -870,6 +880,7 @@ fn build_source_clips_for_plan(
     timeline_start_ns: u64,
     source_timecode_base_ns: Option<u64>,
     media_duration_ns: Option<u64>,
+    animated_svg: bool,
 ) -> Vec<(usize, Clip)> {
     plan.targets
         .iter()
@@ -884,6 +895,7 @@ fn build_source_clips_for_plan(
                 plan.link_group_id.as_deref(),
                 media_duration_ns,
             );
+            clip.animated_svg = animated_svg;
             if target.mute_embedded_audio {
                 clip.volume = 0.0;
             }
@@ -1026,6 +1038,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: Some(42),
         };
 
@@ -1055,6 +1068,7 @@ mod tests {
             1_000,
             source_info.source_timecode_base_ns,
             None,
+            false,
         );
         let link_group_id = plan.link_group_id.as_deref();
         assert_eq!(created.len(), 2);
@@ -1083,6 +1097,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1107,6 +1122,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1130,12 +1146,14 @@ mod tests {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
         let silent_video = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: false,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1159,6 +1177,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1180,6 +1199,7 @@ mod tests {
             is_audio_only: false,
             has_audio: false,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1226,6 +1246,7 @@ mod tests {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1251,6 +1272,7 @@ mod tests {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1269,6 +1291,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1307,6 +1330,7 @@ mod tests {
             playhead,
             None,
             None,
+            false,
         ) {
             let _ = insert_clip_at_playhead_on_track(
                 &mut project.tracks[track_idx],
@@ -1380,6 +1404,7 @@ mod tests {
             range_start,
             None,
             None,
+            false,
         ) {
             let _ = overwrite_clip_range_on_track(
                 &mut project.tracks[track_idx],
@@ -1556,7 +1581,7 @@ mod tests {
         // (collect media_from_project → update existing → add new)
         {
             let mut media_seen: HashSet<&str> = HashSet::new();
-            let media_from_project: Vec<(String, u64, Option<u64>)> = project
+            let media_from_project: Vec<(String, u64, Option<u64>, bool)> = project
                 .tracks
                 .iter()
                 .flat_map(|t| t.clips.iter())
@@ -1566,12 +1591,13 @@ mod tests {
                         c.source_path.clone(),
                         c.media_duration_ns.unwrap_or(0),
                         c.source_timecode_base_ns,
+                        c.animated_svg,
                     )
                 })
                 .collect();
 
             let seen: HashSet<String> = library.iter().map(|i| i.source_path.clone()).collect();
-            for (path, dur, stc) in &media_from_project {
+            for (path, dur, stc, animated_svg) in &media_from_project {
                 if let Some(item) = library.iter_mut().find(|i| i.source_path == *path) {
                     if item.duration_ns == 0 && *dur > 0 {
                         item.duration_ns = *dur;
@@ -1579,15 +1605,17 @@ mod tests {
                     if item.source_timecode_base_ns.is_none() && stc.is_some() {
                         item.source_timecode_base_ns = *stc;
                     }
+                    item.is_animated_svg = *animated_svg;
                 }
             }
             let new_items: Vec<_> = media_from_project
                 .into_iter()
-                .filter(|(path, _, _)| !seen.contains(path))
+                .filter(|(path, _, _, _)| !seen.contains(path))
                 .collect();
-            for (path, dur, stc) in new_items {
+            for (path, dur, stc, animated_svg) in new_items {
                 let mut item = MediaItem::new(path, dur);
                 item.source_timecode_base_ns = stc;
+                item.is_animated_svg = animated_svg;
                 library.push(item);
             }
         }
@@ -2561,6 +2589,8 @@ fn clip_to_program_clips(
             && c.kind != ClipKind::Multicam
             && !suppress_embedded_audio_ids.contains(&c.id),
         is_image: c.kind == ClipKind::Image,
+        animated_svg: c.animated_svg,
+        media_duration_ns: c.media_duration_ns,
         is_adjustment: c.kind == ClipKind::Adjustment,
         chroma_key_enabled: c.chroma_key_enabled,
         chroma_key_color: c.chroma_key_color,
@@ -5038,6 +5068,7 @@ pub fn build_window(
                             is_audio_only: marks.is_audio_only,
                             has_audio: marks.has_audio,
                             is_image: marks.is_image,
+                            is_animated_svg: marks.is_animated_svg,
                             source_timecode_base_ns: marks.source_timecode_base_ns,
                         }
                     } else {
@@ -5141,11 +5172,15 @@ pub fn build_window(
                         }
                     };
                     let media_dur = if source_info.is_image {
-                        None
+                        if source_info.is_animated_svg {
+                            Some(duration_ns)
+                        } else {
+                            None
+                        }
                     } else {
                         Some(duration_ns)
                     };
-                    let clip = build_source_clip(
+                    let mut clip = build_source_clip(
                         &source_path,
                         src_in,
                         src_out,
@@ -5155,6 +5190,7 @@ pub fn build_window(
                         None,
                         media_dur,
                     );
+                    clip.animated_svg = source_info.is_animated_svg;
                     let change = add_clip_to_track(track, clip, magnetic_mode);
                     proj.dirty = true;
                     drop(proj);
@@ -5195,6 +5231,14 @@ pub fn build_window(
 
                 for path in &file_paths {
                     let is_image = crate::model::clip::is_image_file(path);
+                    let animated_svg_analysis = if crate::model::clip::is_svg_file(path) {
+                        crate::media::animated_svg::analyze_svg_path(path).ok()
+                    } else {
+                        None
+                    };
+                    let is_animated_svg = animated_svg_analysis
+                        .as_ref()
+                        .is_some_and(|analysis| analysis.is_animated);
 
                     // Import into library if not already present (synchronous probe).
                     let already_in_library = library
@@ -5205,7 +5249,12 @@ pub fn build_window(
                     if !already_in_library {
                         let uri = format!("file://{path}");
                         let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
-                        let duration_ns = if is_image {
+                        let duration_ns = if is_animated_svg {
+                            animated_svg_analysis
+                                .as_ref()
+                                .and_then(|analysis| analysis.duration_ns)
+                                .unwrap_or(4_000_000_000u64)
+                        } else if is_image {
                             4_000_000_000u64
                         } else {
                             metadata.duration_ns.unwrap_or(10_000_000_000)
@@ -5214,6 +5263,7 @@ pub fn build_window(
                         item.is_audio_only = metadata.is_audio_only;
                         item.has_audio = metadata.has_audio;
                         item.is_image = is_image;
+                        item.is_animated_svg = is_animated_svg;
                         item.source_timecode_base_ns = lookup_source_timecode_base_ns(
                             &library.borrow().items,
                             &project.borrow(),
@@ -5307,11 +5357,15 @@ pub fn build_window(
                             }
                         };
                         let media_dur = if source_info.is_image {
-                            None
+                            if source_info.is_animated_svg {
+                                Some(duration_ns)
+                            } else {
+                                None
+                            }
                         } else {
                             Some(duration_ns)
                         };
-                        let clip = build_source_clip(
+                        let mut clip = build_source_clip(
                             path,
                             src_in,
                             src_out,
@@ -5321,6 +5375,7 @@ pub fn build_window(
                             None,
                             media_dur,
                         );
+                        clip.animated_svg = source_info.is_animated_svg;
                         track_changes.push(add_clip_to_track(track, clip, magnetic_mode));
                     }
 
@@ -6762,6 +6817,7 @@ pub fn build_window(
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
                 is_image: marks.is_image,
+                is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -6786,7 +6842,11 @@ pub fn build_window(
                     let magnetic_mode_for_placement =
                         magnetic_mode && !placement_plan.uses_linked_pair();
                     let media_dur_opt = if source_info.is_image {
-                        None
+                        if source_info.is_animated_svg {
+                            Some(media_dur)
+                        } else {
+                            None
+                        }
                     } else {
                         Some(media_dur)
                     };
@@ -6798,6 +6858,7 @@ pub fn build_window(
                         timeline_start,
                         source_info.source_timecode_base_ns,
                         media_dur_opt,
+                        source_info.is_animated_svg,
                     ) {
                         let _ = add_clip_to_track(
                             &mut proj.tracks[track_idx],
@@ -6832,6 +6893,7 @@ pub fn build_window(
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
                 is_image: marks.is_image,
+                is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -6861,7 +6923,11 @@ pub fn build_window(
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
                 let media_dur_opt = if source_info.is_image {
-                    None
+                    if source_info.is_animated_svg {
+                        Some(media_dur)
+                    } else {
+                        None
+                    }
                 } else {
                     Some(media_dur)
                 };
@@ -6873,6 +6939,7 @@ pub fn build_window(
                     playhead,
                     source_info.source_timecode_base_ns,
                     media_dur_opt,
+                    source_info.is_animated_svg,
                 ) {
                     track_changes.push(insert_clip_at_playhead_on_track(
                         &mut proj.tracks[track_idx],
@@ -6932,6 +6999,7 @@ pub fn build_window(
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
                 is_image: marks.is_image,
+                is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -6964,7 +7032,11 @@ pub fn build_window(
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
                 let media_dur_opt = if source_info.is_image {
-                    None
+                    if source_info.is_animated_svg {
+                        Some(media_dur)
+                    } else {
+                        None
+                    }
                 } else {
                     Some(media_dur)
                 };
@@ -6976,6 +7048,7 @@ pub fn build_window(
                     playhead,
                     source_info.source_timecode_base_ns,
                     media_dur_opt,
+                    source_info.is_animated_svg,
                 ) {
                     track_changes.push(overwrite_clip_range_on_track(
                         &mut proj.tracks[track_idx],
@@ -7055,17 +7128,40 @@ pub fn build_window(
                 let proxy_mode = preferences_state.borrow().proxy_mode.clone();
                 let source_proxy_enabled = proxy_mode.is_enabled();
                 let original_uri = format!("file://{path}");
+                let (fr_num, fr_den) = {
+                    let proj = project.borrow();
+                    (proj.frame_rate.numerator, proj.frame_rate.denominator)
+                };
                 if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
                     *fallback_uri = Some(original_uri.clone());
                 }
-                if source_proxy_enabled && !source_info.is_audio_only {
+                if source_proxy_enabled && !source_info.is_audio_only && !source_info.is_animated_svg {
                     proxy_cache.borrow_mut().request(
                         &path,
                         proxy_scale_for_mode(&proxy_mode),
                         None,
                     );
                 }
-                let load_uri = {
+                let load_uri = if source_info.is_animated_svg {
+                    match crate::media::animated_svg::ensure_rendered_clip(
+                        &path,
+                        0,
+                        duration_ns,
+                        Some(duration_ns),
+                        fr_num,
+                        fr_den,
+                    ) {
+                        Ok(render_path) => format!("file://{render_path}"),
+                        Err(err) => {
+                            log::warn!(
+                                "source preview: failed to render animated SVG {}: {}",
+                                path,
+                                err
+                            );
+                            original_uri.clone()
+                        }
+                    }
+                } else {
                     let cache = proxy_cache.borrow();
                     if source_proxy_enabled {
                         if let Some(proxy_path) = ready_proxy_path_for_source(&cache, &path, None) {
@@ -7093,6 +7189,7 @@ pub fn build_window(
             m.is_audio_only = source_info.is_audio_only;
             m.has_audio = source_info.has_audio;
             m.is_image = source_info.is_image;
+             m.is_animated_svg = source_info.is_animated_svg;
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
         })
     };
@@ -7988,7 +8085,7 @@ pub fn build_window(
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
             let (clips, media_from_project, project_dims, project_frame_rate): (
                 Vec<ProgramClip>,
-                Vec<(String, u64, Option<u64>)>,
+                Vec<(String, u64, Option<u64>, bool)>,
                 (u32, u32),
                 (u32, u32),
             ) = {
@@ -8052,7 +8149,7 @@ pub fn build_window(
                 // Keep media browser in sync with timeline clip sources after project open/load.
                 // Collect only unique source paths to avoid redundant work.
                 let mut media_seen: HashSet<&str> = HashSet::new();
-                let media: Vec<(String, u64, Option<u64>)> = proj
+                let media: Vec<(String, u64, Option<u64>, bool)> = proj
                     .tracks
                     .iter()
                     .flat_map(|t| t.clips.iter())
@@ -8062,6 +8159,7 @@ pub fn build_window(
                             c.source_path.clone(),
                             c.media_duration_ns.unwrap_or(0),
                             c.source_timecode_base_ns,
+                            c.animated_svg,
                         )
                     })
                     .collect();
@@ -8081,7 +8179,7 @@ pub fn build_window(
                 let mut lib = library.borrow_mut();
                 let seen: HashSet<String> =
                     lib.items.iter().map(|i| i.source_path.clone()).collect();
-                for (path, dur, source_timecode_base_ns) in &media_from_project {
+                for (path, dur, source_timecode_base_ns, animated_svg) in &media_from_project {
                     if let Some(item) = lib.items.iter_mut().find(|i| i.source_path == *path) {
                         if item.duration_ns == 0 && *dur > 0 {
                             item.duration_ns = *dur;
@@ -8091,15 +8189,17 @@ pub fn build_window(
                         {
                             item.source_timecode_base_ns = *source_timecode_base_ns;
                         }
+                        item.is_animated_svg = *animated_svg;
                     }
                 }
                 let new_items: Vec<_> = media_from_project
                     .into_iter()
-                    .filter(|(path, _, _)| !seen.contains(path))
+                    .filter(|(path, _, _, _)| !seen.contains(path))
                     .collect();
-                for (path, dur, source_timecode_base_ns) in new_items {
+                for (path, dur, source_timecode_base_ns, animated_svg) in new_items {
                     let mut item = MediaItem::new(path, dur);
                     item.source_timecode_base_ns = source_timecode_base_ns;
+                    item.is_animated_svg = animated_svg;
                     lib.items.push(item);
                 }
                 // Restore bin assignments from parsed FCPXML data.
@@ -8241,6 +8341,51 @@ pub fn build_window(
                             .update_bg_removal_paths(paths);
                     }
                 }
+
+                let animated_svg_paths = {
+                    let mut paths: HashMap<String, String> = HashMap::new();
+                    for clip in &clips {
+                        if !clip.animated_svg {
+                            continue;
+                        }
+                        let key = crate::media::animated_svg::animated_svg_render_key(
+                            &clip.source_path,
+                            clip.source_in_ns,
+                            clip.source_out_ns,
+                            clip.media_duration_ns,
+                            fr_num,
+                            fr_den,
+                        );
+                        if paths.contains_key(&key) {
+                            continue;
+                        }
+                        match crate::media::animated_svg::ensure_rendered_clip(
+                            &clip.source_path,
+                            clip.source_in_ns,
+                            clip.source_out_ns,
+                            clip.media_duration_ns,
+                            fr_num,
+                            fr_den,
+                        ) {
+                            Ok(render_path) => {
+                                paths.insert(key, render_path);
+                            }
+                            Err(err) => {
+                                log::warn!(
+                                    "window:on_project_changed failed to render animated SVG clip {} [{}..{}]: {}",
+                                    clip.source_path,
+                                    clip.source_in_ns,
+                                    clip.source_out_ns,
+                                    err
+                                );
+                            }
+                        }
+                    }
+                    paths
+                };
+                prog_player_reload
+                    .borrow_mut()
+                    .update_animated_svg_paths(animated_svg_paths);
 
                 {
                     let mut pp = prog_player_reload.borrow_mut();
@@ -10462,6 +10607,7 @@ fn handle_mcp_command(
                         timeline_start_ns,
                         source_info.source_timecode_base_ns,
                         None,
+                        source_info.is_animated_svg,
                     ) {
                         created_clip_ids.push(clip.id.clone());
                         let _ = add_clip_to_track(
@@ -12808,6 +12954,7 @@ fn handle_mcp_command(
                     playhead,
                     source_info.source_timecode_base_ns,
                     None,
+                    source_info.is_animated_svg,
                 ) {
                     created_clip_ids.push(clip.id.clone());
                     track_changes.push(insert_clip_at_playhead_on_track(
@@ -12915,6 +13062,7 @@ fn handle_mcp_command(
                     playhead,
                     source_info.source_timecode_base_ns,
                     None,
+                    source_info.is_animated_svg,
                 ) {
                     created_clip_ids.push(clip.id.clone());
                     track_changes.push(overwrite_clip_range_on_track(

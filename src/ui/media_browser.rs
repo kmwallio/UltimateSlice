@@ -767,6 +767,7 @@ pub fn build_media_browser(
                             item.is_audio_only = result.is_audio_only;
                             item.has_audio = result.has_audio;
                             item.is_image = result.is_image;
+                            item.is_animated_svg = result.is_animated_svg;
                             if item.source_timecode_base_ns.is_none() {
                                 item.source_timecode_base_ns = result.source_timecode_base_ns;
                             }

@@ -11,6 +11,8 @@ pub struct ProbeResult {
     pub source_timecode_base_ns: Option<u64>,
     /// True when the file is a still image (PNG, JPEG, etc.).
     pub is_image: bool,
+    /// True when the file is an animated SVG that should be treated as animated media.
+    pub is_animated_svg: bool,
 }
 
 /// Asynchronous media probe cache.
@@ -40,8 +42,8 @@ impl MediaProbeCache {
             while let Ok(path) = work_rx.recv() {
                 let uri = format!("file://{path}");
                 let is_image = crate::model::clip::is_image_file(&path);
-                let (duration_ns, is_audio_only, has_audio, source_timecode_base_ns) =
-                    probe_media_bg(&uri, is_image);
+                let (duration_ns, is_audio_only, has_audio, source_timecode_base_ns, is_animated_svg) =
+                    probe_media_bg(&path, &uri, is_image);
                 if tx
                     .send(ProbeResult {
                         path,
@@ -50,6 +52,7 @@ impl MediaProbeCache {
                         has_audio,
                         source_timecode_base_ns,
                         is_image,
+                        is_animated_svg,
                     })
                     .is_err()
                 {
@@ -99,15 +102,34 @@ impl MediaProbeCache {
 const IMAGE_DEFAULT_DURATION_NS: u64 = 4_000_000_000;
 
 /// Single Discoverer call that returns duration, audio-only flag, has-audio flag, and timecode.
-fn probe_media_bg(uri: &str, is_image: bool) -> (u64, bool, bool, Option<u64>) {
+fn probe_media_bg(
+    path: &str,
+    uri: &str,
+    is_image: bool,
+) -> (u64, bool, bool, Option<u64>, bool) {
     // For still images, skip the Discoverer entirely — images have no
     // meaningful duration or audio streams.
     if is_image {
-        return (IMAGE_DEFAULT_DURATION_NS, false, false, None);
+        if crate::model::clip::is_svg_file(path) {
+            if let Ok(analysis) = crate::media::animated_svg::analyze_svg_path(path) {
+                if analysis.is_animated {
+                    return (
+                        analysis
+                            .duration_ns
+                            .unwrap_or(IMAGE_DEFAULT_DURATION_NS),
+                        false,
+                        false,
+                        None,
+                        true,
+                    );
+                }
+            }
+        }
+        return (IMAGE_DEFAULT_DURATION_NS, false, false, None, false);
     }
 
     use gstreamer_pbutils::Discoverer;
-    let fallback = (10 * 1_000_000_000, false, true, None);
+    let fallback = (10 * 1_000_000_000, false, true, None, false);
     let Ok(()) = gstreamer::init() else {
         return fallback;
     };
@@ -142,6 +164,7 @@ fn probe_media_bg(uri: &str, is_image: bool) -> (u64, bool, bool, Option<u64>) {
         is_audio_only,
         has_audio,
         source_timecode_base_ns,
+        false,
     )
 }
 

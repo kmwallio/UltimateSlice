@@ -18,6 +18,10 @@ pub fn is_image_file(path: &str) -> bool {
         .any(|ext| lower.ends_with(&format!(".{ext}")))
 }
 
+pub fn is_svg_file(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".svg")
+}
+
 /// How the currently-spoken word is visually emphasized in subtitle overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum SubtitleHighlightMode {
@@ -1224,6 +1228,9 @@ pub struct Clip {
     /// be expanded beyond their actual running time.
     #[serde(default)]
     pub media_duration_ns: Option<u64>,
+    /// True when this image clip should be treated as a prerendered animated SVG source.
+    #[serde(default)]
+    pub animated_svg: bool,
     /// Applied frei0r filter effects, ordered from first to last in the chain.
     #[serde(default)]
     pub frei0r_effects: Vec<Frei0rEffect>,
@@ -1556,6 +1563,7 @@ impl Clip {
             link_group_id: None,
             source_timecode_base_ns: None,
             media_duration_ns: None,
+            animated_svg: false,
             frei0r_effects: Vec::new(),
             ladspa_effects: Vec::new(),
             masks: Vec::new(),

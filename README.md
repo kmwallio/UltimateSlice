@@ -35,6 +35,7 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 - `anyhow` / `thiserror` / `log` / `env_logger` — MIT OR Apache-2.0
 - `rustfft` — MIT OR Apache-2.0
 - `ort` (ONNX Runtime) / `ndarray` — MIT OR Apache-2.0
+- `resvg` / `usvg` / `tiny-skia` — MIT OR Apache-2.0
 - `tempfile` — MIT OR Apache-2.0
 - FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
 - x264 (Flatpak build dependency) — GPL-2.0-or-later

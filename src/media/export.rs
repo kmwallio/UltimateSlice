@@ -216,18 +216,28 @@ pub fn export_project(
                 .unwrap_or(false)
     };
 
-    let resolve_export_path = |clip: &Clip| -> String {
+    let resolve_export_path = |clip: &Clip| -> Result<String> {
         if clip.kind == ClipKind::Title || clip.kind == ClipKind::Adjustment {
-            return String::new(); // Title/adjustment clips use lavfi or no input
+            return Ok(String::new()); // Title/adjustment clips use lavfi or no input
+        }
+        if clip.animated_svg {
+            return crate::media::animated_svg::ensure_rendered_clip(
+                &clip.source_path,
+                clip.source_in,
+                clip.source_out,
+                clip.media_duration_ns,
+                project.frame_rate.numerator,
+                project.frame_rate.denominator,
+            );
         }
         if clip.bg_removal_enabled {
             if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
                 if std::path::Path::new(bg_path).exists() {
-                    return bg_path.clone();
+                    return Ok(bg_path.clone());
                 }
             }
         }
-        clip.source_path.clone()
+        Ok(clip.source_path.clone())
     };
 
     // Inputs: primary video clips (0..primary_clips.len())
@@ -246,7 +256,7 @@ pub fn export_project(
             cmd.arg("-f").arg("lavfi").arg("-i").arg(bg);
         } else {
             let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
-            if clip.kind == ClipKind::Image {
+            if clip.kind == ClipKind::Image && !clip.animated_svg {
                 cmd.arg("-loop").arg("1");
             }
             cmd.arg("-ss")
@@ -254,7 +264,7 @@ pub fn export_project(
                 .arg("-t")
                 .arg(format!("{src_dur_s:.6}"))
                 .arg("-i")
-                .arg(resolve_export_path(clip));
+                .arg(resolve_export_path(clip)?);
         }
     }
 
@@ -274,7 +284,7 @@ pub fn export_project(
             cmd.arg("-f").arg("lavfi").arg("-i").arg(bg);
         } else {
             let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
-            if clip.kind == ClipKind::Image {
+            if clip.kind == ClipKind::Image && !clip.animated_svg {
                 cmd.arg("-loop").arg("1");
             }
             cmd.arg("-ss")
@@ -282,7 +292,7 @@ pub fn export_project(
                 .arg("-t")
                 .arg(format!("{src_dur_s:.6}"))
                 .arg("-i")
-                .arg(resolve_export_path(clip));
+                .arg(resolve_export_path(clip)?);
         }
     }
 
@@ -2886,6 +2896,9 @@ fn video_input_seek_and_duration(
         );
     }
     // Still images: seek to 0, decode a single frame.
+    if clip.kind == ClipKind::Image && clip.animated_svg {
+        return (0.0, clip.source_duration() as f64 / 1_000_000_000.0);
+    }
     if clip.kind == ClipKind::Image {
         return (0.0, frame_duration_s.max(0.001));
     }
@@ -2942,7 +2955,7 @@ fn build_timing_filter(
         // Title clips are generated at exact duration by lavfi, no timing filter needed.
         return String::new();
     }
-    if clip.is_freeze_frame() || clip.kind == ClipKind::Image {
+    if clip.is_freeze_frame() || (clip.kind == ClipKind::Image && !clip.animated_svg) {
         let hold_s = clip.duration() as f64 / 1_000_000_000.0;
         let frame_s = frame_duration_s.max(0.001);
         let pad_s = (hold_s - frame_s).max(0.0);

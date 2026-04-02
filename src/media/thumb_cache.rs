@@ -31,12 +31,13 @@ struct RawFrame {
 pub struct ThumbnailCache {
     pub surfaces: HashMap<String, cairo::ImageSurface>,
     loading: HashSet<String>,
-    pending: VecDeque<(String, String, u64)>, // (key, source_path, time_ns)
+    pending: VecDeque<(String, String, u64, Option<u64>)>, // (key, source_path, time_ns, animated_svg_duration_ns)
     in_flight: usize,
     tx: mpsc::SyncSender<RawFrame>,
     rx: mpsc::Receiver<RawFrame>,
     /// When true, no new extraction threads are started (during active playback).
     paused: bool,
+    animated_svg_duration_cache: HashMap<String, Option<u64>>,
 }
 
 impl ThumbnailCache {
@@ -50,6 +51,7 @@ impl ThumbnailCache {
             tx,
             rx,
             paused: false,
+            animated_svg_duration_cache: HashMap::new(),
         }
     }
 
@@ -71,9 +73,24 @@ impl ThumbnailCache {
             return true;
         }
         if !self.loading.contains(&key) {
+            let animated_svg_duration_ns = if crate::model::clip::is_svg_file(source_path) {
+                if let Some(cached) = self.animated_svg_duration_cache.get(source_path) {
+                    *cached
+                } else {
+                    let analyzed = crate::media::animated_svg::analyze_svg_path(source_path)
+                        .ok()
+                        .and_then(|analysis| analysis.is_animated.then_some(analysis.duration_ns))
+                        .flatten();
+                    self.animated_svg_duration_cache
+                        .insert(source_path.to_string(), analyzed);
+                    analyzed
+                }
+            } else {
+                None
+            };
             self.loading.insert(key.clone());
             self.pending
-                .push_back((key, source_path.to_string(), time_ns));
+                .push_back((key, source_path.to_string(), time_ns, animated_svg_duration_ns));
             self.flush_pending();
         }
         false
@@ -114,7 +131,7 @@ impl ThumbnailCache {
             return;
         }
         while self.in_flight < MAX_CONCURRENT {
-            if let Some((key, path, time_ns)) = self.pending.pop_front() {
+            if let Some((key, path, time_ns, animated_svg_duration_ns)) = self.pending.pop_front() {
                 self.in_flight += 1;
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
@@ -123,7 +140,17 @@ impl ThumbnailCache {
                     // and handles multi-stream files (HEVC + audio + GPS)
                     // without GStreamer multiqueue stall risks.
                     let is_image = crate::model::clip::is_image_file(&path);
-                    let data = if is_image {
+                    let data = if let Some(duration_ns) = animated_svg_duration_ns {
+                        let clamped_time_ns = if duration_ns > 0 {
+                            time_ns.min(duration_ns.saturating_sub(1))
+                        } else {
+                            0
+                        };
+                        extract_animated_svg_rgba(&path, clamped_time_ns).unwrap_or_else(|e| {
+                            eprintln!("[thumb] animated svg render failed: {e}");
+                            Vec::new()
+                        })
+                    } else if is_image {
                         extract_rgba(path.clone(), time_ns)
                             .or_else(|gst_err| {
                                 eprintln!("[thumb] gstreamer extraction failed: {gst_err}");
@@ -375,6 +402,48 @@ fn extract_rgba_ffmpeg(source_path: &str, time_ns: u64) -> Result<Vec<u8>> {
         data.truncate(expected);
     }
     Ok(data)
+}
+
+fn extract_animated_svg_rgba(source_path: &str, time_ns: u64) -> Result<Vec<u8>> {
+    let frame = crate::media::animated_svg::render_svg_frame_at_time(source_path, time_ns)?;
+    Ok(scale_and_pad_rgba(
+        &frame.rgba,
+        frame.width as usize,
+        frame.height as usize,
+        THUMB_W as usize,
+        THUMB_H as usize,
+    ))
+}
+
+fn scale_and_pad_rgba(
+    src: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<u8> {
+    let mut out = vec![0u8; dst_w * dst_h * 4];
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return out;
+    }
+    let scale = (dst_w as f64 / src_w as f64).min(dst_h as f64 / src_h as f64);
+    let scaled_w = ((src_w as f64 * scale).round() as usize).clamp(1, dst_w);
+    let scaled_h = ((src_h as f64 * scale).round() as usize).clamp(1, dst_h);
+    let offset_x = (dst_w.saturating_sub(scaled_w)) / 2;
+    let offset_y = (dst_h.saturating_sub(scaled_h)) / 2;
+
+    for y in 0..scaled_h {
+        let src_y = ((y as f64 / scaled_h as f64) * src_h as f64).floor() as usize;
+        let src_y = src_y.min(src_h - 1);
+        for x in 0..scaled_w {
+            let src_x = ((x as f64 / scaled_w as f64) * src_w as f64).floor() as usize;
+            let src_x = src_x.min(src_w - 1);
+            let src_idx = (src_y * src_w + src_x) * 4;
+            let dst_idx = ((offset_y + y) * dst_w + (offset_x + x)) * 4;
+            out[dst_idx..dst_idx + 4].copy_from_slice(&src[src_idx..src_idx + 4]);
+        }
+    }
+    out
 }
 
 fn tune_decoder_threads(element: &gst::Element) {

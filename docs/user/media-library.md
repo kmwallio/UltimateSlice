@@ -9,8 +9,9 @@ The **Media Library** panel (left side) holds all source clips available for you
 3. Choose one or more video, audio, or image files from the file chooser.
 4. Imported items appear in the list showing the clip name and filename.
 5. GStreamer probes each file on import to determine its duration and extract source timecode (creation date/time) when available.
-6. **Still images** (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) are detected by file extension and assigned a **4-second default duration**. They are classified as image clips rather than video or audio.
-7. If a source path is unavailable on disk, the media card shows an **OFFLINE** badge and warning outline.
+6. **Still images** (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, static SVG) are detected by file extension and assigned a **4-second default duration**. They are classified as image clips rather than video or audio.
+7. **Animated SVG** sources are detected during import, keep their authored animation duration, and render to a cached silent video for preview, thumbnails, timeline playback, and export. The current implementation supports the SMIL-style `<animate>` / `<animateTransform>` subset; JavaScript and broader browser-style CSS animation behavior are not supported.
+8. If a source path is unavailable on disk, the media card shows an **OFFLINE** badge and warning outline.
 
 You can also drag files directly from your file manager into the **Media Library** pane to import them.
 

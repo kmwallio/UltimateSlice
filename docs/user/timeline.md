@@ -121,14 +121,15 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ## Image Clips
 
-Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeline like video clips.
+Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the timeline like video clips.
 
-- **Default duration**: Images are imported with a **4-second** default duration.
+- **Default duration**: Static images are imported with a **4-second** default duration.
+- **Animated SVG duration**: Animated SVG clips use their authored animation duration by default.
 - **Placement**: Images are always placed on a **Video track** as `ClipKind::Image`. No linked audio clip is created.
-- **Extending duration**: Drag the right edge (trim-out handle) of an image clip to extend it to any length — there is no upper limit.
+- **Extending duration**: Drag the right edge (trim-out handle) of an image clip to extend it to any length — there is no upper limit. Animated SVG clips hold on their last rendered frame when extended past the authored animation duration.
 - **Shortening duration**: Drag the right edge inward to shorten the clip.
 - **Color/effects**: All color correction, grading, LUT, transform, title, and chroma key controls work on image clips, just as they do on video clips.
-- **Export**: Image clips are exported with the correct duration using the FFmpeg `tpad` hold filter, consistent with freeze-frame video clips.
+- **Export**: Static image clips are exported with the FFmpeg `tpad` hold filter, consistent with freeze-frame video clips. Animated SVG clips are exported from their cached rendered video.
 
 ### Multi-Select (staged rollout)
 
