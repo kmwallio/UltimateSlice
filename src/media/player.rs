@@ -134,7 +134,8 @@ impl Player {
                 bin.add_many([&conv, &even_caps, &paintablesink]).ok();
                 gst::Element::link_many([&conv, &even_caps, &paintablesink]).ok();
                 let sink_pad = conv.static_pad("sink").unwrap();
-                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap()).ok();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                    .ok();
                 (bin.upcast::<gst::Element>(), None)
             }
         };

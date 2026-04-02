@@ -113,9 +113,7 @@ impl LadspaRegistry {
 
     /// Find a plugin by its full GStreamer element name.
     pub fn find_by_gst_name(&self, gst_name: &str) -> Option<&LadspaPluginInfo> {
-        self.plugins
-            .iter()
-            .find(|p| p.gst_element_name == gst_name)
+        self.plugins.iter().find(|p| p.gst_element_name == gst_name)
     }
 
     /// Case-insensitive substring search across display name and description.
@@ -159,7 +157,12 @@ fn inspect_factory(factory: &gstreamer::ElementFactory) -> Option<LadspaPluginIn
 
     // Discover controllable parameters.
     let skip_props = [
-        "name", "parent", "qos", "latency", "last-message", "message-forward",
+        "name",
+        "parent",
+        "qos",
+        "latency",
+        "last-message",
+        "message-forward",
     ];
     let params: Vec<LadspaParamInfo> = element
         .list_properties()
@@ -242,9 +245,5 @@ fn sanitize_bound(val: f64, fallback: f64) -> f64 {
 /// Extract a simplified category from the GStreamer klass string.
 fn simplify_category(klass: &str) -> String {
     // "Filter/Effect/Audio/LADSPA" → "Effect"
-    klass
-        .split('/')
-        .nth(1)
-        .unwrap_or("Audio")
-        .to_string()
+    klass.split('/').nth(1).unwrap_or("Audio").to_string()
 }

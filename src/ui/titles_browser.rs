@@ -59,7 +59,9 @@ pub fn build_titles_browser(
 
     let apply_btn = gtk::Button::with_label("Apply to Clip");
     apply_btn.set_sensitive(false);
-    apply_btn.set_tooltip_text(Some("Apply the selected title style to the selected timeline clip"));
+    apply_btn.set_tooltip_text(Some(
+        "Apply the selected title style to the selected timeline clip",
+    ));
     apply_btn.set_hexpand(true);
     btn_row.append(&apply_btn);
 

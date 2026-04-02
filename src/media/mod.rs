@@ -1,20 +1,20 @@
-pub mod audio_sync;
 pub mod adjustment_scope;
-pub mod ladspa_registry;
-pub mod mask_alpha;
-pub mod voiceover;
+pub mod audio_sync;
 pub mod bg_removal_cache;
-pub mod stt_cache;
 pub mod color_match;
 pub mod cube_lut;
 pub mod export;
 pub mod frei0r_registry;
+pub mod ladspa_registry;
+pub mod mask_alpha;
 pub mod player;
 pub mod probe_cache;
 pub mod program_player;
 pub mod proxy_cache;
+pub mod stt_cache;
 pub mod thumb_cache;
 pub mod thumbnail;
+pub mod voiceover;
 pub mod waveform_cache;
 
 /// RAII guard that sets a GStreamer pipeline to NULL on drop.
@@ -31,8 +31,6 @@ impl Drop for PipelineGuard {
         // pipeline and its elements are freed.  Without this, a qtdemux
         // streaming thread can dereference a freed stream struct (SIGSEGV
         // at offset 0x50 in gst_qtdemux_push_buffer).
-        let _ = self
-            .0
-            .state(gstreamer::ClockTime::from_seconds(5));
+        let _ = self.0.state(gstreamer::ClockTime::from_seconds(5));
     }
 }

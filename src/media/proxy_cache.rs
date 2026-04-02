@@ -138,7 +138,8 @@ impl ProxyCache {
         }
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
         // (source_path, scale, lut_paths, sidecar_mirror, vidstab_enabled, vidstab_smoothing)
-        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
+        let (work_tx, work_rx) =
+            mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
 
         // Pool of worker threads to transcode proxies in parallel.
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
@@ -153,9 +154,25 @@ impl ProxyCache {
                     lock.recv()
                 };
                 match item {
-                    Ok((source_path, scale, lut_paths, sidecar_mirror_enabled, vidstab_enabled, vidstab_smoothing)) => {
-                        let lut_composite = if lut_paths.is_empty() { None } else { Some(lut_paths.join("|")) };
-                        let key = proxy_key_with_vidstab(&source_path, lut_composite.as_deref(), vidstab_enabled, vidstab_smoothing);
+                    Ok((
+                        source_path,
+                        scale,
+                        lut_paths,
+                        sidecar_mirror_enabled,
+                        vidstab_enabled,
+                        vidstab_smoothing,
+                    )) => {
+                        let lut_composite = if lut_paths.is_empty() {
+                            None
+                        } else {
+                            Some(lut_paths.join("|"))
+                        };
+                        let key = proxy_key_with_vidstab(
+                            &source_path,
+                            lut_composite.as_deref(),
+                            vidstab_enabled,
+                            vidstab_smoothing,
+                        );
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
                             scale,
@@ -244,8 +261,10 @@ impl ProxyCache {
             source_path,
             scale
         );
-        self.written_bytes
-            .insert(proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing), 0);
+        self.written_bytes.insert(
+            proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing),
+            0,
+        );
         if let Some(ref tx) = self.work_tx {
             // Split composite key back into individual paths for the worker.
             let lut_paths: Vec<String> = match lut_path {
@@ -283,10 +302,7 @@ impl ProxyCache {
                 ProxyWorkerUpdate::Done(result) => {
                     self.pending.remove(&result.cache_key);
                     if result.success {
-                        log::info!(
-                            "ProxyCache: proxy ready → {}",
-                            result.proxy_path
-                        );
+                        log::info!("ProxyCache: proxy ready → {}", result.proxy_path);
                         self.proxies
                             .insert(result.cache_key.clone(), result.proxy_path.clone());
                         if let Some(estimate) = self.estimated_bytes.get(&result.cache_key).copied()
@@ -858,7 +874,11 @@ fn transcode_proxy(
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
     sidecar_mirror_enabled: bool,
 ) -> (String, bool, bool) {
-    let lut_composite = if lut_paths.is_empty() { None } else { Some(lut_paths.join("|")) };
+    let lut_composite = if lut_paths.is_empty() {
+        None
+    } else {
+        Some(lut_paths.join("|"))
+    };
     let lut_key = lut_composite.as_deref();
     let local_proxy_path = match local_proxy_path_for(source_path, scale, lut_key, local_root) {
         Some(p) => p,
@@ -879,23 +899,30 @@ fn transcode_proxy(
     // Run vidstab two-pass analysis and add transform filter if successful.
     let mut vidstab_trf_path: Option<String> = None;
     if vidstab_enabled && vidstab_smoothing > 0.0 {
-        let trf = format!("/tmp/ultimateslice-proxy-vidstab-{:016x}.trf",
-            {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                source_path.hash(&mut h);
-                h.finish()
-            });
+        let trf = format!("/tmp/ultimateslice-proxy-vidstab-{:016x}.trf", {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            source_path.hash(&mut h);
+            h.finish()
+        });
         let shakiness = ((vidstab_smoothing * 10.0).round() as i32).clamp(1, 10);
-        log::info!("ProxyCache: running vidstab analysis for {} (shakiness={})", source_path, shakiness);
+        log::info!(
+            "ProxyCache: running vidstab analysis for {} (shakiness={})",
+            source_path,
+            shakiness
+        );
         let analysis_ok = std::process::Command::new(&ffmpeg)
             .arg("-y")
-            .arg("-i").arg(source_path)
-            .arg("-vf").arg(format!(
+            .arg("-i")
+            .arg(source_path)
+            .arg("-vf")
+            .arg(format!(
                 "{},vidstabdetect=shakiness={shakiness}:result={trf}",
                 scale.ffmpeg_scale_filter()
             ))
-            .arg("-f").arg("null").arg("-")
+            .arg("-f")
+            .arg("null")
+            .arg("-")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -908,7 +935,10 @@ fn transcode_proxy(
             ));
             vidstab_trf_path = Some(trf);
         } else {
-            log::warn!("ProxyCache: vidstab analysis failed for {}, skipping stabilization", source_path);
+            log::warn!(
+                "ProxyCache: vidstab analysis failed for {}, skipping stabilization",
+                source_path
+            );
             let _ = std::fs::remove_file(&trf);
         }
     }

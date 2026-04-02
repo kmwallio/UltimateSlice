@@ -97,6 +97,8 @@ When UltimateSlice cannot discover native frei0r plugin metadata on the local sy
 
 This keeps FFmpeg frei0r exports more consistent across machines for effects such as **3-point color balance**, including correct bool formatting and grouped color values.
 
+Title text export also resolves the selected Pango font into structured fontconfig selectors (family plus weight/slant/width), which keeps bold and italic title faces closer to the live Program Monitor preview.
+
 ## Export Presets
 
 Use the **Preset** row in the Export dialog to save and reuse named export configurations:
@@ -234,6 +236,26 @@ Features:
 - Title and adjustment clips excluded (no source media)
 
 Also available via MCP: `save_edl` tool with `path` parameter.
+
+## OpenTimelineIO (OTIO) Export
+
+Export the timeline as an OpenTimelineIO JSON file (`.otio`) for interchange with DaVinci Resolve, Premiere (via adapter), Nuke, RV, and other OTIO-compatible tools.
+
+**Export → Export OTIO...** opens a file dialog to save the `.otio` file.
+
+Features:
+- Clips with source media references (`file://` URLs)
+- Explicit gaps between clips
+- Transitions (cross dissolve mapped to `SMPTE_Dissolve`)
+- Speed effects stored as `LinearTimeWarp` OTIO effects
+- Project markers attached to the first video track
+- Track metadata (muted, locked, soloed, audio role, ducking)
+- UltimateSlice-specific clip properties (color grading, opacity, volume, pan) preserved in OTIO metadata for lossless round-trip
+- Title and adjustment clips exported with `MissingReference` and full metadata
+
+**Import:** Open `.otio` files via **File → Open** (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present.
+
+Also available via MCP: `save_otio` and `open_otio` tools with `path` parameter.
 
 ## Notes
 

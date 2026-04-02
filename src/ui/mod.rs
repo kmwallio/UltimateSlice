@@ -1,5 +1,4 @@
 pub mod audio_effects_browser;
-pub mod multicam_viewer;
 pub mod color_scopes;
 pub mod color_wheel;
 pub mod curves_editor;
@@ -9,6 +8,7 @@ pub mod inspector;
 pub mod keyframe_editor;
 pub mod levels_editor;
 pub mod media_browser;
+pub mod multicam_viewer;
 pub mod preferences;
 pub mod preview;
 pub mod program_monitor;

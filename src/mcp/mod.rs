@@ -208,6 +208,14 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    SaveOtio {
+        path: String,
+        reply: SyncSender<Value>,
+    },
+    OpenOtio {
+        path: String,
+        reply: SyncSender<Value>,
+    },
     SaveProjectWithMedia {
         path: String,
         reply: SyncSender<Value>,

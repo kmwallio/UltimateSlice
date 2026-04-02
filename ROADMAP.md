@@ -453,7 +453,12 @@ Tracking docs:
 - [x] Debounced title reseek — compositor-only flush during title edits (avoids expensive all-slot decoder re-seek)
 - [x] Velocity-adaptive scrub waits — 30ms arrival/pulse budgets during rapid scrubbing (2.6× faster)
 - [x] Title clips in background prerender — lavfi color + drawtext source for title overlay clips
+- [x] Transparent title backgrounds preserved in background prerender — zero-alpha title clip backgrounds now use alpha-capable lavfi sources so prerendered title overlays do not cover lower video tracks with black
 - [x] Frei0r effects in background prerender — applied in ffmpeg filter chain, hashed in signature
+- [x] Quiet optional frei0r capability probes for prerender/export — unsupported FFmpeg frei0r modules are now detected silently so title-bearing prerender jobs fall back cleanly instead of logging misleading module-not-found errors
+- [x] Clip-local masks/blur/flip/anamorphic in background prerender — prerender FFmpeg graph now applies shape masks plus the remaining static visual clip transforms/effects that were missing from overlap caches
+- [x] Correctness-first prerender fallback for unsupported clip cases — animated clip/mask properties, speed/reverse/freeze timing, and advanced clip-audio effects now stay on the live path instead of producing incorrect cached prerenders
+- [x] Title font-face parity across preview/prerender/export — FFmpeg drawtext now resolves title fonts with fontconfig family/weight/slant selectors derived from the stored Pango description, keeping bold/italic title faces closer to the live preview
 - [x] MCP tools: `add_title_clip`, `set_clip_title_style`
 - [x] Transition effects (fade to black, wipe right, wipe left)
 - [x] Transition preview matching — program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions using compositor alpha animation and videocrop, matching FFmpeg `xfade` export output
@@ -648,7 +653,7 @@ Tracking docs:
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
-- [ ] OpenTimelineIO (OTIO) import/export
+- [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed/metadata round-trip; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog; 21 unit tests)
 - [ ] Shared Project/Library support for collaborative editing
 
 ---

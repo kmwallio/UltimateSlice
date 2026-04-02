@@ -128,7 +128,10 @@ impl SttCache {
             return;
         };
         let key = cache_key(source_path, source_in_ns, source_out_ns, language);
-        if self.pending.contains(&key) || self.failed.contains(&key) || self.results.contains_key(&key) {
+        if self.pending.contains(&key)
+            || self.failed.contains(&key)
+            || self.results.contains_key(&key)
+        {
             return;
         }
 
@@ -181,7 +184,10 @@ impl SttCache {
                         log::warn!("SttCache: failed key={}", result.cache_key);
                         self.failed.insert(result.cache_key);
                         self.last_error = result.error.or_else(|| {
-                            Some("Subtitle generation failed. Check the log for details.".to_string())
+                            Some(
+                                "Subtitle generation failed. Check the log for details."
+                                    .to_string(),
+                            )
                         });
                     }
                 }
@@ -239,11 +245,18 @@ pub fn find_stt_model_path() -> Option<String> {
     // Priority order: prefer larger models when multiple exist.
     // Within a size tier, prefer .en (English-only, faster) over multilingual.
     const MODEL_PRIORITY: &[&str] = &[
-        "large-v3", "large-v2", "large-v1", "large",
-        "medium.en", "medium",
-        "small.en", "small",
-        "base.en", "base",
-        "tiny.en", "tiny",
+        "large-v3",
+        "large-v2",
+        "large-v1",
+        "large",
+        "medium.en",
+        "medium",
+        "small.en",
+        "small",
+        "base.en",
+        "base",
+        "tiny.en",
+        "tiny",
     ];
 
     for dir in &search_dirs {
@@ -301,10 +314,7 @@ pub fn stt_model_dir() -> PathBuf {
 
 // ── Worker thread ─────────────────────────────────────────────────────────
 
-fn stt_worker_loop(
-    work_rx: mpsc::Receiver<SttJob>,
-    result_tx: mpsc::SyncSender<WorkerUpdate>,
-) {
+fn stt_worker_loop(work_rx: mpsc::Receiver<SttJob>, result_tx: mpsc::SyncSender<WorkerUpdate>) {
     // Model is loaded lazily on first job and kept resident.
     #[cfg(feature = "speech-to-text")]
     let mut ctx: Option<whisper_rs::WhisperContext> = None;
@@ -382,7 +392,7 @@ fn run_stt_job(
     // Let whisper produce natural sentence-length segments (~30 tokens max).
     // Each segment will contain word-level timing via token timestamps.
     params.set_max_len(0); // 0 = no length limit (whisper uses its own segmenting).
-    // Ensure segments break at word boundaries, not mid-word.
+                           // Ensure segments break at word boundaries, not mid-word.
     params.set_split_on_word(true);
 
     // Run inference.
@@ -448,8 +458,8 @@ fn run_stt_job(
                 let is_contraction = (token_text.starts_with('\'') || token_text.starts_with('\u{2019}'))
                     && token_text.len() <= 4 // curly quote is multi-byte
                     && !words.is_empty();
-                let is_punctuation = !words.is_empty()
-                    && token_text.chars().all(|c| c.is_ascii_punctuation());
+                let is_punctuation =
+                    !words.is_empty() && token_text.chars().all(|c| c.is_ascii_punctuation());
                 if is_contraction || is_punctuation {
                     let prev = words.last_mut().unwrap();
                     prev.text.push_str(&token_text);
@@ -496,7 +506,10 @@ fn clean_whisper_text(text: &str) -> String {
         // Don't insert space before punctuation or contraction markers.
         if prev_space
             && !result.is_empty()
-            && !matches!(ch, '\'' | '\u{2019}' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']')
+            && !matches!(
+                ch,
+                '\'' | '\u{2019}' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']'
+            )
         {
             result.push(' ');
         }
@@ -518,11 +531,7 @@ fn run_stt_job(_job: &SttJob) -> (bool, Vec<SubtitleSegment>, Option<String>) {
 /// Extract raw mono f32 audio at 16000 Hz from a media file via GStreamer.
 /// Unlike `audio_sync::extract_raw_audio`, this extracts the full clip range
 /// (no MAX_EXTRACT_SECONDS cap) since whisper needs the complete audio.
-fn extract_audio_for_stt(
-    path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-) -> Option<Vec<f32>> {
+fn extract_audio_for_stt(path: &str, source_in_ns: u64, source_out_ns: u64) -> Option<Vec<f32>> {
     use gstreamer as gst;
     use gstreamer::prelude::*;
     use gstreamer_app::AppSink;
@@ -612,8 +621,7 @@ fn extract_audio_for_stt(
     pipeline.set_state(gst::State::Playing).ok()?;
 
     // Compute max samples for the clip region.
-    let clip_duration_s =
-        source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    let clip_duration_s = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
     let max_samples =
         (clip_duration_s * WHISPER_SAMPLE_RATE as f64) as usize + WHISPER_SAMPLE_RATE as usize;
 

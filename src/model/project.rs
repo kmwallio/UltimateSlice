@@ -289,9 +289,7 @@ impl Project {
                     return Some(clip);
                 }
                 if let Some(ref mut compound_tracks) = clip.compound_tracks {
-                    if let Some(found) =
-                        Self::find_clip_mut_recursive(compound_tracks, clip_id)
-                    {
+                    if let Some(found) = Self::find_clip_mut_recursive(compound_tracks, clip_id) {
                         return Some(found);
                     }
                 }
@@ -503,7 +501,11 @@ mod tests {
     #[test]
     fn test_track_ref_finds_nested_track() {
         let p = make_project_with_compound();
-        let compound = p.tracks[0].clips.iter().find(|c| c.id == "compound-1").unwrap();
+        let compound = p.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == "compound-1")
+            .unwrap();
         let inner_tracks = compound.compound_tracks.as_ref().unwrap();
         let inner_v_id = &inner_tracks[0].id;
         let inner_a_id = &inner_tracks[1].id;
@@ -522,7 +524,11 @@ mod tests {
     #[test]
     fn test_track_mut_finds_nested_track() {
         let mut p = make_project_with_compound();
-        let compound = p.tracks[0].clips.iter().find(|c| c.id == "compound-1").unwrap();
+        let compound = p.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == "compound-1")
+            .unwrap();
         let inner_v_id = compound.compound_tracks.as_ref().unwrap()[0].id.clone();
 
         let track = p.track_mut(&inner_v_id).unwrap();
@@ -558,7 +564,10 @@ mod tests {
         let mut p = make_project_with_compound();
         let clip = p.clip_mut("inner-clip-1").unwrap();
         clip.source_path = "modified.mp4".into();
-        assert_eq!(p.clip_ref("inner-clip-1").unwrap().source_path, "modified.mp4");
+        assert_eq!(
+            p.clip_ref("inner-clip-1").unwrap().source_path,
+            "modified.mp4"
+        );
     }
 
     #[test]

@@ -94,14 +94,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
 
         // Attempt two-point drift measurement if clips are long enough.
         let drift_speed = if confidence >= 3.0 {
-            measure_drift(
-                &anchor.1,
-                anchor.2,
-                anchor.3,
-                &clip.1,
-                clip.2,
-                clip.3,
-            )
+            measure_drift(&anchor.1, anchor.2, anchor.3, &clip.1, clip.2, clip.3)
         } else {
             None
         };

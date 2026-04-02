@@ -198,7 +198,13 @@ fn clamp_scroll_px(scroll_px: f64, width: f64, zoom_x: f64) -> f64 {
     scroll_px.clamp(0.0, max_scroll_px(width, zoom_x))
 }
 
-fn local_ns_to_x(local_time_ns: u64, duration_ns: u64, width: f64, zoom_x: f64, scroll_px: f64) -> f64 {
+fn local_ns_to_x(
+    local_time_ns: u64,
+    duration_ns: u64,
+    width: f64,
+    zoom_x: f64,
+    scroll_px: f64,
+) -> f64 {
     let (left, right) = timeline_x_bounds(width);
     if duration_ns == 0 {
         return left;
@@ -361,10 +367,8 @@ fn phase1_property_value_bounds(property: Phase1KeyframeProperty) -> (f64, f64) 
         Phase1KeyframeProperty::EqLowGain
         | Phase1KeyframeProperty::EqMidGain
         | Phase1KeyframeProperty::EqHighGain => (-24.0, 12.0),
-        Phase1KeyframeProperty::MaskCenterX
-        | Phase1KeyframeProperty::MaskCenterY => (0.0, 1.0),
-        Phase1KeyframeProperty::MaskWidth
-        | Phase1KeyframeProperty::MaskHeight => (0.01, 0.5),
+        Phase1KeyframeProperty::MaskCenterX | Phase1KeyframeProperty::MaskCenterY => (0.0, 1.0),
+        Phase1KeyframeProperty::MaskWidth | Phase1KeyframeProperty::MaskHeight => (0.01, 0.5),
         Phase1KeyframeProperty::MaskRotation => (-180.0, 180.0),
         Phase1KeyframeProperty::MaskFeather => (0.0, 0.5),
         Phase1KeyframeProperty::MaskExpansion => (-0.5, 0.5),
@@ -388,7 +392,9 @@ fn selected_segment_geometry(
     zoom_x: f64,
     scroll_px: f64,
 ) -> Option<SegmentHandleGeometry> {
-    let lane_idx = lanes.iter().position(|lane| lane.property == primary.property)?;
+    let lane_idx = lanes
+        .iter()
+        .position(|lane| lane.property == primary.property)?;
     let row_y = HEADER_H + lane_idx as f64 * ROW_H;
     let duration_ns = clip.duration().max(1);
     let lane_keyframes = clip.keyframes_for_phase1_property(primary.property);
@@ -438,7 +444,8 @@ fn selected_clip_playhead_fraction(project: &Project, timeline_state: &TimelineS
     if duration_ns == 0 {
         return 0.5;
     }
-    (clip.local_timeline_position_ns(timeline_state.playhead_ns) as f64 / duration_ns as f64).clamp(0.0, 1.0)
+    (clip.local_timeline_position_ns(timeline_state.playhead_ns) as f64 / duration_ns as f64)
+        .clamp(0.0, 1.0)
 }
 
 pub fn build_keyframe_editor(
@@ -771,11 +778,8 @@ pub fn build_keyframe_editor(
                         };
                         let x = x0 + frac * (x1 - x0);
                         let local_ns = x_to_local_ns(x, duration_ns, width, zoom_x, scroll_px);
-                        let value = Clip::evaluate_keyframed_value(
-                            lane_keyframes,
-                            local_ns,
-                            default_value,
-                        );
+                        let value =
+                            Clip::evaluate_keyframed_value(lane_keyframes, local_ns, default_value);
                         let y = lane_y_for_value(row_y, lane.property, value);
                         if i == 0 {
                             cr.move_to(x, y);
@@ -920,8 +924,8 @@ pub fn build_keyframe_editor(
                     let d_out_y = y - geom.out_handle_xy.1;
                     let d_in_x = x - geom.in_handle_xy.0;
                     let d_in_y = y - geom.in_handle_xy.1;
-                    let out_hit =
-                        d_out_x * d_out_x + d_out_y * d_out_y <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS;
+                    let out_hit = d_out_x * d_out_x + d_out_y * d_out_y
+                        <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS;
                     let in_hit =
                         d_in_x * d_in_x + d_in_y * d_in_y <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS;
                     if out_hit || in_hit {
@@ -1074,14 +1078,9 @@ pub fn build_keyframe_editor(
             };
             let clip = &proj.tracks[track_idx].clips[clip_idx];
             let duration_ns = clip.duration().max(1);
-            if let Some(geom) = selected_segment_geometry(
-                clip,
-                &lanes,
-                primary_point,
-                width,
-                zoom_x,
-                scroll_px,
-            ) {
+            if let Some(geom) =
+                selected_segment_geometry(clip, &lanes, primary_point, width, zoom_x, scroll_px)
+            {
                 let d_out_x = x - geom.out_handle_xy.0;
                 let d_out_y = y - geom.out_handle_xy.1;
                 if d_out_x * d_out_x + d_out_y * d_out_y <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS {
@@ -1096,8 +1095,18 @@ pub fn build_keyframe_editor(
                         handle_idx: 0,
                         original_track_clips: proj.tracks[track_idx].clips.clone(),
                     });
-                    state_mut.handle_preview_controls =
-                        Some((primary_point, interpolation_control_points(clip.keyframes_for_phase1_property(primary_point.property).iter().find(|kf| kf.time_ns.min(duration_ns) == primary_point.local_time_ns).map(|kf| kf.interpolation).unwrap_or(KeyframeInterpolation::Linear))));
+                    state_mut.handle_preview_controls = Some((
+                        primary_point,
+                        interpolation_control_points(
+                            clip.keyframes_for_phase1_property(primary_point.property)
+                                .iter()
+                                .find(|kf| {
+                                    kf.time_ns.min(duration_ns) == primary_point.local_time_ns
+                                })
+                                .map(|kf| kf.interpolation)
+                                .unwrap_or(KeyframeInterpolation::Linear),
+                        ),
+                    ));
                     return;
                 }
                 let d_in_x = x - geom.in_handle_xy.0;
@@ -1114,8 +1123,18 @@ pub fn build_keyframe_editor(
                         handle_idx: 1,
                         original_track_clips: proj.tracks[track_idx].clips.clone(),
                     });
-                    state_mut.handle_preview_controls =
-                        Some((primary_point, interpolation_control_points(clip.keyframes_for_phase1_property(primary_point.property).iter().find(|kf| kf.time_ns.min(duration_ns) == primary_point.local_time_ns).map(|kf| kf.interpolation).unwrap_or(KeyframeInterpolation::Linear))));
+                    state_mut.handle_preview_controls = Some((
+                        primary_point,
+                        interpolation_control_points(
+                            clip.keyframes_for_phase1_property(primary_point.property)
+                                .iter()
+                                .find(|kf| {
+                                    kf.time_ns.min(duration_ns) == primary_point.local_time_ns
+                                })
+                                .map(|kf| kf.interpolation)
+                                .unwrap_or(KeyframeInterpolation::Linear),
+                        ),
+                    ));
                     return;
                 }
             }
@@ -1133,7 +1152,11 @@ pub fn build_keyframe_editor(
             else {
                 return;
             };
-            let ky = lane_y_for_value(HEADER_H + lane_idx as f64 * ROW_H, primary_point.property, keyframe.value);
+            let ky = lane_y_for_value(
+                HEADER_H + lane_idx as f64 * ROW_H,
+                primary_point.property,
+                keyframe.value,
+            );
             let dx = x - kx;
             let dy = y - ky;
             if dx * dx + dy * dy > KEYFRAME_HIT_RADIUS * KEYFRAME_HIT_RADIUS {
@@ -1169,7 +1192,9 @@ pub fn build_keyframe_editor(
                 let Some(track) = proj.tracks.iter().find(|t| t.id == handle_drag.track_id) else {
                     return;
                 };
-                let Some(current_idx) = track.clips.iter().position(|c| c.id == handle_drag.clip_id) else {
+                let Some(current_idx) =
+                    track.clips.iter().position(|c| c.id == handle_drag.clip_id)
+                else {
                     return;
                 };
                 let clip = &track.clips[current_idx];
@@ -1304,15 +1329,17 @@ pub fn build_keyframe_editor(
                         let next_interp = nearest_interp_for_controls(controls);
                         {
                             let mut proj = project.borrow_mut();
-                            if let Some(track) =
-                                proj.tracks.iter_mut().find(|t| t.id == handle_drag.track_id)
+                            if let Some(track) = proj
+                                .tracks
+                                .iter_mut()
+                                .find(|t| t.id == handle_drag.track_id)
                             {
                                 if let Some(current_idx) =
                                     track.clips.iter().position(|c| c.id == handle_drag.clip_id)
                                 {
                                     let clip = &mut track.clips[current_idx];
-                                    let keyframes =
-                                        clip.keyframes_for_phase1_property_mut(handle_drag.property);
+                                    let keyframes = clip
+                                        .keyframes_for_phase1_property_mut(handle_drag.property);
                                     if let Some(kf) = keyframes
                                         .iter_mut()
                                         .find(|kf| kf.time_ns == handle_drag.source_local_ns)
@@ -1324,8 +1351,7 @@ pub fn build_keyframe_editor(
                                             y2: controls.3.clamp(0.0, 1.0),
                                         };
                                         if kf.interpolation != next_interp
-                                            || kf.bezier_controls
-                                                != Some(next_bezier.clone())
+                                            || kf.bezier_controls != Some(next_bezier.clone())
                                         {
                                             kf.interpolation = next_interp;
                                             kf.bezier_controls = Some(next_bezier);
@@ -1498,7 +1524,8 @@ pub fn build_keyframe_editor(
                 let duration_ns = clip.duration().max(1);
                 for point in &points {
                     let target_local = (i128::from(point.local_time_ns) + i128::from(delta_ns))
-                        .clamp(0, i128::from(duration_ns)) as u64;
+                        .clamp(0, i128::from(duration_ns))
+                        as u64;
                     if target_local == point.local_time_ns {
                         continue;
                     }

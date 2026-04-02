@@ -95,8 +95,20 @@ impl AdjustmentScopeShape {
         let corners = [
             rotate_point_about(self.left, self.top, self.center_x, self.center_y, rot_rad),
             rotate_point_about(self.right, self.top, self.center_x, self.center_y, rot_rad),
-            rotate_point_about(self.right, self.bottom, self.center_x, self.center_y, rot_rad),
-            rotate_point_about(self.left, self.bottom, self.center_x, self.center_y, rot_rad),
+            rotate_point_about(
+                self.right,
+                self.bottom,
+                self.center_x,
+                self.center_y,
+                rot_rad,
+            ),
+            rotate_point_about(
+                self.left,
+                self.bottom,
+                self.center_x,
+                self.center_y,
+                rot_rad,
+            ),
         ];
         let min_x = corners
             .iter()
@@ -142,7 +154,8 @@ mod tests {
 
     #[test]
     fn full_frame_scope_matches_canvas() {
-        let scope = AdjustmentScopeShape::from_transform(1920, 1080, 1.0, 0.0, 0.0, 0.0, 0, 0, 0, 0);
+        let scope =
+            AdjustmentScopeShape::from_transform(1920, 1080, 1.0, 0.0, 0.0, 0.0, 0, 0, 0, 0);
         assert!(scope.is_full_frame(1920, 1080));
         assert!(scope.contains_pixel(0, 0));
         assert!(scope.contains_pixel(1919, 1079));
@@ -162,7 +175,9 @@ mod tests {
     fn rotation_expands_axis_aligned_bounds() {
         let scope =
             AdjustmentScopeShape::from_transform(1000, 1000, 0.5, 0.0, 0.0, 45.0, 0, 0, 0, 0);
-        let bounds = scope.pixel_bounds(1000, 1000).expect("rotated scope bounds");
+        let bounds = scope
+            .pixel_bounds(1000, 1000)
+            .expect("rotated scope bounds");
         assert!(bounds.0 < 250);
         assert!(bounds.2 > 750);
         assert!(scope.contains_pixel(500, 500));

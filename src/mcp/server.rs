@@ -618,6 +618,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "save_otio",
+            "description": "Export the current project to OpenTimelineIO (.otio) JSON file for interchange with DaVinci Resolve, Premiere, Nuke, etc.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for the output .otio file." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "save_project_with_media",
             "description": "Export a packaged project: write .uspxml plus copy all timeline-used media into a sibling ProjectName.Library directory, with XML media paths rewritten to the packaged copies.",
             "inputSchema": {
@@ -635,6 +646,17 @@ fn tools_list() -> Value {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path to the .fcpxml file to open." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "open_otio",
+            "description": "Load a project from an OpenTimelineIO (.otio) JSON file, replacing the current project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the .otio file to open." }
                 },
                 "required": ["path"]
             }
@@ -1659,9 +1681,14 @@ fn dispatch_tool_payload(
         "set_clip_ladspa_effect_params" => McpCommand::SetClipLadspaEffectParams {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
-            params: args.get("params")
+            params: args
+                .get("params")
                 .and_then(|v| v.as_object())
-                .map(|obj| obj.iter().filter_map(|(k, v)| v.as_f64().map(|val| (k.clone(), val))).collect())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_f64().map(|val| (k.clone(), val)))
+                        .collect()
+                })
                 .unwrap_or_default(),
             reply: tx,
         },
@@ -1830,7 +1857,10 @@ fn dispatch_tool_payload(
         "set_clip_mask" => McpCommand::SetClipMask {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
-            shape: args.get("shape").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            shape: args
+                .get("shape")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             center_x: args.get("center_x").and_then(|v| v.as_f64()),
             center_y: args.get("center_y").and_then(|v| v.as_f64()),
             width: args.get("width").and_then(|v| v.as_f64()),
@@ -1858,12 +1888,22 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "save_otio" => McpCommand::SaveOtio {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
         "save_project_with_media" => McpCommand::SaveProjectWithMedia {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 
         "open_fcpxml" => McpCommand::OpenFcpxml {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "open_otio" => McpCommand::OpenOtio {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
@@ -1910,39 +1950,78 @@ fn dispatch_tool_payload(
         },
 
         "create_bin" => {
-            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let parent_id = args.get("parent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let parent_id = args
+                .get("parent_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             if name.is_empty() {
                 return Err(tool_error_payload(-32602, "name is required"));
             }
-            McpCommand::CreateBin { name, parent_id, reply: tx }
+            McpCommand::CreateBin {
+                name,
+                parent_id,
+                reply: tx,
+            }
         }
         "delete_bin" => {
-            let bin_id = args.get("bin_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let bin_id = args
+                .get("bin_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if bin_id.is_empty() {
                 return Err(tool_error_payload(-32602, "bin_id is required"));
             }
             McpCommand::DeleteBin { bin_id, reply: tx }
         }
         "rename_bin" => {
-            let bin_id = args.get("bin_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let bin_id = args
+                .get("bin_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if bin_id.is_empty() || name.is_empty() {
                 return Err(tool_error_payload(-32602, "bin_id and name are required"));
             }
-            McpCommand::RenameBin { bin_id, name, reply: tx }
+            McpCommand::RenameBin {
+                bin_id,
+                name,
+                reply: tx,
+            }
         }
         "list_bins" => McpCommand::ListBins { reply: tx },
         "move_to_bin" => {
-            let source_paths: Vec<String> = args.get("source_paths")
+            let source_paths: Vec<String> = args
+                .get("source_paths")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             if source_paths.is_empty() {
                 return Err(tool_error_payload(-32602, "source_paths is required"));
             }
-            let bin_id = args.get("bin_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-            McpCommand::MoveToBin { source_paths, bin_id, reply: tx }
+            let bin_id = args
+                .get("bin_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            McpCommand::MoveToBin {
+                source_paths,
+                bin_id,
+                reply: tx,
+            }
         }
 
         "reorder_track" => McpCommand::ReorderTrack {
@@ -1971,7 +2050,10 @@ fn dispatch_tool_payload(
                     &args["lut_path"]
                 };
                 match raw {
-                    Value::Array(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+                    Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect(),
                     Value::String(s) => vec![s.clone()],
                     _ => Vec::new(),
                 }
@@ -2007,13 +2089,23 @@ fn dispatch_tool_payload(
         },
         "normalize_clip_audio" => McpCommand::NormalizeClipAudio {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            mode: args.get("mode").and_then(|v| v.as_str()).unwrap_or("lufs").to_string(),
-            target_level: args.get("target_level").and_then(|v| v.as_f64()).unwrap_or(-14.0),
+            mode: args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("lufs")
+                .to_string(),
+            target_level: args
+                .get("target_level")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(-14.0),
             reply: tx,
         },
         "record_voiceover" => McpCommand::RecordVoiceover {
             duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
-            track_index: args.get("track_index").and_then(|v| v.as_u64()).map(|v| v as usize),
+            track_index: args
+                .get("track_index")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
             reply: tx,
         },
         "set_clip_blend_mode" => McpCommand::SetClipBlendMode {
@@ -2126,14 +2218,23 @@ fn dispatch_tool_payload(
         "source_play" => McpCommand::SourcePlay { reply: tx },
         "source_pause" => McpCommand::SourcePause { reply: tx },
         "match_frame" => McpCommand::MatchFrame {
-            clip_id: args.get("clip_id").and_then(|v| v.as_str()).map(str::to_string),
+            clip_id: args
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             reply: tx,
         },
         "list_backups" => McpCommand::ListBackups { reply: tx },
         "set_clip_stabilization" => McpCommand::SetClipStabilization {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            enabled: args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-            smoothing: args.get("smoothing").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            enabled: args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            smoothing: args
+                .get("smoothing")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5),
             reply: tx,
         },
         "sync_clips_by_audio" => McpCommand::SyncClipsByAudio {
@@ -2145,7 +2246,10 @@ fn dispatch_tool_payload(
                         .collect()
                 })
                 .unwrap_or_default(),
-            replace_audio: args.get("replace_audio").and_then(|v| v.as_bool()).unwrap_or(false),
+            replace_audio: args
+                .get("replace_audio")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             reply: tx,
         },
         "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {
@@ -2159,7 +2263,10 @@ fn dispatch_tool_payload(
         "match_clip_colors" => McpCommand::MatchClipColors {
             source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
             reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
-            generate_lut: args.get("generate_lut").and_then(|v| v.as_bool()).unwrap_or(false),
+            generate_lut: args
+                .get("generate_lut")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             reply: tx,
         },
         "list_frei0r_plugins" => McpCommand::ListFrei0rPlugins { reply: tx },
@@ -2216,7 +2323,11 @@ fn dispatch_tool_payload(
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             effect_ids: args["effect_ids"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
             reply: tx,
         },

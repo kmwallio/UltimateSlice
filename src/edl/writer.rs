@@ -18,7 +18,11 @@ pub fn is_drop_frame(fps: &FrameRate) -> bool {
 /// Convert a frame count to SMPTE timecode string.
 /// Non-drop: `HH:MM:SS:FF`, drop-frame: `HH:MM:SS;FF`.
 pub fn frames_to_timecode(total_frames: u64, fps: &FrameRate, drop_frame: bool) -> String {
-    let fps_int = if drop_frame { 30u64 } else { fps.numerator as u64 / fps.denominator.max(1) as u64 };
+    let fps_int = if drop_frame {
+        30u64
+    } else {
+        fps.numerator as u64 / fps.denominator.max(1) as u64
+    };
     if fps_int == 0 {
         return "00:00:00:00".to_string();
     }
@@ -101,7 +105,11 @@ pub fn write_edl(project: &Project) -> String {
     let fps = &project.frame_rate;
     let drop = is_drop_frame(fps);
     // Record timecode offset: 01:00:00:00 in frames.
-    let fps_int = if drop { 30u64 } else { fps.numerator as u64 / fps.denominator.max(1) as u64 };
+    let fps_int = if drop {
+        30u64
+    } else {
+        fps.numerator as u64 / fps.denominator.max(1) as u64
+    };
     let rec_offset_frames = fps_int * 3600; // 1 hour
 
     let mut out = String::new();
@@ -136,7 +144,11 @@ pub fn write_edl(project: &Project) -> String {
 
         for (clip_idx, clip) in track.clips.iter().enumerate() {
             // Skip clips without source media.
-            if clip.kind == ClipKind::Title || clip.kind == ClipKind::Adjustment || clip.kind == ClipKind::Compound || clip.kind == ClipKind::Multicam {
+            if clip.kind == ClipKind::Title
+                || clip.kind == ClipKind::Adjustment
+                || clip.kind == ClipKind::Compound
+                || clip.kind == ClipKind::Multicam
+            {
                 continue;
             }
 
@@ -152,7 +164,8 @@ pub fn write_edl(project: &Project) -> String {
 
             // Record timecodes (timeline position + 01:00:00:00 offset).
             let rec_in_frames = ns_to_frames(clip.timeline_start, fps) + rec_offset_frames;
-            let rec_out_frames = ns_to_frames(clip.timeline_start + clip.duration(), fps) + rec_offset_frames;
+            let rec_out_frames =
+                ns_to_frames(clip.timeline_start + clip.duration(), fps) + rec_offset_frames;
             let rec_in_tc = frames_to_timecode(rec_in_frames, fps, drop);
             let rec_out_tc = frames_to_timecode(rec_out_frames, fps, drop);
 
@@ -183,14 +196,23 @@ pub fn write_edl(project: &Project) -> String {
             // EDL event line.
             out.push_str(&format!(
                 "{:03}  {}  {:<5} {}  {} {} {} {}\n",
-                event_num, reel, track_label, trans_field,
-                src_in_tc, src_out_tc, rec_in_tc, rec_out_tc,
+                event_num,
+                reel,
+                track_label,
+                trans_field,
+                src_in_tc,
+                src_out_tc,
+                rec_in_tc,
+                rec_out_tc,
             ));
 
             // Speed effect comment (if not 1.0).
             if (clip.speed - 1.0).abs() > 0.001 {
                 let effective_fps = fps.as_f64() * clip.speed;
-                out.push_str(&format!("M2   {}  {:.1}  {}\n", reel, effective_fps, src_in_tc));
+                out.push_str(&format!(
+                    "M2   {}  {:.1}  {}\n",
+                    reel, effective_fps, src_in_tc
+                ));
             }
 
             // Comment lines with clip metadata.
@@ -214,22 +236,31 @@ mod tests {
 
     #[test]
     fn test_ns_to_frames_24fps() {
-        let fps = FrameRate { numerator: 24, denominator: 1 };
+        let fps = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
         assert_eq!(ns_to_frames(0, &fps), 0);
         assert_eq!(ns_to_frames(1_000_000_000, &fps), 24); // 1 second = 24 frames
-        assert_eq!(ns_to_frames(500_000_000, &fps), 12);   // 0.5s = 12 frames
+        assert_eq!(ns_to_frames(500_000_000, &fps), 12); // 0.5s = 12 frames
     }
 
     #[test]
     fn test_ns_to_frames_2997fps() {
-        let fps = FrameRate { numerator: 30000, denominator: 1001 };
+        let fps = FrameRate {
+            numerator: 30000,
+            denominator: 1001,
+        };
         // 1 second ≈ 29.97 frames → rounds to 30
         assert_eq!(ns_to_frames(1_000_000_000, &fps), 30);
     }
 
     #[test]
     fn test_frames_to_timecode_nondrop() {
-        let fps = FrameRate { numerator: 24, denominator: 1 };
+        let fps = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
         assert_eq!(frames_to_timecode(0, &fps, false), "00:00:00:00");
         assert_eq!(frames_to_timecode(24, &fps, false), "00:00:01:00");
         assert_eq!(frames_to_timecode(48, &fps, false), "00:00:02:00");
@@ -240,7 +271,10 @@ mod tests {
 
     #[test]
     fn test_frames_to_timecode_drop() {
-        let fps = FrameRate { numerator: 30000, denominator: 1001 };
+        let fps = FrameRate {
+            numerator: 30000,
+            denominator: 1001,
+        };
         assert_eq!(frames_to_timecode(0, &fps, true), "00:00:00;00");
         // At 29.97 DF, 1 second = 30 frames
         assert_eq!(frames_to_timecode(30, &fps, true), "00:00:01;00");
@@ -248,9 +282,18 @@ mod tests {
 
     #[test]
     fn test_is_drop_frame() {
-        assert!(is_drop_frame(&FrameRate { numerator: 30000, denominator: 1001 }));
-        assert!(!is_drop_frame(&FrameRate { numerator: 24, denominator: 1 }));
-        assert!(!is_drop_frame(&FrameRate { numerator: 30, denominator: 1 }));
+        assert!(is_drop_frame(&FrameRate {
+            numerator: 30000,
+            denominator: 1001
+        }));
+        assert!(!is_drop_frame(&FrameRate {
+            numerator: 24,
+            denominator: 1
+        }));
+        assert!(!is_drop_frame(&FrameRate {
+            numerator: 30,
+            denominator: 1
+        }));
     }
 
     #[test]
@@ -264,10 +307,23 @@ mod tests {
     fn test_write_edl_basic() {
         use crate::model::track::Track;
         let mut project = Project::new("Test EDL");
-        project.frame_rate = FrameRate { numerator: 24, denominator: 1 };
+        project.frame_rate = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
         let mut track = Track::new_video("V1");
-        track.add_clip(Clip::new("/footage/clip1.mp4", 5_000_000_000, 0, ClipKind::Video));
-        track.add_clip(Clip::new("/footage/clip2.mp4", 3_000_000_000, 5_000_000_000, ClipKind::Video));
+        track.add_clip(Clip::new(
+            "/footage/clip1.mp4",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        track.add_clip(Clip::new(
+            "/footage/clip2.mp4",
+            3_000_000_000,
+            5_000_000_000,
+            ClipKind::Video,
+        ));
         project.tracks.push(track);
 
         let edl = write_edl(&project);
@@ -285,9 +341,17 @@ mod tests {
     fn test_write_edl_skips_titles() {
         use crate::model::track::Track;
         let mut project = Project::new("Test");
-        project.frame_rate = FrameRate { numerator: 24, denominator: 1 };
+        project.frame_rate = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
         let mut track = Track::new_video("V1");
-        track.add_clip(Clip::new("/footage/real.mp4", 5_000_000_000, 0, ClipKind::Video));
+        track.add_clip(Clip::new(
+            "/footage/real.mp4",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
         track.add_clip(Clip::new("", 2_000_000_000, 5_000_000_000, ClipKind::Title));
         project.tracks.push(track);
 

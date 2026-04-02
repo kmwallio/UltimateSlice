@@ -3,7 +3,6 @@
 /// Renders a tone curve with draggable control points and smooth Catmull-Rom
 /// spline interpolation via Cairo DrawingArea. Used by the inspector to replace
 /// raw numeric sliders with an intuitive graphical curve editor.
-
 use gtk4::prelude::*;
 use gtk4::{self as gtk, DrawingArea, Orientation};
 use std::cell::{Cell, RefCell};
@@ -28,11 +27,11 @@ const CHANNEL_LABELS: &[&str] = &["Red", "Green", "Blue", "RGB", "Luma"];
 /// Map dropdown index to frei0r `channel` param value.
 fn channel_idx_to_frei0r(idx: usize) -> f64 {
     match idx {
-        0 => 0.0,   // Red
-        1 => 0.1,   // Green
-        2 => 0.2,   // Blue
-        3 => 0.5,   // RGB
-        4 => 0.4,   // Luma
+        0 => 0.0, // Red
+        1 => 0.1, // Green
+        2 => 0.2, // Blue
+        3 => 0.5, // RGB
+        4 => 0.4, // Luma
         _ => 0.5,
     }
 }
@@ -181,7 +180,11 @@ fn draw_curves(ctx: &gtk::cairo::Context, w: f64, h: f64, state: &CurveState) {
     for (i, &(inp, out)) in pts.iter().enumerate() {
         let (sx, sy) = to_screen(inp, out, w, h);
         let is_sel = state.selected == Some(i);
-        let r = if is_sel { POINT_RADIUS + 2.0 } else { POINT_RADIUS };
+        let r = if is_sel {
+            POINT_RADIUS + 2.0
+        } else {
+            POINT_RADIUS
+        };
 
         // Dark outline ring
         ctx.set_source_rgba(0.0, 0.0, 0.0, 0.8);
@@ -280,11 +283,11 @@ pub fn build_curves_widget(
                     // Double-click on empty area: add new point
                     let (inp, out) = from_screen(x, y, w, h);
                     s.points.push((inp, out));
-                    s.points
-                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-                    s.selected = s.points.iter().position(|&p| {
-                        (p.0 - inp).abs() < 0.001 && (p.1 - out).abs() < 0.001
-                    });
+                    s.points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                    s.selected = s
+                        .points
+                        .iter()
+                        .position(|&p| (p.0 - inp).abs() < 0.001 && (p.1 - out).abs() < 0.001);
                     drop(s);
                     fire();
                     da_c.queue_draw();
@@ -338,11 +341,9 @@ pub fn build_curves_widget(
                 if let Some(idx) = s.selected {
                     s.points[idx] = (inp, out);
                     let target = (inp, out);
-                    s.points
-                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                    s.points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
                     s.selected = s.points.iter().position(|p| {
-                        (p.0 - target.0).abs() < 0.0001
-                            && (p.1 - target.1).abs() < 0.0001
+                        (p.0 - target.0).abs() < 0.0001 && (p.1 - target.1).abs() < 0.0001
                     });
                     drop(s);
                     fire();

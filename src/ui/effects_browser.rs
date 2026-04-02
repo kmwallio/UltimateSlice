@@ -51,7 +51,9 @@ pub fn build_effects_browser(
     apply_btn.set_margin_end(8);
     apply_btn.set_margin_bottom(4);
     apply_btn.set_sensitive(false);
-    apply_btn.set_tooltip_text(Some("Apply the selected effect to the selected timeline clip"));
+    apply_btn.set_tooltip_text(Some(
+        "Apply the selected effect to the selected timeline clip",
+    ));
     vbox.append(&apply_btn);
 
     // ── Empty state ─────────────────────────────────────────────────────
@@ -217,11 +219,7 @@ fn make_plugin_row(plugin: &crate::media::frei0r_registry::Frei0rPluginInfo) -> 
 }
 
 /// Filter the list by showing/hiding rows based on search query.
-fn filter_list(
-    list_box: &gtk::ListBox,
-    registry: &Option<Rc<Frei0rRegistry>>,
-    query: &str,
-) {
+fn filter_list(list_box: &gtk::ListBox, registry: &Option<Rc<Frei0rRegistry>>, query: &str) {
     let registry = match registry {
         Some(r) => r,
         None => return,

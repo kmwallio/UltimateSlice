@@ -51,6 +51,11 @@ src/
                             native <param>/<keyframeAnimation>/<keyframe> elements for FCP interop)
     writer.rs               Project → FCPXML 1.14 (emits native keyframe elements + us:* vendor attrs)
 
+  otio/
+    schema.rs               OTIO JSON schema types (serde Serialize/Deserialize) + time conversion helpers
+    writer.rs               Project → OTIO JSON (implicit gaps → explicit, transitions, markers, metadata)
+    parser.rs               OTIO JSON → Project (explicit gaps → implicit, transitions, markers, metadata)
+
   undo.rs                   EditCommand trait + EditHistory (undo/redo stacks)
                             Commands: MoveClip, TrimIn, TrimOut, DeleteClip, SplitClip
 
@@ -393,6 +398,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.14 to a file path |
 | `save_edl` | Export timeline to CMX 3600 EDL (.edl) file |
+| `save_otio` | Export the current project to OpenTimelineIO (.otio) JSON file |
+| `open_otio` | Load a project from an OpenTimelineIO (.otio) file, replacing the current project |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
 | `list_export_presets` | List saved export presets from UI state |
 | `save_export_preset` | Create or overwrite a named export preset |

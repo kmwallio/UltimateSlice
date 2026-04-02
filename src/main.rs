@@ -5,6 +5,7 @@ mod fcpxml;
 mod mcp;
 mod media;
 mod model;
+mod otio;
 mod recent;
 mod ui;
 mod ui_state;

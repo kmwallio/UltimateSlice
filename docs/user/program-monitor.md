@@ -117,6 +117,11 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - Prerender cache lookups now track hit/miss telemetry (with hit-rate summaries), and `get_performance_snapshot` includes `prerender_cache_hits`, `prerender_cache_misses`, and `prerender_cache_hit_rate_percent`.
 - For proxy-backed prerender inputs, LUT is not re-applied in the prerender FFmpeg graph, preventing double LUT grading when the proxy media is already LUT-baked.
 - When a **scoped** adjustment layer is active, background prerender falls back to the live compositor-output path so the Program Monitor does not show stale full-frame adjustment renders.
+- Transparent title clips keep their alpha in background prerender, so prerendered title overlays show the lower video tracks behind the text instead of flattening to black.
+- Title fonts in background prerender now reuse the selected family plus structured weight/slant/width selectors, so bold and italic title faces stay closer to the live Program Monitor preview instead of falling back to a regular face.
+- Optional FFmpeg frei0r module probes used by background prerender now fail quietly when those modules are unavailable, so title-heavy compositions fall back cleanly without misleading `Could not find module` log spam.
+- Background prerender now carries the remaining static clip-local visual effects that were missing from the FFmpeg path, including shape masks, clip blur, flip transforms, and anamorphic desqueeze.
+- If an overlap window contains clip features the prerender FFmpeg path still cannot reproduce exactly (for example animated clip/mask properties, speed/reverse/freeze timing, or advanced clip-audio effects), Program Monitor falls back to the live compositor path instead of using an incorrect cached segment.
 
 ## Seeking
 

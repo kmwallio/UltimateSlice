@@ -249,7 +249,9 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
         let freeze_weak = maybe_freeze.as_ref().map(|f| f.downgrade());
         let video_linked_for_cb = video_linked.clone();
         uridec.connect_pad_added(move |_src, pad| {
-            let Some(pipeline) = pipeline_weak.upgrade() else { return };
+            let Some(pipeline) = pipeline_weak.upgrade() else {
+                return;
+            };
             // Prefer linking directly to the video chain sink. We cannot rely on
             // current_caps() in pad-added: some demux/decode combinations emit
             // pads before caps are fixed. A direct link attempt is robust here:
@@ -330,9 +332,7 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
 fn extract_rgba_ffmpeg(source_path: &str, time_ns: u64) -> Result<Vec<u8>> {
     let ffmpeg = crate::media::export::find_ffmpeg()?;
     let mut cmd = Command::new(ffmpeg);
-    cmd.arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error");
+    cmd.arg("-hide_banner").arg("-loglevel").arg("error");
     if time_ns > 0 {
         let seek_sec = format!("{:.3}", time_ns as f64 / 1_000_000_000.0);
         cmd.arg("-ss").arg(seek_sec);

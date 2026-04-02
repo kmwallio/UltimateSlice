@@ -617,10 +617,38 @@ pub struct MaskPath {
 pub fn default_diamond_path() -> MaskPath {
     MaskPath {
         points: vec![
-            BezierPoint { x: 0.5, y: 0.25, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
-            BezierPoint { x: 0.75, y: 0.5, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
-            BezierPoint { x: 0.5, y: 0.75, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
-            BezierPoint { x: 0.25, y: 0.5, handle_in_x: 0.0, handle_in_y: 0.0, handle_out_x: 0.0, handle_out_y: 0.0 },
+            BezierPoint {
+                x: 0.5,
+                y: 0.25,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
+            BezierPoint {
+                x: 0.75,
+                y: 0.5,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
+            BezierPoint {
+                x: 0.5,
+                y: 0.75,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
+            BezierPoint {
+                x: 0.25,
+                y: 0.5,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
         ],
     }
 }
@@ -765,9 +793,21 @@ impl Default for EqBand {
 /// Default EQ band settings: Low 200 Hz, Mid 1 kHz, High 5 kHz — all flat.
 pub fn default_eq_bands() -> [EqBand; 3] {
     [
-        EqBand { freq: 200.0, gain: 0.0, q: 1.0 },
-        EqBand { freq: 1000.0, gain: 0.0, q: 1.0 },
-        EqBand { freq: 5000.0, gain: 0.0, q: 1.0 },
+        EqBand {
+            freq: 200.0,
+            gain: 0.0,
+            q: 1.0,
+        },
+        EqBand {
+            freq: 1000.0,
+            gain: 0.0,
+            q: 1.0,
+        },
+        EqBand {
+            freq: 5000.0,
+            gain: 0.0,
+            q: 1.0,
+        },
     ]
 }
 
@@ -1634,9 +1674,7 @@ impl Clip {
     /// Insert an angle switch, keeping the list sorted by position.
     /// If a switch already exists at the same position, update its angle.
     pub fn insert_angle_switch(&mut self, position_ns: u64, angle_index: usize) {
-        let switches = self
-            .multicam_switches
-            .get_or_insert_with(Vec::new);
+        let switches = self.multicam_switches.get_or_insert_with(Vec::new);
         if let Some(existing) = switches.iter_mut().find(|s| s.position_ns == position_ns) {
             existing.angle_index = angle_index;
         } else {
@@ -1695,7 +1733,10 @@ impl Clip {
     /// clips or FCPXML imports without a probe result), or when the clip is
     /// a still image (images can be extended to any timeline length).
     pub fn max_source_out(&self) -> Option<u64> {
-        if self.kind == ClipKind::Image || self.kind == ClipKind::Title || self.kind == ClipKind::Adjustment {
+        if self.kind == ClipKind::Image
+            || self.kind == ClipKind::Title
+            || self.kind == ClipKind::Adjustment
+        {
             return None;
         }
         self.media_duration_ns
@@ -1805,27 +1846,41 @@ impl Clip {
             Phase1KeyframeProperty::CropTop => &self.crop_top_keyframes,
             Phase1KeyframeProperty::CropBottom => &self.crop_bottom_keyframes,
             Phase1KeyframeProperty::Blur => &self.blur_keyframes,
-            Phase1KeyframeProperty::MaskCenterX => {
-                self.masks.first().map(|m| m.center_x_keyframes.as_slice()).unwrap_or(&[])
-            }
-            Phase1KeyframeProperty::MaskCenterY => {
-                self.masks.first().map(|m| m.center_y_keyframes.as_slice()).unwrap_or(&[])
-            }
-            Phase1KeyframeProperty::MaskWidth => {
-                self.masks.first().map(|m| m.width_keyframes.as_slice()).unwrap_or(&[])
-            }
-            Phase1KeyframeProperty::MaskHeight => {
-                self.masks.first().map(|m| m.height_keyframes.as_slice()).unwrap_or(&[])
-            }
-            Phase1KeyframeProperty::MaskRotation => {
-                self.masks.first().map(|m| m.rotation_keyframes.as_slice()).unwrap_or(&[])
-            }
-            Phase1KeyframeProperty::MaskFeather => {
-                self.masks.first().map(|m| m.feather_keyframes.as_slice()).unwrap_or(&[])
-            }
-            Phase1KeyframeProperty::MaskExpansion => {
-                self.masks.first().map(|m| m.expansion_keyframes.as_slice()).unwrap_or(&[])
-            }
+            Phase1KeyframeProperty::MaskCenterX => self
+                .masks
+                .first()
+                .map(|m| m.center_x_keyframes.as_slice())
+                .unwrap_or(&[]),
+            Phase1KeyframeProperty::MaskCenterY => self
+                .masks
+                .first()
+                .map(|m| m.center_y_keyframes.as_slice())
+                .unwrap_or(&[]),
+            Phase1KeyframeProperty::MaskWidth => self
+                .masks
+                .first()
+                .map(|m| m.width_keyframes.as_slice())
+                .unwrap_or(&[]),
+            Phase1KeyframeProperty::MaskHeight => self
+                .masks
+                .first()
+                .map(|m| m.height_keyframes.as_slice())
+                .unwrap_or(&[]),
+            Phase1KeyframeProperty::MaskRotation => self
+                .masks
+                .first()
+                .map(|m| m.rotation_keyframes.as_slice())
+                .unwrap_or(&[]),
+            Phase1KeyframeProperty::MaskFeather => self
+                .masks
+                .first()
+                .map(|m| m.feather_keyframes.as_slice())
+                .unwrap_or(&[]),
+            Phase1KeyframeProperty::MaskExpansion => self
+                .masks
+                .first()
+                .map(|m| m.expansion_keyframes.as_slice())
+                .unwrap_or(&[]),
         }
     }
 
@@ -1856,31 +1911,45 @@ impl Clip {
             Phase1KeyframeProperty::CropBottom => &mut self.crop_bottom_keyframes,
             Phase1KeyframeProperty::Blur => &mut self.blur_keyframes,
             Phase1KeyframeProperty::MaskCenterX => {
-                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                if self.masks.is_empty() {
+                    self.masks.push(ClipMask::new(MaskShape::Rectangle));
+                }
                 &mut self.masks[0].center_x_keyframes
             }
             Phase1KeyframeProperty::MaskCenterY => {
-                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                if self.masks.is_empty() {
+                    self.masks.push(ClipMask::new(MaskShape::Rectangle));
+                }
                 &mut self.masks[0].center_y_keyframes
             }
             Phase1KeyframeProperty::MaskWidth => {
-                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                if self.masks.is_empty() {
+                    self.masks.push(ClipMask::new(MaskShape::Rectangle));
+                }
                 &mut self.masks[0].width_keyframes
             }
             Phase1KeyframeProperty::MaskHeight => {
-                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                if self.masks.is_empty() {
+                    self.masks.push(ClipMask::new(MaskShape::Rectangle));
+                }
                 &mut self.masks[0].height_keyframes
             }
             Phase1KeyframeProperty::MaskRotation => {
-                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                if self.masks.is_empty() {
+                    self.masks.push(ClipMask::new(MaskShape::Rectangle));
+                }
                 &mut self.masks[0].rotation_keyframes
             }
             Phase1KeyframeProperty::MaskFeather => {
-                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                if self.masks.is_empty() {
+                    self.masks.push(ClipMask::new(MaskShape::Rectangle));
+                }
                 &mut self.masks[0].feather_keyframes
             }
             Phase1KeyframeProperty::MaskExpansion => {
-                if self.masks.is_empty() { self.masks.push(ClipMask::new(MaskShape::Rectangle)); }
+                if self.masks.is_empty() {
+                    self.masks.push(ClipMask::new(MaskShape::Rectangle));
+                }
                 &mut self.masks[0].expansion_keyframes
             }
         }
@@ -1909,13 +1978,27 @@ impl Clip {
             Phase1KeyframeProperty::CropTop => self.crop_top as f64,
             Phase1KeyframeProperty::CropBottom => self.crop_bottom as f64,
             Phase1KeyframeProperty::Blur => self.blur as f64,
-            Phase1KeyframeProperty::MaskCenterX => self.masks.first().map(|m| m.center_x).unwrap_or(0.5),
-            Phase1KeyframeProperty::MaskCenterY => self.masks.first().map(|m| m.center_y).unwrap_or(0.5),
-            Phase1KeyframeProperty::MaskWidth => self.masks.first().map(|m| m.width).unwrap_or(0.25),
-            Phase1KeyframeProperty::MaskHeight => self.masks.first().map(|m| m.height).unwrap_or(0.25),
-            Phase1KeyframeProperty::MaskRotation => self.masks.first().map(|m| m.rotation).unwrap_or(0.0),
-            Phase1KeyframeProperty::MaskFeather => self.masks.first().map(|m| m.feather).unwrap_or(0.0),
-            Phase1KeyframeProperty::MaskExpansion => self.masks.first().map(|m| m.expansion).unwrap_or(0.0),
+            Phase1KeyframeProperty::MaskCenterX => {
+                self.masks.first().map(|m| m.center_x).unwrap_or(0.5)
+            }
+            Phase1KeyframeProperty::MaskCenterY => {
+                self.masks.first().map(|m| m.center_y).unwrap_or(0.5)
+            }
+            Phase1KeyframeProperty::MaskWidth => {
+                self.masks.first().map(|m| m.width).unwrap_or(0.25)
+            }
+            Phase1KeyframeProperty::MaskHeight => {
+                self.masks.first().map(|m| m.height).unwrap_or(0.25)
+            }
+            Phase1KeyframeProperty::MaskRotation => {
+                self.masks.first().map(|m| m.rotation).unwrap_or(0.0)
+            }
+            Phase1KeyframeProperty::MaskFeather => {
+                self.masks.first().map(|m| m.feather).unwrap_or(0.0)
+            }
+            Phase1KeyframeProperty::MaskExpansion => {
+                self.masks.first().map(|m| m.expansion).unwrap_or(0.0)
+            }
         }
     }
 
@@ -1943,10 +2026,12 @@ impl Clip {
             Phase1KeyframeProperty::EqLowGain
             | Phase1KeyframeProperty::EqMidGain
             | Phase1KeyframeProperty::EqHighGain => value.clamp(-24.0, 12.0),
-            Phase1KeyframeProperty::MaskCenterX
-            | Phase1KeyframeProperty::MaskCenterY => value.clamp(0.0, 1.0),
-            Phase1KeyframeProperty::MaskWidth
-            | Phase1KeyframeProperty::MaskHeight => value.clamp(0.01, 0.5),
+            Phase1KeyframeProperty::MaskCenterX | Phase1KeyframeProperty::MaskCenterY => {
+                value.clamp(0.0, 1.0)
+            }
+            Phase1KeyframeProperty::MaskWidth | Phase1KeyframeProperty::MaskHeight => {
+                value.clamp(0.01, 0.5)
+            }
             Phase1KeyframeProperty::MaskRotation => value.clamp(-180.0, 180.0),
             Phase1KeyframeProperty::MaskFeather => value.clamp(0.0, 0.5),
             Phase1KeyframeProperty::MaskExpansion => value.clamp(-0.5, 0.5),
@@ -1997,13 +2082,12 @@ impl Clip {
         };
         let clamped_value = Self::clamp_phase1_property_value(property, value);
         // Capture duration before the change so we can rescale siblings.
-        let old_dur = if property == Phase1KeyframeProperty::Speed
-            && !self.speed_keyframes.is_empty()
-        {
-            Some(self.duration())
-        } else {
-            None
-        };
+        let old_dur =
+            if property == Phase1KeyframeProperty::Speed && !self.speed_keyframes.is_empty() {
+                Some(self.duration())
+            } else {
+                None
+            };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
         // Snap to an existing keyframe within half a frame (~20ms) to avoid
         // creating near-duplicates when the playhead is close but not exact.
@@ -2405,7 +2489,10 @@ impl Clip {
         self.speed_at_local_timeline_ns(local_ns)
     }
 
-    pub(crate) fn integrated_source_distance_for_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
+    pub(crate) fn integrated_source_distance_for_local_timeline_ns(
+        &self,
+        local_timeline_ns: u64,
+    ) -> f64 {
         if local_timeline_ns == 0 {
             return 0.0;
         }
@@ -2439,7 +2526,8 @@ impl Clip {
             let n = SAMPLES_PER_SEGMENT.min(seg_len / 1_000_000).max(1);
             for j in 0..n {
                 let t0 = seg_start + (u128::from(seg_len) * u128::from(j) / u128::from(n)) as u64;
-                let t1 = seg_start + (u128::from(seg_len) * u128::from(j + 1) / u128::from(n)) as u64;
+                let t1 =
+                    seg_start + (u128::from(seg_len) * u128::from(j + 1) / u128::from(n)) as u64;
                 let dt = t1 - t0;
                 let mid = t0 + dt / 2;
                 integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
@@ -3357,7 +3445,10 @@ mod tests {
         clip.speed = 2.0;
         // At 2x speed, 1s on timeline = 2s in source
         assert_eq!(clip.timeline_to_source_delta(1_000_000_000), 2_000_000_000);
-        assert_eq!(clip.timeline_to_source_delta(-1_000_000_000), -2_000_000_000);
+        assert_eq!(
+            clip.timeline_to_source_delta(-1_000_000_000),
+            -2_000_000_000
+        );
     }
 
     #[test]
@@ -3565,7 +3656,10 @@ mod tests {
             KeyframeInterpolation::Linear,
         );
         let dur_with_ramp = clip.duration();
-        assert!(dur_with_ramp < 120_000_000_000, "4x ramp should shorten clip");
+        assert!(
+            dur_with_ramp < 120_000_000_000,
+            "4x ramp should shorten clip"
+        );
 
         // Adding a third keyframe that ramps back to 1x changes the curve
         // and thus the duration. The keyframe is placed wherever the user
@@ -3576,11 +3670,18 @@ mod tests {
             1.0,
             KeyframeInterpolation::Linear,
         );
-        assert_eq!(clip.speed_keyframes.len(), 3, "all 3 keyframes should be kept");
+        assert_eq!(
+            clip.speed_keyframes.len(),
+            3,
+            "all 3 keyframes should be kept"
+        );
         // Duration changes because the speed curve changed.
         let dur_with_three = clip.duration();
         assert!(dur_with_three > 0);
-        assert_ne!(dur_with_three, dur_with_ramp, "3rd KF should change duration");
+        assert_ne!(
+            dur_with_three, dur_with_ramp,
+            "3rd KF should change duration"
+        );
     }
 
     #[test]
@@ -3667,7 +3768,9 @@ mod tests {
                 source_out: 10_000_000_000,
                 sync_offset_ns: 0,
                 source_timecode_base_ns: None,
-                media_duration_ns: None, volume: 1.0, muted: false,
+                media_duration_ns: None,
+                volume: 1.0,
+                muted: false,
             },
             MulticamAngle {
                 id: "a2".into(),
@@ -3677,7 +3780,9 @@ mod tests {
                 source_out: 8_000_000_000,
                 sync_offset_ns: 500_000_000,
                 source_timecode_base_ns: None,
-                media_duration_ns: None, volume: 1.0, muted: false,
+                media_duration_ns: None,
+                volume: 1.0,
+                muted: false,
             },
         ];
         let mc = Clip::new_multicam(1_000_000_000, angles);
@@ -3697,18 +3802,35 @@ mod tests {
 
     #[test]
     fn test_active_angle_at() {
-        let mut mc = Clip::new_multicam(0, vec![
-            MulticamAngle {
-                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
-                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
-            },
-            MulticamAngle {
-                id: "a2".into(), label: "Cam2".into(), source_path: "b.mp4".into(),
-                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
-            },
-        ]);
+        let mut mc = Clip::new_multicam(
+            0,
+            vec![
+                MulticamAngle {
+                    id: "a1".into(),
+                    label: "Cam1".into(),
+                    source_path: "a.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+                MulticamAngle {
+                    id: "a2".into(),
+                    label: "Cam2".into(),
+                    source_path: "b.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+            ],
+        );
         // Default: angle 0 at position 0
         assert_eq!(mc.active_angle_at(0), 0);
         assert_eq!(mc.active_angle_at(5_000_000_000), 0);
@@ -3728,18 +3850,35 @@ mod tests {
 
     #[test]
     fn test_multicam_segments() {
-        let mut mc = Clip::new_multicam(0, vec![
-            MulticamAngle {
-                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
-                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
-            },
-            MulticamAngle {
-                id: "a2".into(), label: "Cam2".into(), source_path: "b.mp4".into(),
-                source_in: 0, source_out: 20_000_000_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
-            },
-        ]);
+        let mut mc = Clip::new_multicam(
+            0,
+            vec![
+                MulticamAngle {
+                    id: "a1".into(),
+                    label: "Cam1".into(),
+                    source_path: "a.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+                MulticamAngle {
+                    id: "a2".into(),
+                    label: "Cam2".into(),
+                    source_path: "b.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+            ],
+        );
         mc.insert_angle_switch(5_000_000_000, 1);
         mc.insert_angle_switch(10_000_000_000, 0);
 
@@ -3752,18 +3891,35 @@ mod tests {
 
     #[test]
     fn test_insert_angle_switch_updates_existing() {
-        let mut mc = Clip::new_multicam(0, vec![
-            MulticamAngle {
-                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
-                source_in: 0, source_out: 10_000_000_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
-            },
-            MulticamAngle {
-                id: "a2".into(), label: "Cam2".into(), source_path: "b.mp4".into(),
-                source_in: 0, source_out: 10_000_000_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None, volume: 1.0, muted: false,
-            },
-        ]);
+        let mut mc = Clip::new_multicam(
+            0,
+            vec![
+                MulticamAngle {
+                    id: "a1".into(),
+                    label: "Cam1".into(),
+                    source_path: "a.mp4".into(),
+                    source_in: 0,
+                    source_out: 10_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+                MulticamAngle {
+                    id: "a2".into(),
+                    label: "Cam2".into(),
+                    source_path: "b.mp4".into(),
+                    source_in: 0,
+                    source_out: 10_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+            ],
+        );
         mc.insert_angle_switch(5_000_000_000, 1);
         assert_eq!(mc.multicam_switches.as_ref().unwrap().len(), 2);
 
@@ -3775,13 +3931,21 @@ mod tests {
 
     #[test]
     fn test_multicam_serde_round_trip() {
-        let mut mc = Clip::new_multicam(1_000, vec![
-            MulticamAngle {
-                id: "a1".into(), label: "Cam1".into(), source_path: "a.mp4".into(),
-                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
-                source_timecode_base_ns: Some(42), media_duration_ns: Some(15_000), volume: 1.0, muted: false,
-            },
-        ]);
+        let mut mc = Clip::new_multicam(
+            1_000,
+            vec![MulticamAngle {
+                id: "a1".into(),
+                label: "Cam1".into(),
+                source_path: "a.mp4".into(),
+                source_in: 0,
+                source_out: 10_000,
+                sync_offset_ns: 0,
+                source_timecode_base_ns: Some(42),
+                media_duration_ns: Some(15_000),
+                volume: 1.0,
+                muted: false,
+            }],
+        );
         mc.insert_angle_switch(5_000, 0);
 
         let json = serde_json::to_string(&mc).unwrap();
@@ -3807,20 +3971,35 @@ mod tests {
 
     #[test]
     fn test_multicam_volume_mute_serde_round_trip() {
-        let mc = Clip::new_multicam(0, vec![
-            MulticamAngle {
-                id: "a1".into(), label: "Main".into(), source_path: "a.mp4".into(),
-                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None,
-                volume: 0.75, muted: false,
-            },
-            MulticamAngle {
-                id: "a2".into(), label: "Wide".into(), source_path: "b.mp4".into(),
-                source_in: 0, source_out: 10_000, sync_offset_ns: 0,
-                source_timecode_base_ns: None, media_duration_ns: None,
-                volume: 0.0, muted: true,
-            },
-        ]);
+        let mc = Clip::new_multicam(
+            0,
+            vec![
+                MulticamAngle {
+                    id: "a1".into(),
+                    label: "Main".into(),
+                    source_path: "a.mp4".into(),
+                    source_in: 0,
+                    source_out: 10_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 0.75,
+                    muted: false,
+                },
+                MulticamAngle {
+                    id: "a2".into(),
+                    label: "Wide".into(),
+                    source_path: "b.mp4".into(),
+                    source_in: 0,
+                    source_out: 10_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 0.0,
+                    muted: true,
+                },
+            ],
+        );
         let json = serde_json::to_string(&mc).unwrap();
         let restored: Clip = serde_json::from_str(&json).unwrap();
         let angles = restored.multicam_angles.unwrap();
@@ -3835,7 +4014,10 @@ mod tests {
         // Simulate old data without volume/muted fields
         let json = r#"{"id":"a","label":"Cam","source_path":"x.mp4","source_in":0,"source_out":1000,"sync_offset_ns":0,"source_timecode_base_ns":null,"media_duration_ns":null}"#;
         let angle: MulticamAngle = serde_json::from_str(json).unwrap();
-        assert!((angle.volume - 1.0).abs() < f32::EPSILON, "default volume should be 1.0");
+        assert!(
+            (angle.volume - 1.0).abs() < f32::EPSILON,
+            "default volume should be 1.0"
+        );
         assert!(!angle.muted, "default muted should be false");
     }
 }

@@ -826,9 +826,12 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment | ClipKind::Compound | ClipKind::Multicam => {
-                    lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
-                }
+                ClipKind::Video
+                | ClipKind::Image
+                | ClipKind::Title
+                | ClipKind::Adjustment
+                | ClipKind::Compound
+                | ClipKind::Multicam => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
             };
             let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
             let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
@@ -993,7 +996,9 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:masks") {
                 let json_str = v.replace("&quot;", "\"");
-                if let Ok(masks) = serde_json::from_str::<Vec<crate::model::clip::ClipMask>>(&json_str) {
+                if let Ok(masks) =
+                    serde_json::from_str::<Vec<crate::model::clip::ClipMask>>(&json_str)
+                {
                     clip.masks = masks;
                 }
             }
@@ -1225,8 +1230,7 @@ fn parse_asset_clip(
                         clip.kind = ClipKind::Compound;
                         if let Some(tracks_json) = attrs.get("us:compound-tracks") {
                             let json_str = tracks_json.replace("&quot;", "\"");
-                            clip.compound_tracks =
-                                serde_json::from_str(&json_str).ok();
+                            clip.compound_tracks = serde_json::from_str(&json_str).ok();
                         }
                     }
                     "multicam" => {
@@ -1932,9 +1936,13 @@ fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeK
                         let kfs = parse_keyframe_animation_children(reader)?;
                         for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some((x, y)) = parse_vec2(val_str) {
-                                result
-                                    .position_keyframes
-                                    .push((*time_ns, x, y, *interp, *bezier_controls));
+                                result.position_keyframes.push((
+                                    *time_ns,
+                                    x,
+                                    y,
+                                    *interp,
+                                    *bezier_controls,
+                                ));
                             }
                         }
                     } else if param_name_lower == "scale" {
@@ -5100,19 +5108,25 @@ mod tests {
         // Rotation keyframes: clip-local times
         assert_eq!(clip.rotate_keyframes.len(), 2);
         assert!(clip.rotate_keyframes[0].time_ns <= 1);
-        let delta = clip.rotate_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        let delta = clip.rotate_keyframes[1]
+            .time_ns
+            .abs_diff(expected_offset_ns);
         assert!(delta <= 1, "second rotation kf off by {delta}ns");
 
         // Position keyframes: clip-local times
         assert_eq!(clip.position_x_keyframes.len(), 2);
         assert!(clip.position_x_keyframes[0].time_ns <= 1);
-        let delta = clip.position_x_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        let delta = clip.position_x_keyframes[1]
+            .time_ns
+            .abs_diff(expected_offset_ns);
         assert!(delta <= 1, "second position_x kf off by {delta}ns");
 
         // Opacity keyframes: clip-local times
         assert_eq!(clip.opacity_keyframes.len(), 2);
         assert!(clip.opacity_keyframes[0].time_ns <= 1);
-        let delta = clip.opacity_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        let delta = clip.opacity_keyframes[1]
+            .time_ns
+            .abs_diff(expected_offset_ns);
         assert!(delta <= 1, "second opacity kf off by {delta}ns");
 
         // Verify all keyframe times are < source_in (i.e. clip-local, not absolute)
@@ -5466,40 +5480,68 @@ mod tests {
 
         // Clip 1: start=1700856/24s, source_in should be 0 (start == base)
         let c1_expected_source_in = 0u64;
-        assert_eq!(clips[0].source_in, c1_expected_source_in,
-            "clip 1 source_in: {} != {}", clips[0].source_in, c1_expected_source_in);
+        assert_eq!(
+            clips[0].source_in, c1_expected_source_in,
+            "clip 1 source_in: {} != {}",
+            clips[0].source_in, c1_expected_source_in
+        );
         let c1_dur = parse_fcpxml_time("50/24s").unwrap();
-        assert_eq!(clips[0].source_out, c1_expected_source_in + c1_dur,
-            "clip 1 source_out");
+        assert_eq!(
+            clips[0].source_out,
+            c1_expected_source_in + c1_dur,
+            "clip 1 source_out"
+        );
         assert_eq!(clips[0].source_timecode_base_ns, Some(base_ns));
 
         // Clip 2: start=1700967/24s, source_in = (1700967/24 - 70869) seconds
         let c2_start_ns = parse_fcpxml_time("1700967/24s").unwrap();
         let c2_expected_source_in = c2_start_ns - base_ns;
-        assert_eq!(clips[1].source_in, c2_expected_source_in,
+        assert_eq!(
+            clips[1].source_in,
+            c2_expected_source_in,
             "clip 2 source_in: {} != {} ({:.6}s != {:.6}s)",
-            clips[1].source_in, c2_expected_source_in,
-            clips[1].source_in as f64 / 1e9, c2_expected_source_in as f64 / 1e9);
+            clips[1].source_in,
+            c2_expected_source_in,
+            clips[1].source_in as f64 / 1e9,
+            c2_expected_source_in as f64 / 1e9
+        );
         let c2_dur = parse_fcpxml_time("475/24s").unwrap();
-        assert_eq!(clips[1].source_out, c2_expected_source_in + c2_dur,
-            "clip 2 source_out");
+        assert_eq!(
+            clips[1].source_out,
+            c2_expected_source_in + c2_dur,
+            "clip 2 source_out"
+        );
 
         // Clip 3: start=1701495/24s
         let c3_start_ns = parse_fcpxml_time("1701495/24s").unwrap();
         let c3_expected_source_in = c3_start_ns - base_ns;
-        assert_eq!(clips[2].source_in, c3_expected_source_in,
+        assert_eq!(
+            clips[2].source_in,
+            c3_expected_source_in,
             "clip 3 source_in: {} != {} ({:.6}s != {:.6}s)",
-            clips[2].source_in, c3_expected_source_in,
-            clips[2].source_in as f64 / 1e9, c3_expected_source_in as f64 / 1e9);
+            clips[2].source_in,
+            c3_expected_source_in,
+            clips[2].source_in as f64 / 1e9,
+            c3_expected_source_in as f64 / 1e9
+        );
         let c3_dur = parse_fcpxml_time("21/24s").unwrap();
-        assert_eq!(clips[2].source_out, c3_expected_source_in + c3_dur,
-            "clip 3 source_out");
+        assert_eq!(
+            clips[2].source_out,
+            c3_expected_source_in + c3_dur,
+            "clip 3 source_out"
+        );
 
         // Verify source_in values are reasonable seconds into the file
         assert!(clips[0].source_in == 0, "clip 1 starts at file beginning");
-        assert!(clips[1].source_in > 4_000_000_000 && clips[1].source_in < 5_000_000_000,
-            "clip 2 source_in should be ~4.625s, got {}s", clips[1].source_in as f64 / 1e9);
-        assert!(clips[2].source_in > 26_000_000_000 && clips[2].source_in < 27_000_000_000,
-            "clip 3 source_in should be ~26.625s, got {}s", clips[2].source_in as f64 / 1e9);
+        assert!(
+            clips[1].source_in > 4_000_000_000 && clips[1].source_in < 5_000_000_000,
+            "clip 2 source_in should be ~4.625s, got {}s",
+            clips[1].source_in as f64 / 1e9
+        );
+        assert!(
+            clips[2].source_in > 26_000_000_000 && clips[2].source_in < 27_000_000_000,
+            "clip 3 source_in should be ~26.625s, got {}s",
+            clips[2].source_in as f64 / 1e9
+        );
     }
 }

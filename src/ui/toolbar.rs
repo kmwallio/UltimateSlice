@@ -340,7 +340,13 @@ pub fn build_toolbar(
                     on_project_changed();
                 }
             });
-            confirm_unsaved_then(window, project.clone(), library.clone(), on_project_changed_cb, action);
+            confirm_unsaved_then(
+                window,
+                project.clone(),
+                library.clone(),
+                on_project_changed_cb,
+                action,
+            );
         });
     }
     header.pack_start(&btn_new);
@@ -371,7 +377,8 @@ pub fn build_toolbar(
                     filter.add_pattern("*.uspxml");
                     filter.add_pattern("*.fcpxml");
                     filter.add_pattern("*.xml");
-                    filter.set_name(Some("Project XML Files"));
+                    filter.add_pattern("*.otio");
+                    filter.set_name(Some("Project Files"));
                     let filters = gio::ListStore::new::<gtk::FileFilter>();
                     filters.append(&filter);
                     dialog.set_filters(Some(&filters));
@@ -392,12 +399,17 @@ pub fn build_toolbar(
                                 std::thread::spawn(move || {
                                     let result = std::fs::read_to_string(&path_bg)
                                         .map_err(|e| format!("Failed to read file: {e}"))
-                                        .and_then(|xml| {
-                                            fcpxml::parser::parse_fcpxml_with_path(
-                                                &xml,
-                                                Some(std::path::Path::new(&path_bg)),
-                                            )
-                                            .map_err(|e| format!("FCPXML parse error: {e}"))
+                                        .and_then(|content| {
+                                            if path_bg.ends_with(".otio") {
+                                                crate::otio::parser::parse_otio(&content)
+                                                    .map_err(|e| format!("OTIO parse error: {e}"))
+                                            } else {
+                                                fcpxml::parser::parse_fcpxml_with_path(
+                                                    &content,
+                                                    Some(std::path::Path::new(&path_bg)),
+                                                )
+                                                .map_err(|e| format!("FCPXML parse error: {e}"))
+                                            }
                                         });
                                     let _ = tx.send(result);
                                 });
@@ -446,7 +458,13 @@ pub fn build_toolbar(
                     });
                 }
             });
-            confirm_unsaved_then(window, project.clone(), library.clone(), on_project_changed_cb, action);
+            confirm_unsaved_then(
+                window,
+                project.clone(),
+                library.clone(),
+                on_project_changed_cb,
+                action,
+            );
         });
     }
     header.pack_start(&btn_open);
@@ -672,25 +690,37 @@ pub fn build_toolbar(
             // ── Aspect ratio / resolution presets ──
             // Each aspect ratio group: (label, [(width, height, display_label)])
             let ar_presets: Vec<(&str, Vec<(u32, u32, &str)>)> = vec![
-                ("16:9 (Widescreen)", vec![
-                    (3840, 2160, "3840 × 2160  (4K UHD)"),
-                    (2560, 1440, "2560 × 1440  (1440p QHD)"),
-                    (1920, 1080, "1920 × 1080  (1080p HD)"),
-                    (1280, 720,  "1280 × 720   (720p HD)"),
-                ]),
-                ("4:3 (Standard)", vec![
-                    (1440, 1080, "1440 × 1080  (HD 4:3)"),
-                    (1024, 768,  "1024 × 768   (XGA)"),
-                    (720, 480,   "720 × 480    (SD NTSC)"),
-                ]),
-                ("9:16 (Vertical)", vec![
-                    (1080, 1920, "1080 × 1920  (Full HD Vertical)"),
-                    (720, 1280,  "720 × 1280   (HD Vertical)"),
-                ]),
-                ("1:1 (Square)", vec![
-                    (2160, 2160, "2160 × 2160  (4K Square)"),
-                    (1080, 1080, "1080 × 1080  (HD Square)"),
-                ]),
+                (
+                    "16:9 (Widescreen)",
+                    vec![
+                        (3840, 2160, "3840 × 2160  (4K UHD)"),
+                        (2560, 1440, "2560 × 1440  (1440p QHD)"),
+                        (1920, 1080, "1920 × 1080  (1080p HD)"),
+                        (1280, 720, "1280 × 720   (720p HD)"),
+                    ],
+                ),
+                (
+                    "4:3 (Standard)",
+                    vec![
+                        (1440, 1080, "1440 × 1080  (HD 4:3)"),
+                        (1024, 768, "1024 × 768   (XGA)"),
+                        (720, 480, "720 × 480    (SD NTSC)"),
+                    ],
+                ),
+                (
+                    "9:16 (Vertical)",
+                    vec![
+                        (1080, 1920, "1080 × 1920  (Full HD Vertical)"),
+                        (720, 1280, "720 × 1280   (HD Vertical)"),
+                    ],
+                ),
+                (
+                    "1:1 (Square)",
+                    vec![
+                        (2160, 2160, "2160 × 2160  (4K Square)"),
+                        (1080, 1080, "1080 × 1080  (HD Square)"),
+                    ],
+                ),
             ];
 
             // Detect current aspect ratio and resolution index
@@ -724,14 +754,21 @@ pub fn build_toolbar(
             let res_label = gtk::Label::new(Some("Resolution:"));
             res_label.set_halign(gtk::Align::End);
             let initial_res_strings: Vec<&str> = if (init_ar_idx as usize) < ar_presets.len() {
-                ar_presets[init_ar_idx as usize].1.iter().map(|r| r.2).collect()
+                ar_presets[init_ar_idx as usize]
+                    .1
+                    .iter()
+                    .map(|r| r.2)
+                    .collect()
             } else {
                 vec!["1920 × 1080  (1080p HD)"]
             };
-            let res_string_list = gtk::StringList::new(&initial_res_strings.iter().map(|s| *s).collect::<Vec<&str>>());
-            let res_combo = gtk::DropDown::builder()
-                .model(&res_string_list)
-                .build();
+            let res_string_list = gtk::StringList::new(
+                &initial_res_strings
+                    .iter()
+                    .map(|s| *s)
+                    .collect::<Vec<&str>>(),
+            );
+            let res_combo = gtk::DropDown::builder().model(&res_string_list).build();
             grid.attach(&res_label, 0, 1, 1, 1);
             grid.attach(&res_combo, 1, 1, 2, 1);
 
@@ -768,14 +805,16 @@ pub fn build_toolbar(
                 let res_combo = res_combo.clone();
                 let res_label = res_label.clone();
                 let custom_box = custom_box.clone();
-                let ar_presets_labels: Vec<Vec<String>> = ar_presets.iter()
+                let ar_presets_labels: Vec<Vec<String>> = ar_presets
+                    .iter()
                     .map(|(_, resolutions)| resolutions.iter().map(|r| r.2.to_string()).collect())
                     .collect();
                 ar_combo.connect_selected_notify(move |combo| {
                     let idx = combo.selected() as usize;
                     if idx < ar_presets_labels.len() {
                         // Preset aspect ratio: show resolution dropdown, hide custom
-                        let labels: Vec<&str> = ar_presets_labels[idx].iter().map(|s| s.as_str()).collect();
+                        let labels: Vec<&str> =
+                            ar_presets_labels[idx].iter().map(|s| s.as_str()).collect();
                         let new_model = gtk::StringList::new(&labels);
                         res_combo.set_model(Some(&new_model));
                         res_combo.set_selected(0);
@@ -820,7 +859,8 @@ pub fn build_toolbar(
             dialog.add_button("Apply", gtk::ResponseType::Accept);
 
             // Clone presets data for the response handler
-            let ar_res_data: Vec<Vec<(u32, u32)>> = ar_presets.iter()
+            let ar_res_data: Vec<Vec<(u32, u32)>> = ar_presets
+                .iter()
                 .map(|(_, resolutions)| resolutions.iter().map(|r| (r.0, r.1)).collect())
                 .collect();
 
@@ -998,7 +1038,9 @@ pub fn build_toolbar(
             gif_fps_label.set_halign(gtk::Align::End);
             let gif_fps_spin = gtk::SpinButton::with_range(1.0, 30.0, 1.0);
             gif_fps_spin.set_value(15.0);
-            gif_fps_spin.set_tooltip_text(Some("Frames per second for the animated GIF (lower = smaller file)"));
+            gif_fps_spin.set_tooltip_text(Some(
+                "Frames per second for the animated GIF (lower = smaller file)",
+            ));
             grid.attach(&gif_fps_label, 0, 5, 1, 1);
             grid.attach(&gif_fps_spin, 1, 5, 1, 1);
             gif_fps_label.set_visible(false);
@@ -1225,7 +1267,10 @@ pub fn build_toolbar(
                             &gif_fps_spin,
                         );
                         let ok = state
-                            .upsert_preset(ExportPreset::from_export_options(existing_name, &options))
+                            .upsert_preset(ExportPreset::from_export_options(
+                                existing_name,
+                                &options,
+                            ))
                             .is_ok();
                         if ok {
                             ui_state::save_export_presets_state(&state);
@@ -1320,7 +1365,8 @@ pub fn build_toolbar(
                         if let Ok(file) = result {
                             if let Some(path) = file.path() {
                                 let output = path.to_string_lossy().to_string();
-                                let preset = ExportPreset::from_export_options("(queued)", &options_q);
+                                let preset =
+                                    ExportPreset::from_export_options("(queued)", &options_q);
                                 let job = ExportQueueJob::new(&output, preset);
                                 let mut queue = ui_state::load_export_queue_state();
                                 queue.jobs.push(job);
@@ -1671,8 +1717,7 @@ pub fn build_toolbar(
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
                         let path_str = path.to_string_lossy().to_string();
-                        let (tx, rx) =
-                            std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
                         let path_bg = path_str.clone();
                         std::thread::spawn(move || {
                             let result = std::fs::read_to_string(&path_bg)
@@ -1691,9 +1736,8 @@ pub fn build_toolbar(
                         let on_project_reloaded = on_project_reloaded.clone();
                         let timeline_state = timeline_state.clone();
                         timeline_state.borrow_mut().loading = true;
-                        glib::timeout_add_local(
-                            std::time::Duration::from_millis(50),
-                            move || match rx.try_recv() {
+                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                            match rx.try_recv() {
                                 Ok(Ok(mut new_proj)) => {
                                     new_proj.dirty = false;
                                     *project.borrow_mut() = new_proj;
@@ -1714,8 +1758,8 @@ pub fn build_toolbar(
                                     timeline_state.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
                                 }
-                            },
-                        );
+                            }
+                        });
                     }
                 }
             });
@@ -1762,9 +1806,56 @@ pub fn build_toolbar(
         });
     }
 
+    // -- Export OTIO button --
+    let btn_export_otio = gtk::Button::with_label("Export OTIO…");
+    btn_export_otio.add_css_class("flat");
+    {
+        let project = project.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_otio.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Export OTIO");
+            dialog.set_initial_name(Some("timeline.otio"));
+
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.otio");
+            filter.set_name(Some("OpenTimelineIO Files"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        match crate::otio::writer::write_otio(&project.borrow()) {
+                            Ok(json) => match std::fs::write(&path, json) {
+                                Ok(_) => {
+                                    log::info!("OTIO exported to {}", path.display());
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to write OTIO file: {e}");
+                                }
+                            },
+                            Err(e) => {
+                                log::error!("Failed to generate OTIO: {e}");
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     export_pop_box.append(&btn_export_project_with_media);
     export_pop_box.append(&btn_export_frame);
     export_pop_box.append(&btn_export_edl);
+    export_pop_box.append(&btn_export_otio);
     export_pop_box.append(&btn_restore_backup);
 
     // Export Queue dialog entry
@@ -1812,7 +1903,9 @@ pub fn build_toolbar(
 
     // ── Record Voiceover ────────────────────────────────────────────────────
     let btn_record = Button::with_label("Record");
-    btn_record.set_tooltip_text(Some("Record voiceover from microphone at playhead position"));
+    btn_record.set_tooltip_text(Some(
+        "Record voiceover from microphone at playhead position",
+    ));
     btn_record.add_css_class("small-btn");
     {
         let on_record_voiceover = on_record_voiceover.clone();

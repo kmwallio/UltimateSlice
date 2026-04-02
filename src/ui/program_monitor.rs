@@ -187,9 +187,8 @@ pub fn build_program_monitor(
     overlays_popover_box.set_margin_end(12);
     let subtitle_overlay_btn = CheckButton::with_label("Subtitles");
     subtitle_overlay_btn.set_active(true);
-    subtitle_overlay_btn.set_tooltip_text(Some(
-        "Show/hide subtitle overlay in the Program Monitor",
-    ));
+    subtitle_overlay_btn
+        .set_tooltip_text(Some("Show/hide subtitle overlay in the Program Monitor"));
 
     overlays_popover_box.append(&safe_area_btn);
     overlays_popover_box.append(&false_color_btn);
@@ -333,12 +332,7 @@ pub fn build_program_monitor(
                     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
                     let (fr, fg, fb) = false_color_luma(luma);
                     cr.set_source_rgb(fr, fg, fb);
-                    cr.rectangle(
-                        fx as f64 * sw,
-                        fy as f64 * sh,
-                        sw + 0.5,
-                        sh + 0.5,
-                    );
+                    cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);
                     cr.fill().ok();
                 }
             }
@@ -384,12 +378,7 @@ pub fn build_program_monitor(
                     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
                     if luma >= threshold && (fx + fy) % 8 < 4 {
                         cr.set_source_rgba(1.0, 0.85, 0.0, 0.85);
-                        cr.rectangle(
-                            fx as f64 * sw,
-                            fy as f64 * sh,
-                            sw + 0.5,
-                            sh + 0.5,
-                        );
+                        cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);
                         cr.fill().ok();
                     }
                 }
@@ -440,14 +429,27 @@ pub fn build_program_monitor(
                 } else {
                     gtk::cairo::FontWeight::Normal
                 };
-                let face = family.replace("Bold", "").replace("Italic", "").replace("Oblique", "").trim().to_string();
-                let face = if face.is_empty() { "Sans".to_string() } else { face };
+                let face = family
+                    .replace("Bold", "")
+                    .replace("Italic", "")
+                    .replace("Oblique", "")
+                    .trim()
+                    .to_string();
+                let face = if face.is_empty() {
+                    "Sans".to_string()
+                } else {
+                    face
+                };
                 cr.select_font_face(&face, slant, weight);
                 cr.set_font_size(font_size);
 
                 // Build the display string and measure it.
                 let display_text = if !line.words.is_empty() {
-                    line.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+                    line.words
+                        .iter()
+                        .map(|w| w.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 } else {
                     line.text.clone()
                 };
@@ -455,7 +457,9 @@ pub fn build_program_monitor(
                     continue;
                 }
 
-                let te = cr.text_extents(&display_text).unwrap_or_else(|_| cr.text_extents("M").unwrap());
+                let te = cr
+                    .text_extents(&display_text)
+                    .unwrap_or_else(|_| cr.text_extents("M").unwrap());
                 let tx = (w - te.width()) / 2.0 - te.x_bearing();
                 let ty = ty_base;
 
@@ -471,10 +475,34 @@ pub fn build_program_monitor(
                     let box_h = te.height() + pad_y * 2.0;
                     let r = 4.0;
                     cr.new_sub_path();
-                    cr.arc(box_x + box_w - r, box_y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-                    cr.arc(box_x + box_w - r, box_y + box_h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-                    cr.arc(box_x + r, box_y + box_h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-                    cr.arc(box_x + r, box_y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
+                    cr.arc(
+                        box_x + box_w - r,
+                        box_y + r,
+                        r,
+                        -std::f64::consts::FRAC_PI_2,
+                        0.0,
+                    );
+                    cr.arc(
+                        box_x + box_w - r,
+                        box_y + box_h - r,
+                        r,
+                        0.0,
+                        std::f64::consts::FRAC_PI_2,
+                    );
+                    cr.arc(
+                        box_x + r,
+                        box_y + box_h - r,
+                        r,
+                        std::f64::consts::FRAC_PI_2,
+                        std::f64::consts::PI,
+                    );
+                    cr.arc(
+                        box_x + r,
+                        box_y + r,
+                        r,
+                        std::f64::consts::PI,
+                        3.0 * std::f64::consts::FRAC_PI_2,
+                    );
                     cr.close_path();
                     cr.fill().ok();
                 }
@@ -493,12 +521,17 @@ pub fn build_program_monitor(
                 use crate::model::clip::SubtitleHighlightMode;
                 if !line.words.is_empty() && line.highlight_mode != SubtitleHighlightMode::None {
                     let mut word_x = tx;
-                    let space_w = cr.text_extents(" ").map(|e| e.x_advance()).unwrap_or(font_size * 0.3);
+                    let space_w = cr
+                        .text_extents(" ")
+                        .map(|e| e.x_advance())
+                        .unwrap_or(font_size * 0.3);
                     for (i, word) in line.words.iter().enumerate() {
                         if i > 0 {
                             word_x += space_w;
                         }
-                        let we = cr.text_extents(&word.text).unwrap_or_else(|_| cr.text_extents("M").unwrap());
+                        let we = cr
+                            .text_extents(&word.text)
+                            .unwrap_or_else(|_| cr.text_extents("M").unwrap());
 
                         if word.active {
                             match line.highlight_mode {
@@ -564,7 +597,6 @@ pub fn build_program_monitor(
                     let _ = cr.move_to(tx, ty);
                     let _ = cr.show_text(&display_text);
                 }
-
             }
         });
     }
@@ -1011,20 +1043,20 @@ pub fn format_timecode(ns: u64, frame_rate: &FrameRate) -> String {
 ///   deep purple → blue → cyan → green (correct) → yellow → orange → red → white
 fn false_color_luma(luma: f64) -> (f64, f64, f64) {
     if luma < 0.04 {
-        (0.30, 0.0, 0.50)   // deep purple — clipped/crushed black
+        (0.30, 0.0, 0.50) // deep purple — clipped/crushed black
     } else if luma < 0.20 {
-        (0.0, 0.0, 0.90)    // blue — underexposed shadow
+        (0.0, 0.0, 0.90) // blue — underexposed shadow
     } else if luma < 0.45 {
-        (0.0, 0.75, 0.75)   // cyan — low midtone
+        (0.0, 0.75, 0.75) // cyan — low midtone
     } else if luma < 0.60 {
-        (0.0, 0.80, 0.0)    // green — correctly exposed midtone ✓
+        (0.0, 0.80, 0.0) // green — correctly exposed midtone ✓
     } else if luma < 0.70 {
-        (1.0, 1.0, 0.0)     // yellow — high midtone
+        (1.0, 1.0, 0.0) // yellow — high midtone
     } else if luma < 0.90 {
-        (1.0, 0.50, 0.0)    // orange — overexposed highlight
+        (1.0, 0.50, 0.0) // orange — overexposed highlight
     } else if luma < 0.97 {
-        (1.0, 0.0, 0.0)     // red — near clip
+        (1.0, 0.0, 0.0) // red — near clip
     } else {
-        (1.0, 1.0, 1.0)     // white — clipped white
+        (1.0, 1.0, 1.0) // white — clipped white
     }
 }

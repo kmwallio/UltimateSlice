@@ -3,7 +3,6 @@
 /// Renders an HSV color circle via Cairo `DrawingArea` with a draggable
 /// indicator. Used by the inspector to replace raw R/G/B sliders with an
 /// intuitive wheel for shadows, midtones, and highlights zones.
-
 use gtk4::prelude::*;
 use gtk4::{self as gtk, DrawingArea, Orientation, Scale};
 use std::cell::{Cell, RefCell};
@@ -92,13 +91,7 @@ pub fn rgb_to_wheel_pos(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 ///
 /// Convention: hue 0° (red) at 3-o'clock, increasing CCW on screen.
 /// This matches `wheel_pos_to_rgb` where hue = degrees(math_angle).
-fn draw_wheel_background(
-    cr: &gtk::cairo::Context,
-    cx: f64,
-    cy: f64,
-    radius: f64,
-    value: f64,
-) {
+fn draw_wheel_background(cr: &gtk::cairo::Context, cx: f64, cy: f64, radius: f64, value: f64) {
     let steps = (radius * 1.5).max(60.0) as i32;
     let angle_steps = 256;
     let v = value.clamp(0.05, 1.0);
@@ -454,11 +447,11 @@ mod tests {
 
         let positions: &[(&str, f64, f64, f64)] = &[
             // (label, cairo_angle, math_angle, expected_hue)
-            ("right",  0.0,        0.0,          0.0),
-            ("up",     3.0*PI/2.0, PI/2.0,       90.0),
-            ("left",   PI,         PI,            180.0),
-            ("down",   PI/2.0,     -PI/2.0,      270.0),
-            ("1 o'clock", 5.0*PI/3.0, PI/3.0,   60.0),  // yellow
+            ("right", 0.0, 0.0, 0.0),
+            ("up", 3.0 * PI / 2.0, PI / 2.0, 90.0),
+            ("left", PI, PI, 180.0),
+            ("down", PI / 2.0, -PI / 2.0, 270.0),
+            ("1 o'clock", 5.0 * PI / 3.0, PI / 3.0, 60.0), // yellow
         ];
 
         for &(label, cairo_a, math_a, expected_hue) in positions {
@@ -469,11 +462,17 @@ mod tests {
 
             let dh1 = (draw_hue - expected_hue).abs();
             let dh1 = dh1.min(360.0 - dh1);
-            assert!(dh1 < 0.1, "{label}: draw_hue={draw_hue:.1}° expected {expected_hue:.1}°");
+            assert!(
+                dh1 < 0.1,
+                "{label}: draw_hue={draw_hue:.1}° expected {expected_hue:.1}°"
+            );
 
             let dh2 = (interact_hue - expected_hue).abs();
             let dh2 = dh2.min(360.0 - dh2);
-            assert!(dh2 < 0.1, "{label}: interact_hue={interact_hue:.1}° expected {expected_hue:.1}°");
+            assert!(
+                dh2 < 0.1,
+                "{label}: interact_hue={interact_hue:.1}° expected {expected_hue:.1}°"
+            );
         }
     }
 }

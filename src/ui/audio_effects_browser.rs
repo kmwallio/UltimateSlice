@@ -43,7 +43,9 @@ pub fn build_audio_effects_browser(
     apply_btn.set_margin_end(8);
     apply_btn.set_margin_bottom(4);
     apply_btn.set_sensitive(false);
-    apply_btn.set_tooltip_text(Some("Apply the selected LADSPA effect to the selected clip"));
+    apply_btn.set_tooltip_text(Some(
+        "Apply the selected LADSPA effect to the selected clip",
+    ));
     vbox.append(&apply_btn);
 
     let empty_hint = gtk::Label::new(Some(
@@ -167,9 +169,7 @@ fn populate_list(list_box: &gtk::ListBox, registry: &LadspaRegistry) {
     }
 }
 
-fn make_plugin_row(
-    plugin: &crate::media::ladspa_registry::LadspaPluginInfo,
-) -> gtk::ListBoxRow {
+fn make_plugin_row(plugin: &crate::media::ladspa_registry::LadspaPluginInfo) -> gtk::ListBoxRow {
     let vbox = gtk::Box::new(Orientation::Vertical, 2);
     vbox.set_margin_start(12);
     vbox.set_margin_end(8);
@@ -195,11 +195,7 @@ fn make_plugin_row(
     row
 }
 
-fn filter_list(
-    list_box: &gtk::ListBox,
-    registry: &Option<Rc<LadspaRegistry>>,
-    query: &str,
-) {
+fn filter_list(list_box: &gtk::ListBox, registry: &Option<Rc<LadspaRegistry>>, query: &str) {
     let Some(reg) = registry else {
         return;
     };

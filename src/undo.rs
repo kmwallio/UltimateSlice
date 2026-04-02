@@ -506,7 +506,8 @@ impl EditCommand for SplitClipCommand {
                 let new_source_out = clip.source_in + cut_offset;
                 clip.source_out = new_source_out;
                 // Filter left clip subtitles: keep only segments that end before the cut point.
-                clip.subtitle_segments.retain(|s| s.end_ns <= new_source_out);
+                clip.subtitle_segments
+                    .retain(|s| s.end_ns <= new_source_out);
             }
             // Insert the right half (already has filtered subtitles from creation).
             track.add_clip(self.right_clip.clone());
@@ -1289,7 +1290,11 @@ impl EditCommand for SetFrei0rEffectParamsCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                if let Some(effect) = clip
+                    .frei0r_effects
+                    .iter_mut()
+                    .find(|e| e.id == self.effect_id)
+                {
                     effect.params = self.new_params.clone();
                 }
             }
@@ -1299,7 +1304,11 @@ impl EditCommand for SetFrei0rEffectParamsCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                if let Some(effect) = clip
+                    .frei0r_effects
+                    .iter_mut()
+                    .find(|e| e.id == self.effect_id)
+                {
                     effect.params = self.old_params.clone();
                 }
             }
@@ -1322,7 +1331,11 @@ impl EditCommand for ToggleFrei0rEffectCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                if let Some(effect) = clip
+                    .frei0r_effects
+                    .iter_mut()
+                    .find(|e| e.id == self.effect_id)
+                {
                     effect.enabled = !effect.enabled;
                 }
             }
@@ -1412,7 +1425,9 @@ pub struct SetTitlePropertiesCommand {
 
 impl EditCommand for SetTitlePropertiesCommand {
     fn execute(&self, project: &mut Project) {
-        if let Some(clip) = project.tracks.iter_mut()
+        if let Some(clip) = project
+            .tracks
+            .iter_mut()
             .flat_map(|t| t.clips.iter_mut())
             .find(|c| c.id == self.clip_id)
         {
@@ -1421,7 +1436,9 @@ impl EditCommand for SetTitlePropertiesCommand {
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let Some(clip) = project.tracks.iter_mut()
+        if let Some(clip) = project
+            .tracks
+            .iter_mut()
             .flat_map(|t| t.clips.iter_mut())
             .find(|c| c.id == self.clip_id)
         {
@@ -1545,7 +1562,11 @@ pub struct EditSubtitleTextCommand {
 impl EditCommand for EditSubtitleTextCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
-            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
                 seg.text = self.new_text.clone();
             }
         }
@@ -1553,7 +1574,11 @@ impl EditCommand for EditSubtitleTextCommand {
     }
     fn undo(&self, project: &mut Project) {
         if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
-            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
                 seg.text = self.old_text.clone();
             }
         }
@@ -1578,7 +1603,11 @@ pub struct EditSubtitleTimingCommand {
 impl EditCommand for EditSubtitleTimingCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
-            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
                 seg.start_ns = self.new_start_ns;
                 seg.end_ns = self.new_end_ns;
             }
@@ -1587,7 +1616,11 @@ impl EditCommand for EditSubtitleTimingCommand {
     }
     fn undo(&self, project: &mut Project) {
         if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
-            if let Some(seg) = clip.subtitle_segments.iter_mut().find(|s| s.id == self.segment_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
                 seg.start_ns = self.old_start_ns;
                 seg.end_ns = self.old_end_ns;
             }
@@ -1643,7 +1676,8 @@ impl EditCommand for DeleteSubtitleSegmentCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
             let idx = self.index.min(clip.subtitle_segments.len());
-            clip.subtitle_segments.insert(idx, self.deleted_segment.clone());
+            clip.subtitle_segments
+                .insert(idx, self.deleted_segment.clone());
         }
         project.dirty = true;
     }

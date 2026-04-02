@@ -138,7 +138,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     };
 
     // <resources>
-    write_resources(project, &mut writer, options, export_ctx.as_ref(), &asset_id_by_source)?;
+    write_resources(
+        project,
+        &mut writer,
+        options,
+        export_ctx.as_ref(),
+        &asset_id_by_source,
+    )?;
 
     // <library>
     let mut library = BytesStart::new("library");
@@ -432,7 +438,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 Some(ct.lane),
                                 Some(clip),
                             )?;
-                            write_strict_clip_body(&mut writer, conn_clip, project, conn_source_start)?;
+                            write_strict_clip_body(
+                                &mut writer,
+                                conn_clip,
+                                project,
+                                conn_source_start,
+                            )?;
                             // audio-channel-source after connected clip's own anchors (none here)
                             write_strict_audio_channel_sources(
                                 &mut writer,
@@ -552,8 +563,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
                 let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
-                let source_start_ns =
-                    clip.source_timecode_start_ns().unwrap_or(clip.source_in);
+                let source_start_ns = clip.source_timecode_start_ns().unwrap_or(clip.source_in);
                 let start = ns_to_fcpxml_time(source_start_ns, &project.frame_rate);
 
                 let mut asset_clip = BytesStart::new("asset-clip");
@@ -573,10 +583,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip
                         .push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
                     if track.audio_role != crate::model::track::AudioRole::None {
-                        asset_clip.push_attribute((
-                            "us:track-audio-role",
-                            track.audio_role.as_str(),
-                        ));
+                        asset_clip
+                            .push_attribute(("us:track-audio-role", track.audio_role.as_str()));
                     }
                     if track.duck {
                         asset_clip.push_attribute(("us:track-duck", "true"));
@@ -674,8 +682,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
                     asset_clip
                         .push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
-                    asset_clip
-                        .push_attribute(("us:blur", clip.blur.to_string().as_str()));
+                    asset_clip.push_attribute(("us:blur", clip.blur.to_string().as_str()));
                     if !clip.blur_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.blur_keyframes) {
                             asset_clip.push_attribute(("us:blur-keyframes", json.as_str()));
@@ -705,27 +712,45 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         }
                     }
                     if !clip.subtitles_language.is_empty() {
-                        asset_clip.push_attribute(("us:subtitles-language", clip.subtitles_language.as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitles-language",
+                            clip.subtitles_language.as_str(),
+                        ));
                     }
                     if clip.subtitle_font != "Sans Bold 24" {
-                        asset_clip.push_attribute(("us:subtitle-font", clip.subtitle_font.as_str()));
+                        asset_clip
+                            .push_attribute(("us:subtitle-font", clip.subtitle_font.as_str()));
                     }
                     if clip.subtitle_color != 0xFFFFFFFF {
-                        asset_clip.push_attribute(("us:subtitle-color", clip.subtitle_color.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitle-color",
+                            clip.subtitle_color.to_string().as_str(),
+                        ));
                     }
                     if clip.subtitle_outline_color != 0x000000FF {
-                        asset_clip.push_attribute(("us:subtitle-outline-color", clip.subtitle_outline_color.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitle-outline-color",
+                            clip.subtitle_outline_color.to_string().as_str(),
+                        ));
                     }
                     if (clip.subtitle_outline_width - 2.0).abs() > 0.001 {
-                        asset_clip.push_attribute(("us:subtitle-outline-width", clip.subtitle_outline_width.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitle-outline-width",
+                            clip.subtitle_outline_width.to_string().as_str(),
+                        ));
                     }
                     if !clip.subtitle_bg_box {
                         asset_clip.push_attribute(("us:subtitle-bg-box", "false"));
                     }
                     if clip.subtitle_bg_box_color != 0x00000099 {
-                        asset_clip.push_attribute(("us:subtitle-bg-box-color", clip.subtitle_bg_box_color.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitle-bg-box-color",
+                            clip.subtitle_bg_box_color.to_string().as_str(),
+                        ));
                     }
-                    if clip.subtitle_highlight_mode != crate::model::clip::SubtitleHighlightMode::None {
+                    if clip.subtitle_highlight_mode
+                        != crate::model::clip::SubtitleHighlightMode::None
+                    {
                         let mode_str = match clip.subtitle_highlight_mode {
                             crate::model::clip::SubtitleHighlightMode::Bold => "bold",
                             crate::model::clip::SubtitleHighlightMode::Color => "color",
@@ -736,13 +761,22 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         asset_clip.push_attribute(("us:subtitle-highlight-mode", mode_str));
                     }
                     if clip.subtitle_highlight_color != 0xFFFF00FF {
-                        asset_clip.push_attribute(("us:subtitle-highlight-color", clip.subtitle_highlight_color.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitle-highlight-color",
+                            clip.subtitle_highlight_color.to_string().as_str(),
+                        ));
                     }
                     if (clip.subtitle_word_window_secs - 2.0).abs() > 0.001 {
-                        asset_clip.push_attribute(("us:subtitle-word-window-secs", clip.subtitle_word_window_secs.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitle-word-window-secs",
+                            clip.subtitle_word_window_secs.to_string().as_str(),
+                        ));
                     }
                     if (clip.subtitle_position_y - 0.85).abs() > 0.001 {
-                        asset_clip.push_attribute(("us:subtitle-position-y", clip.subtitle_position_y.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:subtitle-position-y",
+                            clip.subtitle_position_y.to_string().as_str(),
+                        ));
                     }
                     if !clip.ladspa_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.ladspa_effects) {
@@ -782,20 +816,17 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     if !clip.eq_low_gain_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.eq_low_gain_keyframes) {
-                            asset_clip
-                                .push_attribute(("us:eq-low-gain-keyframes", json.as_str()));
+                            asset_clip.push_attribute(("us:eq-low-gain-keyframes", json.as_str()));
                         }
                     }
                     if !clip.eq_mid_gain_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.eq_mid_gain_keyframes) {
-                            asset_clip
-                                .push_attribute(("us:eq-mid-gain-keyframes", json.as_str()));
+                            asset_clip.push_attribute(("us:eq-mid-gain-keyframes", json.as_str()));
                         }
                     }
                     if !clip.eq_high_gain_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.eq_high_gain_keyframes) {
-                            asset_clip
-                                .push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
+                            asset_clip.push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
                         }
                     }
                     if clip.pitch_shift_semitones.abs() > 0.001 {
@@ -870,7 +901,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
                     asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
                     if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
-                        asset_clip.push_attribute(("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:anamorphic-desqueeze",
+                            clip.anamorphic_desqueeze.to_string().as_str(),
+                        ));
                     }
                     asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
                     let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
@@ -919,28 +953,56 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
                     asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
                     if !clip.title_template.is_empty() {
-                        asset_clip.push_attribute(("us:title-template", clip.title_template.as_str()));
+                        asset_clip
+                            .push_attribute(("us:title-template", clip.title_template.as_str()));
                     }
                     if clip.title_outline_width > 0.0 {
-                        asset_clip.push_attribute(("us:title-outline-color", format!("{:08X}", clip.title_outline_color).as_str()));
-                        asset_clip.push_attribute(("us:title-outline-width", clip.title_outline_width.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-outline-color",
+                            format!("{:08X}", clip.title_outline_color).as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-outline-width",
+                            clip.title_outline_width.to_string().as_str(),
+                        ));
                     }
                     if clip.title_shadow {
                         asset_clip.push_attribute(("us:title-shadow", "true"));
-                        asset_clip.push_attribute(("us:title-shadow-color", format!("{:08X}", clip.title_shadow_color).as_str()));
-                        asset_clip.push_attribute(("us:title-shadow-offset-x", clip.title_shadow_offset_x.to_string().as_str()));
-                        asset_clip.push_attribute(("us:title-shadow-offset-y", clip.title_shadow_offset_y.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-shadow-color",
+                            format!("{:08X}", clip.title_shadow_color).as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-shadow-offset-x",
+                            clip.title_shadow_offset_x.to_string().as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-shadow-offset-y",
+                            clip.title_shadow_offset_y.to_string().as_str(),
+                        ));
                     }
                     if clip.title_bg_box {
                         asset_clip.push_attribute(("us:title-bg-box", "true"));
-                        asset_clip.push_attribute(("us:title-bg-box-color", format!("{:08X}", clip.title_bg_box_color).as_str()));
-                        asset_clip.push_attribute(("us:title-bg-box-padding", clip.title_bg_box_padding.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-bg-box-color",
+                            format!("{:08X}", clip.title_bg_box_color).as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-bg-box-padding",
+                            clip.title_bg_box_padding.to_string().as_str(),
+                        ));
                     }
                     if clip.title_clip_bg_color != 0 {
-                        asset_clip.push_attribute(("us:title-clip-bg-color", format!("{:08X}", clip.title_clip_bg_color).as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-clip-bg-color",
+                            format!("{:08X}", clip.title_clip_bg_color).as_str(),
+                        ));
                     }
                     if !clip.title_secondary_text.is_empty() {
-                        asset_clip.push_attribute(("us:title-secondary-text", clip.title_secondary_text.as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-secondary-text",
+                            clip.title_secondary_text.as_str(),
+                        ));
                     }
                     if clip.kind == crate::model::clip::ClipKind::Title {
                         asset_clip.push_attribute(("us:clip-kind", "title"));
@@ -965,7 +1027,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         if let Some(ref switches) = clip.multicam_switches {
                             if let Ok(json) = serde_json::to_string(switches) {
                                 let escaped = json.replace('"', "&quot;");
-                                asset_clip.push_attribute(("us:multicam-switches", escaped.as_str()));
+                                asset_clip
+                                    .push_attribute(("us:multicam-switches", escaped.as_str()));
                             }
                         }
                     }
@@ -1115,8 +1178,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         || !clip.position_y_keyframes.is_empty();
                     let has_scale_kfs = !clip.scale_keyframes.is_empty();
                     let has_rotation_kfs = !clip.rotate_keyframes.is_empty();
-                    let has_transform_kfs =
-                        has_position_kfs || has_scale_kfs || has_rotation_kfs;
+                    let has_transform_kfs = has_position_kfs || has_scale_kfs || has_rotation_kfs;
                     // FCP omits inline attrs for properties that have keyframes
                     if !has_position_kfs {
                         adjust_transform.push_attribute((
@@ -1131,10 +1193,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         ));
                     }
                     if !has_rotation_kfs {
-                        adjust_transform.push_attribute((
-                            "rotation",
-                            clip.rotate.to_string().as_str(),
-                        ));
+                        adjust_transform
+                            .push_attribute(("rotation", clip.rotate.to_string().as_str()));
                     }
                     if has_transform_kfs {
                         writer.write_event(Event::Start(adjust_transform))?;
@@ -1757,8 +1817,8 @@ fn write_strict_clip_body(
 
         // adjust-transform
         let mut adjust_transform = BytesStart::new("adjust-transform");
-        let has_position_kfs = !clip.position_x_keyframes.is_empty()
-            || !clip.position_y_keyframes.is_empty();
+        let has_position_kfs =
+            !clip.position_x_keyframes.is_empty() || !clip.position_y_keyframes.is_empty();
         let has_scale_kfs = !clip.scale_keyframes.is_empty();
         let has_rotation_kfs = !clip.rotate_keyframes.is_empty();
         let has_transform_kfs = has_position_kfs || has_scale_kfs || has_rotation_kfs;
@@ -2096,7 +2156,10 @@ fn patch_asset_clip_block_transform(
         ("us:saturation", clip.saturation.to_string()),
         ("us:temperature", clip.temperature.to_string()),
         ("us:tint", clip.tint.to_string()),
-        ("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string()),
+        (
+            "us:anamorphic-desqueeze",
+            clip.anamorphic_desqueeze.to_string(),
+        ),
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
@@ -2268,34 +2331,145 @@ fn patch_asset_clip_block_transform(
     }
     // Conditional title attrs
     for (attr, value) in [
-        ("us:title-template", if clip.title_template.is_empty() { None } else { Some(clip.title_template.clone()) }),
-        ("us:title-outline-color", if clip.title_outline_width > 0.0 { Some(format!("{:08X}", clip.title_outline_color)) } else { None }),
-        ("us:title-outline-width", if clip.title_outline_width > 0.0 { Some(clip.title_outline_width.to_string()) } else { None }),
-        ("us:title-shadow", if clip.title_shadow { Some("true".to_string()) } else { None }),
-        ("us:title-shadow-color", if clip.title_shadow { Some(format!("{:08X}", clip.title_shadow_color)) } else { None }),
-        ("us:title-shadow-offset-x", if clip.title_shadow { Some(clip.title_shadow_offset_x.to_string()) } else { None }),
-        ("us:title-shadow-offset-y", if clip.title_shadow { Some(clip.title_shadow_offset_y.to_string()) } else { None }),
-        ("us:title-bg-box", if clip.title_bg_box { Some("true".to_string()) } else { None }),
-        ("us:title-bg-box-color", if clip.title_bg_box { Some(format!("{:08X}", clip.title_bg_box_color)) } else { None }),
-        ("us:title-bg-box-padding", if clip.title_bg_box { Some(clip.title_bg_box_padding.to_string()) } else { None }),
-        ("us:title-clip-bg-color", if clip.title_clip_bg_color != 0 { Some(format!("{:08X}", clip.title_clip_bg_color)) } else { None }),
-        ("us:title-secondary-text", if clip.title_secondary_text.is_empty() { None } else { Some(clip.title_secondary_text.clone()) }),
-        ("us:clip-kind", match clip.kind {
-            crate::model::clip::ClipKind::Title => Some("title".to_string()),
-            crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
-            crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
-            crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
-            _ => None,
-        }),
-        ("us:compound-tracks", if clip.kind == crate::model::clip::ClipKind::Compound {
-            clip.compound_tracks.as_ref().and_then(|t| serde_json::to_string(t).ok()).map(|j| j.replace('"', "&quot;"))
-        } else { None }),
-        ("us:multicam-angles", if clip.kind == crate::model::clip::ClipKind::Multicam {
-            clip.multicam_angles.as_ref().and_then(|a| serde_json::to_string(a).ok()).map(|j| j.replace('"', "&quot;"))
-        } else { None }),
-        ("us:multicam-switches", if clip.kind == crate::model::clip::ClipKind::Multicam {
-            clip.multicam_switches.as_ref().and_then(|s| serde_json::to_string(s).ok()).map(|j| j.replace('"', "&quot;"))
-        } else { None }),
+        (
+            "us:title-template",
+            if clip.title_template.is_empty() {
+                None
+            } else {
+                Some(clip.title_template.clone())
+            },
+        ),
+        (
+            "us:title-outline-color",
+            if clip.title_outline_width > 0.0 {
+                Some(format!("{:08X}", clip.title_outline_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-outline-width",
+            if clip.title_outline_width > 0.0 {
+                Some(clip.title_outline_width.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow",
+            if clip.title_shadow {
+                Some("true".to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow-color",
+            if clip.title_shadow {
+                Some(format!("{:08X}", clip.title_shadow_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow-offset-x",
+            if clip.title_shadow {
+                Some(clip.title_shadow_offset_x.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow-offset-y",
+            if clip.title_shadow {
+                Some(clip.title_shadow_offset_y.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-bg-box",
+            if clip.title_bg_box {
+                Some("true".to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-bg-box-color",
+            if clip.title_bg_box {
+                Some(format!("{:08X}", clip.title_bg_box_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-bg-box-padding",
+            if clip.title_bg_box {
+                Some(clip.title_bg_box_padding.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-clip-bg-color",
+            if clip.title_clip_bg_color != 0 {
+                Some(format!("{:08X}", clip.title_clip_bg_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-secondary-text",
+            if clip.title_secondary_text.is_empty() {
+                None
+            } else {
+                Some(clip.title_secondary_text.clone())
+            },
+        ),
+        (
+            "us:clip-kind",
+            match clip.kind {
+                crate::model::clip::ClipKind::Title => Some("title".to_string()),
+                crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
+                crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
+                crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
+                _ => None,
+            },
+        ),
+        (
+            "us:compound-tracks",
+            if clip.kind == crate::model::clip::ClipKind::Compound {
+                clip.compound_tracks
+                    .as_ref()
+                    .and_then(|t| serde_json::to_string(t).ok())
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:multicam-angles",
+            if clip.kind == crate::model::clip::ClipKind::Multicam {
+                clip.multicam_angles
+                    .as_ref()
+                    .and_then(|a| serde_json::to_string(a).ok())
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:multicam-switches",
+            if clip.kind == crate::model::clip::ClipKind::Multicam {
+                clip.multicam_switches
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok())
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
     ] {
         let next = if let Some(v) = value {
             replace_or_insert_attr(&updated_start, attr, &v)?
@@ -2829,12 +3003,60 @@ fn write_resources(
 
     // Asset resources — deduplicated by source path so clips from the same
     // media file share a single <asset> element.
-    let mut written_asset_sources: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut written_asset_sources: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    // Write placeholder assets for sourceless clips (Title, Adjustment, etc.)
+    // so the parser can find them via their asset-clip ref attribute.
+    {
+        let mut written_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for track in project.video_tracks().chain(project.audio_tracks()) {
+            for clip in &track.clips {
+                if !matches!(
+                    clip.kind,
+                    crate::model::clip::ClipKind::Title | crate::model::clip::ClipKind::Adjustment
+                ) {
+                    continue;
+                }
+                let asset_id = asset_id_by_source
+                    .get(
+                        clip.fcpxml_original_source_path
+                            .as_deref()
+                            .unwrap_or(&clip.source_path),
+                    )
+                    .cloned()
+                    .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
+                if !written_ids.insert(asset_id.clone()) {
+                    continue;
+                }
+                let mut asset_elem = BytesStart::new("asset");
+                asset_elem.push_attribute(("id", asset_id.as_str()));
+                asset_elem.push_attribute(("src", ""));
+                asset_elem.push_attribute(("name", clip.label.as_str()));
+                asset_elem.push_attribute(("hasVideo", "1"));
+                asset_elem.push_attribute((
+                    "duration",
+                    format!(
+                        "{}/{}s",
+                        clip.source_out.saturating_sub(clip.source_in),
+                        1_000_000_000u64
+                    )
+                    .as_str(),
+                ));
+                asset_elem.push_attribute(("format", "r1"));
+                writer.write_event(Event::Empty(asset_elem))?;
+            }
+        }
+    }
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
-            // Title clips have no source media — skip to avoid writing
-            // broken asset references with empty file:// URIs.
-            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment || clip.kind == crate::model::clip::ClipKind::Compound || clip.kind == crate::model::clip::ClipKind::Multicam {
+            // Title/Adjustment clips handled above with placeholder assets.
+            // Compound/Multicam clips have no source media — skip.
+            if clip.source_path.is_empty()
+                || clip.kind == crate::model::clip::ClipKind::Title
+                || clip.kind == crate::model::clip::ClipKind::Adjustment
+                || clip.kind == crate::model::clip::ClipKind::Compound
+                || clip.kind == crate::model::clip::ClipKind::Multicam
+            {
                 continue;
             }
             let export_source_path = clip
@@ -3213,10 +3435,7 @@ fn write_transform_keyframe_params(
                 internal_position_to_fcpxml(ix, iy, project.width, project.height, scale_at_t);
             let mut kf_elem = BytesStart::new("keyframe");
             // Offset clip-local time back to absolute source time for FCP
-            kf_elem.push_attribute((
-                "time",
-                ns_to_fcpxml_time(t + source_start_ns, fps).as_str(),
-            ));
+            kf_elem.push_attribute(("time", ns_to_fcpxml_time(t + source_start_ns, fps).as_str()));
             kf_elem.push_attribute(("value", format!("{} {}", fx, fy).as_str()));
             let x_kf = clip.position_x_keyframes.iter().find(|kf| kf.time_ns == t);
             let y_kf = clip.position_y_keyframes.iter().find(|kf| kf.time_ns == t);
@@ -4690,13 +4909,34 @@ mod tests {
         assert!(written.contains("us:tint-keyframes="));
         // Verify round-trip: parse the written XML back and check data values.
         let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
-        let clip2 = reparsed.tracks.iter().flat_map(|t| t.clips.iter()).next()
+        let clip2 = reparsed
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .next()
             .expect("clip should survive round-trip");
-        assert!((clip2.scale - 1.75).abs() < 0.001, "scale should round-trip");
-        assert!((clip2.position_x - 0.25).abs() < 0.001, "position_x should round-trip");
-        assert!((clip2.position_y - (-0.5)).abs() < 0.001, "position_y should round-trip");
-        assert_eq!(clip2.scale_keyframes.len(), 2, "scale keyframes should round-trip");
-        assert_eq!(clip2.opacity_keyframes.len(), 1, "opacity keyframes should round-trip");
+        assert!(
+            (clip2.scale - 1.75).abs() < 0.001,
+            "scale should round-trip"
+        );
+        assert!(
+            (clip2.position_x - 0.25).abs() < 0.001,
+            "position_x should round-trip"
+        );
+        assert!(
+            (clip2.position_y - (-0.5)).abs() < 0.001,
+            "position_y should round-trip"
+        );
+        assert_eq!(
+            clip2.scale_keyframes.len(),
+            2,
+            "scale keyframes should round-trip"
+        );
+        assert_eq!(
+            clip2.opacity_keyframes.len(),
+            1,
+            "opacity keyframes should round-trip"
+        );
     }
 
     #[test]
@@ -4935,7 +5175,10 @@ mod tests {
         assert!(written.contains("us:track-idx="));
         // Round-trip: verify the written XML can be parsed back.
         let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
-        let overlay = reparsed.tracks.iter().flat_map(|t| t.clips.iter())
+        let overlay = reparsed
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
             .find(|c| c.label == "overlay")
             .expect("overlay clip should survive round-trip");
         assert!((overlay.scale - 0.75).abs() < 0.001);
@@ -5187,7 +5430,10 @@ mod tests {
         project.tracks.push(track);
 
         let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
-        assert!(!xml.contains("xmlns:us="), "strict export should omit vendor ns");
+        assert!(
+            !xml.contains("xmlns:us="),
+            "strict export should omit vendor ns"
+        );
         assert!(xml.contains("<param name=\"scale\""), "missing scale param");
         assert!(
             xml.contains("curve=\"smooth\""),
@@ -5320,8 +5566,7 @@ mod tests {
         // The written FCPXML should NOT have keyframes at time="0s"
         // since source_in is 10s.
         assert!(
-            !xml.contains("time=\"0s\"")
-                && !xml.contains("time=\"0/24s\""),
+            !xml.contains("time=\"0s\"") && !xml.contains("time=\"0/24s\""),
             "keyframe times should be absolute, not clip-local: {xml}"
         );
 

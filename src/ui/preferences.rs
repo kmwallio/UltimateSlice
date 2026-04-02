@@ -113,8 +113,7 @@ pub fn show_preferences_dialog(
     let max_versions_row = GBox::new(Orientation::Horizontal, 6);
     let max_versions_label = Label::new(Some("Max backup versions per project:"));
     max_versions_row.append(&max_versions_label);
-    let backup_max_versions_spin =
-        gtk::SpinButton::with_range(1.0, 100.0, 1.0);
+    let backup_max_versions_spin = gtk::SpinButton::with_range(1.0, 100.0, 1.0);
     backup_max_versions_spin.set_value(current.backup_max_versions as f64);
     max_versions_row.append(&backup_max_versions_spin);
     general_box.append(&max_versions_row);

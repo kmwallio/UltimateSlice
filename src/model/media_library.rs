@@ -149,7 +149,11 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
     let media_bins: std::collections::HashMap<String, String> = lib
         .items
         .iter()
-        .filter_map(|i| i.bin_id.as_ref().map(|bid| (i.source_path.clone(), bid.clone())))
+        .filter_map(|i| {
+            i.bin_id
+                .as_ref()
+                .map(|bid| (i.source_path.clone(), bid.clone()))
+        })
         .collect();
     if media_bins.is_empty() {
         project.parsed_media_bins_json = None;
@@ -159,14 +163,19 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
 }
 
 /// Restore bin data from the project's transient fields into the library (after FCPXML load).
-pub fn apply_bins_from_project(lib: &mut MediaLibrary, project: &mut crate::model::project::Project) {
+pub fn apply_bins_from_project(
+    lib: &mut MediaLibrary,
+    project: &mut crate::model::project::Project,
+) {
     if let Some(ref bins_json) = project.parsed_bins_json {
         if let Ok(bins) = serde_json::from_str::<Vec<MediaBin>>(bins_json) {
             lib.bins = bins;
         }
     }
     if let Some(ref media_bins_json) = project.parsed_media_bins_json {
-        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(media_bins_json) {
+        if let Ok(map) =
+            serde_json::from_str::<std::collections::HashMap<String, String>>(media_bins_json)
+        {
             for item in lib.items.iter_mut() {
                 if let Some(bin_id) = map.get(&item.source_path) {
                     // Only assign if the bin actually exists

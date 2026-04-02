@@ -19,7 +19,8 @@
     "Sample-Media",
     "src",
     "docs",
-    "data"
+    "data",
+    "tools"
   ],
   "notes" : "",
   "icon" : ""

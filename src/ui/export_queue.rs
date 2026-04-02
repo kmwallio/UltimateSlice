@@ -419,12 +419,7 @@ pub fn build_export_queue_dialog(
                             }
                             ui_state::save_export_queue_state(&q);
                             drop(q);
-                            rebuild_list_fn(
-                                &list_box,
-                                &queue_state,
-                                &status_label,
-                                &btn_run_poll,
-                            );
+                            rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
                         }
                         QueueMsg::Progress(id, p) => {
                             status_label.set_text(&format!("Exporting… {:.0}%", p * 100.0));
@@ -436,12 +431,7 @@ pub fn build_export_queue_dialog(
                             }
                             ui_state::save_export_queue_state(&q);
                             drop(q);
-                            rebuild_list_fn(
-                                &list_box,
-                                &queue_state,
-                                &status_label,
-                                &btn_run_poll,
-                            );
+                            rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
                         }
                         QueueMsg::JobError(id, err) => {
                             let mut q = queue_state.borrow_mut();
@@ -451,12 +441,7 @@ pub fn build_export_queue_dialog(
                             }
                             ui_state::save_export_queue_state(&q);
                             drop(q);
-                            rebuild_list_fn(
-                                &list_box,
-                                &queue_state,
-                                &status_label,
-                                &btn_run_poll,
-                            );
+                            rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
                         }
                         QueueMsg::AllDone => {
                             btn_run_poll.set_sensitive(false);
@@ -468,12 +453,7 @@ pub fn build_export_queue_dialog(
                                 .filter(|j| j.status == ExportQueueJobStatus::Pending)
                                 .count();
                             btn_run_poll.set_sensitive(pending > 0);
-                            rebuild_list_fn(
-                                &list_box,
-                                &queue_state,
-                                &status_label,
-                                &btn_run_poll,
-                            );
+                            rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
                             return glib::ControlFlow::Break;
                         }
                     }

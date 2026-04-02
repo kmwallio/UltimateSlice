@@ -43,10 +43,16 @@ fn eq_set_band(element: &gst::Element, band_idx: u32, freq: f64, gain: f64, q: f
         band.set_property("bandwidth", freq / q.max(0.1));
         log::debug!(
             "eq_set_band: band={} freq={:.0} gain={:.1} bw={:.0}",
-            band_idx, freq, gain_clamped, freq / q.max(0.1)
+            band_idx,
+            freq,
+            gain_clamped,
+            freq / q.max(0.1)
         );
     } else {
-        log::warn!("eq_set_band: child_proxy returned None for band={}", band_idx);
+        log::warn!(
+            "eq_set_band: child_proxy returned None for band={}",
+            band_idx
+        );
     }
 }
 
@@ -230,7 +236,11 @@ impl ThreePointParabolaCoeffs {
         // Guard against degenerate/nearly-coincident control points.
         if d1.abs() < 1e-9 || d2.abs() < 1e-9 || d3.abs() < 1e-9 {
             // Fall back to identity.
-            return Self { a: 0.0, b: 1.0, c: 0.0 };
+            return Self {
+                a: 0.0,
+                b: 1.0,
+                c: 0.0,
+            };
         }
         let a = (1.0 / d2 - 0.5 / d1) / d3;
         let b = 0.5 / d1 - a * (x2 + x1);
@@ -705,7 +715,8 @@ impl ProgramClip {
             let n = SAMPLES_PER_SEGMENT.min(seg_len / 1_000_000).max(1);
             for j in 0..n {
                 let t0 = seg_start + (u128::from(seg_len) * u128::from(j) / u128::from(n)) as u64;
-                let t1 = seg_start + (u128::from(seg_len) * u128::from(j + 1) / u128::from(n)) as u64;
+                let t1 =
+                    seg_start + (u128::from(seg_len) * u128::from(j + 1) / u128::from(n)) as u64;
                 let dt = t1 - t0;
                 let mid = t0 + dt / 2;
                 integrated += self.speed_at_local_timeline_ns(mid) * dt as f64;
@@ -1014,8 +1025,12 @@ enum AudioCurrentSource {
 #[inline]
 fn blend_pixel(
     mode: crate::model::clip::BlendMode,
-    sr: f32, sg: f32, sb: f32,
-    br: f32, bg: f32, bb: f32,
+    sr: f32,
+    sg: f32,
+    sb: f32,
+    br: f32,
+    bg: f32,
+    bb: f32,
 ) -> (f32, f32, f32) {
     use crate::model::clip::BlendMode;
     match mode {
@@ -1028,20 +1043,16 @@ fn blend_pixel(
         ),
         BlendMode::Overlay => {
             let ov = |s: f32, b: f32| -> f32 {
-                if b < 0.5 { 2.0 * s * b } else { 1.0 - 2.0 * (1.0 - s) * (1.0 - b) }
+                if b < 0.5 {
+                    2.0 * s * b
+                } else {
+                    1.0 - 2.0 * (1.0 - s) * (1.0 - b)
+                }
             };
             (ov(sr, br), ov(sg, bg), ov(sb, bb))
         }
-        BlendMode::Add => (
-            (sr + br).min(1.0),
-            (sg + bg).min(1.0),
-            (sb + bb).min(1.0),
-        ),
-        BlendMode::Difference => (
-            (sr - br).abs(),
-            (sg - bg).abs(),
-            (sb - bb).abs(),
-        ),
+        BlendMode::Add => ((sr + br).min(1.0), (sg + bg).min(1.0), (sb + bb).min(1.0)),
+        BlendMode::Difference => ((sr - br).abs(), (sg - bg).abs(), (sb - bb).abs()),
         BlendMode::SoftLight => {
             let sl = |s: f32, b: f32| -> f32 {
                 if s <= 0.5 {
@@ -1729,7 +1740,8 @@ impl ProgramPlayer {
             &videoscale_out,
             &preview_capsfilter,
             &video_sink_bin,
-        ]).is_ok();
+        ])
+        .is_ok();
         if !adj_link_ok {
             log::warn!("ProgramPlayer: adjustment elements could not be linked — falling back");
             pipeline.remove(&adj_videoconvert).ok();
@@ -1773,7 +1785,8 @@ impl ProgramPlayer {
                                 }
                                 let clip_opacity = ov.opacity as f32;
                                 let ov_data = &ov.data;
-                                for (bc, oc) in base.chunks_exact_mut(4).zip(ov_data.chunks_exact(4))
+                                for (bc, oc) in
+                                    base.chunks_exact_mut(4).zip(ov_data.chunks_exact(4))
                                 {
                                     let oa = (oc[3] as f32 / 255.0) * clip_opacity;
                                     if oa < 1.0 / 255.0 {
@@ -1785,9 +1798,8 @@ impl ProgramPlayer {
                                     let br = bc[0] as f32 / 255.0;
                                     let bg = bc[1] as f32 / 255.0;
                                     let bb = bc[2] as f32 / 255.0;
-                                    let (dr, dg, db) = blend_pixel(
-                                        ov.blend_mode, sr, sg, sb, br, bg, bb,
-                                    );
+                                    let (dr, dg, db) =
+                                        blend_pixel(ov.blend_mode, sr, sg, sb, br, bg, bb);
                                     bc[0] = ((br + (dr - br) * oa).clamp(0.0, 1.0) * 255.0) as u8;
                                     bc[1] = ((bg + (dg - bg) * oa).clamp(0.0, 1.0) * 255.0) as u8;
                                     bc[2] = ((bb + (db - bb) * oa).clamp(0.0, 1.0) * 255.0) as u8;
@@ -2684,15 +2696,23 @@ impl ProgramPlayer {
     pub fn content_inset(&self) -> (f64, f64) {
         if let Some(slot) = self.slots.first() {
             // Get source dimensions from effects_bin ghost sink pad
-            let src_dims = slot.effects_bin.static_pad("sink")
+            let src_dims = slot
+                .effects_bin
+                .static_pad("sink")
                 .and_then(|ghost| {
-                    ghost.peer().and_then(|p| p.current_caps())
+                    ghost
+                        .peer()
+                        .and_then(|p| p.current_caps())
                         .or_else(|| ghost.current_caps())
                 })
-                .and_then(|c| c.structure(0).map(|s| {
-                    (s.get::<i32>("width").unwrap_or(0),
-                     s.get::<i32>("height").unwrap_or(0))
-                }));
+                .and_then(|c| {
+                    c.structure(0).map(|s| {
+                        (
+                            s.get::<i32>("width").unwrap_or(0),
+                            s.get::<i32>("height").unwrap_or(0),
+                        )
+                    })
+                });
             if let Some((src_w, src_h)) = src_dims {
                 if src_w > 0 && src_h > 0 && self.project_width > 0 && self.project_height > 0 {
                     let pw = self.project_width as f64;
@@ -2807,7 +2827,8 @@ impl ProgramPlayer {
         let mut rebuilt: Vec<AdjustmentOverlay> = Vec::new();
         for idx in 0..self.clips.len() {
             let clip = self.clips[idx].clone();
-            if !clip.is_adjustment || pos < clip.timeline_start_ns || pos >= clip.timeline_end_ns() {
+            if !clip.is_adjustment || pos < clip.timeline_start_ns || pos >= clip.timeline_end_ns()
+            {
                 continue;
             }
 
@@ -2861,7 +2882,8 @@ impl ProgramPlayer {
             } else {
                 None
             };
-            let coloradj_params = has_coloradj.then(|| Self::compute_coloradj_params(temperature, tint));
+            let coloradj_params =
+                has_coloradj.then(|| Self::compute_coloradj_params(temperature, tint));
             let three_point = if has_3point {
                 let params = Self::compute_3point_params(
                     clip.shadows,
@@ -2887,7 +2909,11 @@ impl ProgramPlayer {
             } else {
                 None
             };
-            if vb_params.is_none() && coloradj_params.is_none() && three_point.is_none() && lut.is_none() {
+            if vb_params.is_none()
+                && coloradj_params.is_none()
+                && three_point.is_none()
+                && lut.is_none()
+            {
                 continue;
             }
 
@@ -2947,7 +2973,8 @@ impl ProgramPlayer {
 
     /// Update the shared timeline position for the adjustment probe.
     fn sync_adjustment_timeline_pos(&self) {
-        self.adjustment_timeline_pos.store(self.timeline_pos_ns, Ordering::Relaxed);
+        self.adjustment_timeline_pos
+            .store(self.timeline_pos_ns, Ordering::Relaxed);
     }
 
     // ── Transport controls ─────────────────────────────────────────────────
@@ -3125,7 +3152,9 @@ impl ProgramPlayer {
         // Ensure playback starts with playback-rate seeks (including reverse)
         // even when slots were already loaded by paused-seek paths.
         for slot in &self.slots {
-            let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
+            let Some(clip) = self.clips.get(slot.clip_idx) else {
+                continue;
+            };
             let _ = Self::seek_slot_decoder_with_retry(
                 slot,
                 clip,
@@ -3253,7 +3282,11 @@ impl ProgramPlayer {
         // Capture current position before changing rate.
         if let Some(start) = self.play_start.take() {
             let elapsed = start.elapsed().as_nanos() as u64;
-            let speed = if old_rate.abs() > 0.0 { old_rate.abs() } else { 1.0 };
+            let speed = if old_rate.abs() > 0.0 {
+                old_rate.abs()
+            } else {
+                1.0
+            };
             self.timeline_pos_ns =
                 (self.base_timeline_ns + (elapsed as f64 * speed) as u64).min(self.timeline_dur_ns);
         }
@@ -3276,7 +3309,9 @@ impl ProgramPlayer {
             // adjusts pitch preservation without tearing down the pipeline.
             // Seek each decoder slot at the new rate.
             for slot in &self.slots {
-                let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
+                let Some(clip) = self.clips.get(slot.clip_idx) else {
+                    continue;
+                };
                 let source_ns = clip.source_pos_ns(self.timeline_pos_ns);
                 let _ = slot.decoder.seek(
                     rate,
@@ -3549,10 +3584,8 @@ impl ProgramPlayer {
         }
         // Also set volume to 0 on the audio sink for backends that don't support mute.
         if self.audio_sink.find_property("volume").is_some() {
-            self.audio_sink.set_property(
-                "volume",
-                if mute { 0.0_f64 } else { 1.0_f64 },
-            );
+            self.audio_sink
+                .set_property("volume", if mute { 0.0_f64 } else { 1.0_f64 });
         }
         // Mute audiomixer pads (the actual per-clip mix volumes).
         if mute {
@@ -3805,7 +3838,8 @@ impl ProgramPlayer {
 
         // Detect clip boundary changes: have the active clips changed?
         // Exclude adjustment layers — they have no slots and don't affect boundaries.
-        let desired: Vec<usize> = self.clips_active_at(new_pos)
+        let desired: Vec<usize> = self
+            .clips_active_at(new_pos)
             .into_iter()
             .filter(|&i| i >= self.clips.len() || !self.clips[i].is_adjustment)
             .collect();
@@ -4233,10 +4267,7 @@ impl ProgramPlayer {
     /// main loop inside a signal handler — some frei0r plugins (cairogradient)
     /// crash when a flush-seek is issued synchronously from a property-change
     /// callback.
-    pub fn update_frei0r_effects(
-        &mut self,
-        effects: &[crate::model::clip::Frei0rEffect],
-    ) -> bool {
+    pub fn update_frei0r_effects(&mut self, effects: &[crate::model::clip::Frei0rEffect]) -> bool {
         let clip_idx = match self.current_idx {
             Some(i) => i,
             None => return false,
@@ -4375,17 +4406,19 @@ impl ProgramPlayer {
     }
 
     /// Update EQ band parameters for a specific clip (called from Inspector/MCP).
-    pub fn update_eq_for_clip(
-        &mut self,
-        clip_id: &str,
-        eq_bands: [crate::model::clip::EqBand; 3],
-    ) {
+    pub fn update_eq_for_clip(&mut self, clip_id: &str, eq_bands: [crate::model::clip::EqBand; 3]) {
         // Update stored data on ProgramClip.
         if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
             self.clips[i].eq_bands = eq_bands;
             // Sync live GStreamer element.
-            let slot_found = self.slots.iter().any(|s| s.clip_idx == i && !s.is_prerender_slot);
-            if let Some(slot) = self.slots.iter().find(|s| s.clip_idx == i && !s.is_prerender_slot)
+            let slot_found = self
+                .slots
+                .iter()
+                .any(|s| s.clip_idx == i && !s.is_prerender_slot);
+            if let Some(slot) = self
+                .slots
+                .iter()
+                .find(|s| s.clip_idx == i && !s.is_prerender_slot)
             {
                 if let Some(ref eq_elem) = slot.audio_equalizer {
                     for bi in 0..3u32 {
@@ -4394,7 +4427,10 @@ impl ProgramPlayer {
                     }
                     log::info!(
                         "update_eq_for_clip: set EQ on clip={} gains=[{:.1}, {:.1}, {:.1}]",
-                        clip_id, eq_bands[0].gain, eq_bands[1].gain, eq_bands[2].gain,
+                        clip_id,
+                        eq_bands[0].gain,
+                        eq_bands[1].gain,
+                        eq_bands[2].gain,
                     );
                 } else {
                     log::warn!(
@@ -4423,9 +4459,15 @@ impl ProgramPlayer {
                 let pos = self.timeline_pos_ns;
                 self.rebuild_audio_multi_pipeline(&active, pos);
             }
-            log::info!("update_eq_for_clip: stored EQ for audio-only clip={}", clip_id);
+            log::info!(
+                "update_eq_for_clip: stored EQ for audio-only clip={}",
+                clip_id
+            );
         } else {
-            log::warn!("update_eq_for_clip: clip={} not found in clips or audio_clips", clip_id);
+            log::warn!(
+                "update_eq_for_clip: clip={} not found in clips or audio_clips",
+                clip_id
+            );
         }
     }
 
@@ -4463,7 +4505,17 @@ impl ProgramPlayer {
     pub fn set_title(&self, text: &str, font: &str, color_rgba: u32, rel_x: f64, rel_y: f64) {
         if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
             let (pw, ph) = self.preview_processing_dimensions();
-            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, self.project_height, pw, ph);
+            Self::apply_title_to_slot(
+                slot,
+                text,
+                font,
+                color_rgba,
+                rel_x,
+                rel_y,
+                self.project_height,
+                pw,
+                ph,
+            );
         }
     }
 
@@ -4496,7 +4548,17 @@ impl ProgramPlayer {
         let idx = self.clips.iter().position(|c| c.id == clip_id);
         if let Some(slot) = idx.and_then(|i| self.slot_for_clip(i)) {
             let (pw, ph) = self.preview_processing_dimensions();
-            Self::apply_title_to_slot(slot, text, font, color_rgba, rel_x, rel_y, self.project_height, pw, ph);
+            Self::apply_title_to_slot(
+                slot,
+                text,
+                font,
+                color_rgba,
+                rel_x,
+                rel_y,
+                self.project_height,
+                pw,
+                ph,
+            );
         }
     }
 
@@ -4907,6 +4969,18 @@ impl ProgramPlayer {
 
     // ── Private helpers ────────────────────────────────────────────────────
 
+    fn clip_has_keyframed_masks(clip: &ProgramClip) -> bool {
+        clip.masks.iter().any(|mask| {
+            !mask.center_x_keyframes.is_empty()
+                || !mask.center_y_keyframes.is_empty()
+                || !mask.width_keyframes.is_empty()
+                || !mask.height_keyframes.is_empty()
+                || !mask.rotation_keyframes.is_empty()
+                || !mask.feather_keyframes.is_empty()
+                || !mask.expansion_keyframes.is_empty()
+        })
+    }
+
     fn clip_has_phase1_keyframes(clip: &ProgramClip) -> bool {
         !clip.scale_keyframes.is_empty()
             || !clip.opacity_keyframes.is_empty()
@@ -4915,15 +4989,47 @@ impl ProgramPlayer {
             || !clip.saturation_keyframes.is_empty()
             || !clip.temperature_keyframes.is_empty()
             || !clip.tint_keyframes.is_empty()
+            || !clip.blur_keyframes.is_empty()
             || !clip.position_x_keyframes.is_empty()
             || !clip.position_y_keyframes.is_empty()
             || !clip.volume_keyframes.is_empty()
             || !clip.pan_keyframes.is_empty()
+            || !clip.eq_low_gain_keyframes.is_empty()
+            || !clip.eq_mid_gain_keyframes.is_empty()
+            || !clip.eq_high_gain_keyframes.is_empty()
+            || !clip.speed_keyframes.is_empty()
             || !clip.rotate_keyframes.is_empty()
             || !clip.crop_left_keyframes.is_empty()
             || !clip.crop_right_keyframes.is_empty()
             || !clip.crop_top_keyframes.is_empty()
             || !clip.crop_bottom_keyframes.is_empty()
+            || Self::clip_has_keyframed_masks(clip)
+    }
+
+    fn clip_has_unsupported_background_prerender_audio_effects(clip: &ProgramClip) -> bool {
+        clip.has_audio
+            && (clip.pan.abs() > 0.001
+                || clip.eq_bands.iter().any(|band| band.gain.abs() > 0.001)
+                || clip.ladspa_effects.iter().any(|effect| effect.enabled)
+                || clip.pitch_shift_semitones.abs() > 0.001
+                || clip.duck)
+    }
+
+    fn clip_has_unsupported_background_prerender_features(clip: &ProgramClip) -> bool {
+        Self::clip_has_phase1_keyframes(clip)
+            || clip.is_freeze_frame()
+            || clip.reverse
+            || (clip.speed - 1.0).abs() > 0.001
+            || Self::clip_has_unsupported_background_prerender_audio_effects(clip)
+    }
+
+    fn active_has_unsupported_background_prerender_features(&self, active: &[usize]) -> bool {
+        active.iter().any(|&idx| {
+            self.clips
+                .get(idx)
+                .map(Self::clip_has_unsupported_background_prerender_features)
+                .unwrap_or(true)
+        })
     }
 
     /// Return the highest-track-index clip active at this position.
@@ -5183,27 +5289,19 @@ impl ProgramPlayer {
                     Some(ts) => {
                         let t = ts.progress;
                         match (ts.kind.as_str(), ts.role) {
-                            ("cross_dissolve", TransitionRole::Outgoing) => {
-                                base_alpha * (1.0 - t)
-                            }
-                            ("cross_dissolve", TransitionRole::Incoming) => {
-                                base_alpha * t
-                            }
+                            ("cross_dissolve", TransitionRole::Outgoing) => base_alpha * (1.0 - t),
+                            ("cross_dissolve", TransitionRole::Incoming) => base_alpha * t,
                             ("fade_to_black", TransitionRole::Outgoing) => {
                                 base_alpha * (1.0 - 2.0 * t).max(0.0)
                             }
                             ("fade_to_black", TransitionRole::Incoming) => {
                                 base_alpha * (2.0 * t - 1.0).max(0.0)
                             }
-                            ("wipe_right", _) | ("wipe_left", _) => {
-                                base_alpha
-                            }
-                            _ => {
-                                match ts.role {
-                                    TransitionRole::Outgoing => base_alpha * (1.0 - t),
-                                    TransitionRole::Incoming => base_alpha * t,
-                                }
-                            }
+                            ("wipe_right", _) | ("wipe_left", _) => base_alpha,
+                            _ => match ts.role {
+                                TransitionRole::Outgoing => base_alpha * (1.0 - t),
+                                TransitionRole::Incoming => base_alpha * t,
+                            },
                         }
                     }
                     None => base_alpha,
@@ -5298,19 +5396,27 @@ impl ProgramPlayer {
             }
         }
 
-        let lut_composite = if clip.lut_paths.is_empty() { None } else { Some(clip.lut_paths.join("|")) };
+        let lut_composite = if clip.lut_paths.is_empty() {
+            None
+        } else {
+            Some(clip.lut_paths.join("|"))
+        };
         if self.proxy_enabled {
             let key = crate::media::proxy_cache::proxy_key_with_vidstab(
-                &clip.source_path, lut_composite.as_deref(),
-                clip.vidstab_enabled, clip.vidstab_smoothing,
+                &clip.source_path,
+                lut_composite.as_deref(),
+                clip.vidstab_enabled,
+                clip.vidstab_smoothing,
             );
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
                 .unwrap_or_else(|| (clip.source_path.clone(), false, key))
         } else if self.preview_luts && !clip.lut_paths.is_empty() {
             let key = crate::media::proxy_cache::proxy_key_with_vidstab(
-                &clip.source_path, lut_composite.as_deref(),
-                clip.vidstab_enabled, clip.vidstab_smoothing,
+                &clip.source_path,
+                lut_composite.as_deref(),
+                clip.vidstab_enabled,
+                clip.vidstab_smoothing,
             );
             resolve_ready_proxy(&key)
                 .map(|p| (p, true, key.clone()))
@@ -5813,6 +5919,9 @@ impl ProgramPlayer {
         if has_scoped_adjustment {
             return false;
         }
+        if self.active_has_unsupported_background_prerender_features(active) {
+            return false;
+        }
         if active.len() >= 3 {
             return true;
         }
@@ -5876,7 +5985,15 @@ impl ProgramPlayer {
         );
         // Also warm the effects-bin construction path.
         let (proc_w, proc_h) = self.preview_processing_dimensions();
-        let (effects_bin, ..) = Self::build_effects_bin(clip, proc_w, proc_h, self.project_width, self.project_height, None, Arc::new(Mutex::new(Vec::new())));
+        let (effects_bin, ..) = Self::build_effects_bin(
+            clip,
+            proc_w,
+            proc_h,
+            self.project_width,
+            self.project_height,
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+        );
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
         if self.prepreroll_sidecars.len() >= MAX_PREPREROLL_SIDECARS {
@@ -6130,13 +6247,7 @@ impl ProgramPlayer {
         if !self.background_prerender || (active.len() < 3 && !transition_prerender_allowed) {
             return;
         }
-        if active.iter().any(|&idx| {
-            self.clips
-                .get(idx)
-                .map(|c| c.is_freeze_frame() || Self::clip_has_phase1_keyframes(c))
-                .unwrap_or(false)
-        }) && !transition_prerender_allowed
-        {
+        if self.active_has_unsupported_background_prerender_features(active) {
             return;
         }
         let next_boundary = self
@@ -6180,7 +6291,10 @@ impl ProgramPlayer {
         // This keeps at most one in-flight job per region and frees a queue
         // slot so the fresh request passes admission.
         let boundary_region = (segment_start_ns, segment_end_ns);
-        if let Some(old_key) = self.prerender_boundary_latest.insert(boundary_region, key.clone()) {
+        if let Some(old_key) = self
+            .prerender_boundary_latest
+            .insert(boundary_region, key.clone())
+        {
             if old_key != key && self.prerender_pending.remove(&old_key) {
                 self.prerender_pending_priority.remove(&old_key);
                 self.prerender_superseded.insert(old_key.clone());
@@ -6218,7 +6332,9 @@ impl ProgramPlayer {
             .iter()
             .filter_map(|&idx| {
                 self.clips.get(idx).and_then(|clip| {
-                    if clip.is_adjustment { return None; }
+                    if clip.is_adjustment {
+                        return None;
+                    }
                     let c = clip.clone();
                     let (path, source_is_proxy, _) = self.resolve_source_path_for_clip(&c);
                     let source_ns = c.source_pos_ns(segment_start_ns);
@@ -6618,7 +6734,6 @@ impl ProgramPlayer {
         self.slots.iter().any(|slot| {
             !slot.hidden
                 && !slot.is_prerender_slot
-                
                 && self
                     .compute_transition_state(slot.clip_idx, timeline_pos_ns)
                     .is_some()
@@ -6738,9 +6853,17 @@ impl ProgramPlayer {
             // very tight budgets — a briefly stale frame is much better than
             // 200ms+ of UI freeze per scrub step.
             let cap = if self.is_rapid_scrubbing() {
-                if self.slots.len() >= 3 { 60 } else { 30 }
+                if self.slots.len() >= 3 {
+                    60
+                } else {
+                    30
+                }
             } else {
-                if self.slots.len() >= 3 { 220 } else { 150 }
+                if self.slots.len() >= 3 {
+                    220
+                } else {
+                    150
+                }
             };
             requested_ms.min(cap)
         } else {
@@ -6859,7 +6982,9 @@ impl ProgramPlayer {
         let effective_timeout_ms = self.effective_wait_timeout_ms(timeout_ms);
         log::debug!(
             "wait_for_compositor_arrivals: requested={}ms effective={}ms scrub={}",
-            timeout_ms, effective_timeout_ms, self.is_rapid_scrubbing()
+            timeout_ms,
+            effective_timeout_ms,
+            self.is_rapid_scrubbing()
         );
         let deadline = Instant::now() + Duration::from_millis(effective_timeout_ms);
         // Use finer sleep granularity during playback for faster response.
@@ -7288,34 +7413,43 @@ impl ProgramPlayer {
         // 1. Ghost sink pad's peer (decoder src pad)
         // 2. Ghost sink pad's own current caps (may have source caps after preroll)
         // 3. The first element inside the effects_bin's sink pad caps
-        let source_caps = slot.effects_bin.static_pad("sink")
-            .and_then(|ghost| {
-                ghost.peer().and_then(|p| p.current_caps())
-                    .or_else(|| ghost.current_caps())
-            });
+        let source_caps = slot.effects_bin.static_pad("sink").and_then(|ghost| {
+            ghost
+                .peer()
+                .and_then(|p| p.current_caps())
+                .or_else(|| ghost.current_caps())
+        });
         let (lb_h, lb_v) = source_caps
-            .and_then(|c| c.structure(0).map(|s| {
-                let src_w = s.get::<i32>("width").unwrap_or(0);
-                let src_h = s.get::<i32>("height").unwrap_or(0);
-                if src_w <= 0 || src_h <= 0 {
-                    return (0, 0);
-                }
-                // Get project resolution from effects_bin src pad
-                let (fw, fh) = slot.effects_bin.static_pad("src")
-                    .and_then(|p| p.current_caps())
-                    .and_then(|c| c.structure(0).map(|s| {
-                        (s.get::<i32>("width").unwrap_or(0),
-                         s.get::<i32>("height").unwrap_or(0))
-                    }))
-                    .unwrap_or((0, 0));
-                if fw <= 0 || fh <= 0 {
-                    return (0, 0);
-                }
-                let scale = (fw as f64 / src_w as f64).min(fh as f64 / src_h as f64);
-                let scaled_w = (src_w as f64 * scale).round() as i32;
-                let scaled_h = (src_h as f64 * scale).round() as i32;
-                ((fw - scaled_w) / 2, (fh - scaled_h) / 2)
-            }))
+            .and_then(|c| {
+                c.structure(0).map(|s| {
+                    let src_w = s.get::<i32>("width").unwrap_or(0);
+                    let src_h = s.get::<i32>("height").unwrap_or(0);
+                    if src_w <= 0 || src_h <= 0 {
+                        return (0, 0);
+                    }
+                    // Get project resolution from effects_bin src pad
+                    let (fw, fh) = slot
+                        .effects_bin
+                        .static_pad("src")
+                        .and_then(|p| p.current_caps())
+                        .and_then(|c| {
+                            c.structure(0).map(|s| {
+                                (
+                                    s.get::<i32>("width").unwrap_or(0),
+                                    s.get::<i32>("height").unwrap_or(0),
+                                )
+                            })
+                        })
+                        .unwrap_or((0, 0));
+                    if fw <= 0 || fh <= 0 {
+                        return (0, 0);
+                    }
+                    let scale = (fw as f64 / src_w as f64).min(fh as f64 / src_h as f64);
+                    let scaled_w = (src_w as f64 * scale).round() as i32;
+                    let scaled_h = (src_h as f64 * scale).round() as i32;
+                    ((fw - scaled_w) / 2, (fh - scaled_h) / 2)
+                })
+            })
             .unwrap_or((0, 0));
         if crop_left > 0 || crop_right > 0 || crop_top > 0 || crop_bottom > 0 {
             log::info!(
@@ -7412,7 +7546,9 @@ impl ProgramPlayer {
             if !silent {
                 to.set_property("text", text);
                 let (family, base_size) = Self::parse_pango_font_desc(font);
-                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (project_h as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size =
+                    (base_size * PANGO_EXPORT_MATCH * (project_h as f64 / TITLE_REFERENCE_HEIGHT))
+                        .max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
                 // Use center alignment + pixel deltas to match FFmpeg drawtext
@@ -7442,10 +7578,7 @@ impl ProgramPlayer {
     }
 
     /// Apply extended title styling (outline, shadow, bg box) to the textoverlay.
-    fn apply_title_style_to_slot(
-        slot: &VideoSlot,
-        clip: &ProgramClip,
-    ) {
+    fn apply_title_style_to_slot(slot: &VideoSlot, clip: &ProgramClip) {
         if let Some(ref to) = slot.textoverlay {
             // Outline (GStreamer textoverlay uses draw-outline, fixed ~1px width)
             to.set_property("draw-outline", clip.title_outline_width > 0.0);
@@ -8209,7 +8342,7 @@ impl ProgramPlayer {
         mask_shared: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
     ) -> (
         gst::Bin,
-        Option<gst::Element>, // videobalance
+        Option<gst::Element>,                                 // videobalance
         Option<gst::Element>, // coloradj_rgb (frei0r temperature/tint)
         Option<gst::Element>, // colorbalance_3pt (frei0r shadows/midtones/highlights)
         Option<gst::Element>, // gaussianblur
@@ -8226,8 +8359,7 @@ impl ProgramPlayer {
         Option<gst::Element>, // videobox_zoom
         Vec<gst::Element>,    // frei0r_user_effects
         Arc<Mutex<(i32, i32, i32, i32, i32, i32, i32, i32)>>, // crop_alpha_state
-    )
-    {
+    ) {
         let bin = gst::Bin::new();
 
         // Determine which effects are active (non-default) so we can skip
@@ -8338,7 +8470,9 @@ impl ProgramPlayer {
         // format conversion needed unlike gaussianblur which requires AYUV).
         let need_creative_blur = clip.blur > f64::EPSILON;
         let squareblur = if need_creative_blur {
-            gst::ElementFactory::make("frei0r-filter-squareblur").build().ok()
+            gst::ElementFactory::make("frei0r-filter-squareblur")
+                .build()
+                .ok()
         } else {
             None
         };
@@ -8539,14 +8673,18 @@ impl ProgramPlayer {
                 to.set_property("silent", false);
                 to.set_property("text", &clip.title_text);
                 let (family, base_size) = Self::parse_pango_font_desc(&clip.title_font);
-                let scaled_size = (base_size * PANGO_EXPORT_MATCH * (project_height as f64 / TITLE_REFERENCE_HEIGHT)).max(4.0);
+                let scaled_size = (base_size
+                    * PANGO_EXPORT_MATCH
+                    * (project_height as f64 / TITLE_REFERENCE_HEIGHT))
+                    .max(4.0);
                 let adjusted_font = format!("{} {:.0}", family, scaled_size);
                 to.set_property("font-desc", &adjusted_font);
                 to.set_property_from_str("halignment", "center");
                 to.set_property_from_str("valignment", "center");
                 let text_h_px = (scaled_size * 0.0037 * target_height as f64).round();
                 let dx = ((clip.title_x - 0.5) * target_width as f64).round() as i32;
-                let dy = ((clip.title_y - 0.5) * target_height as f64 + text_h_px * 0.35).round() as i32;
+                let dy =
+                    ((clip.title_y - 0.5) * target_height as f64 + text_h_px * 0.35).round() as i32;
                 to.set_property("deltax", dx);
                 to.set_property("deltay", dy);
 
@@ -8623,7 +8761,10 @@ impl ProgramPlayer {
                     &gst::Caps::builder("video/x-raw")
                         .field(
                             "pixel-aspect-ratio",
-                            gst::Fraction::new((clip.anamorphic_desqueeze * 1000.0).round() as i32, 1000),
+                            gst::Fraction::new(
+                                (clip.anamorphic_desqueeze * 1000.0).round() as i32,
+                                1000,
+                            ),
                         )
                         .build(),
                 )
@@ -8687,7 +8828,16 @@ impl ProgramPlayer {
         // Source dimensions are used to compute letterbox offset so crop
         // targets video content, not letterbox bars.
         let crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32, i32, i32, i32, i32)>> =
-            Arc::new(Mutex::new((clip.crop_left, clip.crop_right, clip.crop_top, clip.crop_bottom, 0i32, 0i32, project_width as i32, project_height as i32)));
+            Arc::new(Mutex::new((
+                clip.crop_left,
+                clip.crop_right,
+                clip.crop_top,
+                clip.crop_bottom,
+                0i32,
+                0i32,
+                project_width as i32,
+                project_height as i32,
+            )));
         {
             let crop_state = crop_alpha_state.clone();
             if let Ok(identity) = gst::ElementFactory::make("identity").build() {
@@ -8731,7 +8881,11 @@ impl ProgramPlayer {
                                 let (w, h, stride) = match info_ref {
                                     Ok(ref vi) => {
                                         let s = vi.stride()[0] as usize;
-                                        (vi.width() as i32, vi.height() as i32, if s > 0 { s } else { vi.width() as usize * 4 })
+                                        (
+                                            vi.width() as i32,
+                                            vi.height() as i32,
+                                            if s > 0 { s } else { vi.width() as usize * 4 },
+                                        )
                                     }
                                     Err(_) => return gst::PadProbeReturn::Ok,
                                 };
@@ -8744,12 +8898,24 @@ impl ProgramPlayer {
                                 // then add letterbox offset.
                                 let content_w = (w as i32 - 2 * lb_h.max(0)).max(1) as f64;
                                 let content_h = (h as i32 - 2 * lb_v.max(0)).max(1) as f64;
-                                let scale_x = if proj_w > 0 { content_w / proj_w as f64 } else { 1.0 };
-                                let scale_y = if proj_h > 0 { content_h / proj_h as f64 } else { 1.0 };
-                                let ct = ((ct.max(0) as f64 * scale_y).round() as usize) + lb_v.max(0) as usize;
-                                let cb = ((cb.max(0) as f64 * scale_y).round() as usize) + lb_v.max(0) as usize;
-                                let cl = ((cl.max(0) as f64 * scale_x).round() as usize) + lb_h.max(0) as usize;
-                                let cr = ((cr.max(0) as f64 * scale_x).round() as usize) + lb_h.max(0) as usize;
+                                let scale_x = if proj_w > 0 {
+                                    content_w / proj_w as f64
+                                } else {
+                                    1.0
+                                };
+                                let scale_y = if proj_h > 0 {
+                                    content_h / proj_h as f64
+                                } else {
+                                    1.0
+                                };
+                                let ct = ((ct.max(0) as f64 * scale_y).round() as usize)
+                                    + lb_v.max(0) as usize;
+                                let cb = ((cb.max(0) as f64 * scale_y).round() as usize)
+                                    + lb_v.max(0) as usize;
+                                let cl = ((cl.max(0) as f64 * scale_x).round() as usize)
+                                    + lb_h.max(0) as usize;
+                                let cr = ((cr.max(0) as f64 * scale_x).round() as usize)
+                                    + lb_h.max(0) as usize;
                                 let h = h as usize;
                                 let w = w as usize;
                                 for row in 0..h {
@@ -8809,15 +8975,18 @@ impl ProgramPlayer {
                                     let data = map.as_mut_slice();
                                     let total = data.len();
                                     if total >= 4 {
-                                        let (width, height) = if let Some(caps) = _pad.current_caps() {
-                                            let s = caps.structure(0).unwrap();
-                                            (s.get::<i32>("width").unwrap_or(0) as usize,
-                                             s.get::<i32>("height").unwrap_or(0) as usize)
-                                        } else {
-                                            let pixels = total / 4;
-                                            let w = (pixels as f64).sqrt() as usize;
-                                            (w, if w > 0 { pixels / w } else { 0 })
-                                        };
+                                        let (width, height) =
+                                            if let Some(caps) = _pad.current_caps() {
+                                                let s = caps.structure(0).unwrap();
+                                                (
+                                                    s.get::<i32>("width").unwrap_or(0) as usize,
+                                                    s.get::<i32>("height").unwrap_or(0) as usize,
+                                                )
+                                            } else {
+                                                let pixels = total / 4;
+                                                let w = (pixels as f64).sqrt() as usize;
+                                                (w, if w > 0 { pixels / w } else { 0 })
+                                            };
                                         if width > 0 && height > 0 && width * height * 4 <= total {
                                             crate::media::mask_alpha::apply_masks_to_rgba_buffer(
                                                 &masks, data, width, height, pts_ns,
@@ -9154,12 +9323,16 @@ impl ProgramPlayer {
                                 link_src = equalizer.static_pad("src");
                                 log::info!("build_audio_only_slot: equalizer-nbands linked OK");
                             } else {
-                                log::warn!("build_audio_only_slot: equalizer pad link failed, removing");
+                                log::warn!(
+                                    "build_audio_only_slot: equalizer pad link failed, removing"
+                                );
                                 self.pipeline.remove(equalizer).ok();
                                 eq = None;
                             }
                         } else {
-                            log::warn!("build_audio_only_slot: failed to add equalizer to pipeline");
+                            log::warn!(
+                                "build_audio_only_slot: failed to add equalizer to pipeline"
+                            );
                             eq = None;
                         }
                     }
@@ -9287,10 +9460,12 @@ impl ProgramPlayer {
             colorbalance_3pt: None,
             gaussianblur: None,
             squareblur: None,
-            
+
             videocrop: None,
             videobox_crop_alpha: None,
-            crop_alpha_state: Arc::new(Mutex::new((0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32))),
+            crop_alpha_state: Arc::new(Mutex::new((
+                0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32,
+            ))),
             imagefreeze: None,
             videoflip_rotate: None,
             videoflip_flip: None,
@@ -9559,10 +9734,12 @@ impl ProgramPlayer {
             coloradj_rgb: None,
             colorbalance_3pt: None,
             gaussianblur: None,
-            
+
             squareblur: None,
             videocrop: None,
-            crop_alpha_state: Arc::new(Mutex::new((0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32))),
+            crop_alpha_state: Arc::new(Mutex::new((
+                0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32,
+            ))),
             videobox_crop_alpha: None,
             imagefreeze: None,
             videoflip_rotate: None,
@@ -9613,19 +9790,8 @@ impl ProgramPlayer {
         for (clip, path, source_ns, _, _) in inputs {
             if clip.is_title {
                 // Title clips use a lavfi color source instead of a file.
-                let bg = clip.title_clip_bg_color;
-                let a = bg & 0xFF;
-                let color_str = if a > 0 {
-                    let r = (bg >> 24) & 0xFF;
-                    let g = (bg >> 16) & 0xFF;
-                    let b = (bg >> 8) & 0xFF;
-                    format!("#{r:02x}{g:02x}{b:02x}")
-                } else {
-                    "black".to_string()
-                };
-                let lavfi = format!(
-                    "color=c={color_str}:size={out_w}x{out_h}:r={fps}:d={duration_s:.6},format=yuv420p,trim=duration={duration_s:.6},setpts=PTS-STARTPTS"
-                );
+                let lavfi =
+                    Self::prerender_title_clip_lavfi_color(clip, out_w, out_h, fps, duration_s);
                 cmd.arg("-f").arg("lavfi").arg("-i").arg(lavfi);
             } else {
                 let source_s = *source_ns as f64 / 1_000_000_000.0;
@@ -9644,94 +9810,132 @@ impl ProgramPlayer {
             .map(|spec| inputs.len() == 2 && spec.outgoing_input < 2 && spec.incoming_input < 2)
             .unwrap_or(false);
         let mut nodes: Vec<String> = Vec::new();
+        let mut _mask_temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
         for (i, (clip, _, _, _, source_is_proxy)) in inputs.iter().enumerate() {
+            let clip_has_mask = clip.masks.iter().any(|mask| mask.enabled);
+            let lut_filter = Self::prerender_build_lut_filter(clip, *source_is_proxy);
+            let anamorphic_filter = Self::prerender_build_anamorphic_filter(clip);
+            let color_filter = Self::prerender_build_color_filter(clip);
+            let temp_tint_filter = Self::prerender_build_temperature_tint_filter(clip, &color_caps);
+            let grading_filter = Self::prerender_build_grading_filter(clip);
+            let denoise_filter = Self::prerender_build_denoise_filter(clip);
+            let sharpen_filter = Self::prerender_build_sharpen_filter(clip);
+            let blur_filter = Self::prerender_build_blur_filter(clip);
+            let frei0r_filter = Self::prerender_build_frei0r_effects_filter(clip);
+            let chroma_key_filter = Self::prerender_build_chroma_key_filter(clip);
+            let title_filter = Self::prerender_build_title_filter(clip, out_h);
+            let minterpolate_filter = Self::prerender_build_minterpolate_filter(clip, fps);
+            let flip_filter = Self::prerender_build_flip_filter(clip);
             if use_transition_xfade {
-                // Apply LUT at source resolution (before downscale) so it
-                // processes the same pixel values as the export path.
-                nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{}{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{}{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
-                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
-                    Self::prerender_build_anamorphic_filter(clip),
-                    Self::prerender_build_crop_filter(clip, out_w, out_h, false),
-                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
-                    Self::prerender_build_rotation_filter(clip, false),
-                    Self::prerender_build_transition_tpad_filter(
-                        transition_spec,
-                        transition_offset_ns,
-                        i,
-                    ),
-                    fps.max(1),
-                    Self::prerender_build_color_filter(clip),
-                    Self::prerender_build_temperature_tint_filter(clip, &color_caps),
-                    Self::prerender_build_grading_filter(clip),
-                    Self::prerender_build_denoise_filter(clip),
-                    Self::prerender_build_sharpen_filter(clip),
-                    Self::prerender_build_frei0r_effects_filter(clip),
-                    Self::prerender_build_title_filter(clip, out_h),
-                    Self::prerender_build_minterpolate_filter(clip, fps),
-                ));
+                let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, false);
+                let scale_position_filter =
+                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, false);
+                let rotation_filter = Self::prerender_build_rotation_filter(clip, false);
+                let transition_tpad_filter = Self::prerender_build_transition_tpad_filter(
+                    transition_spec,
+                    transition_offset_ns,
+                    i,
+                );
+                if clip_has_mask {
+                    let pre_label = format!("pv{i}pre");
+                    let masked_label = format!("pv{i}masked");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        fps.max(1),
+                    ));
+                    let _ = Self::prerender_append_mask_filter(
+                        &mut nodes,
+                        &pre_label,
+                        &masked_label,
+                        clip,
+                        out_w,
+                        out_h,
+                        &mut _mask_temp_files,
+                    );
+                    nodes.push(format!("[{masked_label}]format=yuv420p[pv{i}]"));
+                } else if clip.chroma_key_enabled {
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter},format=yuv420p[pv{i}]",
+                        fps.max(1),
+                    ));
+                } else {
+                    // Apply LUT at source resolution (before downscale) so it
+                    // processes the same pixel values as the export path.
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}[pv{i}]",
+                        fps.max(1),
+                    ));
+                }
             } else if i == 0 {
-                if clip.chroma_key_enabled {
+                let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, false);
+                let scale_position_filter =
+                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, false);
+                let rotation_filter = Self::prerender_build_rotation_filter(clip, false);
+                if clip_has_mask {
+                    let pre_label = format!("pv{i}pre");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        fps.max(1),
+                    ));
+                    let _ = Self::prerender_append_mask_filter(
+                        &mut nodes,
+                        &pre_label,
+                        &format!("pv{i}"),
+                        clip,
+                        out_w,
+                        out_h,
+                        &mut _mask_temp_files,
+                    );
+                } else if clip.chroma_key_enabled {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{}{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{}{}{},fps={}{}{}{}{}{}{}{}{}{}[pv{i}]",
-                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
-                        Self::prerender_build_anamorphic_filter(clip),
-                        Self::prerender_build_crop_filter(clip, out_w, out_h, false),
-                        Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
-                        Self::prerender_build_rotation_filter(clip, false),
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[pv{i}]",
                         fps.max(1),
-                        Self::prerender_build_color_filter(clip),
-                        Self::prerender_build_temperature_tint_filter(clip, &color_caps),
-                        Self::prerender_build_grading_filter(clip),
-                        Self::prerender_build_denoise_filter(clip),
-                        Self::prerender_build_sharpen_filter(clip),
-                        Self::prerender_build_frei0r_effects_filter(clip),
-                        Self::prerender_build_chroma_key_filter(clip),
-                        Self::prerender_build_title_filter(clip, out_h),
-                        Self::prerender_build_minterpolate_filter(clip, fps),
                     ));
                 } else {
                     // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{}{}{},fps={},format=yuv420p{}{}{}{}{}{}{}{}[pv{i}]",
-                        Self::prerender_build_lut_filter(clip, *source_is_proxy),
-                        Self::prerender_build_crop_filter(clip, out_w, out_h, false),
-                        Self::prerender_build_scale_position_filter(clip, out_w, out_h, false),
-                        Self::prerender_build_rotation_filter(clip, false),
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}[pv{i}]",
                         fps.max(1),
-                        Self::prerender_build_color_filter(clip),
-                        Self::prerender_build_temperature_tint_filter(clip, &color_caps),
-                        Self::prerender_build_grading_filter(clip),
-                        Self::prerender_build_denoise_filter(clip),
-                        Self::prerender_build_sharpen_filter(clip),
-                        Self::prerender_build_frei0r_effects_filter(clip),
-                        Self::prerender_build_title_filter(clip, out_h),
-                        Self::prerender_build_minterpolate_filter(clip, fps),
                     ));
                 }
             } else {
-                // Overlay tracks: convert to yuva420p early so pad fills transparent.
-                // Apply LUT at source resolution before format/scale for parity.
-                nodes.push(format!(
-                    "[{i}:v]setpts=PTS-STARTPTS{}{},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{}{}{}{}{}{}{}{}{}{}{}{},colorchannelmixer=aa={:.4}[pv{i}]",
-                    Self::prerender_build_lut_filter(clip, *source_is_proxy),
-                    Self::prerender_build_anamorphic_filter(clip),
-                    Self::prerender_build_crop_filter(clip, out_w, out_h, true),
-                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, true),
-                    Self::prerender_build_rotation_filter(clip, true),
-                    Self::prerender_build_color_filter(clip),
-                    Self::prerender_build_temperature_tint_filter(clip, &color_caps),
-                    Self::prerender_build_grading_filter(clip),
-                    Self::prerender_build_denoise_filter(clip),
-                    Self::prerender_build_sharpen_filter(clip),
-                    Self::prerender_build_frei0r_effects_filter(clip),
-                    Self::prerender_build_chroma_key_filter(clip),
-                    Self::prerender_build_title_filter(clip, out_h),
-                    Self::prerender_build_minterpolate_filter(clip, fps),
-                    clip.opacity.clamp(0.0, 1.0),
-                ));
+                let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, true);
+                let scale_position_filter =
+                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, true);
+                let rotation_filter = Self::prerender_build_rotation_filter(clip, true);
+                if clip_has_mask {
+                    let pre_label = format!("pv{i}pre");
+                    let masked_label = format!("pv{i}masked");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                    ));
+                    let masked_input = if Self::prerender_append_mask_filter(
+                        &mut nodes,
+                        &pre_label,
+                        &masked_label,
+                        clip,
+                        out_w,
+                        out_h,
+                        &mut _mask_temp_files,
+                    ) {
+                        masked_label
+                    } else {
+                        pre_label
+                    };
+                    nodes.push(format!(
+                        "[{masked_input}]colorchannelmixer=aa={:.4}[pv{i}]",
+                        clip.opacity.clamp(0.0, 1.0),
+                    ));
+                } else {
+                    // Overlay tracks: convert to yuva420p early so pad fills transparent.
+                    // Apply LUT at source resolution before format/scale for parity.
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter},colorchannelmixer=aa={:.4}[pv{i}]",
+                        clip.opacity.clamp(0.0, 1.0),
+                    ));
+                }
             }
         }
         let mut last_label = "pv0".to_string();
@@ -9753,7 +9957,9 @@ impl ProgramPlayer {
                 let clip = &inputs[i].0;
                 if clip.blend_mode != crate::model::clip::BlendMode::Normal {
                     let mode = clip.blend_mode.ffmpeg_mode();
-                    nodes.push(format!("[{last_label}][pv{i}]blend=all_mode={mode}[{next}]"));
+                    nodes.push(format!(
+                        "[{last_label}][pv{i}]blend=all_mode={mode}[{next}]"
+                    ));
                 } else {
                     nodes.push(format!("[{last_label}][pv{i}]overlay=x=0:y=0[{next}]"));
                 }
@@ -9763,7 +9969,8 @@ impl ProgramPlayer {
         // Apply adjustment layer effects to the composited output.
         for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
             let adj_color = Self::prerender_build_color_filter(adj_clip);
-            let adj_temp_tint = Self::prerender_build_temperature_tint_filter(adj_clip, &color_caps);
+            let adj_temp_tint =
+                Self::prerender_build_temperature_tint_filter(adj_clip, &color_caps);
             let adj_grading = Self::prerender_build_grading_filter(adj_clip);
             let adj_denoise = Self::prerender_build_denoise_filter(adj_clip);
             let adj_sharpen = Self::prerender_build_sharpen_filter(adj_clip);
@@ -9862,6 +10069,35 @@ impl ProgramPlayer {
         success
     }
 
+    /// Generate the lavfi color source string for a prerendered title clip.
+    ///
+    /// Transparent title backgrounds must keep alpha so overlay-track prerender
+    /// windows composite against lower video tracks instead of flattening to
+    /// opaque black.
+    fn prerender_title_clip_lavfi_color(
+        clip: &ProgramClip,
+        out_w: u32,
+        out_h: u32,
+        fps: u32,
+        duration_s: f64,
+    ) -> String {
+        let bg = clip.title_clip_bg_color;
+        let a = bg & 0xFF;
+        if a > 0 {
+            let r = (bg >> 24) & 0xFF;
+            let g = (bg >> 16) & 0xFF;
+            let b = (bg >> 8) & 0xFF;
+            let color_str = format!("#{r:02x}{g:02x}{b:02x}");
+            format!(
+                "color=c={color_str}:size={out_w}x{out_h}:r={fps}:d={duration_s:.6},format=yuv420p,trim=duration={duration_s:.6},setpts=PTS-STARTPTS"
+            )
+        } else {
+            format!(
+                "color=c=black@0.0:size={out_w}x{out_h}:r={fps}:d={duration_s:.6},format=yuva420p,trim=duration={duration_s:.6},setpts=PTS-STARTPTS"
+            )
+        }
+    }
+
     fn prerender_build_transition_tpad_filter(
         transition_spec: Option<&TransitionPrerenderSpec>,
         transition_offset_ns: u64,
@@ -9918,8 +10154,8 @@ impl ProgramPlayer {
                 0.0,    // midtones handled by grading filter
                 0.0,    // highlights handled by grading filter
                 clip.exposure,
-                0.0,  // black_point handled by grading filter
-                0.0,  // warmth/tint handled by grading filter
+                0.0, // black_point handled by grading filter
+                0.0, // warmth/tint handled by grading filter
                 0.0,
                 0.0,
                 0.0,
@@ -9951,10 +10187,8 @@ impl ProgramPlayer {
         let has_tint = clip.tint.abs() > 0.001;
         // Use frei0r coloradj_RGB when available — same calibrated path as export.
         if caps.use_coloradj_frei0r && (has_temp || has_tint) {
-            let cp = crate::media::export::compute_export_coloradj_params(
-                clip.temperature,
-                clip.tint,
-            );
+            let cp =
+                crate::media::export::compute_export_coloradj_params(clip.temperature, clip.tint);
             return format!(
                 ",frei0r=filter_name=coloradj_RGB:filter_params={:.6}|{:.6}|{:.6}|0.333",
                 cp.r, cp.g, cp.b
@@ -9997,6 +10231,15 @@ impl ProgramPlayer {
         if clip.sharpness != 0.0 {
             let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
             format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
+        } else {
+            String::new()
+        }
+    }
+
+    fn prerender_build_blur_filter(clip: &ProgramClip) -> String {
+        if clip.blur > f64::EPSILON {
+            let radius = (clip.blur * 10.0).clamp(0.0, 10.0);
+            format!(",boxblur={radius:.0}:{radius:.0}")
         } else {
             String::new()
         }
@@ -10107,6 +10350,15 @@ impl ProgramPlayer {
         )
     }
 
+    fn prerender_build_flip_filter(clip: &ProgramClip) -> String {
+        match (clip.flip_h, clip.flip_v) {
+            (false, false) => String::new(),
+            (true, false) => ",hflip".to_string(),
+            (false, true) => ",vflip".to_string(),
+            (true, true) => ",hflip,vflip".to_string(),
+        }
+    }
+
     fn prerender_build_scale_position_filter(
         clip: &ProgramClip,
         out_w: u32,
@@ -10198,25 +10450,56 @@ impl ProgramPlayer {
                         .iter()
                         .map(|np| match np.native_type {
                             Frei0rNativeType::Color => {
-                                let r = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                                let g = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                                let b = np.gst_properties.get(2).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                                let r = np
+                                    .gst_properties
+                                    .first()
+                                    .and_then(|k| effect.params.get(k))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                let g = np
+                                    .gst_properties
+                                    .get(1)
+                                    .and_then(|k| effect.params.get(k))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                let b = np
+                                    .gst_properties
+                                    .get(2)
+                                    .and_then(|k| effect.params.get(k))
+                                    .copied()
+                                    .unwrap_or(0.0);
                                 format!("{r:.6}/{g:.6}/{b:.6}")
                             }
                             Frei0rNativeType::Position => {
-                                let x = np.gst_properties.first().and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
-                                let y = np.gst_properties.get(1).and_then(|k| effect.params.get(k)).copied().unwrap_or(0.0);
+                                let x = np
+                                    .gst_properties
+                                    .first()
+                                    .and_then(|k| effect.params.get(k))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                let y = np
+                                    .gst_properties
+                                    .get(1)
+                                    .and_then(|k| effect.params.get(k))
+                                    .copied()
+                                    .unwrap_or(0.0);
                                 format!("{x:.6}/{y:.6}")
                             }
                             Frei0rNativeType::NativeString => {
-                                let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
+                                let prop =
+                                    np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
                                 effect.string_params.get(prop).cloned().unwrap_or_default()
                             }
                             _ => {
-                                let prop = np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
+                                let prop =
+                                    np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
                                 if np.native_type == Frei0rNativeType::Bool {
                                     let val = effect.params.get(prop).copied().unwrap_or(0.0);
-                                    if val > 0.5 { "y".to_string() } else { "n".to_string() }
+                                    if val > 0.5 {
+                                        "y".to_string()
+                                    } else {
+                                        "n".to_string()
+                                    }
                                 } else {
                                     let val = effect.params.get(prop).copied().unwrap_or(0.0);
                                     format!("{val:.6}")
@@ -10229,12 +10512,21 @@ impl ProgramPlayer {
                     info.params
                         .iter()
                         .map(|p| {
-                            if p.param_type == crate::media::frei0r_registry::Frei0rParamType::String {
-                                effect.string_params.get(&p.name).cloned()
+                            if p.param_type
+                                == crate::media::frei0r_registry::Frei0rParamType::String
+                            {
+                                effect
+                                    .string_params
+                                    .get(&p.name)
+                                    .cloned()
                                     .or_else(|| p.default_string.clone())
                                     .unwrap_or_default()
                             } else {
-                                let val = effect.params.get(&p.name).copied().unwrap_or(p.default_value);
+                                let val = effect
+                                    .params
+                                    .get(&p.name)
+                                    .copied()
+                                    .unwrap_or(p.default_value);
                                 format!("{val:.6}")
                             }
                         })
@@ -10242,13 +10534,22 @@ impl ProgramPlayer {
                         .join("|")
                 }
             } else {
-                effect.params.values().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join("|")
+                effect
+                    .params
+                    .values()
+                    .map(|v| format!("{v:.6}"))
+                    .collect::<Vec<_>>()
+                    .join("|")
             };
-            let ffmpeg_name = plugin.map(|p| p.ffmpeg_name.as_str()).unwrap_or(&effect.plugin_name);
+            let ffmpeg_name = plugin
+                .map(|p| p.ffmpeg_name.as_str())
+                .unwrap_or(&effect.plugin_name);
             if params_str.is_empty() {
                 result.push_str(&format!(",frei0r=filter_name={ffmpeg_name}"));
             } else {
-                result.push_str(&format!(",frei0r=filter_name={ffmpeg_name}:filter_params={params_str}"));
+                result.push_str(&format!(
+                    ",frei0r=filter_name={ffmpeg_name}:filter_params={params_str}"
+                ));
             }
         }
         result
@@ -10270,8 +10571,10 @@ impl ProgramPlayer {
         }
         const REF_H: f64 = 1080.0;
         let text = escape(&clip.title_text).replace('\n', "\\n");
-        let (font_name, font_size) = Self::parse_pango_font_desc(&clip.title_font);
-        let font_name = escape(&font_name);
+        let (_, font_size) = Self::parse_pango_font_desc(&clip.title_font);
+        let font_selector = escape(&crate::media::export::build_drawtext_font_selector(
+            &clip.title_font,
+        ));
         let rel_x = clip.title_x.clamp(0.0, 1.0);
         let rel_y = clip.title_y.clamp(0.0, 1.0);
         let scale_factor = out_h as f64 / REF_H;
@@ -10283,7 +10586,7 @@ impl ProgramPlayer {
         let a = (rgba & 0xFF) as u8;
         let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
         let mut filter = format!(
-            ",drawtext=font='{font_name}':text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
+            ",drawtext=font='{font_selector}':text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
         );
         if clip.title_outline_width > 0.0 {
             let bw = (clip.title_outline_width * scale_factor).max(0.5);
@@ -10293,7 +10596,9 @@ impl ProgramPlayer {
             let ob = ((oc >> 8) & 0xFF) as u8;
             let oa = (oc & 0xFF) as u8;
             let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
-            filter.push_str(&format!(":borderw={bw:.1}:bordercolor={or_:02x}{og:02x}{ob:02x}@{o_alpha:.4}"));
+            filter.push_str(&format!(
+                ":borderw={bw:.1}:bordercolor={or_:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
+            ));
         }
         if clip.title_shadow {
             let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
@@ -10304,7 +10609,9 @@ impl ProgramPlayer {
             let sb = ((sc >> 8) & 0xFF) as u8;
             let sa = (sc & 0xFF) as u8;
             let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
-            filter.push_str(&format!(":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"));
+            filter.push_str(&format!(
+                ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
+            ));
         }
         if clip.title_bg_box {
             let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
@@ -10314,7 +10621,9 @@ impl ProgramPlayer {
             let bb = ((bc >> 8) & 0xFF) as u8;
             let ba = (bc & 0xFF) as u8;
             let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
-            filter.push_str(&format!(":box=1:boxcolor={br:02x}{bgg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"));
+            filter.push_str(&format!(
+                ":box=1:boxcolor={br:02x}{bgg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
+            ));
         }
         filter
     }
@@ -10433,7 +10742,15 @@ impl ProgramPlayer {
             videobox_zoom,
             frei0r_user_effects,
             crop_alpha_state,
-        ) = Self::build_effects_bin(&clip, proc_w, proc_h, self.project_width, self.project_height, realtime_lut, slot_mask_data.clone());
+        ) = Self::build_effects_bin(
+            &clip,
+            proc_w,
+            proc_h,
+            self.project_width,
+            self.project_height,
+            realtime_lut,
+            slot_mask_data.clone(),
+        );
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
         if clip.is_title {
@@ -10463,7 +10780,10 @@ impl ProgramPlayer {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    log::warn!("ProgramPlayer: failed to create videotestsrc for title clip: {}", e);
+                    log::warn!(
+                        "ProgramPlayer: failed to create videotestsrc for title clip: {}",
+                        e
+                    );
                     return None;
                 }
             };
@@ -10482,11 +10802,16 @@ impl ProgramPlayer {
 
             if self.pipeline.add(&src).is_err()
                 || self.pipeline.add(&capsfilter).is_err()
-                || self.pipeline.add(effects_bin.upcast_ref::<gst::Element>()).is_err()
+                || self
+                    .pipeline
+                    .add(effects_bin.upcast_ref::<gst::Element>())
+                    .is_err()
             {
                 self.pipeline.remove(&src).ok();
                 self.pipeline.remove(&capsfilter).ok();
-                self.pipeline.remove(effects_bin.upcast_ref::<gst::Element>()).ok();
+                self.pipeline
+                    .remove(effects_bin.upcast_ref::<gst::Element>())
+                    .ok();
                 return None;
             }
 
@@ -10504,14 +10829,20 @@ impl ProgramPlayer {
                 None => {
                     self.pipeline.remove(&src).ok();
                     self.pipeline.remove(&capsfilter).ok();
-                    self.pipeline.remove(effects_bin.upcast_ref::<gst::Element>()).ok();
+                    self.pipeline
+                        .remove(effects_bin.upcast_ref::<gst::Element>())
+                        .ok();
                     return None;
                 }
             };
             comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
-            comp_pad.set_property("alpha", clip.opacity_at_timeline_ns(self.timeline_pos_ns).clamp(0.0, 1.0));
+            comp_pad.set_property(
+                "alpha",
+                clip.opacity_at_timeline_ns(self.timeline_pos_ns)
+                    .clamp(0.0, 1.0),
+            );
 
-            // Link effects_bin → queue → compositor.
+            // Link effects_bin → [alpha] → queue → compositor.
             let slot_queue = gst::ElementFactory::make("queue")
                 .property("max-size-buffers", 1u32)
                 .property("max-size-bytes", 0u32)
@@ -10519,16 +10850,20 @@ impl ProgramPlayer {
                 .build()
                 .unwrap();
             self.pipeline.add(&slot_queue).ok();
+
             if let Some(ebs) = effects_bin.static_pad("src") {
                 let q_sink = slot_queue.static_pad("sink").unwrap();
                 let _ = ebs.link(&q_sink);
             }
+
             let q_src = slot_queue.static_pad("src").unwrap();
             let _ = q_src.link(&comp_pad);
 
             let comp_arrival_seq = Arc::new(AtomicU64::new(0));
             let is_blend_mode = clip.blend_mode != crate::model::clip::BlendMode::Normal;
-            let blend_alpha = Arc::new(Mutex::new(clip.opacity_at_timeline_ns(self.timeline_pos_ns)));
+            let blend_alpha = Arc::new(Mutex::new(
+                clip.opacity_at_timeline_ns(self.timeline_pos_ns),
+            ));
 
             let video_linked = Arc::new(AtomicBool::new(true));
             let audio_linked = Arc::new(AtomicBool::new(false));
@@ -10548,7 +10883,7 @@ impl ProgramPlayer {
                 videobalance: videobalance.clone(),
                 coloradj_rgb: coloradj_rgb.clone(),
                 colorbalance_3pt: colorbalance_3pt.clone(),
-                
+
                 gaussianblur: gaussianblur.clone(),
                 squareblur: squareblur.clone(),
                 videocrop: videocrop.clone(),
@@ -10574,20 +10909,35 @@ impl ProgramPlayer {
                 mask_data: slot_mask_data.clone(),
             };
             Self::apply_transform_to_slot(
-                &slot_ref_for_transform, clip.crop_left, clip.crop_right,
-                clip.crop_top, clip.crop_bottom, clip.rotate, clip.flip_h, clip.flip_v,
+                &slot_ref_for_transform,
+                clip.crop_left,
+                clip.crop_right,
+                clip.crop_top,
+                clip.crop_bottom,
+                clip.rotate,
+                clip.flip_h,
+                clip.flip_v,
             );
             Self::apply_title_to_slot(
-                &slot_ref_for_transform, &clip.title_text, &clip.title_font,
-                clip.title_color, clip.title_x, clip.title_y, self.project_height, proc_w, proc_h,
+                &slot_ref_for_transform,
+                &clip.title_text,
+                &clip.title_font,
+                clip.title_color,
+                clip.title_x,
+                clip.title_y,
+                self.project_height,
+                proc_w,
+                proc_h,
             );
             Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
             Self::apply_zoom_to_slot(
-                &slot_ref_for_transform, &comp_pad,
+                &slot_ref_for_transform,
+                &comp_pad,
                 clip.scale_at_timeline_ns(self.timeline_pos_ns),
                 clip.position_x_at_timeline_ns(self.timeline_pos_ns),
                 clip.position_y_at_timeline_ns(self.timeline_pos_ns),
-                proc_w, proc_h,
+                proc_w,
+                proc_h,
             );
 
             // Sync elements to pipeline state.
@@ -10623,7 +10973,7 @@ impl ProgramPlayer {
                 alpha_chroma_key,
                 capsfilter_zoom,
                 videobox_zoom,
-            crop_alpha_state,
+                crop_alpha_state,
                 frei0r_user_effects,
                 slot_queue: Some(slot_queue),
                 comp_arrival_seq,
@@ -10640,7 +10990,10 @@ impl ProgramPlayer {
         // Adjustment layers have no visual output in the compositor — their effects
         // are applied post-compositor via the adjustment probe.  Skip slot creation.
         if clip.is_adjustment {
-            log::debug!("ProgramPlayer: skipping slot for adjustment layer clip={}", clip.id);
+            log::debug!(
+                "ProgramPlayer: skipping slot for adjustment layer clip={}",
+                clip.id
+            );
             return None;
         }
 
@@ -10731,7 +11084,8 @@ impl ProgramPlayer {
         // Blend-mode capture: hide from compositor and capture overlay buffer.
         let is_blend_mode = clip.blend_mode != crate::model::clip::BlendMode::Normal;
         let blend_alpha = Arc::new(Mutex::new(
-            clip.opacity_at_timeline_ns(self.timeline_pos_ns).clamp(0.0, 1.0),
+            clip.opacity_at_timeline_ns(self.timeline_pos_ns)
+                .clamp(0.0, 1.0),
         ));
         if is_blend_mode {
             comp_pad.set_property("alpha", 0.0_f64);
@@ -10746,14 +11100,17 @@ impl ProgramPlayer {
                         let data = map.as_slice().to_vec();
                         let opacity = alpha_ref.try_lock().map(|g| *g).unwrap_or(1.0);
                         if let Ok(mut overlays) = blend_ov.try_lock() {
-                            overlays.insert(ci, BlendOverlay {
-                                data,
-                                width: 0,  // not used — size matches compositor output
-                                height: 0,
-                                blend_mode,
-                                opacity,
-                                zorder,
-                            });
+                            overlays.insert(
+                                ci,
+                                BlendOverlay {
+                                    data,
+                                    width: 0, // not used — size matches compositor output
+                                    height: 0,
+                                    blend_mode,
+                                    opacity,
+                                    zorder,
+                                },
+                            );
                         }
                     }
                 }
@@ -10762,7 +11119,8 @@ impl ProgramPlayer {
         }
 
         // Create audio path: audioconvert → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
-        let (audio_conv, audio_equalizer, audio_panorama, audio_level, amix_pad) = if clip_has_audio {
+        let (audio_conv, audio_equalizer, audio_panorama, audio_level, amix_pad) = if clip_has_audio
+        {
             let ac = gst::ElementFactory::make("audioconvert").build().ok();
             let mut eq = gst::ElementFactory::make("equalizer-nbands")
                 .property("num-bands", 3u32)
@@ -10792,12 +11150,17 @@ impl ProgramPlayer {
                                     link_src = equalizer.static_pad("src");
                                     log::info!("build_slot_for_clip: equalizer-nbands linked OK for clip_idx={}", clip_idx);
                                 } else {
-                                    log::warn!("build_slot_for_clip: equalizer pad link FAILED: {:?}", link_result);
+                                    log::warn!(
+                                        "build_slot_for_clip: equalizer pad link FAILED: {:?}",
+                                        link_result
+                                    );
                                     self.pipeline.remove(equalizer).ok();
                                     eq = None;
                                 }
                             } else {
-                                log::warn!("build_slot_for_clip: equalizer static pads not available");
+                                log::warn!(
+                                    "build_slot_for_clip: equalizer static pads not available"
+                                );
                                 self.pipeline.remove(equalizer).ok();
                                 eq = None;
                             }
@@ -10988,7 +11351,7 @@ impl ProgramPlayer {
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
             coloradj_rgb: coloradj_rgb.clone(),
-            
+
             colorbalance_3pt: colorbalance_3pt.clone(),
             gaussianblur: gaussianblur.clone(),
             squareblur: squareblur.clone(),
@@ -11033,7 +11396,8 @@ impl ProgramPlayer {
             clip.title_x,
             clip.title_y,
             self.project_height,
-            pw, ph,
+            pw,
+            ph,
         );
         Self::apply_title_style_to_slot(&slot_ref_for_transform, &clip);
         Self::apply_zoom_to_slot(
@@ -11407,8 +11771,9 @@ impl ProgramPlayer {
         // Warmth positive = warm (red boost, blue cut in 3-point curve space).
         // Tint positive = magenta (green cut); negated because 3-point
         // adds tint directly to green channel.
-        let sw =
-            Self::compute_tonal_axis_response(shadows_warmth) * warmth_scale * shadows_endpoint_boost;
+        let sw = Self::compute_tonal_axis_response(shadows_warmth)
+            * warmth_scale
+            * shadows_endpoint_boost;
         let st =
             -Self::compute_tonal_axis_response(shadows_tint) * tint_scale * shadows_endpoint_boost;
         let mw = Self::compute_tonal_axis_response(midtones_warmth) * warmth_scale;
@@ -11570,6 +11935,59 @@ impl ProgramPlayer {
             midtones_neg_gain,
             highlights_neg_gain,
         )
+    }
+
+    fn prerender_build_mask_alpha(
+        clip: &ProgramClip,
+        out_w: u32,
+        out_h: u32,
+    ) -> Option<crate::media::mask_alpha::FfmpegMaskAlphaResult> {
+        crate::media::mask_alpha::build_combined_mask_ffmpeg_alpha(
+            &clip.masks,
+            out_w,
+            out_h,
+            0,
+            clip.scale,
+            clip.position_x,
+            clip.position_y,
+        )
+    }
+
+    fn prerender_append_mask_filter(
+        nodes: &mut Vec<String>,
+        input_label: &str,
+        output_label: &str,
+        clip: &ProgramClip,
+        out_w: u32,
+        out_h: u32,
+        mask_temp_files: &mut Vec<tempfile::NamedTempFile>,
+    ) -> bool {
+        match Self::prerender_build_mask_alpha(clip, out_w, out_h) {
+            Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::GeqExpression(expr)) => {
+                nodes.push(format!(
+                    "[{input_label}]geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({expr})'[{output_label}]"
+                ));
+                true
+            }
+            Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::RasterFile(mask_file)) => {
+                let mask_path = mask_file
+                    .path()
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+                    .replace(':', "\\:");
+                let mask_label = format!("{output_label}_mask");
+                nodes.push(format!(
+                    "movie='{mask_path}',format=gray,scale={out_w}:{out_h}[{mask_label}]"
+                ));
+                nodes.push(format!(
+                    "[{input_label}][{mask_label}]alphamerge[{output_label}]"
+                ));
+                mask_temp_files.push(mask_file);
+                true
+            }
+            None => false,
+        }
     }
 
     pub(crate) fn apply_export_tonal_parity_gains(
@@ -11940,7 +12358,8 @@ impl ProgramPlayer {
                 clip.title_x,
                 clip.title_y,
                 self.project_height,
-                pw, ph,
+                pw,
+                ph,
             );
             Self::apply_title_style_to_slot(slot, clip);
         }
@@ -12081,12 +12500,7 @@ impl ProgramPlayer {
     /// decoders so they emit fresh segments.  This resets the aggregator's
     /// internal timing/segment state that otherwise causes ≤1 fps or a
     /// gst_segment_to_stream_time assertion crash.
-    fn shrink_slots_to_active(
-        &mut self,
-        timeline_pos: u64,
-        desired: &[usize],
-        was_playing: bool,
-    ) {
+    fn shrink_slots_to_active(&mut self, timeline_pos: u64, desired: &[usize], was_playing: bool) {
         let started = Instant::now();
         let desired_set: HashSet<usize> = desired.iter().copied().collect();
         log::info!(
@@ -12178,10 +12592,7 @@ impl ProgramPlayer {
                     self.frame_duration_ns,
                 );
                 if !ok {
-                    log::warn!(
-                        "shrink_slots_to_active: seek FAILED for clip {}",
-                        clip.id
-                    );
+                    log::warn!("shrink_slots_to_active: seek FAILED for clip {}", clip.id);
                     if let Some(ref pad) = slot.compositor_pad {
                         let _ = pad.send_event(gst::event::Eos::new());
                     }
@@ -12190,8 +12601,7 @@ impl ProgramPlayer {
                     }
                 }
             } else {
-                let _ =
-                    Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
+                let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos);
             }
         }
 
@@ -12233,18 +12643,10 @@ impl ProgramPlayer {
             return false;
         }
         let transition_spec = self.transition_overlap_prerender_spec_at(timeline_pos, active);
-        let transition_prerender_allowed =
-            transition_spec.is_some() && matches!(self.playback_priority, PlaybackPriority::Smooth);
         let transition_metric_kind = transition_spec
             .as_ref()
             .map(|spec| Self::transition_kind_for_prerender_metric(&spec.xfade_transition));
-        if active.iter().any(|&idx| {
-            self.clips
-                .get(idx)
-                .map(Self::clip_has_phase1_keyframes)
-                .unwrap_or(false)
-        }) && !transition_prerender_allowed
-        {
+        if self.active_has_unsupported_background_prerender_features(active) {
             return false;
         }
         self.poll_background_prerender_results();
@@ -12363,18 +12765,9 @@ impl ProgramPlayer {
         // removed.
         if had_existing_slots {
             let desired = self.clips_active_at(timeline_pos);
-            let transition_prerender_allowed = self
-                .transition_overlap_prerender_spec_at(timeline_pos, &desired)
-                .is_some()
-                && matches!(self.playback_priority, PlaybackPriority::Smooth);
             let bypass_continue_for_prerender = if self.background_prerender
                 && self.active_supports_background_prerender_at(timeline_pos, &desired)
-                && (!desired.iter().any(|&idx| {
-                    self.clips
-                        .get(idx)
-                        .map(Self::clip_has_phase1_keyframes)
-                        .unwrap_or(false)
-                }) || transition_prerender_allowed)
+                && !self.active_has_unsupported_background_prerender_features(&desired)
                 && !self.slots.iter().any(|s| s.is_prerender_slot)
             {
                 let signature = self.prerender_signature_for_active(&desired);
@@ -12620,7 +13013,9 @@ impl ProgramPlayer {
             self.clip_seek_flags()
         };
         for slot in &self.slots {
-            let Some(clip) = self.clips.get(slot.clip_idx) else { continue };
+            let Some(clip) = self.clips.get(slot.clip_idx) else {
+                continue;
+            };
             if was_playing {
                 let ok = Self::seek_slot_decoder_with_retry(
                     slot,
@@ -12944,7 +13339,8 @@ impl ProgramPlayer {
                                     // element name (e.g. "audiolevel_track3" → track 3).
                                     if let Some(src) = msg.src() {
                                         let name = src.name().to_string();
-                                        if let Some(idx_str) = name.strip_prefix("audiolevel_track") {
+                                        if let Some(idx_str) = name.strip_prefix("audiolevel_track")
+                                        {
                                             if let Ok(ti) = idx_str.parse::<usize>() {
                                                 self.push_track_peak(ti, l, r);
                                             }
@@ -13043,11 +13439,7 @@ impl ProgramPlayer {
     /// Build a separate pipeline that mixes multiple audio-track clips.
     /// This pipeline is independent from the main compositor pipeline to
     /// avoid clock interference that causes video stuttering.
-    fn rebuild_audio_multi_pipeline(
-        &mut self,
-        active: &[usize],
-        timeline_pos_ns: u64,
-    ) {
+    fn rebuild_audio_multi_pipeline(&mut self, active: &[usize], timeline_pos_ns: u64) {
         if !Self::should_rebuild_audio_multi_pipeline(
             active,
             &self.audio_multi_active,
@@ -13138,7 +13530,9 @@ impl ProgramPlayer {
             };
             // Optional EQ for this branch (skip when flat).
             let clip_ref = self.audio_clips.get(active[decoders.len()]);
-            let needs_eq = clip_ref.map(|c| c.eq_bands.iter().any(|b| b.gain.abs() > 0.001)).unwrap_or(false);
+            let needs_eq = clip_ref
+                .map(|c| c.eq_bands.iter().any(|b| b.gain.abs() > 0.001))
+                .unwrap_or(false);
             let eq_elem = if needs_eq {
                 gst::ElementFactory::make("equalizer-nbands")
                     .property("num-bands", 3u32)
@@ -13428,7 +13822,9 @@ impl ProgramPlayer {
             self.audio_pipeline.set_property("uri", &uri);
             let _ = self.audio_pipeline.set_state(gst::State::Paused);
             // Wait for Paused so pads are linked before seeking.
-            let _ = self.audio_pipeline.state(Some(gst::ClockTime::from_seconds(2)));
+            let _ = self
+                .audio_pipeline
+                .state(Some(gst::ClockTime::from_seconds(2)));
             let _ = self.audio_pipeline.seek(
                 clip.seek_rate(),
                 clip.audio_seek_flags(),
@@ -13518,11 +13914,8 @@ impl ProgramPlayer {
                 // Use the multi-clip mixer for all audio-track playback (1 or more clips).
                 let _ = self.audio_pipeline.set_state(gst::State::Ready);
                 self.audio_current_source = None;
-                if !self.reseek_audio_multi_pipeline(
-                    &active,
-                    timeline_pos_ns,
-                    force_multi_rebuild,
-                ) {
+                if !self.reseek_audio_multi_pipeline(&active, timeline_pos_ns, force_multi_rebuild)
+                {
                     if force_multi_rebuild {
                         self.teardown_audio_multi_pipeline();
                     }
@@ -13649,7 +14042,9 @@ fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
     if let Err(e) = result {
         log::warn!(
             "set_frei0r_property: panic setting '{param}' = {val} — {:?}",
-            e.downcast_ref::<String>().map(|s| s.as_str()).unwrap_or("unknown")
+            e.downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .unwrap_or("unknown")
         );
     }
 }
@@ -13665,14 +14060,19 @@ fn set_frei0r_string_property(elem: &gst::Element, param: &str, val: &str) {
         if let Err(e) = result {
             log::warn!(
                 "set_frei0r_string_property: panic setting '{param}' = '{val}' — {:?}",
-                e.downcast_ref::<String>().map(|s| s.as_str()).unwrap_or("unknown")
+                e.downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown")
             );
         }
     }
 }
 
 fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
-    clip.opacity >= 0.999
+    // Title clips use videotestsrc with a potentially transparent background
+    // (default bg alpha=0) — they should never occlude lower tracks.
+    !clip.is_title
+        && clip.opacity >= 0.999
         && clip.opacity_keyframes.is_empty()
         && clip.scale >= 1.0
         && clip.scale_keyframes.is_empty()
@@ -13736,12 +14136,21 @@ mod tests {
         let band0 = super::child_proxy_get_child(&eq, 0).unwrap();
         let g: f64 = band0.property("gain");
         let f: f64 = band0.property("freq");
-        assert!((g - 10.0).abs() < 0.001, "band0 gain should be 10.0, got {g}");
-        assert!((f - 200.0).abs() < 0.001, "band0 freq should be 200.0, got {f}");
+        assert!(
+            (g - 10.0).abs() < 0.001,
+            "band0 gain should be 10.0, got {g}"
+        );
+        assert!(
+            (f - 200.0).abs() < 0.001,
+            "band0 freq should be 200.0, got {f}"
+        );
         // Test eq_set_band_gain
         super::eq_set_band_gain(&eq, 0, -12.0);
         let g2: f64 = band0.property("gain");
-        assert!((g2 - (-12.0)).abs() < 0.001, "band0 gain should be -12.0, got {g2}");
+        assert!(
+            (g2 - (-12.0)).abs() < 0.001,
+            "band0 gain should be -12.0, got {g2}"
+        );
     }
 
     #[test]
@@ -13995,6 +14404,168 @@ mod tests {
             ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 83_333_333, 0),
             ""
         );
+    }
+
+    #[test]
+    fn prerender_title_lavfi_color_keeps_alpha_for_transparent_backgrounds() {
+        let mut clip = make_clip();
+        clip.is_title = true;
+        clip.title_clip_bg_color = 0x00000000;
+
+        let filter = ProgramPlayer::prerender_title_clip_lavfi_color(&clip, 1920, 1080, 24, 2.5);
+
+        assert!(filter.contains("color=c=black@0.0"));
+        assert!(filter.contains("format=yuva420p"));
+    }
+
+    #[test]
+    fn prerender_title_lavfi_color_uses_opaque_format_for_filled_backgrounds() {
+        let mut clip = make_clip();
+        clip.is_title = true;
+        clip.title_clip_bg_color = 0x112233CC;
+
+        let filter = ProgramPlayer::prerender_title_clip_lavfi_color(&clip, 1920, 1080, 24, 2.5);
+
+        assert!(filter.contains("color=c=#112233"));
+        assert!(filter.contains("format=yuv420p"));
+        assert!(!filter.contains("black@0.0"));
+    }
+
+    #[test]
+    fn prerender_title_filter_uses_fontconfig_selector_for_bold_italic_fonts() {
+        let mut clip = make_clip();
+        clip.title_text = "Preview".to_string();
+        clip.title_font = "Sans Bold Italic 36".to_string();
+
+        let filter = ProgramPlayer::prerender_build_title_filter(&clip, 1080);
+
+        assert!(filter.contains("font='Sans\\:weight=bold\\:slant=italic'"));
+        assert!(filter.contains("fontsize=48.00"));
+    }
+
+    #[test]
+    fn prerender_build_blur_filter_matches_export_mapping() {
+        let mut clip = make_clip();
+        clip.blur = 0.35;
+
+        assert_eq!(
+            ProgramPlayer::prerender_build_blur_filter(&clip),
+            ",boxblur=4:4"
+        );
+    }
+
+    #[test]
+    fn prerender_build_flip_filter_handles_all_flip_modes() {
+        let mut clip = make_clip();
+        assert_eq!(ProgramPlayer::prerender_build_flip_filter(&clip), "");
+
+        clip.flip_h = true;
+        assert_eq!(ProgramPlayer::prerender_build_flip_filter(&clip), ",hflip");
+
+        clip.flip_h = false;
+        clip.flip_v = true;
+        assert_eq!(ProgramPlayer::prerender_build_flip_filter(&clip), ",vflip");
+
+        clip.flip_h = true;
+        assert_eq!(
+            ProgramPlayer::prerender_build_flip_filter(&clip),
+            ",hflip,vflip"
+        );
+    }
+
+    #[test]
+    fn prerender_build_mask_alpha_uses_geq_for_shape_masks() {
+        let mut clip = make_clip();
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.width = 0.2;
+        mask.height = 0.15;
+        clip.masks.push(mask);
+
+        let mask_alpha = ProgramPlayer::prerender_build_mask_alpha(&clip, 1920, 1080);
+
+        match mask_alpha {
+            Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::GeqExpression(expr)) => {
+                assert!(expr.contains("between(") || expr.contains("clip("));
+            }
+            other => panic!("expected geq expression mask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prerender_build_mask_alpha_rasterizes_path_masks() {
+        let mut clip = make_clip();
+        clip.masks.push(crate::model::clip::ClipMask::new_path(vec![
+            crate::model::clip::BezierPoint {
+                x: 0.5,
+                y: 0.2,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
+            crate::model::clip::BezierPoint {
+                x: 0.8,
+                y: 0.5,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
+            crate::model::clip::BezierPoint {
+                x: 0.5,
+                y: 0.8,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
+            crate::model::clip::BezierPoint {
+                x: 0.2,
+                y: 0.5,
+                handle_in_x: 0.0,
+                handle_in_y: 0.0,
+                handle_out_x: 0.0,
+                handle_out_y: 0.0,
+            },
+        ]));
+
+        let mask_alpha = ProgramPlayer::prerender_build_mask_alpha(&clip, 640, 360);
+
+        match mask_alpha {
+            Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::RasterFile(file)) => {
+                assert!(file.path().exists());
+            }
+            other => panic!("expected rasterized mask file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_has_phase1_keyframes_detects_mask_animation() {
+        let mut clip = make_clip();
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.center_x_keyframes
+            .push(crate::model::clip::NumericKeyframe {
+                time_ns: 0,
+                value: 0.4,
+                interpolation: crate::model::clip::KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            });
+        clip.masks.push(mask);
+
+        assert!(ProgramPlayer::clip_has_phase1_keyframes(&clip));
+    }
+
+    #[test]
+    fn clip_has_unsupported_background_prerender_features_detects_speed_and_audio_fx() {
+        let mut clip = make_clip();
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.speed = 1.25;
+        assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.speed = 1.0;
+        clip.pan = 0.4;
+        assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
     }
 
     #[test]
@@ -14587,7 +15158,9 @@ mod tests {
             },
             gaussianblur: if has_gaussianblur { identity() } else { None },
             squareblur: None, // no squareblur in test slots
-            crop_alpha_state: Arc::new(Mutex::new((0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32))),
+            crop_alpha_state: Arc::new(Mutex::new((
+                0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32, 0i32,
+            ))),
             videocrop: None,
             videobox_crop_alpha: None,
             imagefreeze: if has_imagefreeze { identity() } else { None },
@@ -15490,9 +16063,18 @@ mod tests {
 
         let (sh_pos, mid_pos, hi_pos) =
             ProgramPlayer::apply_export_tonal_parity_gains(-0.8, 0.5, 0.4, 0.9, 0.92, 0.95);
-        assert!((sh_pos + 0.8).abs() < 1e-9, "negative shadows must be unchanged");
-        assert!((mid_pos - 0.5).abs() < 1e-9, "positive midtones must be unchanged");
-        assert!((hi_pos - 0.4).abs() < 1e-9, "positive highlights must be unchanged");
+        assert!(
+            (sh_pos + 0.8).abs() < 1e-9,
+            "negative shadows must be unchanged"
+        );
+        assert!(
+            (mid_pos - 0.5).abs() < 1e-9,
+            "positive midtones must be unchanged"
+        );
+        assert!(
+            (hi_pos - 0.4).abs() < 1e-9,
+            "positive highlights must be unchanged"
+        );
     }
 
     #[test]
@@ -15506,12 +16088,24 @@ mod tests {
     fn piecewise_cool_temperature_gain_interpolates_segments() {
         let far = 0.94;
         let near = 0.98;
-        assert!((ProgramPlayer::piecewise_cool_temperature_gain(2000.0, far, near) - far).abs() < 1e-9);
-        assert!((ProgramPlayer::piecewise_cool_temperature_gain(3500.0, far, near) - 0.96).abs() < 1e-9);
-        assert!((ProgramPlayer::piecewise_cool_temperature_gain(5000.0, far, near) - near).abs() < 1e-9);
-        assert!((ProgramPlayer::piecewise_cool_temperature_gain(5750.0, far, near) - 0.99).abs() < 1e-9);
-        assert!((ProgramPlayer::piecewise_cool_temperature_gain(6500.0, far, near) - 1.0).abs() < 1e-9);
-        assert!((ProgramPlayer::piecewise_cool_temperature_gain(10000.0, far, near) - 1.0).abs() < 1e-9);
+        assert!(
+            (ProgramPlayer::piecewise_cool_temperature_gain(2000.0, far, near) - far).abs() < 1e-9
+        );
+        assert!(
+            (ProgramPlayer::piecewise_cool_temperature_gain(3500.0, far, near) - 0.96).abs() < 1e-9
+        );
+        assert!(
+            (ProgramPlayer::piecewise_cool_temperature_gain(5000.0, far, near) - near).abs() < 1e-9
+        );
+        assert!(
+            (ProgramPlayer::piecewise_cool_temperature_gain(5750.0, far, near) - 0.99).abs() < 1e-9
+        );
+        assert!(
+            (ProgramPlayer::piecewise_cool_temperature_gain(6500.0, far, near) - 1.0).abs() < 1e-9
+        );
+        assert!(
+            (ProgramPlayer::piecewise_cool_temperature_gain(10000.0, far, near) - 1.0).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -15532,56 +16126,75 @@ mod tests {
 
         // Cool side (10000K) — offsets are negative (FFmpeg doesn't cool enough).
         let (r10k, g10k, b10k) = ProgramPlayer::export_temperature_channel_offsets(10000.0);
-        assert!(b10k < -0.01, "10000K: B should be strongly negative: {b10k}");
+        assert!(
+            b10k < -0.01,
+            "10000K: B should be strongly negative: {b10k}"
+        );
         assert!(r10k < 0.0, "10000K: R should be negative: {r10k}");
-        assert!(b10k < r10k, "10000K: B offset should be larger than R: b={b10k} r={r10k}");
+        assert!(
+            b10k < r10k,
+            "10000K: B offset should be larger than R: b={b10k} r={r10k}"
+        );
     }
 
     #[test]
     fn export_3point_parity_offsets_shadows_positive_is_noop() {
         // Tonal 3-point offsets are intentionally disabled (no-op).
-        let base = ProgramPlayer::compute_3point_params(
-            0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        );
+        let base =
+            ProgramPlayer::compute_3point_params(0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut adjusted = base.clone();
         ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.5, 0.0, 0.0);
-        assert!((adjusted.black_r - base.black_r).abs() < 1e-9, "no-op: black_r unchanged");
-        assert!((adjusted.gray_r - base.gray_r).abs() < 1e-9, "no-op: gray_r unchanged");
-        assert!((adjusted.white_r - base.white_r).abs() < 1e-9, "no-op: white_r unchanged");
+        assert!(
+            (adjusted.black_r - base.black_r).abs() < 1e-9,
+            "no-op: black_r unchanged"
+        );
+        assert!(
+            (adjusted.gray_r - base.gray_r).abs() < 1e-9,
+            "no-op: gray_r unchanged"
+        );
+        assert!(
+            (adjusted.white_r - base.white_r).abs() < 1e-9,
+            "no-op: white_r unchanged"
+        );
     }
 
     #[test]
     fn export_3point_parity_offsets_midtones_negative_is_noop() {
-        let base = ProgramPlayer::compute_3point_params(
-            0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        );
+        let base =
+            ProgramPlayer::compute_3point_params(0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut adjusted = base.clone();
         ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.0, -1.0, 0.0);
-        assert!((adjusted.gray_r - base.gray_r).abs() < 1e-9, "no-op: gray_r unchanged");
+        assert!(
+            (adjusted.gray_r - base.gray_r).abs() < 1e-9,
+            "no-op: gray_r unchanged"
+        );
     }
 
     #[test]
     fn export_3point_parity_offsets_highlights_is_noop() {
-        let base = ProgramPlayer::compute_3point_params(
-            0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        );
+        let base =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut adjusted = base.clone();
         ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.0, 0.0, -1.0);
-        assert!((adjusted.white_r - base.white_r).abs() < 1e-9, "no-op: white_r unchanged");
-
-        let base_pos = ProgramPlayer::compute_3point_params(
-            0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        assert!(
+            (adjusted.white_r - base.white_r).abs() < 1e-9,
+            "no-op: white_r unchanged"
         );
+
+        let base_pos =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut adjusted_pos = base_pos.clone();
         ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted_pos, 0.0, 0.0, 1.0);
-        assert!((adjusted_pos.white_r - base_pos.white_r).abs() < 1e-9, "no-op: white_r unchanged");
+        assert!(
+            (adjusted_pos.white_r - base_pos.white_r).abs() < 1e-9,
+            "no-op: white_r unchanged"
+        );
     }
 
     #[test]
     fn export_3point_parity_offsets_neutral_is_passthrough() {
-        let base = ProgramPlayer::compute_3point_params(
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        );
+        let base =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut adjusted = base.clone();
         ProgramPlayer::apply_export_3point_parity_offsets(&mut adjusted, 0.0, 0.0, 0.0);
         assert!((adjusted.black_r - base.black_r).abs() < 1e-9);
@@ -15642,9 +16255,8 @@ mod tests {
         // Negative tint = green (green boost): black_g should be LOWER.
         let magenta =
             ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
-        let green = ProgramPlayer::compute_3point_params(
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
-        );
+        let green =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0);
         assert!(
             magenta.black_g > green.black_g,
             "magenta tint (+1) green control should be higher (less green): magenta_g={}, green_g={}",
@@ -15661,9 +16273,8 @@ mod tests {
     fn threepoint_parabola_identity_at_neutral() {
         // At neutral params (black=0, gray=0.5, white=1.0), the parabola
         // should be identity: y = x.
-        let p = ProgramPlayer::compute_3point_params(
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        );
+        let p =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let para = ThreePointParabola::from_params(&p);
         // Check a few sample values.
         for &x in &[0.0, 0.25, 0.5, 0.75, 1.0] {
@@ -15671,7 +16282,9 @@ mod tests {
             assert!(
                 (yr - x).abs() < 0.05,
                 "neutral red parabola at x={}: expected ~{}, got {}",
-                x, x, yr
+                x,
+                x,
+                yr
             );
         }
     }
@@ -15679,16 +16292,16 @@ mod tests {
     #[test]
     fn threepoint_parabola_matches_frei0r_at_midgray() {
         // The frei0r plugin maps gray_c → 0.5.  Verify our parabola does too.
-        let p = ProgramPlayer::compute_3point_params(
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
-        );
+        let p =
+            ProgramPlayer::compute_3point_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
         let para = ThreePointParabola::from_params(&p);
         let x = p.gray_r;
         let y = para.r.a * x * x + para.r.b * x + para.r.c;
         assert!(
             (y - 0.5).abs() < 0.001,
             "gray_r={}: parabola at gray should be 0.5, got {}",
-            x, y
+            x,
+            y
         );
     }
 

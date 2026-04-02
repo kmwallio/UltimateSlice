@@ -248,7 +248,12 @@ pub fn apply_template_to_clip(template: &TitleTemplate, clip: &mut Clip) {
 
 /// Create a standalone `ClipKind::Title` clip from a template.
 pub fn create_title_clip(template: &TitleTemplate, timeline_start: u64) -> Clip {
-    let mut clip = Clip::new("", template.default_duration_ns, timeline_start, ClipKind::Title);
+    let mut clip = Clip::new(
+        "",
+        template.default_duration_ns,
+        timeline_start,
+        ClipKind::Title,
+    );
     clip.id = Uuid::new_v4().to_string();
     clip.label = template.display_name.to_string();
     clip.title_text = template.display_name.to_string();

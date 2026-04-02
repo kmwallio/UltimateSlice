@@ -593,10 +593,13 @@ impl ExportQueueJob {
             .and_then(|n| n.to_str())
             .unwrap_or(&output_path)
             .to_string();
-        let id = format!("{:x}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos());
+        let id = format!(
+            "{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        );
         Self {
             id,
             label,
