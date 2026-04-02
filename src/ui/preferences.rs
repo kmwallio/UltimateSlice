@@ -9,13 +9,14 @@ use std::rc::Rc;
 
 const THIRD_PARTY_COMPONENTS: &str = "\
 Third-party crates and libraries:\n\
-• gtk4-rs / gdk4 / gio / glib — LGPL-2.1-or-later\n\
+• gtk4-rs / gdk4 / gio / glib / pango — GTK/Pango runtime libraries LGPL-2.1-or-later\n\
 • GStreamer + gstreamer-rs bindings — LGPL-2.1-or-later\n\
 • quick-xml — MIT\n\
 • serde / serde_json — MIT OR Apache-2.0\n\
 • uuid — MIT OR Apache-2.0\n\
 • anyhow / thiserror / log / env_logger — MIT OR Apache-2.0\n\
 • rustfft — MIT OR Apache-2.0\n\
+• whisper-rs — Unlicense\n\
 • ort (ONNX Runtime) — MIT OR Apache-2.0\n\
 • ndarray — MIT OR Apache-2.0\n\
 • resvg / usvg / tiny-skia — MIT OR Apache-2.0\n\
