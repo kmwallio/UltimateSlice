@@ -249,6 +249,10 @@ entry:focus {
     border-color: #555560;
 }
 
+.media-filter-box {
+    padding-bottom: 2px;
+}
+
 .media-list row {
     border-bottom: 1px solid #2a2a2e;
 }
@@ -278,6 +282,21 @@ entry:focus {
     color: #ff8a80;
     font-size: 10px;
     font-weight: 700;
+}
+
+.media-meta-primary {
+    font-size: 10px;
+    color: #c9c9d2;
+}
+
+.media-meta-secondary {
+    font-size: 10px;
+    color: #9fa0aa;
+}
+
+.media-grid flowboxchild:selected .media-meta-primary,
+.media-grid flowboxchild:selected .media-meta-secondary {
+    color: rgba(255, 255, 255, 0.92);
 }
 
 .media-missing-item {

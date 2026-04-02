@@ -1,3 +1,4 @@
+use crate::model::clip::ClipKind;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -85,7 +86,11 @@ impl MediaLibrary {
     }
 }
 
-/// A media item in the project library — not yet placed on the timeline.
+/// A media item in the project library.
+///
+/// Most entries are imported source files, but the browser can also surface
+/// non-file-backed timeline clips (titles, adjustment layers, compounds,
+/// multicam clips) using their clip id as the stable library key.
 #[derive(Debug, Clone)]
 pub struct MediaItem {
     #[allow(dead_code)]
@@ -106,6 +111,20 @@ pub struct MediaItem {
     pub is_animated_svg: bool,
     /// Optional absolute source time reference for the start of the media.
     pub source_timecode_base_ns: Option<u64>,
+    /// Video resolution when the source contains a video stream.
+    pub video_width: Option<u32>,
+    pub video_height: Option<u32>,
+    /// Frame rate as a rational value when the source contains a video stream.
+    pub frame_rate_num: Option<u32>,
+    pub frame_rate_den: Option<u32>,
+    /// Human-friendly codec summary derived from probe metadata.
+    pub codec_summary: Option<String>,
+    /// File size resolved from filesystem metadata.
+    pub file_size_bytes: Option<u64>,
+    /// Timeline-native clip kind when this item has no backing source file.
+    pub clip_kind: Option<ClipKind>,
+    /// Current title text for title clips shown in the media browser.
+    pub title_text: Option<String>,
     /// True when the source file path cannot be resolved on disk.
     pub is_missing: bool,
     /// Bin this item belongs to (None = root level).
@@ -115,7 +134,7 @@ pub struct MediaItem {
 impl MediaItem {
     pub fn new(source_path: impl Into<String>, duration_ns: u64) -> Self {
         let source_path = source_path.into();
-        let is_missing = !source_path_exists(&source_path);
+        let is_missing = !source_path.is_empty() && !source_path_exists(&source_path);
         let label = std::path::Path::new(&source_path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -131,9 +150,35 @@ impl MediaItem {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            video_width: None,
+            video_height: None,
+            frame_rate_num: None,
+            frame_rate_den: None,
+            codec_summary: None,
+            file_size_bytes: None,
+            clip_kind: None,
+            title_text: None,
             is_missing,
             bin_id: None,
         }
+    }
+
+    pub fn has_backing_file(&self) -> bool {
+        !self.source_path.is_empty()
+    }
+
+    pub fn library_key(&self) -> String {
+        if self.has_backing_file() {
+            self.source_path.clone()
+        } else {
+            format!("clip:{}", self.id)
+        }
+    }
+
+    pub fn matches_library_key(&self, key: &str) -> bool {
+        key.strip_prefix("clip:")
+            .map(|clip_id| !self.has_backing_file() && self.id == clip_id)
+            .unwrap_or_else(|| self.source_path == key)
     }
 }
 
@@ -152,11 +197,7 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
     let media_bins: std::collections::HashMap<String, String> = lib
         .items
         .iter()
-        .filter_map(|i| {
-            i.bin_id
-                .as_ref()
-                .map(|bid| (i.source_path.clone(), bid.clone()))
-        })
+        .filter_map(|i| i.bin_id.as_ref().map(|bid| (i.library_key(), bid.clone())))
         .collect();
     if media_bins.is_empty() {
         project.parsed_media_bins_json = None;
@@ -180,7 +221,11 @@ pub fn apply_bins_from_project(
             serde_json::from_str::<std::collections::HashMap<String, String>>(media_bins_json)
         {
             for item in lib.items.iter_mut() {
-                if let Some(bin_id) = map.get(&item.source_path) {
+                let bin_id = map.get(&item.library_key()).or_else(|| {
+                    map.iter()
+                        .find_map(|(key, value)| item.matches_library_key(key).then_some(value))
+                });
+                if let Some(bin_id) = bin_id {
                     // Only assign if the bin actually exists
                     if lib.bins.iter().any(|b| &b.id == bin_id) {
                         item.bin_id = Some(bin_id.clone());
@@ -260,6 +305,14 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            video_width: None,
+            video_height: None,
+            frame_rate_num: None,
+            frame_rate_den: None,
+            codec_summary: None,
+            file_size_bytes: None,
+            clip_kind: None,
+            title_text: None,
             is_missing: true, // test paths don't exist
             bin_id,
         }
@@ -345,5 +398,58 @@ mod tests {
 
         assert!(lib.find_bin(&bin.id).is_some());
         assert!(lib.find_bin("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_library_key_uses_clip_id_for_non_file_items() {
+        let mut item = MediaItem::new("", 2_000_000_000);
+        item.id = "title-123".to_string();
+        item.clip_kind = Some(ClipKind::Title);
+
+        assert_eq!(item.library_key(), "clip:title-123");
+        assert!(item.matches_library_key("clip:title-123"));
+    }
+
+    #[test]
+    fn test_sync_bins_round_trips_non_file_items() {
+        let bin = make_bin("Generated", None);
+        let mut lib = MediaLibrary::new();
+        lib.bins.push(bin.clone());
+
+        let mut file_item = make_item("/tmp/a.mp4", Some(bin.id.clone()));
+        file_item.is_missing = false;
+        lib.items.push(file_item);
+
+        let mut title_item = MediaItem::new("", 4_000_000_000);
+        title_item.id = "title-clip".to_string();
+        title_item.label = "Lower Third".to_string();
+        title_item.clip_kind = Some(ClipKind::Title);
+        title_item.title_text = Some("Jane Doe".to_string());
+        title_item.bin_id = Some(bin.id.clone());
+        lib.items.push(title_item.clone());
+
+        let mut project = crate::model::project::Project::new("Test");
+        sync_bins_to_project(&lib, &mut project);
+
+        let bins_json = project
+            .parsed_media_bins_json
+            .as_ref()
+            .expect("media bins should be serialized");
+        assert!(bins_json.contains("clip:title-clip"));
+
+        let mut restored = MediaLibrary::new();
+        restored.bins.push(bin.clone());
+
+        let mut restored_file = make_item("/tmp/a.mp4", None);
+        restored_file.is_missing = false;
+        restored.items.push(restored_file);
+
+        title_item.bin_id = None;
+        restored.items.push(title_item);
+
+        apply_bins_from_project(&mut restored, &mut project);
+
+        assert_eq!(restored.items[0].bin_id.as_deref(), Some(bin.id.as_str()));
+        assert_eq!(restored.items[1].bin_id.as_deref(), Some(bin.id.as_str()));
     }
 }

@@ -7270,13 +7270,12 @@ fn draw_clip(
                     } else {
                         ((mid * src_span as f64) as u64).min(src_span - 1)
                     };
-                    let sample_time = if clip.kind == crate::model::clip::ClipKind::Image
-                        && !clip.animated_svg
-                    {
-                        0
-                    } else {
-                        clip.source_in + src_offset
-                    };
+                    let sample_time =
+                        if clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg {
+                            0
+                        } else {
+                            clip.source_in + src_offset
+                        };
 
                     if let Some(surf) = cache.get(&clip.source_path, sample_time) {
                         cr.save().ok();
@@ -7295,8 +7294,7 @@ fn draw_clip(
             } else {
                 let draw_w = ((inner_h * THUMB_ASPECT).max(1.0)).min((inner_w * 0.5).max(1.0));
                 let mut requested_this_draw = 0usize;
-                let is_img =
-                    clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg;
+                let is_img = clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg;
                 let start_time = if is_img { 0 } else { clip.source_in };
                 let end_time = if is_img {
                     0

@@ -1,14 +1,14 @@
 # Media Library
 
-The **Media Library** panel (left side) holds all source clips available for your project.
+The **Media Library** panel (left side) holds all imported source clips available for your project, along with timeline-native browser items such as titles that do not have backing media files.
 
 ## Importing Media
 
 1. When the library is empty, click the **+ Import Media…** button in the library panel.
 2. Once media has been imported, use the **+** button next to the **Media Library** title to import more files.
 3. Choose one or more video, audio, or image files from the file chooser.
-4. Imported items appear in the list showing the clip name and filename.
-5. GStreamer probes each file on import to determine its duration and extract source timecode (creation date/time) when available.
+4. Imported items appear as thumbnail cards showing the clip name and, once probing completes, compact media metadata.
+5. GStreamer probes each file on import to determine duration, media type, dimensions/frame rate when applicable, file size, and source timecode (creation date/time) when available.
 6. **Still images** (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, static SVG) are detected by file extension and assigned a **4-second default duration**. They are classified as image clips rather than video or audio.
 7. **Animated SVG** sources are detected during import, keep their authored animation duration, and render to a cached silent video for preview, thumbnails, timeline playback, and export. The current implementation supports the SMIL-style `<animate>` / `<animateTransform>` subset; JavaScript and broader browser-style CSS animation behavior are not supported.
 8. If a source path is unavailable on disk, the media card shows an **OFFLINE** badge and warning outline.
@@ -45,8 +45,25 @@ Bins are saved with your project and restored when you reopen it.
 
 ## Browsing and Selecting
 
-- Click a library item to select it — the **Source Monitor** immediately loads and previews the clip.
+- Click a **source-backed** library item to select it — the **Source Monitor** immediately loads and previews the clip.
 - The clip name is shown above the source monitor preview.
+- Title and other non-file-backed browser cards remain visible/searchable and can still be organized into bins, but they do not load the Source Monitor because they have no source file to preview.
+
+## Metadata and Filtering
+
+- Each media card now shows compact metadata beneath the clip name when available:
+  - **Video / animated SVG**: resolution, frame rate, codec summary, duration, file size
+  - **Audio-only**: audio-only indicator text, codec summary, duration, file size
+  - **Still images**: resolution, image type, default duration, file size
+- Timeline-native cards with no backing file show their clip type instead of file metadata. Title cards use the current title text as the main card label and remain searchable by that text.
+- Hover a media card to see the full source path plus expanded metadata details in the tooltip.
+- Use the **filter search** field to match clip names, file paths, or codec text.
+- Use the **type** dropdown to focus on video, audio, images, or offline clips.
+- Use the **size** dropdown to narrow the current browser scope to SD-or-smaller, HD, Full HD, or 4K+ media.
+- Filters apply to the current browser scope:
+  - inside a bin, they filter that bin's items
+  - in **All Media**, they filter the flat project-wide media view
+  - bins themselves remain visible so navigation still works while filters are active
 
 ## Adding Clips to the Timeline
 

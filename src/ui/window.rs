@@ -303,6 +303,120 @@ fn lookup_source_timecode_base_ns(
         })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ProjectLibraryEntry {
+    sync_key: String,
+    item_id: String,
+    source_path: String,
+    duration_ns: u64,
+    source_timecode_base_ns: Option<u64>,
+    is_animated_svg: bool,
+    clip_kind: Option<ClipKind>,
+    label: String,
+    title_text: Option<String>,
+}
+
+impl ProjectLibraryEntry {
+    fn from_clip(clip: &Clip) -> Self {
+        let clip_kind = clip.source_path.is_empty().then_some(clip.kind.clone());
+        let title_text = if clip.kind == ClipKind::Title && !clip.title_text.trim().is_empty() {
+            Some(clip.title_text.clone())
+        } else {
+            None
+        };
+        Self {
+            sync_key: if clip.source_path.is_empty() {
+                format!("clip:{}", clip.id)
+            } else {
+                clip.source_path.clone()
+            },
+            item_id: clip.id.clone(),
+            source_path: clip.source_path.clone(),
+            duration_ns: if clip.source_path.is_empty() {
+                clip.duration()
+            } else {
+                clip.media_duration_ns.unwrap_or(0)
+            },
+            source_timecode_base_ns: clip.source_timecode_base_ns,
+            is_animated_svg: clip.animated_svg,
+            clip_kind,
+            label: clip.label.clone(),
+            title_text,
+        }
+    }
+
+    fn apply_to_item(&self, item: &mut MediaItem) {
+        if self.source_path.is_empty() {
+            item.duration_ns = self.duration_ns;
+            item.is_audio_only = false;
+            item.has_audio = false;
+            item.is_image = false;
+            item.video_width = None;
+            item.video_height = None;
+            item.frame_rate_num = None;
+            item.frame_rate_den = None;
+            item.codec_summary = None;
+            item.file_size_bytes = None;
+            item.is_missing = false;
+            item.label = self.label.clone();
+            item.clip_kind = self.clip_kind.clone();
+            item.title_text = self.title_text.clone();
+        } else if item.duration_ns == 0 && self.duration_ns > 0 {
+            item.duration_ns = self.duration_ns;
+        }
+        if item.source_timecode_base_ns.is_none() && self.source_timecode_base_ns.is_some() {
+            item.source_timecode_base_ns = self.source_timecode_base_ns;
+        }
+        item.is_animated_svg = self.is_animated_svg;
+    }
+
+    fn into_media_item(self) -> MediaItem {
+        let mut item = MediaItem::new(self.source_path, self.duration_ns);
+        item.id = self.item_id;
+        item.source_timecode_base_ns = self.source_timecode_base_ns;
+        item.is_animated_svg = self.is_animated_svg;
+        item.clip_kind = self.clip_kind;
+        item.title_text = self.title_text;
+        if !item.has_backing_file() {
+            item.label = self.label;
+            item.is_missing = false;
+        }
+        item
+    }
+}
+
+fn collect_project_library_entries(project: &Project) -> Vec<ProjectLibraryEntry> {
+    let mut seen = HashSet::new();
+    project
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .filter_map(|clip| {
+            let entry = ProjectLibraryEntry::from_clip(clip);
+            seen.insert(entry.sync_key.clone()).then_some(entry)
+        })
+        .collect()
+}
+
+fn sync_library_with_project_entries(library: &mut MediaLibrary, entries: &[ProjectLibraryEntry]) {
+    for entry in entries {
+        if let Some(item) = library
+            .items
+            .iter_mut()
+            .find(|item| item.matches_library_key(&entry.sync_key))
+        {
+            entry.apply_to_item(item);
+        }
+    }
+
+    let existing: HashSet<String> = library.items.iter().map(MediaItem::library_key).collect();
+    for entry in entries {
+        if !existing.contains(&entry.sync_key) {
+            library.items.push(entry.clone().into_media_item());
+        }
+    }
+}
+
 fn collect_media_source_paths(project: &Project, library: &[MediaItem]) -> HashSet<String> {
     let mut paths: HashSet<String> = project
         .tracks
@@ -668,21 +782,18 @@ fn lookup_source_placement_info(
     let item = library.iter().find(|item| item.source_path == source_path);
     let mut is_audio_only = item.map(|item| item.is_audio_only).unwrap_or(false);
     let mut has_audio = item.map(|item| item.has_audio).unwrap_or(false);
-    let is_animated_svg = item
-        .map(|item| item.is_animated_svg)
-        .unwrap_or_else(|| {
-            crate::model::clip::is_svg_file(source_path)
-                && crate::media::animated_svg::analyze_svg_path(source_path)
-                    .map(|analysis| analysis.is_animated)
-                    .unwrap_or(false)
-        });
+    let is_animated_svg = item.map(|item| item.is_animated_svg).unwrap_or_else(|| {
+        crate::model::clip::is_svg_file(source_path)
+            && crate::media::animated_svg::analyze_svg_path(source_path)
+                .map(|analysis| analysis.is_animated)
+                .unwrap_or(false)
+    });
     let is_image = item
         .map(|item| item.is_image)
         .unwrap_or_else(|| crate::model::clip::is_image_file(source_path));
 
     if item.is_none() || (!has_audio && !is_audio_only) {
-        let uri = format!("file://{source_path}");
-        let metadata = media_browser::probe_media_metadata(&uri);
+        let metadata = crate::media::probe_cache::probe_media_metadata(source_path);
         is_audio_only = metadata.is_audio_only;
         has_audio = metadata.has_audio;
     }
@@ -1024,6 +1135,36 @@ fn overwrite_clip_range_on_track(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_project_library_entries_keeps_distinct_sourceless_titles() {
+        let mut project = Project::new("Test");
+        let video_idx = project
+            .tracks
+            .iter()
+            .position(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist");
+
+        let mut title_a = Clip::new("", 4_000_000_000, 0, ClipKind::Title);
+        title_a.id = "title-a".to_string();
+        title_a.label = "Lower Third".to_string();
+        title_a.title_text = "Jane Doe".to_string();
+
+        let mut title_b = Clip::new("", 5_000_000_000, 6_000_000_000, ClipKind::Title);
+        title_b.id = "title-b".to_string();
+        title_b.label = "Lower Third".to_string();
+        title_b.title_text = "John Doe".to_string();
+
+        project.tracks[video_idx].clips.push(title_a);
+        project.tracks[video_idx].clips.push(title_b);
+
+        let entries = collect_project_library_entries(&project);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sync_key, "clip:title-a");
+        assert_eq!(entries[1].sync_key, "clip:title-b");
+        assert_eq!(entries[0].title_text.as_deref(), Some("Jane Doe"));
+        assert_eq!(entries[1].title_text.as_deref(), Some("John Doe"));
+    }
 
     #[test]
     fn source_monitor_plan_links_video_and_audio_when_both_tracks_exist() {
@@ -1578,47 +1719,13 @@ mod tests {
         assert!(st.missing_media_paths.is_empty(), "step 2: timeline clear");
 
         // Step 3: Simulate on_project_changed_impl library sync
-        // (collect media_from_project → update existing → add new)
-        {
-            let mut media_seen: HashSet<&str> = HashSet::new();
-            let media_from_project: Vec<(String, u64, Option<u64>, bool)> = project
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .filter(|c| media_seen.insert(c.source_path.as_str()))
-                .map(|c| {
-                    (
-                        c.source_path.clone(),
-                        c.media_duration_ns.unwrap_or(0),
-                        c.source_timecode_base_ns,
-                        c.animated_svg,
-                    )
-                })
-                .collect();
-
-            let seen: HashSet<String> = library.iter().map(|i| i.source_path.clone()).collect();
-            for (path, dur, stc, animated_svg) in &media_from_project {
-                if let Some(item) = library.iter_mut().find(|i| i.source_path == *path) {
-                    if item.duration_ns == 0 && *dur > 0 {
-                        item.duration_ns = *dur;
-                    }
-                    if item.source_timecode_base_ns.is_none() && stc.is_some() {
-                        item.source_timecode_base_ns = *stc;
-                    }
-                    item.is_animated_svg = *animated_svg;
-                }
-            }
-            let new_items: Vec<_> = media_from_project
-                .into_iter()
-                .filter(|(path, _, _, _)| !seen.contains(path))
-                .collect();
-            for (path, dur, stc, animated_svg) in new_items {
-                let mut item = MediaItem::new(path, dur);
-                item.source_timecode_base_ns = stc;
-                item.is_animated_svg = animated_svg;
-                library.push(item);
-            }
-        }
+        let media_from_project = collect_project_library_entries(&project);
+        let mut wrapped_library = MediaLibrary {
+            items: library,
+            bins: Vec::new(),
+        };
+        sync_library_with_project_entries(&mut wrapped_library, &media_from_project);
+        let mut library = wrapped_library.items;
 
         // Step 4: second refresh_media_availability_state (inside on_project_changed_impl)
         let missing2 = refresh_media_availability_state(&project, library.as_mut_slice(), &mut st);
@@ -5247,8 +5354,7 @@ pub fn build_window(
                         .iter()
                         .any(|item| item.source_path == *path);
                     if !already_in_library {
-                        let uri = format!("file://{path}");
-                        let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
+                        let metadata = crate::media::probe_cache::probe_media_metadata(path);
                         let duration_ns = if is_animated_svg {
                             animated_svg_analysis
                                 .as_ref()
@@ -5264,11 +5370,20 @@ pub fn build_window(
                         item.has_audio = metadata.has_audio;
                         item.is_image = is_image;
                         item.is_animated_svg = is_animated_svg;
-                        item.source_timecode_base_ns = lookup_source_timecode_base_ns(
-                            &library.borrow().items,
-                            &project.borrow(),
-                            path,
-                        );
+                        item.source_timecode_base_ns =
+                            metadata.source_timecode_base_ns.or_else(|| {
+                                lookup_source_timecode_base_ns(
+                                    &library.borrow().items,
+                                    &project.borrow(),
+                                    path,
+                                )
+                            });
+                        item.video_width = metadata.video_width;
+                        item.video_height = metadata.video_height;
+                        item.frame_rate_num = metadata.frame_rate_num;
+                        item.frame_rate_den = metadata.frame_rate_den;
+                        item.codec_summary = metadata.codec_summary.clone();
+                        item.file_size_bytes = metadata.file_size_bytes;
                         library.borrow_mut().items.push(item);
                     }
 
@@ -7135,7 +7250,10 @@ pub fn build_window(
                 if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
                     *fallback_uri = Some(original_uri.clone());
                 }
-                if source_proxy_enabled && !source_info.is_audio_only && !source_info.is_animated_svg {
+                if source_proxy_enabled
+                    && !source_info.is_audio_only
+                    && !source_info.is_animated_svg
+                {
                     proxy_cache.borrow_mut().request(
                         &path,
                         proxy_scale_for_mode(&proxy_mode),
@@ -7189,7 +7307,7 @@ pub fn build_window(
             m.is_audio_only = source_info.is_audio_only;
             m.has_audio = source_info.has_audio;
             m.is_image = source_info.is_image;
-             m.is_animated_svg = source_info.is_animated_svg;
+            m.is_animated_svg = source_info.is_animated_svg;
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
         })
     };
@@ -8085,7 +8203,7 @@ pub fn build_window(
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
             let (clips, media_from_project, project_dims, project_frame_rate): (
                 Vec<ProgramClip>,
-                Vec<(String, u64, Option<u64>, bool)>,
+                Vec<ProjectLibraryEntry>,
                 (u32, u32),
                 (u32, u32),
             ) = {
@@ -8147,22 +8265,10 @@ pub fn build_window(
                     })
                     .collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
-                // Collect only unique source paths to avoid redundant work.
-                let mut media_seen: HashSet<&str> = HashSet::new();
-                let media: Vec<(String, u64, Option<u64>, bool)> = proj
-                    .tracks
-                    .iter()
-                    .flat_map(|t| t.clips.iter())
-                    .filter(|c| media_seen.insert(c.source_path.as_str()))
-                    .map(|c| {
-                        (
-                            c.source_path.clone(),
-                            c.media_duration_ns.unwrap_or(0),
-                            c.source_timecode_base_ns,
-                            c.animated_svg,
-                        )
-                    })
-                    .collect();
+                // Source-backed clips still dedupe by source path, while sourceless timeline-native
+                // clips keep distinct clip-id keys so title cards don't collapse onto one
+                // empty-path browser item.
+                let media = collect_project_library_entries(&proj);
                 (
                     clips,
                     media,
@@ -8177,31 +8283,7 @@ pub fn build_window(
 
             {
                 let mut lib = library.borrow_mut();
-                let seen: HashSet<String> =
-                    lib.items.iter().map(|i| i.source_path.clone()).collect();
-                for (path, dur, source_timecode_base_ns, animated_svg) in &media_from_project {
-                    if let Some(item) = lib.items.iter_mut().find(|i| i.source_path == *path) {
-                        if item.duration_ns == 0 && *dur > 0 {
-                            item.duration_ns = *dur;
-                        }
-                        if item.source_timecode_base_ns.is_none()
-                            && source_timecode_base_ns.is_some()
-                        {
-                            item.source_timecode_base_ns = *source_timecode_base_ns;
-                        }
-                        item.is_animated_svg = *animated_svg;
-                    }
-                }
-                let new_items: Vec<_> = media_from_project
-                    .into_iter()
-                    .filter(|(path, _, _, _)| !seen.contains(path))
-                    .collect();
-                for (path, dur, source_timecode_base_ns, animated_svg) in new_items {
-                    let mut item = MediaItem::new(path, dur);
-                    item.source_timecode_base_ns = source_timecode_base_ns;
-                    item.is_animated_svg = animated_svg;
-                    lib.items.push(item);
-                }
+                sync_library_with_project_entries(&mut lib, &media_from_project);
                 // Restore bin assignments from parsed FCPXML data.
                 let mut proj = project.borrow_mut();
                 crate::model::media_library::apply_bins_from_project(&mut lib, &mut proj);
@@ -12557,18 +12639,41 @@ fn handle_mcp_command(
         }
 
         McpCommand::ListLibrary { reply } => {
+            fn library_clip_kind_id(kind: &ClipKind) -> &'static str {
+                match kind {
+                    ClipKind::Video => "video",
+                    ClipKind::Audio => "audio",
+                    ClipKind::Image => "image",
+                    ClipKind::Title => "title",
+                    ClipKind::Adjustment => "adjustment",
+                    ClipKind::Compound => "compound",
+                    ClipKind::Multicam => "multicam",
+                }
+            }
+
             let lib = library.borrow();
             let items: Vec<_> = lib
                 .items
                 .iter()
                 .map(|item| {
                     json!({
+                        "id":          item.id,
                         "label":       item.label,
                         "source_path": item.source_path,
                         "duration_ns": item.duration_ns,
                         "duration_s":  item.duration_ns as f64 / 1_000_000_000.0,
                         "is_audio_only": item.is_audio_only,
                         "has_audio": item.has_audio,
+                        "is_image": item.is_image,
+                        "is_animated_svg": item.is_animated_svg,
+                        "video_width": item.video_width,
+                        "video_height": item.video_height,
+                        "frame_rate_num": item.frame_rate_num,
+                        "frame_rate_den": item.frame_rate_den,
+                        "codec_summary": item.codec_summary,
+                        "file_size_bytes": item.file_size_bytes,
+                        "clip_kind": item.clip_kind.as_ref().map(library_clip_kind_id),
+                        "title_text": item.title_text,
                         "is_missing": item.is_missing,
                         "bin_id": item.bin_id,
                     })
@@ -12578,20 +12683,27 @@ fn handle_mcp_command(
         }
 
         McpCommand::ImportMedia { path, reply } => {
-            let uri = format!("file://{path}");
-            let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
+            let metadata = crate::media::probe_cache::probe_media_metadata(&path);
             let duration_ns = metadata.duration_ns.unwrap_or(10 * 1_000_000_000);
             let audio_only = metadata.is_audio_only;
             let has_audio = metadata.has_audio;
-            let source_timecode_base_ns = {
+            let source_timecode_base_ns = metadata.source_timecode_base_ns.or_else(|| {
                 let lib = library.borrow();
                 let proj = project.borrow();
                 lookup_source_timecode_base_ns(&lib.items, &proj, &path)
-            };
+            });
             let mut item = MediaItem::new(path.clone(), duration_ns);
             item.is_audio_only = audio_only;
             item.has_audio = has_audio;
             item.source_timecode_base_ns = source_timecode_base_ns;
+            item.is_image = metadata.is_image;
+            item.is_animated_svg = metadata.is_animated_svg;
+            item.video_width = metadata.video_width;
+            item.video_height = metadata.video_height;
+            item.frame_rate_num = metadata.frame_rate_num;
+            item.frame_rate_den = metadata.frame_rate_den;
+            item.codec_summary = metadata.codec_summary.clone();
+            item.file_size_bytes = metadata.file_size_bytes;
             let label = item.label.clone();
             library.borrow_mut().items.push(item);
             {
@@ -12608,6 +12720,12 @@ fn handle_mcp_command(
                     "is_audio_only": audio_only,
                     "has_audio": has_audio,
                     "source_timecode_base_ns": source_timecode_base_ns,
+                    "video_width": metadata.video_width,
+                    "video_height": metadata.video_height,
+                    "frame_rate_num": metadata.frame_rate_num,
+                    "frame_rate_den": metadata.frame_rate_den,
+                    "codec_summary": metadata.codec_summary,
+                    "file_size_bytes": metadata.file_size_bytes,
                     "is_missing": !crate::model::media_library::source_path_exists(&path)
                 }))
                 .ok();
@@ -13275,14 +13393,23 @@ fn handle_mcp_command(
                 .cloned();
             match item {
                 Some(media_item) => {
-                    on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
-                    reply
-                        .send(json!({
-                            "ok": true,
-                            "label": media_item.label,
-                            "duration_ns": media_item.duration_ns,
-                        }))
-                        .ok();
+                    if media_item.has_backing_file() {
+                        on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
+                        reply
+                            .send(json!({
+                                "ok": true,
+                                "label": media_item.label,
+                                "duration_ns": media_item.duration_ns,
+                            }))
+                            .ok();
+                    } else {
+                        reply
+                            .send(json!({
+                                "ok": false,
+                                "error": "Library item has no source media to preview",
+                            }))
+                            .ok();
+                    }
                 }
                 None => {
                     reply

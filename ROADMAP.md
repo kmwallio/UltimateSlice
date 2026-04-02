@@ -540,7 +540,7 @@ Tracking docs:
   - [x] MCP tools: `create_bin`, `delete_bin`, `rename_bin`, `list_bins`, `move_to_bin`; `list_library` includes `bin_id`
 - [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
 - [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
-- [ ] Metadata display & filtering — show resolution, codec, frame rate, duration, file size in media browser
+- [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
 
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)

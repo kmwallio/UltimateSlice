@@ -3407,7 +3407,8 @@ impl ProgramPlayer {
                 let Some(clip) = self.clips.get(slot.clip_idx) else {
                     continue;
                 };
-                let source_ns = Self::effective_slot_source_pos_ns(slot, clip, self.timeline_pos_ns);
+                let source_ns =
+                    Self::effective_slot_source_pos_ns(slot, clip, self.timeline_pos_ns);
                 let _ = slot.decoder.seek(
                     rate,
                     gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
@@ -7286,11 +7287,9 @@ impl ProgramPlayer {
         // the virtual overlap window.
         let effective_pos = timeline_pos_ns + slot.transition_enter_offset_ns;
         let source_ns = Self::effective_slot_source_pos_ns(slot, clip, effective_pos);
-        let effective_seek_flags =
-            Self::effective_decode_seek_flags(slot, clip, seek_flags);
+        let effective_seek_flags = Self::effective_decode_seek_flags(slot, clip, seek_flags);
         let start_ns = Self::effective_video_seek_start_ns(slot, clip, source_ns);
-        let stop_ns =
-            Self::effective_video_seek_stop_ns(slot, clip, source_ns, frame_duration_ns);
+        let stop_ns = Self::effective_video_seek_stop_ns(slot, clip, source_ns, frame_duration_ns);
         slot.decoder
             .seek(
                 clip.seek_rate(),
@@ -7329,9 +7328,17 @@ impl ProgramPlayer {
         }
     }
 
-    fn effective_video_seek_start_ns(slot: &VideoSlot, clip: &ProgramClip, source_pos_ns: u64) -> u64 {
+    fn effective_video_seek_start_ns(
+        slot: &VideoSlot,
+        clip: &ProgramClip,
+        source_pos_ns: u64,
+    ) -> u64 {
         if slot.animated_svg_rendered {
-            if clip.reverse { 0 } else { source_pos_ns }
+            if clip.reverse {
+                0
+            } else {
+                source_pos_ns
+            }
         } else {
             clip.seek_start_ns(source_pos_ns)
         }
@@ -15334,8 +15341,7 @@ mod tests {
         let slot = make_test_slot(false, false, false, false, false, false);
 
         let source = clip.source_pos_ns(0);
-        let stop =
-            ProgramPlayer::effective_video_seek_stop_ns(&slot, &clip, source, 41_666_667);
+        let stop = ProgramPlayer::effective_video_seek_stop_ns(&slot, &clip, source, 41_666_667);
         assert_eq!(stop, source + 41_666_667);
     }
 

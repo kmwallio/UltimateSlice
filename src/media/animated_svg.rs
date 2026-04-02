@@ -68,8 +68,14 @@ impl AnimatedSvgCache {
                     let lock = rx.lock().unwrap();
                     lock.recv()
                 };
-                let Ok((source_path, source_in_ns, source_out_ns, media_duration_ns, fps_num, fps_den)) =
-                    item
+                let Ok((
+                    source_path,
+                    source_in_ns,
+                    source_out_ns,
+                    media_duration_ns,
+                    fps_num,
+                    fps_den,
+                )) = item
                 else {
                     break;
                 };
@@ -132,7 +138,10 @@ impl AnimatedSvgCache {
             fps_num,
             fps_den,
         );
-        if self.paths.contains_key(&key) || self.pending.contains(&key) || self.failed.contains(&key) {
+        if self.paths.contains_key(&key)
+            || self.pending.contains(&key)
+            || self.failed.contains(&key)
+        {
             return;
         }
         if let Some(existing) = existing_render_path_for(
@@ -316,8 +325,12 @@ fn render_animated_svg_clip(
     let parent = Path::new(output_path)
         .parent()
         .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create animated SVG cache dir {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create animated SVG cache dir {}",
+            parent.display()
+        )
+    })?;
     let _ = std::fs::remove_file(&temp_path);
     let mut encoder = Command::new(&ffmpeg)
         .args([
@@ -379,7 +392,9 @@ fn render_animated_svg_clip(
     }
     writer.flush()?;
     drop(writer);
-    let status = encoder.wait().context("waiting for animated SVG encoder failed")?;
+    let status = encoder
+        .wait()
+        .context("waiting for animated SVG encoder failed")?;
     if !status.success() {
         let _ = std::fs::remove_file(&temp_path);
         return Err(anyhow!(
@@ -409,7 +424,11 @@ fn render_svg_frame_from_str(
     let height = size.height().ceil().max(1.0) as u32;
     let mut pixmap =
         tiny_skia::Pixmap::new(width, height).ok_or_else(|| anyhow!("invalid SVG frame size"))?;
-    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     Ok(RenderedSvgFrame {
         width,
         height,
@@ -445,7 +464,10 @@ fn render_svg_node(
         .map(|attr| (attr.name().to_string(), attr.value().to_string()))
         .collect();
     let mut style_map = parse_style_map(get_attr_value(&attrs, "style"));
-    let base_transform = get_attr_value(&attrs, "transform").unwrap_or("").trim().to_string();
+    let base_transform = get_attr_value(&attrs, "transform")
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let mut animated_transform = None;
     for child in node.children().filter(|child| child.is_element()) {
         if let Some(animation) = parse_animation_node(child) {
@@ -486,10 +508,7 @@ fn render_svg_node(
     }
     let has_non_animation_children = node.children().any(|child| {
         !child.is_element()
-            || child
-                .tag_name()
-                .name()
-                .is_empty()
+            || child.tag_name().name().is_empty()
             || !is_animation_tag(child.tag_name().name())
     });
     if !has_non_animation_children {
@@ -595,10 +614,7 @@ fn rendered_file_is_ready(path: &str, ffprobe_path: Option<&str>) -> bool {
                     path,
                 ])
                 .output();
-            return output
-                .ok()
-                .filter(|o| o.status.success())
-                .is_some();
+            return output.ok().filter(|o| o.status.success()).is_some();
         }
         return true;
     }
@@ -615,7 +631,8 @@ fn is_animation_tag(name: &str) -> bool {
 }
 
 fn get_attr_value<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    attrs.iter()
+    attrs
+        .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value.as_str())
 }
@@ -772,7 +789,12 @@ fn parse_animation_node(node: usvg::roxmltree::Node<'_, '_>) -> Option<ParsedAni
     };
     let values = node
         .attribute("values")
-        .map(|values| values.split(';').map(|v| v.trim().to_string()).collect::<Vec<_>>())
+        .map(|values| {
+            values
+                .split(';')
+                .map(|v| v.trim().to_string())
+                .collect::<Vec<_>>()
+        })
         .filter(|values| values.len() >= 2);
     let from = node.attribute("from").map(|s| s.trim().to_string());
     let to = node.attribute("to").map(|s| s.trim().to_string());
@@ -848,7 +870,11 @@ fn parse_svg_time_to_ns(value: &str) -> Option<u64> {
         return None;
     }
     if let Some(ms) = value.strip_suffix("ms") {
-        return ms.trim().parse::<f64>().ok().map(|v| (v * 1_000_000.0) as u64);
+        return ms
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1_000_000.0) as u64);
     }
     if let Some(sec) = value.strip_suffix('s') {
         return sec
@@ -904,12 +930,7 @@ fn interpolate_animation_value(
     let is_color = matches!(attribute_name, "fill" | "stroke");
     if let Some(values) = values {
         if is_color {
-            return interpolate_value_list(
-                values,
-                progress,
-                calc_mode,
-                interpolate_color_value,
-            );
+            return interpolate_value_list(values, progress, calc_mode, interpolate_color_value);
         }
         return interpolate_value_list(values, progress, calc_mode, interpolate_numeric_value);
     }
@@ -940,14 +961,22 @@ fn interpolate_transform_value(
     Some(match kind {
         TransformKind::Translate => {
             if components.len() > 1 {
-                format!("translate({} {})", format_number(components[0]), format_number(components[1]))
+                format!(
+                    "translate({} {})",
+                    format_number(components[0]),
+                    format_number(components[1])
+                )
             } else {
                 format!("translate({})", format_number(components[0]))
             }
         }
         TransformKind::Scale => {
             if components.len() > 1 {
-                format!("scale({} {})", format_number(components[0]), format_number(components[1]))
+                format!(
+                    "scale({} {})",
+                    format_number(components[0]),
+                    format_number(components[1])
+                )
             } else {
                 format!("scale({})", format_number(components[0]))
             }
@@ -1041,7 +1070,10 @@ fn parse_numeric_with_suffix(value: &str) -> Option<(f64, String)> {
         .find(|ch: char| !(ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E')))
         .unwrap_or(value.len());
     let (number, suffix) = value.split_at(split);
-    Some((number.trim().parse::<f64>().ok()?, suffix.trim().to_string()))
+    Some((
+        number.trim().parse::<f64>().ok()?,
+        suffix.trim().to_string(),
+    ))
 }
 
 fn parse_number_list(value: &str) -> Option<Vec<f64>> {

@@ -89,8 +89,12 @@ impl ThumbnailCache {
                 None
             };
             self.loading.insert(key.clone());
-            self.pending
-                .push_back((key, source_path.to_string(), time_ns, animated_svg_duration_ns));
+            self.pending.push_back((
+                key,
+                source_path.to_string(),
+                time_ns,
+                animated_svg_duration_ns,
+            ));
             self.flush_pending();
         }
         false

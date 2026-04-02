@@ -720,7 +720,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_library",
-            "description": "List all items currently in the media library (imported but not necessarily on the timeline).",
+            "description": "List all items currently in the media library, including stable item ids plus resolved browser metadata such as duration, codec, resolution, frame rate, file size, and non-file clip kind/title text when available.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
