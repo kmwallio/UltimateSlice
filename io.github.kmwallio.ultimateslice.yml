@@ -1,9 +1,10 @@
 app-id: io.github.kmwallio.ultimateslice
 runtime: org.gnome.Platform
-runtime-version: "49"
+runtime-version: "50"
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm20
 command: ultimate-slice
 finish-args:
   - --share=ipc
@@ -16,17 +17,27 @@ finish-args:
   - --filesystem=/run/media
   - --filesystem=/mnt
 build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
   env:
     CARGO_HOME: /run/build/ultimate-slice/cargo
+    LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
 modules:
   - name: ultimate-slice
     buildsystem: simple
     build-options:
       env:
         CARGO_HOME: /run/build/ultimate-slice/cargo
+        LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
     build-commands:
-      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - mkdir -p .cargo
+      - |
+        cat > .cargo/config.toml << 'EOF'
+        [source.crates-io]
+        replace-with = "vendored-sources"
+
+        [source.vendored-sources]
+        directory = "cargo/vendor"
+        EOF
       - cargo --offline build --release --locked
       - install -Dm755 target/release/ultimate-slice /app/bin/ultimate-slice
       - install -Dm644 data/io.github.kmwallio.ultimateslice.desktop /app/share/applications/io.github.kmwallio.ultimateslice.desktop
