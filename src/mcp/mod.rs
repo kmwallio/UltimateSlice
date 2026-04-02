@@ -280,6 +280,30 @@ pub enum McpCommand {
         bin_id: Option<String>,
         reply: SyncSender<Value>,
     },
+    ListCollections {
+        reply: SyncSender<Value>,
+    },
+    CreateCollection {
+        name: String,
+        search_text: Option<String>,
+        kind: Option<String>,
+        resolution: Option<String>,
+        frame_rate: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    UpdateCollection {
+        collection_id: String,
+        name: Option<String>,
+        search_text: Option<String>,
+        kind: Option<String>,
+        resolution: Option<String>,
+        frame_rate: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    DeleteCollection {
+        collection_id: String,
+        reply: SyncSender<Value>,
+    },
     ReorderTrack {
         from_index: usize,
         to_index: usize,

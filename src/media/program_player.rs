@@ -5102,6 +5102,26 @@ impl ProgramPlayer {
             || Self::clip_has_keyframed_masks(clip)
     }
 
+    fn clip_has_unsupported_background_prerender_keyframes(clip: &ProgramClip) -> bool {
+        !clip.scale_keyframes.is_empty()
+            || !clip.opacity_keyframes.is_empty()
+            || !clip.blur_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
+            || !clip.volume_keyframes.is_empty()
+            || !clip.pan_keyframes.is_empty()
+            || !clip.eq_low_gain_keyframes.is_empty()
+            || !clip.eq_mid_gain_keyframes.is_empty()
+            || !clip.eq_high_gain_keyframes.is_empty()
+            || !clip.speed_keyframes.is_empty()
+            || !clip.rotate_keyframes.is_empty()
+            || !clip.crop_left_keyframes.is_empty()
+            || !clip.crop_right_keyframes.is_empty()
+            || !clip.crop_top_keyframes.is_empty()
+            || !clip.crop_bottom_keyframes.is_empty()
+            || Self::clip_has_keyframed_masks(clip)
+    }
+
     fn clip_has_unsupported_background_prerender_audio_effects(clip: &ProgramClip) -> bool {
         clip.has_audio
             && (clip.pan.abs() > 0.001
@@ -5112,7 +5132,7 @@ impl ProgramPlayer {
     }
 
     fn clip_has_unsupported_background_prerender_features(clip: &ProgramClip) -> bool {
-        Self::clip_has_phase1_keyframes(clip)
+        Self::clip_has_unsupported_background_prerender_keyframes(clip)
             || clip.is_freeze_frame()
             || clip.reverse
             || (clip.speed - 1.0).abs() > 0.001
@@ -10413,9 +10433,49 @@ impl ProgramPlayer {
     }
 
     fn prerender_build_color_filter(clip: &ProgramClip) -> String {
+        let has_color_keyframes = !clip.brightness_keyframes.is_empty()
+            || !clip.contrast_keyframes.is_empty()
+            || !clip.saturation_keyframes.is_empty();
         let has_color = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
         let has_exposure = clip.exposure.abs() > f64::EPSILON;
-        if has_color || has_exposure {
+        if has_color_keyframes {
+            let brightness_expr = crate::media::export::build_keyframed_property_expression(
+                &clip.brightness_keyframes,
+                clip.brightness,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let contrast_expr = crate::media::export::build_keyframed_property_expression(
+                &clip.contrast_keyframes,
+                clip.contrast,
+                0.0,
+                2.0,
+                "t",
+            );
+            let saturation_expr = crate::media::export::build_keyframed_property_expression(
+                &clip.saturation_keyframes,
+                clip.saturation,
+                0.0,
+                2.0,
+                "t",
+            );
+            let brightness_expr = if has_exposure {
+                let exposure_brightness_delta = clip.exposure.clamp(-1.0, 1.0) * 0.55;
+                format!("({brightness_expr})+{exposure_brightness_delta:.6}")
+            } else {
+                brightness_expr
+            };
+            let contrast_expr = if has_exposure {
+                let exposure_contrast_delta = clip.exposure.clamp(-1.0, 1.0) * 0.12;
+                format!("({contrast_expr})+{exposure_contrast_delta:.6}")
+            } else {
+                contrast_expr
+            };
+            format!(
+                ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
+            )
+        } else if has_color || has_exposure {
             // Use the same calibrated videobalance mapping as export so that
             // proxy-mode preview matches the final render.
             let preview_params = Self::compute_videobalance_params(
@@ -10459,8 +10519,14 @@ impl ProgramPlayer {
     ) -> String {
         let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
         let has_tint = clip.tint.abs() > 0.001;
+        let has_temp_keyframes = !clip.temperature_keyframes.is_empty();
+        let has_tint_keyframes = !clip.tint_keyframes.is_empty();
         // Use frei0r coloradj_RGB when available — same calibrated path as export.
-        if caps.use_coloradj_frei0r && (has_temp || has_tint) {
+        if caps.use_coloradj_frei0r
+            && (has_temp || has_tint)
+            && !has_temp_keyframes
+            && !has_tint_keyframes
+        {
             let cp =
                 crate::media::export::compute_export_coloradj_params(clip.temperature, clip.tint);
             return format!(
@@ -10470,13 +10536,38 @@ impl ProgramPlayer {
         }
         // Fallback when frei0r is unavailable.
         let mut f = String::new();
-        if has_temp {
+        if has_temp_keyframes {
+            let temp_expr = crate::media::export::build_keyframed_property_expression(
+                &clip.temperature_keyframes,
+                clip.temperature,
+                2000.0,
+                10000.0,
+                "t",
+            );
+            f.push_str(&format!(
+                ",colortemperature=temperature='{temp_expr}':eval=frame"
+            ));
+        } else if has_temp {
             f.push_str(&format!(
                 ",colortemperature=temperature={:.0}",
                 clip.temperature.clamp(2000.0, 10000.0)
             ));
         }
-        if has_tint {
+        if has_tint_keyframes {
+            let tint_expr = crate::media::export::build_keyframed_property_expression(
+                &clip.tint_keyframes,
+                clip.tint,
+                -1.0,
+                1.0,
+                "t",
+            );
+            let gm_expr = format!("(-({tint_expr}))*0.5");
+            let rm_expr = format!("({tint_expr})*0.25");
+            let bm_expr = format!("({tint_expr})*0.25");
+            f.push_str(&format!(
+                ",colorbalance=rm='{rm_expr}':gm='{gm_expr}':bm='{bm_expr}':eval=frame"
+            ));
+        } else if has_tint {
             let t = clip.tint.clamp(-1.0, 1.0);
             let gm = -t * 0.5;
             let rm = t * 0.25;
@@ -14842,6 +14933,78 @@ mod tests {
     }
 
     #[test]
+    fn prerender_build_color_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = make_clip();
+        clip.timeline_start_ns = 2_000_000_000;
+        clip.brightness_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.25,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+
+        let filter = ProgramPlayer::prerender_build_color_filter(&clip);
+
+        assert!(filter.contains("eq=brightness='if(lt(t,0.000000000),"));
+        assert!(filter.contains("lt(t,1.000000000)"));
+        assert!(filter.contains(":eval=frame"));
+        assert!(!filter.contains("3.000000000"));
+    }
+
+    #[test]
+    fn prerender_build_temperature_tint_filter_uses_eval_frame_when_keyframed() {
+        let mut clip = make_clip();
+        clip.temperature_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 3200.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 7800.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        clip.tint_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: -0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+
+        let caps = crate::media::export::ColorFilterCapabilities {
+            use_coloradj_frei0r: true,
+            ..Default::default()
+        };
+        let filter = ProgramPlayer::prerender_build_temperature_tint_filter(&clip, &caps);
+
+        assert!(filter.contains("colortemperature=temperature='if(lt(t,0.000000000),"));
+        assert!(filter.contains("lt(t,1.000000000)"));
+        assert!(filter.contains(",colorbalance=rm='("));
+        assert!(filter.contains(":eval=frame"));
+        assert!(!filter.contains("frei0r=filter_name=coloradj_RGB"));
+    }
+
+    #[test]
     fn prerender_build_flip_filter_handles_all_flip_modes() {
         let mut clip = make_clip();
         assert_eq!(ProgramPlayer::prerender_build_flip_filter(&clip), "");
@@ -14952,6 +15115,38 @@ mod tests {
 
         clip.speed = 1.0;
         clip.pan = 0.4;
+        assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn clip_has_unsupported_background_prerender_features_allows_color_keyframes() {
+        let mut clip = make_clip();
+        clip.brightness_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.25,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.temperature_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 7200.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn clip_has_unsupported_background_prerender_features_rejects_transform_keyframes() {
+        let mut clip = make_clip();
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.25,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+
         assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
     }
 

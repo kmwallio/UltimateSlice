@@ -175,6 +175,11 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:media-bins", media_bins_json.as_str()));
             }
         }
+        if let Some(ref collections_json) = project.parsed_collections_json {
+            if collections_json != "[]" {
+                event.push_attribute(("us:smart-collections", collections_json.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -3715,7 +3720,7 @@ fn is_writer_managed_library_attr(_key: &str) -> bool {
 }
 
 fn is_writer_managed_event_attr(_key: &str) -> bool {
-    false
+    matches!(_key, "us:bins" | "us:media-bins" | "us:smart-collections")
 }
 
 fn is_writer_managed_project_attr(key: &str) -> bool {

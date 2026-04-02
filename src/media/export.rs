@@ -1328,7 +1328,7 @@ fn build_custom_eased_t_expr(
     expr
 }
 
-fn build_keyframed_property_expression(
+pub(crate) fn build_keyframed_property_expression(
     keyframes: &[NumericKeyframe],
     default_value: f64,
     min_value: f64,

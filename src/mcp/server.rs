@@ -805,6 +805,53 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_collections",
+            "description": "List saved smart collections and their metadata filter criteria.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "create_collection",
+            "description": "Create a project-wide smart collection from saved media-browser filters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Collection name." },
+                    "search_text": { "type": "string", "description": "Optional text match against clip name, title text, path, or codec." },
+                    "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional media kind filter." },
+                    "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional resolution bucket." },
+                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional frame-rate bucket." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "update_collection",
+            "description": "Rename a smart collection or replace any of its saved filter criteria.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collection_id": { "type": "string", "description": "Collection id from list_collections." },
+                    "name": { "type": "string", "description": "Optional new collection name." },
+                    "search_text": { "type": "string", "description": "Optional replacement search text." },
+                    "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional replacement media kind filter." },
+                    "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional replacement resolution bucket." },
+                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional replacement frame-rate bucket." }
+                },
+                "required": ["collection_id"]
+            }
+        },
+        {
+            "name": "delete_collection",
+            "description": "Delete a smart collection by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collection_id": { "type": "string", "description": "Collection id from list_collections." }
+                },
+                "required": ["collection_id"]
+            }
+        },
+        {
             "name": "reorder_track",
             "description": "Move a track from one position to another (0-based indices).",
             "inputSchema": {
@@ -1624,6 +1671,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "get_preferences"
             | "list_export_presets"
             | "list_library"
+            | "list_collections"
             | "list_frei0r_plugins"
     )
 }
@@ -2020,6 +2068,88 @@ fn dispatch_tool_payload(
             McpCommand::MoveToBin {
                 source_paths,
                 bin_id,
+                reply: tx,
+            }
+        }
+        "list_collections" => McpCommand::ListCollections { reply: tx },
+        "create_collection" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                return Err(tool_error_payload(-32602, "name is required"));
+            }
+            McpCommand::CreateCollection {
+                name,
+                search_text: args
+                    .get("search_text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                kind: args
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                resolution: args
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                frame_rate: args
+                    .get("frame_rate")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                reply: tx,
+            }
+        }
+        "update_collection" => {
+            let collection_id = args
+                .get("collection_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if collection_id.is_empty() {
+                return Err(tool_error_payload(-32602, "collection_id is required"));
+            }
+            McpCommand::UpdateCollection {
+                collection_id,
+                name: args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                search_text: args
+                    .get("search_text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                kind: args
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                resolution: args
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                frame_rate: args
+                    .get("frame_rate")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                reply: tx,
+            }
+        }
+        "delete_collection" => {
+            let collection_id = args
+                .get("collection_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if collection_id.is_empty() {
+                return Err(tool_error_payload(-32602, "collection_id is required"));
+            }
+            McpCommand::DeleteCollection {
+                collection_id,
                 reply: tx,
             }
         }

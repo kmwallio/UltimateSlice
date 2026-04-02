@@ -160,6 +160,9 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             if let Some(media_bins_json) = attrs.get("us:media-bins") {
                                 project.parsed_media_bins_json = Some(media_bins_json.clone());
                             }
+                            if let Some(collections_json) = attrs.get("us:smart-collections") {
+                                project.parsed_collections_json = Some(collections_json.clone());
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -2674,7 +2677,7 @@ fn is_known_library_attr(_key: &str) -> bool {
 }
 
 fn is_known_event_attr(_key: &str) -> bool {
-    false
+    matches!(_key, "us:bins" | "us:media-bins" | "us:smart-collections")
 }
 
 fn is_known_project_attr(key: &str) -> bool {

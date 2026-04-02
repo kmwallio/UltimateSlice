@@ -57,13 +57,22 @@ Bins are saved with your project and restored when you reopen it.
   - **Still images**: resolution, image type, default duration, file size
 - Timeline-native cards with no backing file show their clip type instead of file metadata. Title cards use the current title text as the main card label and remain searchable by that text.
 - Hover a media card to see the full source path plus expanded metadata details in the tooltip.
-- Use the **filter search** field to match clip names, file paths, or codec text.
+- Use the **filter search** field to match clip names, title text, file paths, or codec text.
 - Use the **type** dropdown to focus on video, audio, images, or offline clips.
 - Use the **size** dropdown to narrow the current browser scope to SD-or-smaller, HD, Full HD, or 4K+ media.
+- Use the **FPS** dropdown to narrow the current browser scope to 24 fps-or-less, 25-30 fps, 31-59 fps, or 60+ fps clips.
 - Filters apply to the current browser scope:
   - inside a bin, they filter that bin's items
   - in **All Media**, they filter the flat project-wide media view
   - bins themselves remain visible so navigation still works while filters are active
+
+## Smart Collections
+
+- Use the **Collections** picker in the filter bar to recall saved project-wide media queries.
+- Click the **save** button next to the picker to store the current search/type/size/FPS filter combination as a smart collection.
+- Selecting a smart collection switches the browser to a flat **All Media**-style view across the whole project, even if you were previously inside a bin.
+- Use the **rename** and **delete** buttons next to the picker to manage the selected collection.
+- Smart collections are saved with your project, round-trip through UltimateSlice's FCPXML vendor metadata, and are available to automation through the MCP `list_collections`, `create_collection`, `update_collection`, and `delete_collection` tools.
 
 ## Adding Clips to the Timeline
 

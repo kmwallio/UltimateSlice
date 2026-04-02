@@ -2,7 +2,11 @@ use crate::media::probe_cache::MediaProbeCache;
 use crate::media::proxy_cache::ProxyCache;
 use crate::media::thumb_cache::ThumbnailCache;
 use crate::model::clip::ClipKind;
-use crate::model::media_library::{MediaItem, MediaLibrary};
+use crate::model::media_library::{
+    media_display_name, media_frame_rate_value, media_matches_filters, non_file_clip_kind_text,
+    normalized_media_text, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
+    MediaKindFilter, MediaLibrary, ResolutionFilter,
+};
 use crate::ui_state::PreferencesState;
 use gdk4;
 use gio;
@@ -17,6 +21,7 @@ use std::rc::Rc;
 
 const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
+const COLLECTION_NONE_ID: &str = "__none__";
 
 /// Distinguishes bin cells from media cells in the FlowBox.
 #[derive(Debug, Clone)]
@@ -31,55 +36,103 @@ enum FlowBoxEntry {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum MediaKindFilter {
-    #[default]
-    All,
-    Video,
-    Audio,
-    Image,
-    Offline,
-}
-
-impl MediaKindFilter {
-    fn from_active_id(active_id: Option<glib::GString>) -> Self {
-        match active_id.as_deref() {
-            Some("video") => Self::Video,
-            Some("audio") => Self::Audio,
-            Some("image") => Self::Image,
-            Some("offline") => Self::Offline,
-            _ => Self::All,
-        }
+fn kind_filter_from_active_id(active_id: Option<glib::GString>) -> MediaKindFilter {
+    match active_id.as_deref() {
+        Some("video") => MediaKindFilter::Video,
+        Some("audio") => MediaKindFilter::Audio,
+        Some("image") => MediaKindFilter::Image,
+        Some("offline") => MediaKindFilter::Offline,
+        _ => MediaKindFilter::All,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum ResolutionFilter {
-    #[default]
-    All,
-    SdOrSmaller,
-    Hd,
-    FullHd,
-    UltraHd,
-}
-
-impl ResolutionFilter {
-    fn from_active_id(active_id: Option<glib::GString>) -> Self {
-        match active_id.as_deref() {
-            Some("sd") => Self::SdOrSmaller,
-            Some("hd") => Self::Hd,
-            Some("fhd") => Self::FullHd,
-            Some("uhd") => Self::UltraHd,
-            _ => Self::All,
-        }
+fn kind_filter_active_id(filter: MediaKindFilter) -> &'static str {
+    match filter {
+        MediaKindFilter::All => "all",
+        MediaKindFilter::Video => "video",
+        MediaKindFilter::Audio => "audio",
+        MediaKindFilter::Image => "image",
+        MediaKindFilter::Offline => "offline",
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct MediaBrowserFilters {
-    search_text: String,
-    kind: MediaKindFilter,
-    resolution: ResolutionFilter,
+fn resolution_filter_from_active_id(active_id: Option<glib::GString>) -> ResolutionFilter {
+    match active_id.as_deref() {
+        Some("sd") => ResolutionFilter::SdOrSmaller,
+        Some("hd") => ResolutionFilter::Hd,
+        Some("fhd") => ResolutionFilter::FullHd,
+        Some("uhd") => ResolutionFilter::UltraHd,
+        _ => ResolutionFilter::All,
+    }
+}
+
+fn resolution_filter_active_id(filter: ResolutionFilter) -> &'static str {
+    match filter {
+        ResolutionFilter::All => "all",
+        ResolutionFilter::SdOrSmaller => "sd",
+        ResolutionFilter::Hd => "hd",
+        ResolutionFilter::FullHd => "fhd",
+        ResolutionFilter::UltraHd => "uhd",
+    }
+}
+
+fn frame_rate_filter_from_active_id(active_id: Option<glib::GString>) -> FrameRateFilter {
+    match active_id.as_deref() {
+        Some("fps24") => FrameRateFilter::Fps24OrLess,
+        Some("fps25_30") => FrameRateFilter::Fps25To30,
+        Some("fps31_59") => FrameRateFilter::Fps31To59,
+        Some("fps60") => FrameRateFilter::Fps60Plus,
+        _ => FrameRateFilter::All,
+    }
+}
+
+fn frame_rate_filter_active_id(filter: FrameRateFilter) -> &'static str {
+    match filter {
+        FrameRateFilter::All => "all",
+        FrameRateFilter::Fps24OrLess => "fps24",
+        FrameRateFilter::Fps25To30 => "fps25_30",
+        FrameRateFilter::Fps31To59 => "fps31_59",
+        FrameRateFilter::Fps60Plus => "fps60",
+    }
+}
+
+fn collection_display_label(collection: &MediaCollection) -> String {
+    collection.name.clone()
+}
+
+fn selected_collection_id(combo: &gtk::ComboBoxText) -> Option<String> {
+    combo.active_id().and_then(|id| {
+        let id = id.to_string();
+        (id != COLLECTION_NONE_ID).then_some(id)
+    })
+}
+
+fn refresh_collection_picker(
+    combo: &gtk::ComboBoxText,
+    rename_btn: &Button,
+    delete_btn: &Button,
+    lib: &MediaLibrary,
+) {
+    let active_id = selected_collection_id(combo);
+    combo.remove_all();
+    combo.append(Some(COLLECTION_NONE_ID), "Collections");
+    for collection in &lib.collections {
+        combo.append(
+            Some(collection.id.as_str()),
+            collection_display_label(collection).as_str(),
+        );
+    }
+    let active_id = active_id
+        .filter(|id| {
+            lib.collections
+                .iter()
+                .any(|collection| &collection.id == id)
+        })
+        .unwrap_or_else(|| COLLECTION_NONE_ID.to_string());
+    combo.set_active_id(Some(&active_id));
+    let has_selected_collection = active_id != COLLECTION_NONE_ID;
+    rename_btn.set_sensitive(has_selected_collection);
+    delete_btn.set_sensitive(has_selected_collection);
 }
 
 /// Builds the media browser panel.
@@ -145,8 +198,9 @@ pub fn build_media_browser(
     breadcrumb_bar.set_visible(false);
     vbox.append(&breadcrumb_bar);
 
-    let filters: Rc<RefCell<MediaBrowserFilters>> =
-        Rc::new(RefCell::new(MediaBrowserFilters::default()));
+    let filters: Rc<RefCell<MediaFilterCriteria>> =
+        Rc::new(RefCell::new(MediaFilterCriteria::default()));
+    let applying_collection: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     let filter_box = GBox::new(Orientation::Vertical, 4);
     filter_box.set_margin_start(8);
@@ -159,6 +213,33 @@ pub fn build_media_browser(
     filter_search.set_placeholder_text(Some("Filter name, path, or codec"));
     filter_search.add_css_class("media-filter-search");
     filter_box.append(&filter_search);
+
+    let collection_row = GBox::new(Orientation::Horizontal, 4);
+
+    let collection_filter = gtk::ComboBoxText::new();
+    collection_filter.append(Some(COLLECTION_NONE_ID), "Collections");
+    collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+    collection_filter.set_hexpand(true);
+    collection_row.append(&collection_filter);
+
+    let save_collection_btn = Button::from_icon_name("document-save-symbolic");
+    save_collection_btn.add_css_class("browser-header-import");
+    save_collection_btn.set_tooltip_text(Some("Save the current filters as a smart collection"));
+    collection_row.append(&save_collection_btn);
+
+    let rename_collection_btn = Button::from_icon_name("document-edit-symbolic");
+    rename_collection_btn.add_css_class("browser-header-import");
+    rename_collection_btn.set_tooltip_text(Some("Rename the selected smart collection"));
+    rename_collection_btn.set_sensitive(false);
+    collection_row.append(&rename_collection_btn);
+
+    let delete_collection_btn = Button::from_icon_name("user-trash-symbolic");
+    delete_collection_btn.add_css_class("browser-header-import");
+    delete_collection_btn.set_tooltip_text(Some("Delete the selected smart collection"));
+    delete_collection_btn.set_sensitive(false);
+    collection_row.append(&delete_collection_btn);
+
+    filter_box.append(&collection_row);
 
     let filter_row = GBox::new(Orientation::Horizontal, 4);
 
@@ -181,6 +262,16 @@ pub fn build_media_browser(
     resolution_filter.set_active_id(Some("all"));
     resolution_filter.set_hexpand(true);
     filter_row.append(&resolution_filter);
+
+    let frame_rate_filter = gtk::ComboBoxText::new();
+    frame_rate_filter.append(Some("all"), "All FPS");
+    frame_rate_filter.append(Some("fps24"), "24 fps or less");
+    frame_rate_filter.append(Some("fps25_30"), "25-30 fps");
+    frame_rate_filter.append(Some("fps31_59"), "31-59 fps");
+    frame_rate_filter.append(Some("fps60"), "60+ fps");
+    frame_rate_filter.set_active_id(Some("all"));
+    frame_rate_filter.set_hexpand(true);
+    filter_row.append(&frame_rate_filter);
 
     filter_box.append(&filter_row);
     vbox.append(&filter_box);
@@ -230,6 +321,21 @@ pub fn build_media_browser(
     let show_all_media: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
     let flow_box_paths: Rc<RefCell<Vec<FlowBoxEntry>>> = Rc::new(RefCell::new(Vec::new()));
+    let refresh_collection_controls: Rc<dyn Fn()> = {
+        let library = library.clone();
+        let collection_filter = collection_filter.clone();
+        let rename_collection_btn = rename_collection_btn.clone();
+        let delete_collection_btn = delete_collection_btn.clone();
+        Rc::new(move || {
+            let lib = library.borrow();
+            refresh_collection_picker(
+                &collection_filter,
+                &rename_collection_btn,
+                &delete_collection_btn,
+                &lib,
+            );
+        })
+    };
     let refresh_filtered_view: Rc<dyn Fn()> = {
         let library = library.clone();
         let flow_box = flow_box.clone();
@@ -253,31 +359,177 @@ pub fn build_media_browser(
             );
         })
     };
+    let refresh_browser_view: Rc<dyn Fn()> = {
+        let library = library.clone();
+        let flow_box = flow_box.clone();
+        let thumb_cache = thumb_cache.clone();
+        let flow_box_paths = flow_box_paths.clone();
+        let current_bin_id = current_bin_id.clone();
+        let show_all_media = show_all_media.clone();
+        let breadcrumb_bar = breadcrumb_bar.clone();
+        let all_media_btn = all_media_btn.clone();
+        let filters = filters.clone();
+        Rc::new(move || {
+            refresh_bin_view(
+                &library,
+                &flow_box,
+                &thumb_cache,
+                &flow_box_paths,
+                &current_bin_id,
+                &show_all_media,
+                &breadcrumb_bar,
+                &all_media_btn,
+                &filters,
+            );
+        })
+    };
 
     {
         let filters = filters.clone();
         let refresh_filtered_view = refresh_filtered_view.clone();
+        let collection_filter = collection_filter.clone();
+        let applying_collection = applying_collection.clone();
         filter_search.connect_search_changed(move |entry| {
-            filters.borrow_mut().search_text = entry.text().trim().to_ascii_lowercase();
+            filters.borrow_mut().search_text = entry.text().trim().to_string();
+            if !applying_collection.get() {
+                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+            }
             refresh_filtered_view();
         });
     }
     {
         let filters = filters.clone();
         let refresh_filtered_view = refresh_filtered_view.clone();
+        let collection_filter = collection_filter.clone();
+        let applying_collection = applying_collection.clone();
         kind_filter.connect_changed(move |combo| {
-            filters.borrow_mut().kind = MediaKindFilter::from_active_id(combo.active_id());
+            filters.borrow_mut().kind = kind_filter_from_active_id(combo.active_id());
+            if !applying_collection.get() {
+                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+            }
             refresh_filtered_view();
         });
     }
     {
         let filters = filters.clone();
         let refresh_filtered_view = refresh_filtered_view.clone();
+        let collection_filter = collection_filter.clone();
+        let applying_collection = applying_collection.clone();
         resolution_filter.connect_changed(move |combo| {
-            filters.borrow_mut().resolution = ResolutionFilter::from_active_id(combo.active_id());
+            filters.borrow_mut().resolution = resolution_filter_from_active_id(combo.active_id());
+            if !applying_collection.get() {
+                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+            }
             refresh_filtered_view();
         });
     }
+    {
+        let filters = filters.clone();
+        let refresh_filtered_view = refresh_filtered_view.clone();
+        let collection_filter = collection_filter.clone();
+        let applying_collection = applying_collection.clone();
+        frame_rate_filter.connect_changed(move |combo| {
+            filters.borrow_mut().frame_rate = frame_rate_filter_from_active_id(combo.active_id());
+            if !applying_collection.get() {
+                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+            }
+            refresh_filtered_view();
+        });
+    }
+    {
+        let library = library.clone();
+        let filters = filters.clone();
+        let applying_collection = applying_collection.clone();
+        let filter_search = filter_search.clone();
+        let kind_filter = kind_filter.clone();
+        let resolution_filter = resolution_filter.clone();
+        let frame_rate_filter = frame_rate_filter.clone();
+        let current_bin_id = current_bin_id.clone();
+        let show_all_media = show_all_media.clone();
+        let refresh_browser_view = refresh_browser_view.clone();
+        let rename_collection_btn = rename_collection_btn.clone();
+        let delete_collection_btn = delete_collection_btn.clone();
+        collection_filter.connect_changed(move |combo| {
+            let Some(collection_id) = selected_collection_id(combo) else {
+                rename_collection_btn.set_sensitive(false);
+                delete_collection_btn.set_sensitive(false);
+                return;
+            };
+            let Some(collection) = library.borrow().find_collection(&collection_id).cloned() else {
+                combo.set_active_id(Some(COLLECTION_NONE_ID));
+                rename_collection_btn.set_sensitive(false);
+                delete_collection_btn.set_sensitive(false);
+                return;
+            };
+            rename_collection_btn.set_sensitive(true);
+            delete_collection_btn.set_sensitive(true);
+            applying_collection.set(true);
+            *filters.borrow_mut() = collection.criteria.clone();
+            filter_search.set_text(&collection.criteria.search_text);
+            kind_filter.set_active_id(Some(kind_filter_active_id(collection.criteria.kind)));
+            resolution_filter.set_active_id(Some(resolution_filter_active_id(
+                collection.criteria.resolution,
+            )));
+            frame_rate_filter.set_active_id(Some(frame_rate_filter_active_id(
+                collection.criteria.frame_rate,
+            )));
+            applying_collection.set(false);
+            *current_bin_id.borrow_mut() = None;
+            *show_all_media.borrow_mut() = true;
+            refresh_browser_view();
+        });
+    }
+    {
+        let library = library.clone();
+        let filters = filters.clone();
+        let collection_filter = collection_filter.clone();
+        let refresh_browser_view = refresh_browser_view.clone();
+        let refresh_collection_controls = refresh_collection_controls.clone();
+        save_collection_btn.connect_clicked(move |_| {
+            show_new_collection_dialog(
+                &collection_filter,
+                &library,
+                filters.borrow().clone(),
+                &refresh_browser_view,
+                &refresh_collection_controls,
+            );
+        });
+    }
+    {
+        let library = library.clone();
+        let collection_filter = collection_filter.clone();
+        let refresh_browser_view = refresh_browser_view.clone();
+        let refresh_collection_controls = refresh_collection_controls.clone();
+        rename_collection_btn.connect_clicked(move |_| {
+            if let Some(collection_id) = selected_collection_id(&collection_filter) {
+                show_rename_collection_dialog(
+                    &collection_filter,
+                    &collection_id,
+                    &library,
+                    &refresh_browser_view,
+                    &refresh_collection_controls,
+                );
+            }
+        });
+    }
+    {
+        let library = library.clone();
+        let collection_filter = collection_filter.clone();
+        let refresh_browser_view = refresh_browser_view.clone();
+        let refresh_collection_controls = refresh_collection_controls.clone();
+        delete_collection_btn.connect_clicked(move |_| {
+            if let Some(collection_id) = selected_collection_id(&collection_filter) {
+                delete_collection(
+                    &collection_filter,
+                    &collection_id,
+                    &library,
+                    &refresh_browser_view,
+                    &refresh_collection_controls,
+                );
+            }
+        });
+    }
+    refresh_collection_controls();
 
     // Double-click handler: navigate into bins (Capture phase, claims on double-click only).
     {
@@ -290,6 +542,7 @@ pub fn build_media_browser(
         let breadcrumb_bar_click = breadcrumb_bar.clone();
         let all_media_btn_click = all_media_btn.clone();
         let filters_click = filters.clone();
+        let collection_filter_click = collection_filter.clone();
         let dbl_click = gtk::GestureClick::new();
         dbl_click.set_button(1);
         dbl_click.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -324,6 +577,7 @@ pub fn build_media_browser(
                     drop(entries);
                     *current_bin_id_click.borrow_mut() = Some(bin_id);
                     *show_all_media_click.borrow_mut() = false;
+                    collection_filter_click.set_active_id(Some(COLLECTION_NONE_ID));
                     let lib = library_click.borrow();
                     rebuild_flowbox_binned(
                         &flow_box_click,
@@ -1255,9 +1509,11 @@ pub fn build_media_browser(
         let breadcrumb_bar_all = breadcrumb_bar.clone();
         let all_media_btn_all = all_media_btn.clone();
         let filters_all = filters.clone();
+        let collection_filter_all = collection_filter.clone();
         all_media_btn.connect_clicked(move |_| {
             let is_all = *show_all_media_all.borrow();
             *show_all_media_all.borrow_mut() = !is_all;
+            collection_filter_all.set_active_id(Some(COLLECTION_NONE_ID));
             if !is_all {
                 // Entering All Media mode — clear bin navigation
                 *current_bin_id_all.borrow_mut() = None;
@@ -1305,6 +1561,7 @@ pub fn build_media_browser(
         let current_bin_id = current_bin_id.clone();
         let show_all_media = show_all_media.clone();
         let filters = filters.clone();
+        let refresh_collection_controls = refresh_collection_controls.clone();
         Rc::new(move || {
             let lib = library.borrow();
             rebuild_flowbox_binned(
@@ -1318,6 +1575,7 @@ pub fn build_media_browser(
                 &library,
             );
             header_relink_btn.set_visible(false);
+            refresh_collection_controls();
         })
     };
 
@@ -1515,7 +1773,7 @@ fn flowbox_matches_library_binned(
     lib: &MediaLibrary,
     current_bin_id: &Option<String>,
     show_all: bool,
-    filters: &MediaBrowserFilters,
+    filters: &MediaFilterCriteria,
 ) -> bool {
     let expected = build_expected_entries(lib, current_bin_id, show_all, filters);
     if current_entries.len() != expected.len() {
@@ -1553,7 +1811,7 @@ fn build_expected_entries(
     lib: &MediaLibrary,
     current_bin_id: &Option<String>,
     show_all: bool,
-    filters: &MediaBrowserFilters,
+    filters: &MediaFilterCriteria,
 ) -> Vec<FlowBoxEntry> {
     let mut entries = Vec::new();
     if show_all {
@@ -1602,98 +1860,6 @@ fn media_display_key(item: &MediaItem) -> String {
         media_primary_text(item).unwrap_or_default(),
         media_secondary_text(item).unwrap_or_default(),
     )
-}
-
-fn media_matches_filters(item: &MediaItem, filters: &MediaBrowserFilters) -> bool {
-    if !matches_media_kind_filter(item, filters.kind) {
-        return false;
-    }
-    if !matches_resolution_filter(item, filters.resolution) {
-        return false;
-    }
-    if filters.search_text.is_empty() {
-        return true;
-    }
-
-    let needle = filters.search_text.as_str();
-    media_display_name(item)
-        .to_ascii_lowercase()
-        .contains(needle)
-        || item.label.to_ascii_lowercase().contains(needle)
-        || item.source_path.to_ascii_lowercase().contains(needle)
-        || media_primary_text(item).is_some_and(|text| text.to_ascii_lowercase().contains(needle))
-        || media_secondary_text(item).is_some_and(|text| text.to_ascii_lowercase().contains(needle))
-        || item
-            .codec_summary
-            .as_ref()
-            .is_some_and(|codec| codec.to_ascii_lowercase().contains(needle))
-}
-
-fn matches_media_kind_filter(item: &MediaItem, filter: MediaKindFilter) -> bool {
-    match filter {
-        MediaKindFilter::All => true,
-        MediaKindFilter::Video => !item.is_missing && !item.is_audio_only && !item.is_image,
-        MediaKindFilter::Audio => !item.is_missing && item.is_audio_only,
-        MediaKindFilter::Image => !item.is_missing && item.is_image,
-        MediaKindFilter::Offline => item.is_missing,
-    }
-}
-
-fn matches_resolution_filter(item: &MediaItem, filter: ResolutionFilter) -> bool {
-    match filter {
-        ResolutionFilter::All => true,
-        ResolutionFilter::SdOrSmaller => media_max_dimension(item).is_some_and(|dim| dim <= 720),
-        ResolutionFilter::Hd => {
-            media_max_dimension(item).is_some_and(|dim| (721..=1280).contains(&dim))
-        }
-        ResolutionFilter::FullHd => {
-            media_max_dimension(item).is_some_and(|dim| (1281..=1920).contains(&dim))
-        }
-        ResolutionFilter::UltraHd => media_max_dimension(item).is_some_and(|dim| dim >= 1921),
-    }
-}
-
-fn media_max_dimension(item: &MediaItem) -> Option<u32> {
-    item.video_width
-        .zip(item.video_height)
-        .map(|(w, h)| w.max(h))
-}
-
-fn media_display_name(item: &MediaItem) -> String {
-    if matches!(item.clip_kind, Some(ClipKind::Title)) {
-        if let Some(text) = normalized_media_text(item.title_text.as_deref()) {
-            return text;
-        }
-    }
-    normalized_media_text(Some(item.label.as_str())).unwrap_or_else(|| {
-        item.clip_kind
-            .as_ref()
-            .map(non_file_clip_kind_text)
-            .unwrap_or("media")
-            .to_string()
-    })
-}
-
-fn normalized_media_text(text: Option<&str>) -> Option<String> {
-    let normalized = text?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" / ");
-    (!normalized.is_empty()).then_some(normalized)
-}
-
-fn non_file_clip_kind_text(kind: &ClipKind) -> &'static str {
-    match kind {
-        ClipKind::Title => "Title clip",
-        ClipKind::Adjustment => "Adjustment layer",
-        ClipKind::Compound => "Compound clip",
-        ClipKind::Multicam => "Multicam clip",
-        ClipKind::Video => "Generated video clip",
-        ClipKind::Audio => "Generated audio clip",
-        ClipKind::Image => "Generated image clip",
-    }
 }
 
 fn media_primary_text(item: &MediaItem) -> Option<String> {
@@ -1825,11 +1991,7 @@ fn media_resolution_text(item: &MediaItem) -> Option<String> {
 }
 
 fn media_frame_rate_text(item: &MediaItem) -> Option<String> {
-    let (num, den) = item.frame_rate_num.zip(item.frame_rate_den)?;
-    if num == 0 || den == 0 {
-        return None;
-    }
-    let fps = num as f64 / den as f64;
+    let fps = media_frame_rate_value(item)?;
     let mut text = format!("{fps:.2}");
     while text.ends_with('0') {
         text.pop();
@@ -1942,7 +2104,7 @@ fn rebuild_flowbox_binned(
     flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
     current_bin_id: &Option<String>,
     show_all: bool,
-    filters: &MediaBrowserFilters,
+    filters: &MediaFilterCriteria,
     library_rc: &Rc<RefCell<MediaLibrary>>,
 ) {
     // Temporarily detach from ScrolledWindow parent to avoid GTK adjustment
@@ -2122,7 +2284,7 @@ fn rebuild_breadcrumb(
     thumb_cache: &Rc<RefCell<ThumbnailCache>>,
     flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
     all_media_btn: &Button,
-    filters: &Rc<RefCell<MediaBrowserFilters>>,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
 ) {
     // Remove all existing breadcrumb children.
     // Collect first to avoid infinite loop if remove() fails on a non-child.
@@ -2270,7 +2432,7 @@ fn refresh_bin_view(
     show_all_media: &Rc<RefCell<bool>>,
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
-    filters: &Rc<RefCell<MediaBrowserFilters>>,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
 ) {
     let lib = library.borrow();
     let cid = current_bin_id.borrow().clone();
@@ -2313,7 +2475,7 @@ fn show_new_bin_dialog(
     show_all_media: &Rc<RefCell<bool>>,
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
-    filters: &Rc<RefCell<MediaBrowserFilters>>,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
 ) {
     let window = flow_box
         .root()
@@ -2384,7 +2546,7 @@ fn show_rename_dialog(
     show_all_media: &Rc<RefCell<bool>>,
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
-    filters: &Rc<RefCell<MediaBrowserFilters>>,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
 ) {
     let current_name = library
         .borrow()
@@ -2466,7 +2628,7 @@ fn delete_bin(
     show_all_media: &Rc<RefCell<bool>>,
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
-    filters: &Rc<RefCell<MediaBrowserFilters>>,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
 ) {
     let mut lib = library.borrow_mut();
     let parent_id = lib
@@ -2529,7 +2691,7 @@ fn move_items_to_bin(
     show_all_media: &Rc<RefCell<bool>>,
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
-    filters: &Rc<RefCell<MediaBrowserFilters>>,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
 ) {
     {
         let mut lib = library.borrow_mut();
@@ -2550,6 +2712,138 @@ fn move_items_to_bin(
         all_media_btn,
         filters,
     );
+}
+
+#[allow(deprecated)]
+fn show_new_collection_dialog(
+    collection_filter: &gtk::ComboBoxText,
+    library: &Rc<RefCell<MediaLibrary>>,
+    criteria: MediaFilterCriteria,
+    refresh_browser_view: &Rc<dyn Fn()>,
+    refresh_collection_controls: &Rc<dyn Fn()>,
+) {
+    let window = collection_filter
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok());
+    let dialog = gtk::Dialog::with_buttons(
+        Some("Save Smart Collection"),
+        window.as_ref(),
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[
+            ("Save", gtk::ResponseType::Accept),
+            ("Cancel", gtk::ResponseType::Cancel),
+        ],
+    );
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some("Collection name"));
+    entry.set_activates_default(true);
+    entry.set_margin_top(8);
+    entry.set_margin_bottom(8);
+    entry.set_margin_start(8);
+    entry.set_margin_end(8);
+    dialog.content_area().append(&entry);
+
+    let library = library.clone();
+    let collection_filter = collection_filter.clone();
+    let refresh_browser_view = refresh_browser_view.clone();
+    let refresh_collection_controls = refresh_collection_controls.clone();
+    dialog.connect_response(move |dlg, response| {
+        if response == gtk::ResponseType::Accept {
+            let name = entry.text().trim().to_string();
+            if !name.is_empty() {
+                let mut lib = library.borrow_mut();
+                let collection = MediaCollection::new(name, criteria.clone());
+                let collection_id = collection.id.clone();
+                lib.collections.push(collection);
+                drop(lib);
+                refresh_collection_controls();
+                collection_filter.set_active_id(Some(&collection_id));
+                refresh_browser_view();
+            }
+        }
+        dlg.close();
+    });
+    dialog.present();
+}
+
+#[allow(deprecated)]
+fn show_rename_collection_dialog(
+    widget: &impl gtk4::prelude::IsA<gtk::Widget>,
+    collection_id: &str,
+    library: &Rc<RefCell<MediaLibrary>>,
+    refresh_browser_view: &Rc<dyn Fn()>,
+    refresh_collection_controls: &Rc<dyn Fn()>,
+) {
+    let current_name = library
+        .borrow()
+        .collections
+        .iter()
+        .find(|collection| collection.id == collection_id)
+        .map(|collection| collection.name.clone())
+        .unwrap_or_default();
+    let window = widget
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok());
+    let dialog = gtk::Dialog::with_buttons(
+        Some("Rename Smart Collection"),
+        window.as_ref(),
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[
+            ("Rename", gtk::ResponseType::Accept),
+            ("Cancel", gtk::ResponseType::Cancel),
+        ],
+    );
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let entry = gtk::Entry::new();
+    entry.set_text(&current_name);
+    entry.set_activates_default(true);
+    entry.set_margin_top(8);
+    entry.set_margin_bottom(8);
+    entry.set_margin_start(8);
+    entry.set_margin_end(8);
+    dialog.content_area().append(&entry);
+
+    let collection_id = collection_id.to_string();
+    let library = library.clone();
+    let refresh_browser_view = refresh_browser_view.clone();
+    let refresh_collection_controls = refresh_collection_controls.clone();
+    dialog.connect_response(move |dlg, response| {
+        if response == gtk::ResponseType::Accept {
+            let name = entry.text().trim().to_string();
+            if !name.is_empty() {
+                if let Some(collection) = library
+                    .borrow_mut()
+                    .collections
+                    .iter_mut()
+                    .find(|collection| collection.id == collection_id)
+                {
+                    collection.name = name;
+                }
+                refresh_collection_controls();
+                refresh_browser_view();
+            }
+        }
+        dlg.close();
+    });
+    dialog.present();
+}
+
+fn delete_collection(
+    collection_filter: &gtk::ComboBoxText,
+    collection_id: &str,
+    library: &Rc<RefCell<MediaLibrary>>,
+    refresh_browser_view: &Rc<dyn Fn()>,
+    refresh_collection_controls: &Rc<dyn Fn()>,
+) {
+    {
+        let mut lib = library.borrow_mut();
+        lib.collections
+            .retain(|collection| collection.id != collection_id);
+    }
+    collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+    refresh_collection_controls();
+    refresh_browser_view();
 }
 
 #[cfg(test)]
@@ -2596,17 +2890,19 @@ mod tests {
     #[test]
     fn media_matches_filters_by_search_kind_and_resolution() {
         let item = make_video_item("/tmp/dialog_take.mov");
-        let filters = MediaBrowserFilters {
+        let filters = MediaFilterCriteria {
             search_text: "dialog".to_string(),
             kind: MediaKindFilter::Video,
             resolution: ResolutionFilter::UltraHd,
+            ..Default::default()
         };
         assert!(media_matches_filters(&item, &filters));
 
-        let filters = MediaBrowserFilters {
+        let filters = MediaFilterCriteria {
             search_text: "aac".to_string(),
             kind: MediaKindFilter::Audio,
             resolution: ResolutionFilter::All,
+            ..Default::default()
         };
         assert!(!media_matches_filters(&item, &filters));
     }
@@ -2622,10 +2918,11 @@ mod tests {
         assert_eq!(media_secondary_text(&item).as_deref(), Some("0:04"));
         assert!(media_tooltip_text(&item).contains("Text: Jane Doe"));
 
-        let filters = MediaBrowserFilters {
+        let filters = MediaFilterCriteria {
             search_text: "jane".to_string(),
             kind: MediaKindFilter::All,
             resolution: ResolutionFilter::All,
+            ..Default::default()
         };
         assert!(media_matches_filters(&item, &filters));
     }
@@ -2646,10 +2943,11 @@ mod tests {
         let bin_item_id = bin_item.id.clone();
         lib.items.push(bin_item);
 
-        let filters = MediaBrowserFilters {
+        let filters = MediaFilterCriteria {
             search_text: "dialog".to_string(),
             kind: MediaKindFilter::All,
             resolution: ResolutionFilter::All,
+            ..Default::default()
         };
 
         let root_entries = build_expected_entries(&lib, &None, false, &filters);
@@ -2665,5 +2963,21 @@ mod tests {
             bin_entries.first(),
             Some(FlowBoxEntry::Media { item_id, .. }) if item_id == &bin_item_id
         ));
+    }
+
+    #[test]
+    fn media_matches_filters_by_frame_rate_bucket() {
+        let item = make_video_item("/tmp/hfr.mov");
+        let filters = MediaFilterCriteria {
+            frame_rate: FrameRateFilter::Fps24OrLess,
+            ..Default::default()
+        };
+        assert!(media_matches_filters(&item, &filters));
+
+        let filters = MediaFilterCriteria {
+            frame_rate: FrameRateFilter::Fps60Plus,
+            ..Default::default()
+        };
+        assert!(!media_matches_filters(&item, &filters));
     }
 }

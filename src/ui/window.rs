@@ -1,7 +1,10 @@
 use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, Phase1KeyframeProperty};
-use crate::model::media_library::{MediaItem, MediaLibrary};
+use crate::model::media_library::{
+    FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter,
+    MediaLibrary, ResolutionFilter,
+};
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 use crate::recent;
@@ -35,6 +38,89 @@ fn is_text_input_focused(focused: &gtk4::Widget) -> bool {
         || focused.is::<gtk4::SearchEntry>()
         || focused.is::<gtk4::TextView>()
         || focused.is::<gtk4::SpinButton>()
+}
+
+fn media_kind_filter_id(filter: MediaKindFilter) -> &'static str {
+    match filter {
+        MediaKindFilter::All => "all",
+        MediaKindFilter::Video => "video",
+        MediaKindFilter::Audio => "audio",
+        MediaKindFilter::Image => "image",
+        MediaKindFilter::Offline => "offline",
+    }
+}
+
+fn resolution_filter_id(filter: ResolutionFilter) -> &'static str {
+    match filter {
+        ResolutionFilter::All => "all",
+        ResolutionFilter::SdOrSmaller => "sd",
+        ResolutionFilter::Hd => "hd",
+        ResolutionFilter::FullHd => "fhd",
+        ResolutionFilter::UltraHd => "uhd",
+    }
+}
+
+fn frame_rate_filter_id(filter: FrameRateFilter) -> &'static str {
+    match filter {
+        FrameRateFilter::All => "all",
+        FrameRateFilter::Fps24OrLess => "fps24",
+        FrameRateFilter::Fps25To30 => "fps25_30",
+        FrameRateFilter::Fps31To59 => "fps31_59",
+        FrameRateFilter::Fps60Plus => "fps60",
+    }
+}
+
+fn parse_media_kind_filter(id: Option<&str>) -> Option<MediaKindFilter> {
+    match id {
+        Some("all") => Some(MediaKindFilter::All),
+        Some("video") => Some(MediaKindFilter::Video),
+        Some("audio") => Some(MediaKindFilter::Audio),
+        Some("image") => Some(MediaKindFilter::Image),
+        Some("offline") => Some(MediaKindFilter::Offline),
+        Some(_) => None,
+        None => Some(MediaKindFilter::All),
+    }
+}
+
+fn parse_resolution_filter(id: Option<&str>) -> Option<ResolutionFilter> {
+    match id {
+        Some("all") => Some(ResolutionFilter::All),
+        Some("sd") => Some(ResolutionFilter::SdOrSmaller),
+        Some("hd") => Some(ResolutionFilter::Hd),
+        Some("fhd") => Some(ResolutionFilter::FullHd),
+        Some("uhd") => Some(ResolutionFilter::UltraHd),
+        Some(_) => None,
+        None => Some(ResolutionFilter::All),
+    }
+}
+
+fn parse_frame_rate_filter(id: Option<&str>) -> Option<FrameRateFilter> {
+    match id {
+        Some("all") => Some(FrameRateFilter::All),
+        Some("fps24") => Some(FrameRateFilter::Fps24OrLess),
+        Some("fps25_30") => Some(FrameRateFilter::Fps25To30),
+        Some("fps31_59") => Some(FrameRateFilter::Fps31To59),
+        Some("fps60") => Some(FrameRateFilter::Fps60Plus),
+        Some(_) => None,
+        None => Some(FrameRateFilter::All),
+    }
+}
+
+fn collection_criteria_from_mcp(
+    search_text: Option<String>,
+    kind: Option<String>,
+    resolution: Option<String>,
+    frame_rate: Option<String>,
+) -> Result<MediaFilterCriteria, String> {
+    Ok(MediaFilterCriteria {
+        search_text: search_text.unwrap_or_default(),
+        kind: parse_media_kind_filter(kind.as_deref())
+            .ok_or_else(|| "invalid kind filter".to_string())?,
+        resolution: parse_resolution_filter(resolution.as_deref())
+            .ok_or_else(|| "invalid resolution filter".to_string())?,
+        frame_rate: parse_frame_rate_filter(frame_rate.as_deref())
+            .ok_or_else(|| "invalid frame_rate filter".to_string())?,
+    })
 }
 
 fn flash_window_status_title(
@@ -1723,6 +1809,7 @@ mod tests {
         let mut wrapped_library = MediaLibrary {
             items: library,
             bins: Vec::new(),
+            collections: Vec::new(),
         };
         sync_library_with_project_entries(&mut wrapped_library, &media_from_project);
         let mut library = wrapped_library.items;
@@ -12898,6 +12985,138 @@ fn handle_mcp_command(
             reply
                 .send(json!({"success": true, "moved_count": moved}))
                 .ok();
+        }
+
+        McpCommand::ListCollections { reply } => {
+            let lib = library.borrow();
+            let collections: Vec<_> = lib
+                .collections
+                .iter()
+                .map(|collection| {
+                    json!({
+                        "id": collection.id,
+                        "name": collection.name,
+                        "criteria": {
+                            "search_text": collection.criteria.search_text,
+                            "kind": media_kind_filter_id(collection.criteria.kind),
+                            "resolution": resolution_filter_id(collection.criteria.resolution),
+                            "frame_rate": frame_rate_filter_id(collection.criteria.frame_rate),
+                        },
+                        "item_count": lib.items_in_collection(&collection.id).len(),
+                    })
+                })
+                .collect();
+            reply.send(json!(collections)).ok();
+        }
+
+        McpCommand::CreateCollection {
+            name,
+            search_text,
+            kind,
+            resolution,
+            frame_rate,
+            reply,
+        } => {
+            let criteria =
+                match collection_criteria_from_mcp(search_text, kind, resolution, frame_rate) {
+                    Ok(criteria) => criteria,
+                    Err(error) => {
+                        reply.send(json!({"error": error})).ok();
+                        return;
+                    }
+                };
+            let mut lib = library.borrow_mut();
+            let collection = MediaCollection::new(name.clone(), criteria);
+            let id = collection.id.clone();
+            lib.collections.push(collection);
+            drop(lib);
+            reply
+                .send(json!({"success": true, "id": id, "name": name}))
+                .ok();
+            on_project_changed_full();
+        }
+
+        McpCommand::UpdateCollection {
+            collection_id,
+            name,
+            search_text,
+            kind,
+            resolution,
+            frame_rate,
+            reply,
+        } => {
+            let mut lib = library.borrow_mut();
+            let Some(collection) = lib
+                .collections
+                .iter_mut()
+                .find(|collection| collection.id == collection_id)
+            else {
+                reply.send(json!({"error": "Collection not found"})).ok();
+                return;
+            };
+            if let Some(name) = name {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    reply
+                        .send(json!({"error": "Collection name cannot be empty"}))
+                        .ok();
+                    return;
+                }
+                collection.name = trimmed.to_string();
+            }
+            let mut criteria = collection.criteria.clone();
+            if let Some(search_text) = search_text {
+                criteria.search_text = search_text;
+            }
+            if let Some(kind) = kind {
+                let Some(parsed) = parse_media_kind_filter(Some(kind.as_str())) else {
+                    reply.send(json!({"error": "invalid kind filter"})).ok();
+                    return;
+                };
+                criteria.kind = parsed;
+            }
+            if let Some(resolution) = resolution {
+                let Some(parsed) = parse_resolution_filter(Some(resolution.as_str())) else {
+                    reply
+                        .send(json!({"error": "invalid resolution filter"}))
+                        .ok();
+                    return;
+                };
+                criteria.resolution = parsed;
+            }
+            if let Some(frame_rate) = frame_rate {
+                let Some(parsed) = parse_frame_rate_filter(Some(frame_rate.as_str())) else {
+                    reply
+                        .send(json!({"error": "invalid frame_rate filter"}))
+                        .ok();
+                    return;
+                };
+                criteria.frame_rate = parsed;
+            }
+            collection.criteria = criteria;
+            let name = collection.name.clone();
+            drop(lib);
+            reply
+                .send(json!({"success": true, "collection_id": collection_id, "name": name}))
+                .ok();
+            on_project_changed_full();
+        }
+
+        McpCommand::DeleteCollection {
+            collection_id,
+            reply,
+        } => {
+            let mut lib = library.borrow_mut();
+            let initial_len = lib.collections.len();
+            lib.collections
+                .retain(|collection| collection.id != collection_id);
+            if lib.collections.len() == initial_len {
+                reply.send(json!({"error": "Collection not found"})).ok();
+                return;
+            }
+            drop(lib);
+            reply.send(json!({"success": true})).ok();
+            on_project_changed_full();
         }
 
         McpCommand::ReorderTrack {

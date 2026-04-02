@@ -37,6 +37,7 @@ impl MediaBin {
 pub struct MediaLibrary {
     pub items: Vec<MediaItem>,
     pub bins: Vec<MediaBin>,
+    pub collections: Vec<MediaCollection>,
 }
 
 impl MediaLibrary {
@@ -65,9 +66,19 @@ impl MediaLibrary {
         &self.items
     }
 
+    /// All smart collections.
+    pub fn collections(&self) -> &[MediaCollection] {
+        &self.collections
+    }
+
     /// Find a bin by id.
     pub fn find_bin(&self, id: &str) -> Option<&MediaBin> {
         self.bins.iter().find(|b| b.id == id)
+    }
+
+    /// Find a smart collection by id.
+    pub fn find_collection(&self, id: &str) -> Option<&MediaCollection> {
+        self.collections.iter().find(|c| c.id == id)
     }
 
     /// Build the ancestor chain for breadcrumb display (root-first order).
@@ -83,6 +94,80 @@ impl MediaLibrary {
         }
         chain.reverse();
         chain
+    }
+
+    /// Items matching a smart collection.
+    pub fn items_in_collection(&self, collection_id: &str) -> Vec<&MediaItem> {
+        let Some(collection) = self.find_collection(collection_id) else {
+            return Vec::new();
+        };
+        self.items
+            .iter()
+            .filter(|item| media_matches_filters(item, &collection.criteria))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKindFilter {
+    #[default]
+    All,
+    Video,
+    Audio,
+    Image,
+    Offline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionFilter {
+    #[default]
+    All,
+    SdOrSmaller,
+    Hd,
+    FullHd,
+    UltraHd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameRateFilter {
+    #[default]
+    All,
+    Fps24OrLess,
+    Fps25To30,
+    Fps31To59,
+    Fps60Plus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MediaFilterCriteria {
+    #[serde(default)]
+    pub search_text: String,
+    #[serde(default)]
+    pub kind: MediaKindFilter,
+    #[serde(default)]
+    pub resolution: ResolutionFilter,
+    #[serde(default)]
+    pub frame_rate: FrameRateFilter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaCollection {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub criteria: MediaFilterCriteria,
+}
+
+impl MediaCollection {
+    pub fn new(name: impl Into<String>, criteria: MediaFilterCriteria) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: name.into(),
+            criteria,
+        }
     }
 }
 
@@ -186,14 +271,131 @@ pub fn source_path_exists(source_path: &str) -> bool {
     std::fs::metadata(source_path).is_ok()
 }
 
-/// Serialize bin data from the library into the project's transient fields (for FCPXML save).
+pub fn normalized_media_text(text: Option<&str>) -> Option<String> {
+    let normalized = text?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+pub fn non_file_clip_kind_text(kind: &ClipKind) -> &'static str {
+    match kind {
+        ClipKind::Title => "Title clip",
+        ClipKind::Adjustment => "Adjustment layer",
+        ClipKind::Compound => "Compound clip",
+        ClipKind::Multicam => "Multicam clip",
+        ClipKind::Video => "Generated video clip",
+        ClipKind::Audio => "Generated audio clip",
+        ClipKind::Image => "Generated image clip",
+    }
+}
+
+pub fn media_display_name(item: &MediaItem) -> String {
+    if matches!(item.clip_kind, Some(ClipKind::Title)) {
+        if let Some(text) = normalized_media_text(item.title_text.as_deref()) {
+            return text;
+        }
+    }
+    normalized_media_text(Some(item.label.as_str())).unwrap_or_else(|| {
+        item.clip_kind
+            .as_ref()
+            .map(non_file_clip_kind_text)
+            .unwrap_or("media")
+            .to_string()
+    })
+}
+
+pub fn media_max_dimension(item: &MediaItem) -> Option<u32> {
+    item.video_width
+        .zip(item.video_height)
+        .map(|(w, h)| w.max(h))
+}
+
+pub fn media_frame_rate_value(item: &MediaItem) -> Option<f64> {
+    let (num, den) = item.frame_rate_num.zip(item.frame_rate_den)?;
+    if num == 0 || den == 0 {
+        return None;
+    }
+    Some(num as f64 / den as f64)
+}
+
+pub fn media_matches_filters(item: &MediaItem, filters: &MediaFilterCriteria) -> bool {
+    if !matches_media_kind_filter(item, filters.kind) {
+        return false;
+    }
+    if !matches_resolution_filter(item, filters.resolution) {
+        return false;
+    }
+    if !matches_frame_rate_filter(item, filters.frame_rate) {
+        return false;
+    }
+    if filters.search_text.trim().is_empty() {
+        return true;
+    }
+
+    let needle = filters.search_text.trim().to_ascii_lowercase();
+    media_display_name(item)
+        .to_ascii_lowercase()
+        .contains(&needle)
+        || item.label.to_ascii_lowercase().contains(&needle)
+        || item
+            .title_text
+            .as_ref()
+            .is_some_and(|text| text.to_ascii_lowercase().contains(&needle))
+        || item.source_path.to_ascii_lowercase().contains(&needle)
+        || item
+            .codec_summary
+            .as_ref()
+            .is_some_and(|codec| codec.to_ascii_lowercase().contains(&needle))
+}
+
+pub fn matches_media_kind_filter(item: &MediaItem, filter: MediaKindFilter) -> bool {
+    match filter {
+        MediaKindFilter::All => true,
+        MediaKindFilter::Video => !item.is_missing && !item.is_audio_only && !item.is_image,
+        MediaKindFilter::Audio => !item.is_missing && item.is_audio_only,
+        MediaKindFilter::Image => !item.is_missing && item.is_image,
+        MediaKindFilter::Offline => item.is_missing,
+    }
+}
+
+pub fn matches_resolution_filter(item: &MediaItem, filter: ResolutionFilter) -> bool {
+    match filter {
+        ResolutionFilter::All => true,
+        ResolutionFilter::SdOrSmaller => media_max_dimension(item).is_some_and(|dim| dim <= 720),
+        ResolutionFilter::Hd => {
+            media_max_dimension(item).is_some_and(|dim| (721..=1280).contains(&dim))
+        }
+        ResolutionFilter::FullHd => {
+            media_max_dimension(item).is_some_and(|dim| (1281..=1920).contains(&dim))
+        }
+        ResolutionFilter::UltraHd => media_max_dimension(item).is_some_and(|dim| dim >= 1921),
+    }
+}
+
+pub fn matches_frame_rate_filter(item: &MediaItem, filter: FrameRateFilter) -> bool {
+    match filter {
+        FrameRateFilter::All => true,
+        FrameRateFilter::Fps24OrLess => media_frame_rate_value(item).is_some_and(|fps| fps <= 24.0),
+        FrameRateFilter::Fps25To30 => media_frame_rate_value(item)
+            .is_some_and(|fps| (24.0..=30.0).contains(&fps) && fps > 24.0),
+        FrameRateFilter::Fps31To59 => media_frame_rate_value(item)
+            .is_some_and(|fps| (30.0..60.0).contains(&fps) && fps > 30.0),
+        FrameRateFilter::Fps60Plus => media_frame_rate_value(item).is_some_and(|fps| fps >= 60.0),
+    }
+}
+
+/// Serialize media-browser organization data from the library into the project's transient fields
+/// (for FCPXML save).
 pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::project::Project) {
     if lib.bins.is_empty() {
         project.parsed_bins_json = None;
-        project.parsed_media_bins_json = None;
-        return;
+    } else {
+        project.parsed_bins_json = serde_json::to_string(&lib.bins).ok();
     }
-    project.parsed_bins_json = serde_json::to_string(&lib.bins).ok();
     let media_bins: std::collections::HashMap<String, String> = lib
         .items
         .iter()
@@ -204,9 +406,15 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
     } else {
         project.parsed_media_bins_json = serde_json::to_string(&media_bins).ok();
     }
+    if lib.collections.is_empty() {
+        project.parsed_collections_json = None;
+    } else {
+        project.parsed_collections_json = serde_json::to_string(&lib.collections).ok();
+    }
 }
 
-/// Restore bin data from the project's transient fields into the library (after FCPXML load).
+/// Restore media-browser organization data from the project's transient fields into the library
+/// (after FCPXML load).
 pub fn apply_bins_from_project(
     lib: &mut MediaLibrary,
     project: &mut crate::model::project::Project,
@@ -234,9 +442,15 @@ pub fn apply_bins_from_project(
             }
         }
     }
+    if let Some(ref collections_json) = project.parsed_collections_json {
+        if let Ok(collections) = serde_json::from_str::<Vec<MediaCollection>>(collections_json) {
+            lib.collections = collections;
+        }
+    }
     // Clear transient fields
     project.parsed_bins_json = None;
     project.parsed_media_bins_json = None;
+    project.parsed_collections_json = None;
 }
 
 /// In/out marks and current source for the source preview monitor.
@@ -451,5 +665,69 @@ mod tests {
 
         assert_eq!(restored.items[0].bin_id.as_deref(), Some(bin.id.as_str()));
         assert_eq!(restored.items[1].bin_id.as_deref(), Some(bin.id.as_str()));
+    }
+
+    #[test]
+    fn test_media_matches_filters_by_title_text_and_frame_rate() {
+        let mut title = MediaItem::new("", 4_000_000_000);
+        title.label = "Lower Third".to_string();
+        title.clip_kind = Some(ClipKind::Title);
+        title.title_text = Some("Jane Doe".to_string());
+        title.is_missing = false;
+        assert!(media_matches_filters(
+            &title,
+            &MediaFilterCriteria {
+                search_text: "jane".to_string(),
+                ..Default::default()
+            }
+        ));
+
+        let mut clip = MediaItem::new("/tmp/clip.mov", 1_000_000_000);
+        clip.is_missing = false;
+        clip.frame_rate_num = Some(60000);
+        clip.frame_rate_den = Some(1000);
+        assert!(media_matches_filters(
+            &clip,
+            &MediaFilterCriteria {
+                frame_rate: FrameRateFilter::Fps60Plus,
+                ..Default::default()
+            }
+        ));
+        assert!(!media_matches_filters(
+            &clip,
+            &MediaFilterCriteria {
+                frame_rate: FrameRateFilter::Fps24OrLess,
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_sync_bins_round_trips_collections() {
+        let mut lib = MediaLibrary::new();
+        lib.collections.push(MediaCollection::new(
+            "4K clips",
+            MediaFilterCriteria {
+                resolution: ResolutionFilter::UltraHd,
+                frame_rate: FrameRateFilter::Fps31To59,
+                ..Default::default()
+            },
+        ));
+
+        let mut project = crate::model::project::Project::new("Test");
+        sync_bins_to_project(&lib, &mut project);
+        assert!(project
+            .parsed_collections_json
+            .as_ref()
+            .is_some_and(|json| json.contains("4K clips")));
+
+        let mut restored = MediaLibrary::new();
+        apply_bins_from_project(&mut restored, &mut project);
+        assert_eq!(restored.collections.len(), 1);
+        assert_eq!(restored.collections[0].name, "4K clips");
+        assert_eq!(
+            restored.collections[0].criteria.frame_rate,
+            FrameRateFilter::Fps31To59
+        );
     }
 }

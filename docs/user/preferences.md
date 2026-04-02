@@ -141,6 +141,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - When available, Program Monitor playback can use the prerendered section clip instead of rebuilding all video layers live for that segment.
 - If both **Real-time preview** and **Background prerender** are enabled, 3+ track overlap boundaries now prefer the prerender-capable path so prerender clips are still used during full playthrough.
 - Prerender playback uses the same preview-processing dimensions as live playback, so reduced Preview Quality modes do not crop prerender output to a top-left region.
+- Animated **brightness / contrast / saturation / temperature / tint** keyframes are now preserved in prerendered overlap segments, keeping heavy-overlap preview closer to export when those color controls are animated.
 - If a prerender segment finishes while playback is already inside that overlap region, UltimateSlice can now switch into the prerender path mid-segment (via a short rebuild) instead of waiting for the next boundary.
 - While paused or stopped, UltimateSlice also schedules nearby prerender jobs around the current playhead so heavy sections can be ready before playback starts.
 - While playing, background prerender scheduling is bounded to upcoming boundaries (not every playhead tick) to reduce job churn and keep readiness stable.
@@ -152,6 +153,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - Only active when enabled in Preferences.
 - Prerender cache files are temporary and are cleaned up when the project/player is closed.
 - If a prerender boundary clip fails to link reliably, UltimateSlice automatically falls back to the normal live rebuild path for stability.
+- Animated transform/mask properties, speed/reverse/freeze timing, and advanced clip-audio animation still fall back to the normal live path when prerender cannot reproduce them safely.
 - When a boundary is not warm, playback falls back to the normal live rebuild path.
 - Uses more CPU/memory while playing and is disabled by default.
 - MCP automation:

@@ -129,6 +129,9 @@ pub struct Project {
     /// Transient: parsed media-to-bin mapping from `us:media-bins` FCPXML event attribute.
     #[serde(skip)]
     pub parsed_media_bins_json: Option<String>,
+    /// Transient: parsed smart collections from `us:smart-collections` FCPXML event attribute.
+    #[serde(skip)]
+    pub parsed_collections_json: Option<String>,
 }
 
 impl Project {
@@ -153,6 +156,7 @@ impl Project {
             fcpxml_unknown_spine: FcpxmlUnknownNode::default(),
             parsed_bins_json: None,
             parsed_media_bins_json: None,
+            parsed_collections_json: None,
         };
         // Default tracks like FCP
         project.tracks.push(Track::new_video("Video 1"));

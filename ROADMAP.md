@@ -414,7 +414,7 @@ Tracking docs:
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Preview/Export color parity improvements
   - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
-  - [ ] Prerender keyframe interpolation — support brightness/contrast/saturation/temperature/tint keyframes in the prerender pipeline (currently only static values are applied; animated color adjustments are not visible in proxy mode)
+  - [x] Prerender keyframe interpolation — background prerender now carries brightness/contrast/saturation/temperature/tint keyframes so animated color adjustments remain visible during prerender-backed preview
   - [ ] Configurable prerender quality — expose CRF / encoding preset in Preferences (currently CRF 20 veryfast) to let users trade cache size and prerender speed for higher color fidelity
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
 - [x] Advanced color grading
@@ -632,7 +632,7 @@ Tracking docs:
   - [x] SRT file export, 7 MCP tools, FCPXML round-trip, timeline CC badge
   - [x] Whisper output cleanup (contraction merging, punctuation spacing)
 - [ ] AI Scene Cut Detection for long source files
-- [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
+- [x] Smart Collections based on metadata — save project-wide media-browser queries by search text, kind, resolution, and frame rate; manage them from the browser; persist via FCPXML vendor metadata; automate with MCP `list_collections` / `create_collection` / `update_collection` / `delete_collection`
 - [ ] Optical Flow slow-motion (AI frame interpolation)
 - [ ] AI Music Generation (MusicGen / MusicGPT)
   - [ ] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
