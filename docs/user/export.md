@@ -250,10 +250,14 @@ Features:
 - Speed effects stored as `LinearTimeWarp` OTIO effects
 - Project markers attached to the first video track
 - Track metadata (muted, locked, soloed, audio role, ducking)
-- UltimateSlice-specific clip properties (color grading, opacity, volume, pan) preserved in OTIO metadata for lossless round-trip
-- Title and adjustment clips exported with `MissingReference` and full metadata
+- UltimateSlice OTIO metadata currently preserves the supported clip metadata set, including core clip settings (`speed`, `reverse`, `opacity`, `volume`, `pan`, `brightness`, `contrast`, `saturation`)
+- Title clips exported with `MissingReference`, plus title styling metadata (text, font, colors, outline, shadow, box, template, secondary text, and clip background color)
+- Subtitle-bearing clips preserve subtitle segments/word timing plus subtitle styling metadata (language, font/colors, outline, background box, highlight mode/color, word window, and vertical position)
+- Adjustment clips also export as `MissingReference`
 
-**Import:** Open `.otio` files via **File → Open** (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present.
+**Import:** Open `.otio` files via **File → Open** (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present. UltimateSlice also accepts older flat OTIO metadata from previous app builds and upgrades it to the current versioned OTIO metadata contract on save.
+
+Current limitation: OTIO round-trip is still partial for some UltimateSlice-only features. Some advanced transforms/effects/keyframes/masks and nested clip internals are not fully preserved yet, so `.uspxml` remains the highest-fidelity interchange/save format for complete UltimateSlice projects.
 
 Also available via MCP: `save_otio` and `open_otio` tools with `path` parameter.
 

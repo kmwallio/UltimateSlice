@@ -5,8 +5,12 @@ use serde_json::Value;
 
 use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::{FrameRate, Marker, Project};
-use crate::model::track::{Track, TrackKind};
+use crate::model::track::{AudioRole, Track, TrackKind};
 
+use super::metadata::{
+    clip_metadata_from_root, marker_metadata_from_root, project_metadata_from_root,
+    track_metadata_from_root, transition_metadata_from_root,
+};
 use super::schema::*;
 
 /// Parse an OTIO JSON string into a `Project`.
@@ -47,12 +51,23 @@ pub fn parse_otio(json: &str) -> Result<Project> {
         };
 
         // Restore track metadata if present.
-        if let Some(us) = otio_track.metadata.get("ultimateslice") {
-            track.muted = us.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
-            track.locked = us.get("locked").and_then(|v| v.as_bool()).unwrap_or(false);
-            track.soloed = us.get("soloed").and_then(|v| v.as_bool()).unwrap_or(false);
-            track.duck = us.get("duck").and_then(|v| v.as_bool()).unwrap_or(false);
-            if let Some(db) = us.get("duck_amount_db").and_then(|v| v.as_f64()) {
+        if let Some(us) = track_metadata_from_root(&otio_track.metadata) {
+            if let Some(v) = us.muted {
+                track.muted = v;
+            }
+            if let Some(v) = us.locked {
+                track.locked = v;
+            }
+            if let Some(v) = us.soloed {
+                track.soloed = v;
+            }
+            if let Some(role) = us.audio_role.as_deref() {
+                track.audio_role = AudioRole::from_str(role);
+            }
+            if let Some(v) = us.duck {
+                track.duck = v;
+            }
+            if let Some(db) = us.duck_amount_db {
                 track.duck_amount_db = db;
             }
         }
@@ -79,12 +94,8 @@ pub fn parse_otio(json: &str) -> Result<Project> {
                 OtioTrackChild::Transition(trans) => {
                     // Attach transition info to the preceding clip.
                     if let Some(prev) = track.clips.last_mut() {
-                        let kind_name = trans
-                            .metadata
-                            .get("ultimateslice")
-                            .and_then(|us| us.get("transition_kind"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
+                        let kind_name = transition_metadata_from_root(&trans.metadata)
+                            .and_then(|us| us.transition_kind);
                         let transition_name =
                             kind_name.unwrap_or_else(|| match trans.transition_type.as_str() {
                                 "SMPTE_Dissolve" => "cross_dissolve".into(),
@@ -124,7 +135,7 @@ fn otio_clip_to_clip(
     otio_clip: &OtioClip,
     timeline_start_ns: u64,
     track_kind: TrackKind,
-    rate: f64,
+    _rate: f64,
 ) -> Clip {
     // Source range.
     let (source_in, source_out) = otio_clip
@@ -144,10 +155,10 @@ fn otio_clip_to_clip(
     };
 
     // Clip kind — check UltimateSlice metadata first, else derive from track.
-    let us_meta = otio_clip.metadata.get("ultimateslice");
+    let us_meta = clip_metadata_from_root(&otio_clip.metadata);
     let kind = us_meta
-        .and_then(|us| us.get("kind"))
-        .and_then(|v| v.as_str())
+        .as_ref()
+        .and_then(|us| us.kind.as_deref())
         .and_then(parse_clip_kind)
         .unwrap_or(match track_kind {
             TrackKind::Video => {
@@ -171,32 +182,121 @@ fn otio_clip_to_clip(
     clip.label = otio_clip.name.clone();
 
     // Restore UltimateSlice-specific metadata when available.
-    if let Some(us) = us_meta {
-        if let Some(v) = us.get("speed").and_then(|v| v.as_f64()) {
+    if let Some(us) = us_meta.as_ref() {
+        if let Some(v) = us.speed {
             clip.speed = v;
         }
-        if let Some(v) = us.get("reverse").and_then(|v| v.as_bool()) {
+        if let Some(v) = us.reverse {
             clip.reverse = v;
         }
-        if let Some(v) = us.get("volume").and_then(|v| v.as_f64()) {
+        if let Some(v) = us.volume {
             clip.volume = v as f32;
         }
-        if let Some(v) = us.get("pan").and_then(|v| v.as_f64()) {
+        if let Some(v) = us.pan {
             clip.pan = v as f32;
         }
-        if let Some(v) = us.get("brightness").and_then(|v| v.as_f64()) {
+        if let Some(v) = us.brightness {
             clip.brightness = v as f32;
         }
-        if let Some(v) = us.get("contrast").and_then(|v| v.as_f64()) {
+        if let Some(v) = us.contrast {
             clip.contrast = v as f32;
         }
-        if let Some(v) = us.get("saturation").and_then(|v| v.as_f64()) {
+        if let Some(v) = us.saturation {
             clip.saturation = v as f32;
         }
-        if let Some(v) = us.get("opacity").and_then(|v| v.as_f64()) {
+        if let Some(v) = us.opacity {
             clip.opacity = v;
         }
-    } else {
+        if let Some(v) = us.title_text.as_ref() {
+            clip.title_text = v.clone();
+        }
+        if let Some(v) = us.title_font.as_ref() {
+            clip.title_font = v.clone();
+        }
+        if let Some(v) = us.title_color {
+            clip.title_color = v;
+        }
+        if let Some(v) = us.title_x {
+            clip.title_x = v;
+        }
+        if let Some(v) = us.title_y {
+            clip.title_y = v;
+        }
+        if let Some(v) = us.title_template.as_ref() {
+            clip.title_template = v.clone();
+        }
+        if let Some(v) = us.title_outline_color {
+            clip.title_outline_color = v;
+        }
+        if let Some(v) = us.title_outline_width {
+            clip.title_outline_width = v;
+        }
+        if let Some(v) = us.title_shadow {
+            clip.title_shadow = v;
+        }
+        if let Some(v) = us.title_shadow_color {
+            clip.title_shadow_color = v;
+        }
+        if let Some(v) = us.title_shadow_offset_x {
+            clip.title_shadow_offset_x = v;
+        }
+        if let Some(v) = us.title_shadow_offset_y {
+            clip.title_shadow_offset_y = v;
+        }
+        if let Some(v) = us.title_bg_box {
+            clip.title_bg_box = v;
+        }
+        if let Some(v) = us.title_bg_box_color {
+            clip.title_bg_box_color = v;
+        }
+        if let Some(v) = us.title_bg_box_padding {
+            clip.title_bg_box_padding = v;
+        }
+        if let Some(v) = us.title_clip_bg_color {
+            clip.title_clip_bg_color = v;
+        }
+        if let Some(v) = us.title_secondary_text.as_ref() {
+            clip.title_secondary_text = v.clone();
+        }
+        if let Some(v) = us.subtitle_segments.as_ref() {
+            clip.subtitle_segments = v.clone();
+        }
+        if let Some(v) = us.subtitles_language.as_ref() {
+            clip.subtitles_language = v.clone();
+        }
+        if let Some(v) = us.subtitle_font.as_ref() {
+            clip.subtitle_font = v.clone();
+        }
+        if let Some(v) = us.subtitle_color {
+            clip.subtitle_color = v;
+        }
+        if let Some(v) = us.subtitle_outline_color {
+            clip.subtitle_outline_color = v;
+        }
+        if let Some(v) = us.subtitle_outline_width {
+            clip.subtitle_outline_width = v;
+        }
+        if let Some(v) = us.subtitle_bg_box {
+            clip.subtitle_bg_box = v;
+        }
+        if let Some(v) = us.subtitle_bg_box_color {
+            clip.subtitle_bg_box_color = v;
+        }
+        if let Some(v) = us.subtitle_highlight_mode {
+            clip.subtitle_highlight_mode = v;
+        }
+        if let Some(v) = us.subtitle_highlight_color {
+            clip.subtitle_highlight_color = v;
+        }
+        if let Some(v) = us.subtitle_word_window_secs {
+            clip.subtitle_word_window_secs = v;
+        }
+        if let Some(v) = us.subtitle_position_y {
+            clip.subtitle_position_y = v;
+        }
+    }
+
+    if us_meta.as_ref().and_then(|us| us.speed).is_none() {
         // Check OTIO effects for speed (LinearTimeWarp from other tools).
         for eff in &otio_clip.effects {
             if eff.name == "LinearTimeWarp" {
@@ -281,17 +381,8 @@ fn rate_to_frame_rate(rate: f64) -> FrameRate {
 
 /// Extract width/height from timeline metadata, defaulting to 1920×1080.
 fn extract_resolution(metadata: &Value) -> (u32, u32) {
-    let w = metadata
-        .get("ultimateslice")
-        .and_then(|us| us.get("width"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1920) as u32;
-    let h = metadata
-        .get("ultimateslice")
-        .and_then(|us| us.get("height"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1080) as u32;
-    (w, h)
+    let us = project_metadata_from_root(metadata).unwrap_or_default();
+    (us.width.unwrap_or(1920), us.height.unwrap_or(1080))
 }
 
 /// Parse a `ClipKind` debug name back to the enum.
@@ -311,13 +402,8 @@ fn parse_clip_kind(s: &str) -> Option<ClipKind> {
 /// Parse marker color from OTIO marker metadata or color name.
 fn parse_marker_color(m: &OtioMarker) -> u32 {
     // Try UltimateSlice metadata first.
-    if let Some(hex) = m
-        .metadata
-        .get("ultimateslice")
-        .and_then(|us| us.get("color_rgba"))
-        .and_then(|v| v.as_str())
-    {
-        if let Ok(rgba) = u32::from_str_radix(hex, 16) {
+    if let Some(hex) = marker_metadata_from_root(&m.metadata).and_then(|us| us.color_rgba) {
+        if let Ok(rgba) = u32::from_str_radix(&hex, 16) {
             return rgba;
         }
     }
@@ -530,7 +616,7 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         use crate::model::clip::Clip;
-        use crate::model::track::Track;
+        use crate::model::track::{AudioRole, Track};
 
         let mut p = Project::new("Roundtrip");
         p.frame_rate = FrameRate {
@@ -538,18 +624,19 @@ mod tests {
             denominator: 1,
         };
         p.tracks.clear();
-        let mut track = Track::new_video("V1");
+        let mut track = Track::new_audio("A1");
+        track.audio_role = AudioRole::Dialogue;
         track.add_clip(Clip::new(
             "/footage/a.mp4",
             2_000_000_000,
             0,
-            ClipKind::Video,
+            ClipKind::Audio,
         ));
         track.add_clip(Clip::new(
             "/footage/b.mp4",
             3_000_000_000,
             5_000_000_000,
-            ClipKind::Video,
+            ClipKind::Audio,
         ));
         p.tracks.push(track);
 
@@ -559,10 +646,141 @@ mod tests {
         assert_eq!(p2.title, "Roundtrip");
         assert_eq!(p2.tracks.len(), 1);
         assert_eq!(p2.tracks[0].clips.len(), 2);
+        assert_eq!(p2.tracks[0].audio_role, AudioRole::Dialogue);
         // First clip at 0, second at 5s.
         assert_eq!(p2.tracks[0].clips[0].timeline_start, 0);
         let diff = (p2.tracks[0].clips[1].timeline_start as i64 - 5_000_000_000i64).unsigned_abs();
         assert!(diff < 42_000_000, "second clip start off by {diff} ns");
+    }
+
+    #[test]
+    fn test_parse_legacy_flat_track_metadata_restores_audio_role() {
+        let json = r#"{
+            "OTIO_SCHEMA": "Timeline.1",
+            "name": "Legacy Track Meta",
+            "global_start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0.0, "rate": 24.0 },
+            "tracks": {
+                "OTIO_SCHEMA": "Stack.1",
+                "name": "tracks",
+                "children": [{
+                    "OTIO_SCHEMA": "Track.1",
+                    "name": "A1",
+                    "kind": "Audio",
+                    "children": [],
+                    "metadata": {
+                        "ultimateslice": {
+                            "muted": false,
+                            "locked": false,
+                            "soloed": true,
+                            "audio_role": "Dialogue",
+                            "duck": true,
+                            "duck_amount_db": -9.0
+                        }
+                    }
+                }]
+            }
+        }"#;
+
+        let p = parse_otio(json).unwrap();
+        assert_eq!(p.tracks.len(), 1);
+        assert_eq!(p.tracks[0].audio_role, AudioRole::Dialogue);
+        assert!(p.tracks[0].soloed);
+        assert!(p.tracks[0].duck);
+        assert_eq!(p.tracks[0].duck_amount_db, -9.0);
+    }
+
+    #[test]
+    fn test_roundtrip_title_and_subtitle_metadata() {
+        use crate::model::clip::{SubtitleHighlightMode, SubtitleSegment, SubtitleWord};
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Text Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+
+        let mut title = Clip::new("", 2_000_000_000, 0, ClipKind::Title);
+        title.label = "Lower Third".into();
+        title.title_text = "Primary".into();
+        title.title_font = "Sans Bold 42".into();
+        title.title_color = 0xFFCC00FF;
+        title.title_x = 0.3;
+        title.title_y = 0.7;
+        title.title_template = "lower_third".into();
+        title.title_outline_color = 0x000000FF;
+        title.title_outline_width = 3.0;
+        title.title_shadow = true;
+        title.title_shadow_color = 0x112233AA;
+        title.title_shadow_offset_x = 5.0;
+        title.title_shadow_offset_y = 7.0;
+        title.title_bg_box = true;
+        title.title_bg_box_color = 0x44556677;
+        title.title_bg_box_padding = 9.0;
+        title.title_clip_bg_color = 0x01020304;
+        title.title_secondary_text = "Secondary".into();
+        track.add_clip(title);
+
+        let mut clip = Clip::new(
+            "/footage/dialogue.mp4",
+            3_000_000_000,
+            2_500_000_000,
+            ClipKind::Video,
+        );
+        clip.subtitle_segments = vec![SubtitleSegment {
+            id: "seg-1".into(),
+            start_ns: 100_000_000,
+            end_ns: 900_000_000,
+            text: "hello world".into(),
+            words: vec![
+                SubtitleWord {
+                    start_ns: 100_000_000,
+                    end_ns: 400_000_000,
+                    text: "hello".into(),
+                },
+                SubtitleWord {
+                    start_ns: 450_000_000,
+                    end_ns: 900_000_000,
+                    text: "world".into(),
+                },
+            ],
+        }];
+        clip.subtitles_language = "en".into();
+        clip.subtitle_font = "Sans Bold 24".into();
+        clip.subtitle_color = 0xFFFFFFFF;
+        clip.subtitle_outline_color = 0x000000FF;
+        clip.subtitle_outline_width = 2.5;
+        clip.subtitle_bg_box = false;
+        clip.subtitle_bg_box_color = 0x12345678;
+        clip.subtitle_highlight_mode = SubtitleHighlightMode::Color;
+        clip.subtitle_highlight_color = 0x00FF00FF;
+        clip.subtitle_word_window_secs = 3.5;
+        clip.subtitle_position_y = 0.82;
+        track.add_clip(clip);
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+
+        let title2 = &p2.tracks[0].clips[0];
+        assert_eq!(title2.kind, ClipKind::Title);
+        assert_eq!(title2.title_text, "Primary");
+        assert_eq!(title2.title_font, "Sans Bold 42");
+        assert_eq!(title2.title_template, "lower_third");
+        assert!(title2.title_shadow);
+        assert_eq!(title2.title_secondary_text, "Secondary");
+        assert_eq!(title2.title_clip_bg_color, 0x01020304);
+
+        let clip2 = &p2.tracks[0].clips[1];
+        assert_eq!(clip2.subtitle_segments.len(), 1);
+        assert_eq!(clip2.subtitle_segments[0].words.len(), 2);
+        assert_eq!(clip2.subtitles_language, "en");
+        assert_eq!(clip2.subtitle_highlight_mode, SubtitleHighlightMode::Color);
+        assert!(!clip2.subtitle_bg_box);
+        assert_eq!(clip2.subtitle_position_y, 0.82);
     }
 
     #[test]

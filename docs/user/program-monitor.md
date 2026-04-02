@@ -72,6 +72,7 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - The program monitor uses a GStreamer **compositor** pipeline that layers all active video tracks simultaneously at the playhead position.
 - Each active clip gets its own decoder branch with per-clip effects, connected to the compositor with correct z-ordering (higher tracks render on top).
 - Audio from active video clips is mixed through an **audiomixer** element (except freeze-frame video holds, which are intentionally silent); audio-only tracks use a separate playbin.
+- Before clip audio reaches the preview mixer, UltimateSlice normalizes it to a fixed 48 kHz stereo raw-audio format. This keeps lower-rate camera AAC sources (such as 16 kHz mono Ring clips) from tripping GStreamer `not-negotiated` playback errors in the Program Monitor.
 - Program Monitor shows a **master stereo meter** (L/R), updated from GStreamer `level` elements.
 - During prerender playback, per-track timeline meters remain active by mapping prerender audio-level telemetry to the currently active prerender track set.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.

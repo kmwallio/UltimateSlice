@@ -373,8 +373,9 @@ Tracking docs:
               - [x] Boundary audio-drop guard: when overlap rebuilds encounter delayed video-pad linking, keep already-linked slot audio active (do not EOS the audio pad solely because video linking is late)
               - [x] Boundary pre-link EOS deferral for active handoffs: when playback is already running across a boundary, avoid forcing early pre-link EOS on newly added overlap slots so late pad-added links can settle before post-seek arrival checks
               - [x] Audiomixer flush parity: flush the audiomixer alongside the compositor during boundary rebuilds so their output running-times stay in sync, preventing audio buffer late-drop after a video-path flush
+              - [x] Normalize Program Monitor mixer-bound clip audio to 48 kHz stereo before `audiomixer`, preventing `qtdemux ... not-negotiated` preview failures on 16 kHz mono AAC camera clips (for example Ring MP4 media)
               - [x] Continuing decoders fast path: reuse existing decoder slots at boundary crossings when adjacent clips share the same source file, avoiding teardown/rebuild overhead (~60-75% boundary latency reduction for same-source transitions)
-            - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
+             - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
    - [x] Proxy shutdown cleanup policy: always clean managed local/tmp proxies on unload/close; preserve tracked `UltimateSlice.cache` proxies only when Proxy mode is enabled (clean sidecar proxies too when disabled)
@@ -653,7 +654,8 @@ Tracking docs:
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
-- [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed/metadata round-trip; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog; 21 unit tests)
+- [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata and track audio-role round-trip; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
+- [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining transforms/effects/keyframes/masks/nested clip internals)
 - [ ] Shared Project/Library support for collaborative editing
 
 ---

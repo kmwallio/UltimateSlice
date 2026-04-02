@@ -7,6 +7,12 @@ use crate::model::clip::ClipKind;
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 
+use super::metadata::{
+    wrap_clip_metadata, wrap_marker_metadata, wrap_project_metadata, wrap_track_metadata,
+    wrap_transition_metadata, UltimateSliceClipOtioMetadata, UltimateSliceMarkerOtioMetadata,
+    UltimateSliceProjectOtioMetadata, UltimateSliceTrackOtioMetadata,
+    UltimateSliceTransitionOtioMetadata,
+};
 use super::schema::*;
 
 /// Map an internal transition name to an OTIO transition type string.
@@ -105,21 +111,46 @@ pub fn write_otio(project: &Project) -> Result<String> {
             }
 
             // UltimateSlice-specific metadata for lossless round-trip.
-            let us_meta = json!({
-                "kind": format!("{:?}", clip.kind),
-                "speed": clip.speed,
-                "reverse": clip.reverse,
-                "volume": clip.volume,
-                "pan": clip.pan,
-                "brightness": clip.brightness,
-                "contrast": clip.contrast,
-                "saturation": clip.saturation,
-                "opacity": clip.opacity,
-                "transition_after": clip.transition_after,
-                "transition_after_ns": clip.transition_after_ns,
+            let metadata = wrap_clip_metadata(&UltimateSliceClipOtioMetadata {
+                kind: Some(format!("{:?}", clip.kind)),
+                speed: Some(clip.speed),
+                reverse: Some(clip.reverse),
+                volume: Some(clip.volume as f64),
+                pan: Some(clip.pan as f64),
+                brightness: Some(clip.brightness as f64),
+                contrast: Some(clip.contrast as f64),
+                saturation: Some(clip.saturation as f64),
+                opacity: Some(clip.opacity),
+                title_text: Some(clip.title_text.clone()),
+                title_font: Some(clip.title_font.clone()),
+                title_color: Some(clip.title_color),
+                title_x: Some(clip.title_x),
+                title_y: Some(clip.title_y),
+                title_template: Some(clip.title_template.clone()),
+                title_outline_color: Some(clip.title_outline_color),
+                title_outline_width: Some(clip.title_outline_width),
+                title_shadow: Some(clip.title_shadow),
+                title_shadow_color: Some(clip.title_shadow_color),
+                title_shadow_offset_x: Some(clip.title_shadow_offset_x),
+                title_shadow_offset_y: Some(clip.title_shadow_offset_y),
+                title_bg_box: Some(clip.title_bg_box),
+                title_bg_box_color: Some(clip.title_bg_box_color),
+                title_bg_box_padding: Some(clip.title_bg_box_padding),
+                title_clip_bg_color: Some(clip.title_clip_bg_color),
+                title_secondary_text: Some(clip.title_secondary_text.clone()),
+                subtitle_segments: Some(clip.subtitle_segments.clone()),
+                subtitles_language: Some(clip.subtitles_language.clone()),
+                subtitle_font: Some(clip.subtitle_font.clone()),
+                subtitle_color: Some(clip.subtitle_color),
+                subtitle_outline_color: Some(clip.subtitle_outline_color),
+                subtitle_outline_width: Some(clip.subtitle_outline_width),
+                subtitle_bg_box: Some(clip.subtitle_bg_box),
+                subtitle_bg_box_color: Some(clip.subtitle_bg_box_color),
+                subtitle_highlight_mode: Some(clip.subtitle_highlight_mode),
+                subtitle_highlight_color: Some(clip.subtitle_highlight_color),
+                subtitle_word_window_secs: Some(clip.subtitle_word_window_secs),
+                subtitle_position_y: Some(clip.subtitle_position_y),
             });
-
-            let metadata = json!({ "ultimateslice": us_meta });
 
             children.push(OtioTrackChild::Clip(OtioClip {
                 schema: "Clip.1".into(),
@@ -142,25 +173,21 @@ pub fn write_otio(project: &Project) -> Result<String> {
                     transition_type: otio_transition_type(&clip.transition_after).into(),
                     in_offset: ns_to_rational_time(half_ns, rate),
                     out_offset: ns_to_rational_time(clip.transition_after_ns - half_ns, rate),
-                    metadata: json!({
-                        "ultimateslice": {
-                            "transition_kind": clip.transition_after,
-                        }
+                    metadata: wrap_transition_metadata(&UltimateSliceTransitionOtioMetadata {
+                        transition_kind: Some(clip.transition_after.clone()),
                     }),
                 }));
             }
         }
 
         // Track-level metadata.
-        let track_meta = json!({
-            "ultimateslice": {
-                "muted": track.muted,
-                "locked": track.locked,
-                "soloed": track.soloed,
-                "audio_role": format!("{:?}", track.audio_role),
-                "duck": track.duck,
-                "duck_amount_db": track.duck_amount_db,
-            }
+        let track_meta = wrap_track_metadata(&UltimateSliceTrackOtioMetadata {
+            muted: Some(track.muted),
+            locked: Some(track.locked),
+            soloed: Some(track.soloed),
+            audio_role: Some(track.audio_role.as_str().to_string()),
+            duck: Some(track.duck),
+            duck_amount_db: Some(track.duck_amount_db),
         });
 
         otio_tracks.push(OtioTrack {
@@ -194,10 +221,8 @@ pub fn write_otio(project: &Project) -> Result<String> {
                         duration: rational_time(0.0, rate),
                     },
                     color,
-                    metadata: json!({
-                        "ultimateslice": {
-                            "color_rgba": format!("{:08X}", marker.color),
-                        }
+                    metadata: wrap_marker_metadata(&UltimateSliceMarkerOtioMetadata {
+                        color_rgba: Some(format!("{:08X}", marker.color)),
                     }),
                 });
             }
@@ -215,11 +240,9 @@ pub fn write_otio(project: &Project) -> Result<String> {
             children: otio_tracks,
             metadata: serde_json::Value::Null,
         },
-        metadata: json!({
-            "ultimateslice": {
-                "width": project.width,
-                "height": project.height,
-            }
+        metadata: wrap_project_metadata(&UltimateSliceProjectOtioMetadata {
+            width: Some(project.width),
+            height: Some(project.height),
         }),
     };
 
@@ -370,6 +393,10 @@ mod tests {
         assert_eq!(children.len(), 3);
         assert_eq!(children[1]["OTIO_SCHEMA"], "Transition.1");
         assert_eq!(children[1]["transition_type"], "SMPTE_Dissolve");
+        assert_eq!(
+            children[1]["metadata"]["ultimateslice"]["transition"]["transition_kind"],
+            "cross_dissolve"
+        );
     }
 
     #[test]
@@ -413,6 +440,24 @@ mod tests {
         let clip = &v["tracks"]["children"][0]["children"][0];
         assert_eq!(clip["name"], "My Title");
         assert_eq!(clip["media_reference"]["OTIO_SCHEMA"], "MissingReference.1");
+        assert_eq!(clip["metadata"]["ultimateslice"]["version"], 1);
+        assert_eq!(clip["metadata"]["ultimateslice"]["clip"]["kind"], "Title");
+        assert_eq!(clip["metadata"]["ultimateslice"]["clip"]["title_text"], "");
+    }
+
+    #[test]
+    fn test_write_track_metadata_uses_versioned_section() {
+        let mut p = make_project();
+        let mut track = Track::new_audio("A1");
+        track.audio_role = crate::model::track::AudioRole::Dialogue;
+        p.tracks.push(track);
+
+        let json = write_otio(&p).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let track_meta = &v["tracks"]["children"][0]["metadata"]["ultimateslice"];
+
+        assert_eq!(track_meta["version"], 1);
+        assert_eq!(track_meta["track"]["audio_role"], "dialogue");
     }
 
     #[test]
