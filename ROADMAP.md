@@ -179,6 +179,7 @@ Tracking docs:
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
+- [x] MCP project replacement actions (`create_project`, `open_fcpxml`, `open_otio`) switch the window from Welcome to Editor when they apply a new project
 - [x] Local perf tooling scripts: `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py`
 - [x] MCP color parity calibration script: `tools/calibrate_mcp_color_match.py` (slider sweeps + preview/export RMSE report + frei0r cross-runtime probe)
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory

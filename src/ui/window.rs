@@ -9403,6 +9403,7 @@ pub fn build_window(
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
         let stt_cache = stt_cache.clone();
+        let main_stack_for_mcp = main_stack.clone();
         let window_weak = window.downgrade();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
@@ -9410,6 +9411,7 @@ pub fn build_window(
                     handle_mcp_command(
                         cmd,
                         &win,
+                        &main_stack_for_mcp,
                         &project,
                         &library,
                         &player,
@@ -9900,6 +9902,7 @@ pub fn build_window(
 fn handle_mcp_command(
     cmd: crate::mcp::McpCommand,
     window: &gtk::ApplicationWindow,
+    main_stack: &gtk::Stack,
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<MediaLibrary>>,
     player: &Rc<RefCell<Player>>,
@@ -12407,6 +12410,7 @@ fn handle_mcp_command(
             timeline_state.borrow_mut().loading = true;
             let project = project.clone();
             let timeline_state = timeline_state.clone();
+            let main_stack = main_stack.clone();
             let on_project_changed = on_project_changed_full.clone();
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
             let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
@@ -12418,6 +12422,7 @@ fn handle_mcp_command(
                         let clip_count: usize = new_proj.tracks.iter().map(|t| t.clips.len()).sum();
                         *project.borrow_mut() = new_proj;
                         timeline_state.borrow_mut().loading = false;
+                        main_stack.set_visible_child_name("editor");
                         reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
                         suppress_resume_on_next_reload.set(true);
                         clear_media_browser_on_next_reload.set(true);
@@ -12459,6 +12464,7 @@ fn handle_mcp_command(
             timeline_state.borrow_mut().loading = true;
             let project = project.clone();
             let timeline_state = timeline_state.clone();
+            let main_stack = main_stack.clone();
             let on_project_changed = on_project_changed_full.clone();
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
             let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
@@ -12470,6 +12476,7 @@ fn handle_mcp_command(
                         let clip_count: usize = new_proj.tracks.iter().map(|t| t.clips.len()).sum();
                         *project.borrow_mut() = new_proj;
                         timeline_state.borrow_mut().loading = false;
+                        main_stack.set_visible_child_name("editor");
                         reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
                         suppress_resume_on_next_reload.set(true);
                         clear_media_browser_on_next_reload.set(true);
@@ -13241,6 +13248,7 @@ fn handle_mcp_command(
                 st.selected_track_id = None;
                 st.history = crate::undo::EditHistory::new();
             }
+            main_stack.set_visible_child_name("editor");
             reply.send(json!({"success": true, "title": title})).ok();
             suppress_resume_on_next_reload.set(true);
             clear_media_browser_on_next_reload.set(true);

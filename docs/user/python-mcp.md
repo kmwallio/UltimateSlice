@@ -109,6 +109,28 @@ Useful playback-tuning toggles:
 
 `set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
 
+## Project management examples
+
+Create a new empty project:
+
+```bash
+python3 tools/mcp_call.py create_project '{"title":"Automation Draft"}'
+```
+
+Open an FCPXML project:
+
+```bash
+python3 tools/mcp_call.py open_fcpxml '{"path":"/absolute/path/project.fcpxml"}'
+```
+
+Open an OTIO project:
+
+```bash
+python3 tools/mcp_call.py open_otio '{"path":"/absolute/path/project.otio"}'
+```
+
+`create_project`, `open_fcpxml`, and `open_otio` replace the current project and switch the visible window from the Welcome screen to the editor view, so screenshots and subsequent UI-driven automation land on the active project.
+
 ## Transform MCP examples
 
 Set scale, position, and optional rotation/anamorphic offset for a clip:
