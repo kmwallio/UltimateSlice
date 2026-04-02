@@ -503,9 +503,12 @@ impl EditCommand for SplitClipCommand {
                 .find(|c| c.id == self.original_clip.id)
             {
                 let cut_offset = self.split_ns - clip.timeline_start;
-                clip.source_out = clip.source_in + cut_offset;
+                let new_source_out = clip.source_in + cut_offset;
+                clip.source_out = new_source_out;
+                // Filter left clip subtitles: keep only segments that end before the cut point.
+                clip.subtitle_segments.retain(|s| s.end_ns <= new_source_out);
             }
-            // Insert the right half
+            // Insert the right half (already has filtered subtitles from creation).
             track.add_clip(self.right_clip.clone());
         }
         project.dirty = true;

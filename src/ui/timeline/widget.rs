@@ -2830,6 +2830,9 @@ impl TimelineState {
             right_clip.source_in = right_source_in;
             right_clip.timeline_start = playhead;
 
+            // Filter subtitles: right clip keeps only segments that start at or after the cut point.
+            right_clip.subtitle_segments.retain(|s| s.start_ns >= right_source_in);
+
             let cmd = SplitClipCommand {
                 original_clip: orig,
                 track_id,

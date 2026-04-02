@@ -1227,16 +1227,21 @@ impl InspectorView {
                 }
                 self.subtitle_clear_btn.set_sensitive(!c.subtitle_segments.is_empty() && !generating);
                 // Show segment list and style controls when subtitles exist.
-                let has_subtitles = !c.subtitle_segments.is_empty();
+                // Filter to only show segments within the active source range (respects trim).
+                let visible_segments: Vec<crate::model::clip::SubtitleSegment> = c.subtitle_segments.iter()
+                    .filter(|s| s.start_ns < c.source_out && s.end_ns > c.source_in)
+                    .cloned()
+                    .collect();
+                let has_subtitles = !visible_segments.is_empty();
                 self.subtitle_segments_section.set_visible(has_subtitles);
                 if has_subtitles {
                     self.subtitle_segments_expander.set_label(Some(&format!(
-                        "Subtitle Segments ({})", c.subtitle_segments.len()
+                        "Subtitle Segments ({})", visible_segments.len()
                     )));
                 }
 
-                // Only rebuild the segment list if the segment IDs changed.
-                let current_ids: Vec<String> = c.subtitle_segments.iter().map(|s| s.id.clone()).collect();
+                // Only rebuild the segment list if the visible segment IDs changed.
+                let current_ids: Vec<String> = visible_segments.iter().map(|s| s.id.clone()).collect();
                 let needs_rebuild = *self.subtitle_segments_snapshot.borrow() != current_ids;
                 if needs_rebuild {
                     while let Some(child) = self.subtitle_list_box.first_child() {
@@ -1247,7 +1252,7 @@ impl InspectorView {
                         let on_cmd = self.on_execute_command.clone();
                         let clip_id = c.id.clone();
 
-                        for (i, seg) in c.subtitle_segments.iter().enumerate() {
+                        for (i, seg) in visible_segments.iter().enumerate() {
                             let row = GBox::new(Orientation::Vertical, 1);
 
                             // Header row: timecode + delete button

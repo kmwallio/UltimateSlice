@@ -12,7 +12,7 @@ use crate::ui::{
     preferences, preview,
     program_monitor, title_templates, titles_browser, toolbar,
 };
-use crate::undo::TrackClipsChange;
+use crate::undo::{EditCommand, TrackClipsChange};
 use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
@@ -8423,6 +8423,7 @@ pub fn build_window(
         let silence_detect_in_progress = silence_detect_in_progress.clone();
         let inspector_view = inspector_view.clone();
         let preferences_state = preferences_state.clone();
+        let timeline_state_stt = timeline_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
@@ -8467,23 +8468,39 @@ pub fn build_window(
                     .stt_model_available
                     .set(stt_cache.borrow().is_available());
             }
-            // Poll STT cache — apply generated subtitles to clips.
+            // Poll STT cache — apply generated subtitles via undo system.
             {
                 let stt_results = stt_cache.borrow_mut().poll();
                 if !stt_results.is_empty() {
                     for result in stt_results {
-                        let mut proj = project_for_stt.borrow_mut();
-                        for track in &mut proj.tracks {
-                            for clip in &mut track.clips {
+                        // Find the matching clip and push an undoable command.
+                        let proj = project_for_stt.borrow();
+                        let mut found = None;
+                        for track in &proj.tracks {
+                            for clip in &track.clips {
                                 if clip.source_path == result.source_path
                                     && clip.source_in == result.source_in_ns
                                     && clip.source_out == result.source_out_ns
                                 {
-                                    clip.subtitle_segments = result.segments.clone();
+                                    found = Some((clip.id.clone(), track.id.clone(), clip.subtitle_segments.clone()));
+                                    break;
                                 }
                             }
+                            if found.is_some() { break; }
                         }
-                        proj.dirty = true;
+                        drop(proj);
+
+                        if let Some((clip_id, track_id, old_segments)) = found {
+                            let cmd = crate::undo::GenerateSubtitlesCommand {
+                                clip_id,
+                                track_id,
+                                old_segments,
+                                new_segments: result.segments,
+                            };
+                            cmd.execute(&mut project_for_stt.borrow_mut());
+                            timeline_state_stt.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                            timeline_state_stt.borrow_mut().history.redo_stack.clear();
+                        }
                     }
                     // Clear generating state and force segment list rebuild.
                     inspector_view.stt_generating.set(false);
