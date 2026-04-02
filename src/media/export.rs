@@ -2437,6 +2437,99 @@ pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse an SRT file and return subtitle segments.
+/// Timestamps in the SRT are treated as source-relative (offset by `source_in_ns`).
+pub fn import_srt(
+    path: &str,
+    source_in_ns: u64,
+) -> Result<Vec<crate::model::clip::SubtitleSegment>> {
+    let content = std::fs::read_to_string(path)?;
+    let mut segments = Vec::new();
+
+    // SRT format: index\nHH:MM:SS,mmm --> HH:MM:SS,mmm\ntext\n\n
+    let mut lines = content.lines().peekable();
+    while lines.peek().is_some() {
+        // Skip blank lines and cue index.
+        let line = match lines.next() {
+            Some(l) => l.trim(),
+            None => break,
+        };
+        if line.is_empty() {
+            continue;
+        }
+        // Try to parse as cue index (just a number) — skip it.
+        if line.parse::<u64>().is_ok() {
+            // Next line should be the timecode.
+            let tc_line = match lines.next() {
+                Some(l) => l.trim().to_string(),
+                None => break,
+            };
+            // Parse "HH:MM:SS,mmm --> HH:MM:SS,mmm"
+            let (start_ns, end_ns) = match parse_srt_timecode_line(&tc_line) {
+                Some(t) => t,
+                None => continue,
+            };
+            // Collect text lines until blank line.
+            let mut text = String::new();
+            for tl in lines.by_ref() {
+                let tl = tl.trim();
+                if tl.is_empty() {
+                    break;
+                }
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(tl);
+            }
+            if !text.is_empty() {
+                segments.push(crate::model::clip::SubtitleSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    start_ns: source_in_ns + start_ns,
+                    end_ns: source_in_ns + end_ns,
+                    text,
+                    words: Vec::new(),
+                });
+            }
+        }
+    }
+
+    Ok(segments)
+}
+
+/// Parse an SRT timecode line like "00:01:23,456 --> 00:01:25,789" into (start_ns, end_ns).
+fn parse_srt_timecode_line(line: &str) -> Option<(u64, u64)> {
+    let parts: Vec<&str> = line.split("-->").collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let start = parse_srt_tc(parts[0].trim())?;
+    let end = parse_srt_tc(parts[1].trim())?;
+    Some((start, end))
+}
+
+/// Parse "HH:MM:SS,mmm" into nanoseconds.
+fn parse_srt_tc(tc: &str) -> Option<u64> {
+    // Handle both comma and period as millisecond separator.
+    let tc = tc.replace(',', ".");
+    let parts: Vec<&str> = tc.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h: u64 = parts[0].parse().ok()?;
+    let m: u64 = parts[1].parse().ok()?;
+    let sec_parts: Vec<&str> = parts[2].split('.').collect();
+    let s: u64 = sec_parts[0].parse().ok()?;
+    let ms: u64 = if sec_parts.len() > 1 {
+        let ms_str = sec_parts[1];
+        // Pad or truncate to 3 digits.
+        let padded = format!("{:0<3}", &ms_str[..ms_str.len().min(3)]);
+        padded.parse().ok()?
+    } else {
+        0
+    };
+    Some((h * 3600 + m * 60 + s) * 1_000_000_000 + ms * 1_000_000)
+}
+
 /// Format nanoseconds as ASS timecode: H:MM:SS.cc (centiseconds)
 fn ass_timecode(ns: u64) -> String {
     let total_cs = ns / 10_000_000;

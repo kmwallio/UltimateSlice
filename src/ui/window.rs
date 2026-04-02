@@ -4075,6 +4075,84 @@ pub fn build_window(
         });
     }
 
+    // Wire Import SRT button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let inspector_view_imp = inspector_view.clone();
+        let window_weak = window.downgrade();
+        inspector_view.subtitle_import_srt_btn.connect_clicked(move |_btn| {
+            let Some(win) = window_weak.upgrade() else { return };
+            let dialog = gtk4::FileDialog::new();
+            dialog.set_title("Import SRT Subtitles");
+            let filter = gtk4::FileFilter::new();
+            filter.add_pattern("*.srt");
+            filter.set_name(Some("SRT Subtitle Files"));
+            let filters = gio::ListStore::new::<gtk4::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+            let project_c = project.clone();
+            let ts_c = timeline_state.clone();
+            let opc = on_project_changed.clone();
+            let iv = inspector_view_imp.clone();
+            dialog.open(Some(&win), None::<&gio::Cancellable>, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let selected = ts_c.borrow().selected_clip_id.clone();
+                        if let Some(ref clip_id) = selected {
+                            // Get clip's source_in for timestamp offset.
+                            let source_in = {
+                                let proj = project_c.borrow();
+                                proj.tracks.iter()
+                                    .flat_map(|t| t.clips.iter())
+                                    .find(|c| &c.id == clip_id)
+                                    .map(|c| c.source_in)
+                                    .unwrap_or(0)
+                            };
+                            match crate::media::export::import_srt(&path.to_string_lossy(), source_in) {
+                                Ok(segments) if !segments.is_empty() => {
+                                    // Find track_id and push undo command.
+                                    let (track_id, old_segments) = {
+                                        let proj = project_c.borrow();
+                                        proj.tracks.iter()
+                                            .find(|t| t.clips.iter().any(|c| &c.id == clip_id))
+                                            .map(|t| {
+                                                let old = t.clips.iter()
+                                                    .find(|c| &c.id == clip_id)
+                                                    .map(|c| c.subtitle_segments.clone())
+                                                    .unwrap_or_default();
+                                                (t.id.clone(), old)
+                                            })
+                                            .unwrap_or_default()
+                                    };
+                                    let cmd = crate::undo::GenerateSubtitlesCommand {
+                                        clip_id: clip_id.clone(),
+                                        track_id,
+                                        old_segments,
+                                        new_segments: segments,
+                                    };
+                                    use crate::undo::EditCommand;
+                                    cmd.execute(&mut project_c.borrow_mut());
+                                    ts_c.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                                    ts_c.borrow_mut().history.redo_stack.clear();
+                                    iv.subtitle_segments_snapshot.borrow_mut().clear();
+                                    opc();
+                                }
+                                Ok(_) => {
+                                    log::warn!("SRT import: no segments found in file");
+                                }
+                                Err(e) => {
+                                    log::error!("SRT import failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     // Wire subtitle Copy Style button.
     {
         let project = project.clone();

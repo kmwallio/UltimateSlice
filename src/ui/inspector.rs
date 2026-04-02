@@ -208,6 +208,7 @@ pub struct InspectorView {
     pub subtitle_bg_box_check: CheckButton,
     pub subtitle_bg_color_btn: gtk4::ColorDialogButton,
     pub subtitle_export_srt_btn: Button,
+    pub subtitle_import_srt_btn: Button,
     pub subtitle_copy_style_btn: Button,
     pub subtitle_paste_style_btn: Button,
     pub subtitle_style_clipboard: Rc<RefCell<Option<SubtitleStyleClipboard>>>,
@@ -2741,6 +2742,11 @@ pub fn build_inspector(
     subtitle_export_srt_btn.set_hexpand(true);
     subtitle_export_srt_btn.set_tooltip_text(Some("Export all subtitles as an SRT file"));
     subtitle_actions_box.append(&subtitle_export_srt_btn);
+
+    let subtitle_import_srt_btn = Button::with_label("Import SRT");
+    subtitle_import_srt_btn.set_hexpand(true);
+    subtitle_import_srt_btn.set_tooltip_text(Some("Import an SRT file as subtitle segments for this clip"));
+    subtitle_actions_box.append(&subtitle_import_srt_btn);
 
     // ── Subtitle Segments section (separate expander for editing) ─────
     let subtitle_segments_section = GBox::new(Orientation::Vertical, 8);
@@ -7357,6 +7363,7 @@ pub fn build_inspector(
         subtitle_bg_box_check,
         subtitle_bg_color_btn,
         subtitle_export_srt_btn,
+        subtitle_import_srt_btn,
         subtitle_copy_style_btn,
         subtitle_paste_style_btn,
         subtitle_style_clipboard: style_clipboard,
