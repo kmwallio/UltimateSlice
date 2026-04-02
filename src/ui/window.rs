@@ -4075,6 +4075,71 @@ pub fn build_window(
         });
     }
 
+    // Wire subtitle Copy Style button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let clipboard = inspector_view.subtitle_style_clipboard.clone();
+        let paste_btn = inspector_view.subtitle_paste_style_btn.clone();
+        inspector_view.subtitle_copy_style_btn.connect_clicked(move |_| {
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let proj = project.borrow();
+                for track in &proj.tracks {
+                    if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                        *clipboard.borrow_mut() = Some(crate::ui::inspector::SubtitleStyleClipboard {
+                            font: clip.subtitle_font.clone(),
+                            color: clip.subtitle_color,
+                            outline_color: clip.subtitle_outline_color,
+                            outline_width: clip.subtitle_outline_width,
+                            bg_box: clip.subtitle_bg_box,
+                            bg_box_color: clip.subtitle_bg_box_color,
+                            highlight_mode: clip.subtitle_highlight_mode,
+                            highlight_color: clip.subtitle_highlight_color,
+                            position_y: clip.subtitle_position_y,
+                            word_window_secs: clip.subtitle_word_window_secs,
+                        });
+                        paste_btn.set_sensitive(true);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire subtitle Paste Style button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let clipboard = inspector_view.subtitle_style_clipboard.clone();
+        inspector_view.subtitle_paste_style_btn.connect_clicked(move |_| {
+            let style = clipboard.borrow().clone();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let (Some(style), Some(ref clip_id)) = (style, selected) {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_font = style.font;
+                        clip.subtitle_color = style.color;
+                        clip.subtitle_outline_color = style.outline_color;
+                        clip.subtitle_outline_width = style.outline_width;
+                        clip.subtitle_bg_box = style.bg_box;
+                        clip.subtitle_bg_box_color = style.bg_box_color;
+                        clip.subtitle_highlight_mode = style.highlight_mode;
+                        clip.subtitle_highlight_color = style.highlight_color;
+                        clip.subtitle_position_y = style.position_y;
+                        clip.subtitle_word_window_secs = style.word_window_secs;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+
     // Wire timeline's on_project_changed + on_seek + on_play_pause
     {
         let cb = on_project_changed.clone();
@@ -8833,6 +8898,55 @@ pub fn build_window(
             use gtk4::gdk::{Key, ModifierType};
             if mods.contains(ModifierType::CONTROL_MASK) && key == Key::comma {
                 open_preferences();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Ctrl+Shift+T: generate subtitles for selected clip ──
+    {
+        let stt_cache = stt_cache.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let inspector_view = inspector_view.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if mods.contains(ModifierType::CONTROL_MASK)
+                && mods.contains(ModifierType::SHIFT_MASK)
+                && key == Key::T
+            {
+                // Skip if a text input is focused.
+                if let Some(widget) = ctrl.widget() {
+                    if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                        if is_text_input_focused(&focused) {
+                            return glib::Propagation::Proceed;
+                        }
+                    }
+                }
+                if !stt_cache.borrow().is_available() {
+                    return glib::Propagation::Proceed;
+                }
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                            if clip.subtitle_segments.is_empty() {
+                                stt_cache.borrow_mut().request(
+                                    &clip.source_path,
+                                    clip.source_in,
+                                    clip.source_out,
+                                    "auto",
+                                );
+                                inspector_view.stt_generating.set(true);
+                            }
+                            break;
+                        }
+                    }
+                }
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed

@@ -1621,6 +1621,34 @@ impl EditCommand for ClearSubtitlesCommand {
     }
 }
 
+/// Delete a single subtitle segment from a clip.
+pub struct DeleteSubtitleSegmentCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub segment_id: String,
+    pub deleted_segment: crate::model::clip::SubtitleSegment,
+    pub index: usize,
+}
+
+impl EditCommand for DeleteSubtitleSegmentCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments.retain(|s| s.id != self.segment_id);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            let idx = self.index.min(clip.subtitle_segments.len());
+            clip.subtitle_segments.insert(idx, self.deleted_segment.clone());
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Delete subtitle segment"
+    }
+}
+
 /// Set a subtitle style property on a clip.
 pub struct SetSubtitleStyleCommand {
     pub clip_id: String,

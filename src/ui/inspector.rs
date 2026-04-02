@@ -1,6 +1,22 @@
 use crate::model::clip::{
     ClipColorLabel, KeyframeInterpolation, NumericKeyframe, Phase1KeyframeProperty,
+    SubtitleHighlightMode,
 };
+
+/// Clipboard for copy/paste subtitle style between clips.
+#[derive(Clone)]
+pub struct SubtitleStyleClipboard {
+    pub font: String,
+    pub color: u32,
+    pub outline_color: u32,
+    pub outline_width: f64,
+    pub bg_box: bool,
+    pub bg_box_color: u32,
+    pub highlight_mode: SubtitleHighlightMode,
+    pub highlight_color: u32,
+    pub position_y: f64,
+    pub word_window_secs: f64,
+}
 use crate::model::project::Project;
 use gdk4;
 use gio;
@@ -192,6 +208,9 @@ pub struct InspectorView {
     pub subtitle_bg_box_check: CheckButton,
     pub subtitle_bg_color_btn: gtk4::ColorDialogButton,
     pub subtitle_export_srt_btn: Button,
+    pub subtitle_copy_style_btn: Button,
+    pub subtitle_paste_style_btn: Button,
+    pub subtitle_style_clipboard: Rc<RefCell<Option<SubtitleStyleClipboard>>>,
     pub subtitle_style_box: GBox,
     /// Set to `true` when the STT model is present; controls section content.
     pub stt_model_available: Cell<bool>,
@@ -1228,19 +1247,53 @@ impl InspectorView {
                         let on_cmd = self.on_execute_command.clone();
                         let clip_id = c.id.clone();
 
-                        for seg in &c.subtitle_segments {
+                        for (i, seg) in c.subtitle_segments.iter().enumerate() {
                             let row = GBox::new(Orientation::Vertical, 1);
 
-                            // Timecode label
+                            // Header row: timecode + delete button
+                            let header = GBox::new(Orientation::Horizontal, 4);
                             let start_s = seg.start_ns as f64 / 1_000_000_000.0;
                             let end_s = seg.end_ns as f64 / 1_000_000_000.0;
                             let tc_label = Label::new(Some(&format!(
                                 "{:.1}s – {:.1}s", start_s, end_s
                             )));
                             tc_label.set_halign(gtk::Align::Start);
+                            tc_label.set_hexpand(true);
                             tc_label.add_css_class("dim-label");
                             tc_label.set_margin_start(4);
-                            row.append(&tc_label);
+                            header.append(&tc_label);
+
+                            let del_btn = Button::new();
+                            del_btn.set_icon_name("edit-delete-symbolic");
+                            del_btn.add_css_class("flat");
+                            del_btn.add_css_class("circular");
+                            del_btn.set_tooltip_text(Some("Delete this segment"));
+                            {
+                                let seg_id = seg.id.clone();
+                                let seg_clone = seg.clone();
+                                let seg_idx = i;
+                                let clip_id_d = clip_id.clone();
+                                let project_d = project.clone();
+                                let on_cmd_d = on_cmd.clone();
+                                del_btn.connect_clicked(move |_| {
+                                    let track_id = {
+                                        let proj = project_d.borrow();
+                                        proj.tracks.iter()
+                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_d))
+                                            .map(|t| t.id.clone())
+                                            .unwrap_or_default()
+                                    };
+                                    on_cmd_d(Box::new(crate::undo::DeleteSubtitleSegmentCommand {
+                                        clip_id: clip_id_d.clone(),
+                                        track_id,
+                                        segment_id: seg_id.clone(),
+                                        deleted_segment: seg_clone.clone(),
+                                        index: seg_idx,
+                                    }));
+                                });
+                            }
+                            header.append(&del_btn);
+                            row.append(&header);
 
                             // Editable text entry
                             let entry = gtk4::Entry::new();
@@ -2653,6 +2706,22 @@ pub fn build_inspector(
     let subtitle_bg_color_btn = gtk4::ColorDialogButton::new(Some(sub_bg_color_dialog));
     subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.6));
     subtitle_style_box.append(&subtitle_bg_color_btn);
+
+    // Copy/Paste Style buttons
+    let style_clipboard: Rc<RefCell<Option<SubtitleStyleClipboard>>> = Rc::new(RefCell::new(None));
+    let subtitle_copy_paste_box = GBox::new(Orientation::Horizontal, 4);
+    let subtitle_copy_style_btn = Button::with_label("Copy Style");
+    subtitle_copy_style_btn.set_hexpand(true);
+    subtitle_copy_style_btn.set_tooltip_text(Some("Copy this clip's subtitle style"));
+    let subtitle_paste_style_btn = Button::with_label("Paste Style");
+    subtitle_paste_style_btn.set_hexpand(true);
+    subtitle_paste_style_btn.set_sensitive(false);
+    subtitle_paste_style_btn.set_tooltip_text(Some("Apply copied subtitle style to this clip"));
+    subtitle_copy_paste_box.append(&subtitle_copy_style_btn);
+    subtitle_copy_paste_box.append(&subtitle_paste_style_btn);
+    subtitle_style_box.append(&subtitle_copy_paste_box);
+
+    // Copy/Paste signal handlers are wired in window.rs where timeline_state is available.
 
     // Action buttons row
     let subtitle_actions_box = GBox::new(Orientation::Horizontal, 4);
@@ -7283,6 +7352,9 @@ pub fn build_inspector(
         subtitle_bg_box_check,
         subtitle_bg_color_btn,
         subtitle_export_srt_btn,
+        subtitle_copy_style_btn,
+        subtitle_paste_style_btn,
+        subtitle_style_clipboard: style_clipboard,
         subtitle_style_box,
         stt_model_available: Cell::new(false),
         stt_generating: Cell::new(false),
