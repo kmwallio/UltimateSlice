@@ -188,7 +188,10 @@ pub struct InspectorView {
     pub subtitle_highlight_color_row: GBox,
     pub subtitle_word_window_slider: Scale,
     pub subtitle_position_slider: Scale,
+    pub subtitle_outline_color_btn: gtk4::ColorDialogButton,
     pub subtitle_bg_box_check: CheckButton,
+    pub subtitle_bg_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_export_srt_btn: Button,
     pub subtitle_style_box: GBox,
     /// Set to `true` when the STT model is present; controls section content.
     pub stt_model_available: Cell<bool>,
@@ -1246,31 +1249,61 @@ impl InspectorView {
                             entry.add_css_class("flat");
 
                             let seg_id = seg.id.clone();
-                            let old_text = seg.text.clone();
+                            let old_text = Rc::new(RefCell::new(seg.text.clone()));
                             let clip_id_c = clip_id.clone();
                             let project_c = project.clone();
                             let on_cmd_c = on_cmd.clone();
-                            entry.connect_activate(move |e| {
-                                let new_text = e.text().to_string();
-                                if new_text == old_text {
-                                    return;
-                                }
-                                // Find track_id for the clip.
-                                let track_id = {
-                                    let proj = project_c.borrow();
-                                    proj.tracks.iter()
-                                        .find(|t| t.clips.iter().any(|c| c.id == clip_id_c))
-                                        .map(|t| t.id.clone())
-                                        .unwrap_or_default()
-                                };
-                                on_cmd_c(Box::new(crate::undo::EditSubtitleTextCommand {
-                                    clip_id: clip_id_c.clone(),
-                                    track_id,
-                                    segment_id: seg_id.clone(),
-                                    old_text: old_text.clone(),
-                                    new_text,
-                                }));
-                            });
+
+                            // Shared commit logic for both Enter and focus-out.
+                            let commit_edit = {
+                                let seg_id = seg_id.clone();
+                                let old_text = old_text.clone();
+                                let clip_id_c = clip_id_c.clone();
+                                let project_c = project_c.clone();
+                                let on_cmd_c = on_cmd_c.clone();
+                                Rc::new(move |new_text: String| {
+                                    let prev = old_text.borrow().clone();
+                                    if new_text == prev {
+                                        return;
+                                    }
+                                    let track_id = {
+                                        let proj = project_c.borrow();
+                                        proj.tracks.iter()
+                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_c))
+                                            .map(|t| t.id.clone())
+                                            .unwrap_or_default()
+                                    };
+                                    on_cmd_c(Box::new(crate::undo::EditSubtitleTextCommand {
+                                        clip_id: clip_id_c.clone(),
+                                        track_id,
+                                        segment_id: seg_id.clone(),
+                                        old_text: prev.clone(),
+                                        new_text: new_text.clone(),
+                                    }));
+                                    *old_text.borrow_mut() = new_text;
+                                })
+                            };
+
+                            // Commit on Enter.
+                            {
+                                let commit = commit_edit.clone();
+                                entry.connect_activate(move |e| {
+                                    commit(e.text().to_string());
+                                });
+                            }
+                            // Commit on focus-out (Tab, click away).
+                            {
+                                let commit = commit_edit.clone();
+                                let focus = gtk4::EventControllerFocus::new();
+                                focus.connect_leave(move |ctl| {
+                                    if let Some(widget) = ctl.widget() {
+                                        if let Some(entry) = widget.downcast_ref::<gtk4::Entry>() {
+                                            commit(entry.text().to_string());
+                                        }
+                                    }
+                                });
+                                entry.add_controller(focus);
+                            }
                             row.append(&entry);
                             self.subtitle_list_box.append(&row);
                         }
@@ -1299,7 +1332,22 @@ impl InspectorView {
                 // Show word window slider only when a highlight mode is active.
                 self.subtitle_word_window_slider.set_visible(hl_idx != 0);
                 self.subtitle_position_slider.set_value(c.subtitle_position_y);
+                let oc = c.subtitle_outline_color;
+                self.subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(
+                    ((oc >> 24) & 0xFF) as f32 / 255.0,
+                    ((oc >> 16) & 0xFF) as f32 / 255.0,
+                    ((oc >> 8) & 0xFF) as f32 / 255.0,
+                    (oc & 0xFF) as f32 / 255.0,
+                ));
                 self.subtitle_bg_box_check.set_active(c.subtitle_bg_box);
+                let bgc = c.subtitle_bg_box_color;
+                self.subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(
+                    ((bgc >> 24) & 0xFF) as f32 / 255.0,
+                    ((bgc >> 16) & 0xFF) as f32 / 255.0,
+                    ((bgc >> 8) & 0xFF) as f32 / 255.0,
+                    (bgc & 0xFF) as f32 / 255.0,
+                ));
+                self.subtitle_export_srt_btn.set_sensitive(!c.subtitle_segments.is_empty());
                 if hl_idx == 2 || hl_idx == 4 {
                     let hc = c.subtitle_highlight_color;
                     let hr = ((hc >> 24) & 0xFF) as f32 / 255.0;
@@ -2588,14 +2636,37 @@ pub fn build_inspector(
     subtitle_position_slider.set_tooltip_text(Some("Vertical position: 0 = top, 1 = bottom"));
     subtitle_style_box.append(&subtitle_position_slider);
 
+    row_label(&subtitle_style_box, "Outline Color");
+    let sub_outline_color_dialog = gtk4::ColorDialog::new();
+    sub_outline_color_dialog.set_with_alpha(true);
+    let subtitle_outline_color_btn = gtk4::ColorDialogButton::new(Some(sub_outline_color_dialog));
+    subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_style_box.append(&subtitle_outline_color_btn);
+
     let subtitle_bg_box_check = CheckButton::with_label("Background Box");
     subtitle_bg_box_check.set_active(true);
     subtitle_style_box.append(&subtitle_bg_box_check);
 
-    // Clear button
+    row_label(&subtitle_style_box, "Background Color");
+    let sub_bg_color_dialog = gtk4::ColorDialog::new();
+    sub_bg_color_dialog.set_with_alpha(true);
+    let subtitle_bg_color_btn = gtk4::ColorDialogButton::new(Some(sub_bg_color_dialog));
+    subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.6));
+    subtitle_style_box.append(&subtitle_bg_color_btn);
+
+    // Action buttons row
+    let subtitle_actions_box = GBox::new(Orientation::Horizontal, 4);
+    subtitle_controls_box.append(&subtitle_actions_box);
+
     let subtitle_clear_btn = Button::with_label("Clear Subtitles");
     subtitle_clear_btn.add_css_class("destructive-action");
-    subtitle_controls_box.append(&subtitle_clear_btn);
+    subtitle_clear_btn.set_hexpand(true);
+    subtitle_actions_box.append(&subtitle_clear_btn);
+
+    let subtitle_export_srt_btn = Button::with_label("Export SRT");
+    subtitle_export_srt_btn.set_hexpand(true);
+    subtitle_export_srt_btn.set_tooltip_text(Some("Export all subtitles as an SRT file"));
+    subtitle_actions_box.append(&subtitle_export_srt_btn);
 
     // ── Subtitle Segments section (separate expander for editing) ─────
     let subtitle_segments_section = GBox::new(Orientation::Vertical, 8);
@@ -7208,7 +7279,10 @@ pub fn build_inspector(
         subtitle_highlight_color_row,
         subtitle_word_window_slider,
         subtitle_position_slider,
+        subtitle_outline_color_btn,
         subtitle_bg_box_check,
+        subtitle_bg_color_btn,
+        subtitle_export_srt_btn,
         subtitle_style_box,
         stt_model_available: Cell::new(false),
         stt_generating: Cell::new(false),

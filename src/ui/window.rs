@@ -3992,6 +3992,89 @@ pub fn build_window(
         });
     }
 
+    // Wire subtitle outline color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_outline_color_btn.connect_notify_local(Some("rgba"), move |btn, _| {
+            if *updating.borrow() { return; }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0) as u32;
+            let g = (rgba.green() * 255.0) as u32;
+            let b = (rgba.blue() * 255.0) as u32;
+            let a = (rgba.alpha() * 255.0) as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_outline_color = color;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire subtitle background color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.subtitle_bg_color_btn.connect_notify_local(Some("rgba"), move |btn, _| {
+            if *updating.borrow() { return; }
+            let rgba = btn.rgba();
+            let r = (rgba.red() * 255.0) as u32;
+            let g = (rgba.green() * 255.0) as u32;
+            let b = (rgba.blue() * 255.0) as u32;
+            let a = (rgba.alpha() * 255.0) as u32;
+            let color = (r << 24) | (g << 16) | (b << 8) | a;
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        clip.subtitle_bg_box_color = color;
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire Export SRT button.
+    {
+        let project = project.clone();
+        let window_weak = window.downgrade();
+        inspector_view.subtitle_export_srt_btn.connect_clicked(move |_btn| {
+            let Some(win) = window_weak.upgrade() else { return };
+            let dialog = gtk4::FileDialog::new();
+            dialog.set_title("Export Subtitles as SRT");
+            let filter = gtk4::FileFilter::new();
+            filter.add_pattern("*.srt");
+            filter.set_name(Some("SRT Subtitle Files"));
+            let filters = gio::ListStore::new::<gtk4::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+            dialog.set_initial_name(Some("subtitles.srt"));
+            let project_c = project.clone();
+            dialog.save(Some(&win), None::<&gio::Cancellable>, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let proj = project_c.borrow();
+                        if let Err(e) = crate::media::export::export_srt(&proj, &path.to_string_lossy()) {
+                            log::error!("SRT export failed: {e}");
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     // Wire timeline's on_project_changed + on_seek + on_play_pause
     {
         let cb = on_project_changed.clone();
@@ -6050,9 +6133,9 @@ pub fn build_window(
                                         let oc = clip.subtitle_outline_color;
                                         let bc = clip.subtitle_bg_box_color;
                                         let hc = clip.subtitle_highlight_color;
-                                        let font_size = clip.subtitle_font.rsplit_once(' ')
-                                            .and_then(|(_, s)| s.parse::<f64>().ok())
-                                            .unwrap_or(24.0);
+                                        let (font_family, font_size) = clip.subtitle_font.rsplit_once(' ')
+                                            .and_then(|(name, s)| s.parse::<f64>().ok().map(|sz| (name.to_string(), sz)))
+                                            .unwrap_or(("Sans Bold".to_string(), 24.0));
 
                                         // Build word-level display with active word highlighting.
                                         // Fixed groups: divide words into groups of N, show the
@@ -6107,6 +6190,7 @@ pub fn build_window(
                                                 ((bc >> 8) & 0xFF) as f64 / 255.0,
                                                 (bc & 0xFF) as f64 / 255.0,
                                             ),
+                                            font_family: font_family.clone(),
                                             font_size,
                                             position_y: clip.subtitle_position_y,
                                         });

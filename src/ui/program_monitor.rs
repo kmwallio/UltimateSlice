@@ -33,6 +33,8 @@ pub struct SubtitleLine {
     pub bg_box: bool,
     /// Background box color.
     pub bg_box_color: (f64, f64, f64, f64),
+    /// Font family name (e.g. "Sans Bold").
+    pub font_family: String,
     /// Font size scaling factor (from clip font descriptor).
     pub font_size: f64,
     /// Vertical position: 0.0 (top) to 1.0 (bottom). Default 0.85.
@@ -58,6 +60,7 @@ impl Default for SubtitleLine {
             outline_width: 2.0,
             bg_box: true,
             bg_box_color: (0.0, 0.0, 0.0, 0.6),
+            font_family: "Sans Bold".to_string(),
             font_size: 24.0,
             position_y: 0.85,
         }
@@ -425,6 +428,21 @@ pub fn build_program_monitor(
                 // Scale font: Pango pts → pixels (×4/3), then proportional to preview height.
                 // Matches the export scaling: font_size * 4/3 * (out_h / 1080).
                 let font_size = (line.font_size * (4.0 / 3.0) * h / 1080.0).clamp(10.0, 72.0);
+                // Parse font family for weight (Bold, Italic).
+                let family = &line.font_family;
+                let slant = if family.contains("Italic") || family.contains("Oblique") {
+                    gtk::cairo::FontSlant::Italic
+                } else {
+                    gtk::cairo::FontSlant::Normal
+                };
+                let weight = if family.contains("Bold") {
+                    gtk::cairo::FontWeight::Bold
+                } else {
+                    gtk::cairo::FontWeight::Normal
+                };
+                let face = family.replace("Bold", "").replace("Italic", "").replace("Oblique", "").trim().to_string();
+                let face = if face.is_empty() { "Sans".to_string() } else { face };
+                cr.select_font_face(&face, slant, weight);
                 cr.set_font_size(font_size);
 
                 // Build the display string and measure it.
